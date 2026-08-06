@@ -100,6 +100,7 @@ impl PostgresEligibilitySweep {
                          FROM turn_lifecycle AS active
                         WHERE active.session_id = queued.session_id
                           AND active.state_kind = 'active'
+                          AND NOT active.delegation_runtime_terminal
                  )
                  GROUP BY queued.session_id
                 UNION
@@ -135,6 +136,7 @@ impl PostgresEligibilitySweep {
                 SELECT active.session_id
                   FROM turn_lifecycle AS active
                  WHERE active.state_kind = 'active'
+                   AND NOT active.delegation_runtime_terminal
                    AND active.active_tool_round_call_id IS NOT NULL
                    AND (
                         active.active_phase_kind = 'running'
@@ -154,6 +156,26 @@ impl PostgresEligibilitySweep {
                                          WHERE judge.request_id = request.request_id
                                            AND judge.state_kind = 'terminal'
                                    )
+                            )
+                        )
+                        OR (
+                            active.active_phase_kind = 'awaiting_child'
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM session_delegation_wait AS waiting
+                                  JOIN session_child_result_delivery AS delivery
+                                    ON delivery.awaiting_tool_request_id =
+                                       waiting.awaiting_tool_request_id
+                                   AND delivery.spawning_tool_request_id =
+                                       waiting.spawning_tool_request_id
+                                   AND delivery.parent_session_id =
+                                       waiting.parent_session_id
+                                   AND delivery.delivery_sequence IS NULL
+                                 WHERE waiting.awaiting_tool_request_id =
+                                       active.child_wait_request_id
+                                   AND waiting.parent_session_id = active.session_id
+                                   AND waiting.parent_turn_id = active.turn_id
+                                   AND waiting.wait_mode = 'foreground'
                             )
                         )
                    )

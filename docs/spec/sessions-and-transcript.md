@@ -966,6 +966,12 @@ this choice, so replacement after parent-turn acceptance, including replacement
 while the spawn request awaits approval or execution, cannot change the child.
 Tool arguments supply no defaults field.
 
+The delegated-task turn nevertheless retains its parent's exact requested and
+frozen model configuration as turn-origin provenance. A direct override remains
+an override, and an alias retains both its frozen definition and selected direct
+model; reconstitution does not replace either form with the copied child default
+merely because both resolve to the same effective model.
+
 The checked spawn task becomes one `DelegatedTask` semantic entry in the child,
 referencing the exact spawning request and its parent session and turn. It is
 model/tool-authored delegation work, not accepted input and not `Actor::User`;
@@ -1046,16 +1052,23 @@ scope; a turn interrupt additionally names its exact turn, while a goal stop
 names the exact goal generation and carries no turn. Raw identities cannot
 construct that authority, `parent_alone` authority cannot produce a child
 disposition, and the recorded outcome reason must match its command kind and
-scope. `ChildStopped` is produced only by a parent-policy stop; the existing
-proof-bearing failed, refused, and cancelled model-call turn candidates can name
-any turn origin, including the delegated-task origin, but do not fabricate a
-distinct stopped outcome from that evidence. Delivery appends a
-`DelegationResult` semantic entry only to the target parent, names the exact
-awaiting request that receives the result, and is idempotent by that awaiting
-request. The immutable child result remains keyed by the spawning request. A
-detached child may return after the parent has stopped or cancelled; the result
-remains durable and independently inspectable even when no parent turn can
-consume it.
+scope. Parent-policy stop and cancellation both terminalize the exact delegated
+child turn through its existing cancelled-turn lifecycle state and exact
+cancellation marker; the relationship outcome preserves whether the chosen
+policy action was `ChildStopped` or `ChildCancelled`. `ChildStopped` is produced
+only by a parent-policy stop; the existing proof-bearing failed, refused, and
+cancelled model-call turn candidates can name any turn origin, including the
+delegated-task origin, but do not fabricate a distinct stopped outcome from that
+evidence. Delivery appends a `DelegationResult` semantic entry only to the
+target parent, names the exact awaiting request that receives the result, and is
+idempotent by that awaiting request. A foreground delivery correlates that entry
+as the logical result of its still-open `await_session` request. A background
+delivery retains the awaiting request only as delegation provenance, without a
+tool-result correlation, because that request already completed with its
+registration receipt; the result instead arrives as wake content. The immutable
+child result remains keyed by the spawning request. A detached child may return
+after the parent has stopped or cancelled; the result remains durable and
+independently inspectable even when no parent turn can consume it.
 
 **Committed unimplemented functionality.** A spawned child defaults into its
 parent's directory. No present delegation or placement surface implements or
@@ -1082,11 +1095,10 @@ placement and this stack implements no placement logic.
   attempt, committing origin plus failed marker in one transaction) has no
   implemented producer; startup recovery and the model-call known-failure
   closure are the committed `TurnFailed` sources today.
-- Assistant text, tool-use/result references, completed-turn, steering, and
-  cancelled-turn semantic entries are implemented. The session-delegation stack
-  adds delegation-message and delegation-result entries. Refusal,
-  reconciliation, mismatch, accepted-risk, and approval-event variants remain
-  open.
+- Assistant text, tool-use/result references, completed-turn, steering,
+  cancelled-turn, delegated-task, delegation-message, and delegation-result
+  semantic entries are implemented. Refusal, reconciliation, mismatch,
+  accepted-risk, and approval-event variants remain open.
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
   record family has since committed storage versions 1 and 2 without one, so

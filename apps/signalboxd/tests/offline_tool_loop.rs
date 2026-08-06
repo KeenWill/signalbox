@@ -24,15 +24,15 @@ use signalbox_application::{
     UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
-    ActivatedAcceptedInputTurn, DangerousToolAutoApproval, DecideToolRequest,
-    DecideToolRequestResult, DeliveryRequest, DirectModelSelection, DurableCommandId, ModelCallId,
-    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
-    NormalizedToolArguments, PerInputConfigurationChoices, ProviderModelIdentity,
-    ResolvedProviderTarget, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionId, SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult,
-    ToolApprovalDecision, ToolApprovalPosture, ToolAttemptDispatchCorrelation,
-    ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorDetail, ToolName,
-    ToolPermissionDefault, ToolRequestId, TurnId, UserContent,
+    ActivatedTurn, DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult,
+    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    ModelCallId, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
+    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
+    ProviderModelIdentity, ResolvedProviderTarget, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult,
+    SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision, ToolApprovalPosture,
+    ToolAttemptDispatchCorrelation, ToolDispatchGeneration, ToolEffectClass,
+    ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, ToolRequestId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
     ApprovalJudgeModel, RuntimeApprovalJudgeModel, RuntimeModelCallProvider, RuntimeModelCatalog,
@@ -236,7 +236,7 @@ struct ToolLoopFixture {
     pool: PgPool,
     session: SessionId,
     turn: TurnId,
-    activated: ActivatedAcceptedInputTurn,
+    activated: ActivatedTurn,
     selection: DirectModelSelection,
     targets: ModelTargetCatalog,
     runtime_models: RuntimeModelCatalog,
@@ -3294,6 +3294,7 @@ async fn s10_s11_inv020_inv027_inv029_inv037_cancelled_tool_round_admits_and_run
                 .expect("fixture interrupt content is admitted"),
             DeliveryRequest::Interrupt {
                 expected_active_turn: fixture.turn,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
                 configuration: default_configuration(),
             },
         )?)
@@ -3400,6 +3401,7 @@ async fn s07_s10_inv012_inv028_interrupt_against_parked_approval_wait_is_rejecte
                 .expect("fixture interrupt content is admitted"),
             DeliveryRequest::Interrupt {
                 expected_active_turn: fixture.turn,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
                 configuration: default_configuration(),
             },
         )?)

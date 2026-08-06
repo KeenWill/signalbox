@@ -23,6 +23,28 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  /// INV-033: turn stops encode the required descendant scope in version one.
+  func testTurnStopRequestEncodesItsDescendantScope() throws {
+    let frame = SignalboxProcessClientFrame(
+      requestID: try SignalboxRequestID(validating: 9),
+      request: .stopTurn(
+        commandID: try SignalboxCommandID(validating: turnID),
+        sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+        expectedActiveTurnID: try SignalboxCanonicalUUID(validating: turnID),
+        content: "Stop and continue",
+        expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 3),
+        descendantScope: .parentAndDescendants
+      )
+    )
+
+    let encoded = try SignalboxJSONCoding.encoder().encode(frame)
+
+    XCTAssertEqual(
+      String(decoding: encoded, as: UTF8.self),
+      #"{"request":{"command_id":"\#(turnID)","content":"Stop and continue","descendant_scope":"parent_and_descendants","expected_active_turn_id":"\#(turnID)","expected_defaults_version":"3","model_settings":{"fast_mode":{"kind":"inherit"},"reasoning_level":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session_id":"\#(sessionID)","type":"stop_turn"},"request_id":"9","version":1}"#
+    )
+  }
+
   func testNewerProtocolVersionRemainsClassifiable() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.newerVersionFrame()
@@ -1109,6 +1131,171 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertTrue(diagnostic.message.contains(ProcessProtocolFixture.defaultsVersionField))
   }
 
+  func testDelegatedTaskEntryDecodesExactProvenanceAndContent() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegatedTaskEntryFrame(sessionID: sessionID)
+    )
+    let entry = try ProcessProtocolFixture.transcriptEntry(in: frame.message)
+
+    XCTAssertEqual(
+      entry.entry,
+      .delegatedTask(
+        spawningRequestID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.spawningRequestID),
+        parentSessionID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.parentSessionID),
+        parentTurnID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.parentTurnID),
+        content: ProcessProtocolFixture.delegatedTaskContent
+      )
+    )
+  }
+
+  func testDelegatedTaskEntryRejectsEmptyContent() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegatedTaskEntryFrame(sessionID: sessionID, content: "")
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertFalse(diagnostic.message.isEmpty)
+  }
+
+  func testDelegationMessageEntryDecodesExactDelivery() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationMessageEntryFrame(sessionID: sessionID)
+    )
+    let entry = try ProcessProtocolFixture.transcriptEntry(in: frame.message)
+
+    XCTAssertEqual(
+      entry.entry,
+      .delegationMessage(
+        spawningRequestID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.spawningRequestID),
+        messageID: try SignalboxCanonicalUUID(validating: ProcessProtocolFixture.messageID),
+        senderSessionID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.parentSessionID),
+        recipientSessionID: try SignalboxCanonicalUUID(validating: sessionID),
+        ordinal: SignalboxCanonicalUInt64(
+          rawValue: ProcessProtocolFixture.delegationMessageOrdinal),
+        deliverySequence: SignalboxCanonicalUInt64(
+          rawValue: ProcessProtocolFixture.delegationMessageDeliverySequence),
+        content: ProcessProtocolFixture.delegationMessageContent
+      )
+    )
+  }
+
+  func testDelegationMessageEntryRejectsNULContent() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationMessageEntryFrame(
+        sessionID: sessionID,
+        content: #"invalid\u0000message"#
+      )
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertFalse(diagnostic.message.isEmpty)
+  }
+
+  func testForegroundDelegationResultEntryDecodesExactLifecycleProof() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationResultEntryFrame(
+        sessionID: sessionID,
+        mode: "foreground",
+        deliverySequence: "null"
+      )
+    )
+    let entry = try ProcessProtocolFixture.transcriptEntry(in: frame.message)
+
+    XCTAssertEqual(
+      entry.entry,
+      .delegationResult(
+        awaitRequestID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.awaitRequestID),
+        spawningRequestID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.spawningRequestID),
+        childSessionID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.childSessionID),
+        mode: .foreground,
+        deliverySequence: nil,
+        outcome: .returned,
+        content: ProcessProtocolFixture.delegationResultContent,
+        reason: .childCompleted,
+        provenance: .childTurn(
+          childSessionID: try SignalboxCanonicalUUID(
+            validating: ProcessProtocolFixture.childSessionID),
+          childTurnID: try SignalboxCanonicalUUID(
+            validating: ProcessProtocolFixture.childTurnID)
+        )
+      )
+    )
+  }
+
+  func testBackgroundDelegationResultEntryDecodesWakeSequence() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationResultEntryFrame(
+        sessionID: sessionID,
+        mode: "background",
+        deliverySequence: "\"7\""
+      )
+    )
+    let entry = try ProcessProtocolFixture.transcriptEntry(in: frame.message)
+
+    XCTAssertEqual(
+      entry.entry,
+      .delegationResult(
+        awaitRequestID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.awaitRequestID),
+        spawningRequestID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.spawningRequestID),
+        childSessionID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.childSessionID),
+        mode: .background,
+        deliverySequence: SignalboxCanonicalUInt64(rawValue: 7),
+        outcome: .returned,
+        content: ProcessProtocolFixture.delegationResultContent,
+        reason: .childCompleted,
+        provenance: .childTurn(
+          childSessionID: try SignalboxCanonicalUUID(
+            validating: ProcessProtocolFixture.childSessionID),
+          childTurnID: try SignalboxCanonicalUUID(
+            validating: ProcessProtocolFixture.childTurnID)
+        )
+      )
+    )
+  }
+
+  func testDelegationResultRejectsContradictoryOutcomeReasonTuple() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationResultEntryFrame(
+        sessionID: sessionID,
+        mode: "foreground",
+        deliverySequence: "null",
+        reason: "child_cancelled"
+      )
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertFalse(diagnostic.message.isEmpty)
+  }
+
+  func testDelegationResultRejectsOversizedContent() throws {
+    let oversized = String(
+      repeating: "x",
+      count: SignalboxProcessProtocol.maximumContentFragmentUTF8Bytes + 1
+    )
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationResultEntryFrame(
+        sessionID: sessionID,
+        mode: "foreground",
+        deliverySequence: "null",
+        content: oversized
+      )
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertFalse(diagnostic.message.isEmpty)
+  }
+
   func testTranscriptToolApprovalRejectsExplicitNull() throws {
     let encoded = Data(
       """
@@ -1150,6 +1337,82 @@ final class ProcessProtocolTests: XCTestCase {
       try ProcessProtocolFixture.failedProviderCause(in: frame.message),
       .unknown(ProcessProtocolFixture.futureProviderFailureCause)
     )
+  }
+
+  func testQueuedDelegatedTurnDecodesExactOriginProvenance() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.queuedDelegatedTurnFrame(turnID: turnID)
+    )
+    let origin = try ProcessProtocolFixture.queuedDelegatedOrigin(in: frame.message)
+
+    XCTAssertEqual(origin.spawningRequestID.rawValue, ProcessProtocolFixture.spawningRequestID)
+    XCTAssertEqual(origin.parentSessionID.rawValue, ProcessProtocolFixture.parentSessionID)
+    XCTAssertEqual(origin.parentTurnID.rawValue, ProcessProtocolFixture.parentTurnID)
+    XCTAssertEqual(origin.content, ProcessProtocolFixture.delegatedTaskContent)
+  }
+
+  func testQueuedDelegationWakeDecodesExactDeliveryRange() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.queuedDelegationWakeTurnFrame(turnID: turnID)
+    )
+    let range = try ProcessProtocolFixture.queuedDelegationWakeRange(in: frame.message)
+
+    XCTAssertEqual(range.first.rawValue, ProcessProtocolFixture.wakeFirstDeliverySequence)
+    XCTAssertEqual(range.through.rawValue, ProcessProtocolFixture.wakeThroughDeliverySequence)
+  }
+
+  func testDelegationTerminalTurnDecodesParentGoalAuthority() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationTerminalTurnFrame(turnID: turnID)
+    )
+    let terminal = try ProcessProtocolFixture.delegationTerminal(in: frame.message)
+
+    XCTAssertEqual(terminal.spawningRequestID.rawValue, ProcessProtocolFixture.spawningRequestID)
+    XCTAssertEqual(terminal.outcome, .stopped)
+    XCTAssertEqual(terminal.reason, .parentStopped)
+    XCTAssertEqual(
+      terminal.provenance,
+      .parentGoalCommand(
+        parentSessionID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.parentSessionID),
+        goalGeneration: SignalboxCanonicalUInt64(rawValue: 1),
+        commandID: try SignalboxCanonicalUUID(validating: ProcessProtocolFixture.parentTurnID),
+        descendantScope: .parentAndDescendants
+      )
+    )
+  }
+
+  func testDelegationTerminalTurnAdmitsCrossedParentPolicy() throws {
+    // A bound relationship maps the parent verb through its own policy, so a
+    // parent cancellation may stop the child and a parent stop may cancel it.
+    let stoppedByCancellation = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationTerminalTurnFrame(
+        turnID: turnID, outcome: "stopped", reason: "parent_cancelled")
+    )
+    let cancelledByStop = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationTerminalTurnFrame(
+        turnID: turnID, outcome: "cancelled", reason: "parent_stopped")
+    )
+
+    let stoppedTerminal = try ProcessProtocolFixture.delegationTerminal(
+      in: stoppedByCancellation.message)
+    XCTAssertEqual(stoppedTerminal.outcome, .stopped)
+    XCTAssertEqual(stoppedTerminal.reason, .parentCancelled)
+    let cancelledTerminal = try ProcessProtocolFixture.delegationTerminal(
+      in: cancelledByStop.message)
+    XCTAssertEqual(cancelledTerminal.outcome, .cancelled)
+    XCTAssertEqual(cancelledTerminal.reason, .parentStopped)
+  }
+
+  func testDelegationTerminalTurnRejectsANonTerminalOutcome() throws {
+    // `continue_running` reports an edge the cascade did not terminalize, so it
+    // is never a terminal turn state.
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationTerminalTurnFrame(
+        turnID: turnID, outcome: "continue_running", reason: "parent_stopped")
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.turnStateDecodingDiagnostic(in: frame.message))
   }
 
   func testTranscriptModelCallCostWithoutAUsageAxisDegradesWithDiagnostic() throws {
@@ -1492,6 +1755,20 @@ private enum ProcessProtocolFixture {
   static let modelIdentityDefaultsVersion: UInt64 = 7
   static let defaultsVersionField = "defaults_version"
   static let selectedModelID = "88888888-8888-4888-8888-888888888888"
+  static let spawningRequestID = "33333333-3333-4333-8333-333333333333"
+  static let parentSessionID = "44444444-4444-4444-8444-444444444444"
+  static let parentTurnID = "12121212-1212-4212-8212-121212121212"
+  static let delegatedTaskContent = "fixture delegated task"
+  static let wakeFirstDeliverySequence: UInt64 = 3
+  static let wakeThroughDeliverySequence: UInt64 = 5
+  static let delegationMessageContent = "fixture delegation message"
+  static let delegationMessageOrdinal: UInt64 = 1
+  static let delegationMessageDeliverySequence: UInt64 = 2
+  static let delegationResultContent = "fixture delegation result"
+  static let messageID = "55555555-5555-4555-8555-555555555555"
+  static let awaitRequestID = "66666666-6666-4666-8666-666666666666"
+  static let childSessionID = "77777777-7777-4777-8777-777777777777"
+  static let childTurnID = "99999999-9999-4999-8999-999999999999"
   static let futureProviderFailureCause = "future_provider_failure"
   static let expandedErrorMessage = "fixture error"
   static let expandedRejectionMessage = "fixture rejection"
@@ -1567,6 +1844,102 @@ private enum ProcessProtocolFixture {
             "turn_id":"\(turnID)",
             "defaults_version":"\(defaultsVersion)",
             "selected_model_id":"\(selectedModelID)"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func delegatedTaskEntryFrame(
+    sessionID: String,
+    content: String = delegatedTaskContent
+  ) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"\(requestID)",
+        "message":{
+          "type":"transcript_entry",
+          "entry_index":"\(firstEntryIndex)",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"22222222-2222-4222-8222-222222222222",
+          "entry":{
+            "type":"delegated_task",
+            "spawning_request_id":"\(spawningRequestID)",
+            "parent_session_id":"\(parentSessionID)",
+            "parent_turn_id":"\(parentTurnID)",
+            "content":"\(content)"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func delegationMessageEntryFrame(
+    sessionID: String,
+    content: String = delegationMessageContent
+  ) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"\(requestID)",
+        "message":{
+          "type":"transcript_entry",
+          "entry_index":"\(firstEntryIndex)",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"22222222-2222-4222-8222-222222222222",
+          "entry":{
+            "type":"delegation_message",
+            "spawning_request_id":"\(spawningRequestID)",
+            "message_id":"\(messageID)",
+            "sender_session_id":"\(parentSessionID)",
+            "recipient_session_id":"\(sessionID)",
+            "ordinal":"\(delegationMessageOrdinal)",
+            "delivery_sequence":"\(delegationMessageDeliverySequence)",
+            "content":"\(content)"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func delegationResultEntryFrame(
+    sessionID: String,
+    mode: String,
+    deliverySequence: String,
+    reason: String = "child_completed",
+    content: String = delegationResultContent
+  ) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"\(requestID)",
+        "message":{
+          "type":"transcript_entry",
+          "entry_index":"\(firstEntryIndex)",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"22222222-2222-4222-8222-222222222222",
+          "entry":{
+            "type":"delegation_result",
+            "await_request_id":"\(awaitRequestID)",
+            "spawning_request_id":"\(spawningRequestID)",
+            "child_session_id":"\(childSessionID)",
+            "mode":"\(mode)",
+            "delivery_sequence":\(deliverySequence),
+            "outcome":"returned",
+            "content":"\(content)",
+            "reason":"\(reason)",
+            "provenance":{
+              "type":"child_turn",
+              "child_session_id":"\(childSessionID)",
+              "child_turn_id":"\(childTurnID)"
+            }
           }
         }
       }
@@ -2060,6 +2433,81 @@ private enum ProcessProtocolFixture {
     )
   }
 
+  static func queuedDelegatedTurnFrame(turnID: String) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_turn",
+          "turn_id":"\(turnID)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"queued_delegated",
+            "spawning_request_id":"\(spawningRequestID)",
+            "parent_session_id":"\(parentSessionID)",
+            "parent_turn_id":"\(parentTurnID)",
+            "content":"\(delegatedTaskContent)"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func queuedDelegationWakeTurnFrame(turnID: String) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_turn",
+          "turn_id":"\(turnID)",
+          "acceptance_position":"2",
+          "state":{
+            "type":"queued_delegation_wake",
+            "first_delivery_sequence":"\(wakeFirstDeliverySequence)",
+            "through_delivery_sequence":"\(wakeThroughDeliverySequence)"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func delegationTerminalTurnFrame(
+    turnID: String, outcome: String = "stopped", reason: String = "parent_stopped"
+  ) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_turn",
+          "turn_id":"\(turnID)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"delegation_terminated",
+            "spawning_request_id":"\(spawningRequestID)",
+            "outcome":"\(outcome)",
+            "reason":"\(reason)",
+            "provenance":{
+              "type":"parent_goal_command",
+              "parent_session_id":"\(parentSessionID)",
+              "goal_generation":"1",
+              "command_id":"\(parentTurnID)",
+              "descendant_scope":"parent_and_descendants"
+            }
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
   static func failedTurnWithNullCauseFrame(turnID: String) -> Data {
     Data(
       """
@@ -2152,6 +2600,58 @@ private enum ProcessProtocolFixture {
       throw ProcessProtocolFixtureError.missingProviderFailureCause
     }
     return cause
+  }
+
+  static func queuedDelegatedOrigin(
+    in message: SignalboxProcessServerMessage
+  ) throws -> (
+    spawningRequestID: SignalboxCanonicalUUID,
+    parentSessionID: SignalboxCanonicalUUID,
+    parentTurnID: SignalboxCanonicalUUID,
+    content: String
+  ) {
+    guard
+      case .transcriptTurn(let turn) = message,
+      case .queuedDelegated(
+        let spawningRequestID,
+        let parentSessionID,
+        let parentTurnID,
+        let content
+      ) = turn.state
+    else {
+      throw ProcessProtocolFixtureError.missingDelegatedOrigin
+    }
+    return (spawningRequestID, parentSessionID, parentTurnID, content)
+  }
+
+  static func queuedDelegationWakeRange(
+    in message: SignalboxProcessServerMessage
+  ) throws -> (first: SignalboxCanonicalUInt64, through: SignalboxCanonicalUInt64) {
+    guard
+      case .transcriptTurn(let turn) = message,
+      case .queuedDelegationWake(let first, let through) = turn.state
+    else {
+      throw ProcessProtocolFixtureError.missingDelegatedOrigin
+    }
+    return (first, through)
+  }
+
+  static func delegationTerminal(
+    in message: SignalboxProcessServerMessage
+  ) throws -> (
+    spawningRequestID: SignalboxCanonicalUUID,
+    outcome: SignalboxDelegationOutcome,
+    reason: SignalboxDelegationReason,
+    provenance: SignalboxDelegationProvenance
+  ) {
+    guard
+      case .transcriptTurn(let turn) = message,
+      case .delegationTerminated(
+        let spawningRequestID, let outcome, let reason, let provenance) = turn.state
+    else {
+      throw ProcessProtocolFixtureError.missingDelegatedOrigin
+    }
+    return (spawningRequestID, outcome, reason, provenance)
   }
 
   static func oversizedFrame() -> Data {
@@ -2281,6 +2781,7 @@ private enum ProcessProtocolFixture {
 }
 
 private enum ProcessProtocolFixtureError: Error {
+  case missingDelegatedOrigin
   case missingImportedEntry
   case missingRejectionDetail
   case missingProcessError

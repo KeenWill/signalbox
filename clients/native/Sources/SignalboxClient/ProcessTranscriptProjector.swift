@@ -274,6 +274,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           unknownTurnActivity = latestActivity
         } else if case .queued = turn.state {
           // A queued successor does not prove that an unknown earlier turn is terminal.
+        } else if case .queuedDelegated = turn.state {
+          // A queued successor does not prove that an unknown earlier turn is terminal.
+        } else if case .queuedDelegationWake = turn.state {
+          // A queued successor does not prove that an unknown earlier turn is terminal.
         } else {
           unknownTurnActivity = nil
         }
@@ -361,6 +365,26 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         )
         if let projected {
           store(projected, in: &projectedByID, order: &projectedOrder)
+          if case .delegationResult(
+            let requestID,
+            _,
+            _,
+            .foreground,
+            _,
+            let outcome,
+            let content,
+            _,
+            _
+          ) = message.entry {
+            let toolResult = try updateTool(
+              sourceSessionID: message.sourceSessionID.rawValue,
+              requestID: requestID.rawValue,
+              toolAttemptID: nil,
+              output: content,
+              status: outcome == .returned ? .completed : .closed
+            )
+            store(toolResult, in: &projectedByID, order: &projectedOrder)
+          }
         }
       }
       for usageRecord in anchoredUsageByRecordIndex.removeValue(forKey: recordIndex) ?? [] {
@@ -466,7 +490,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
             turnID: turnID
           )
         case .toolExecutionResult(let requestID, _, _),
-          .toolDenied(let requestID, _), .toolClosed(let requestID, _):
+          .toolDenied(let requestID, _), .toolClosed(let requestID, _),
+          .delegationResult(let requestID, _, _, .foreground, _, _, _, _, _):
           let correlation = ToolCorrelation(
             sourceSessionID: message.sourceSessionID.rawValue,
             requestID: requestID.rawValue
@@ -489,7 +514,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
               turnID: turnID
             )
           }
-        case .modelIdentityChanged, .imported, .unknown:
+        case .delegatedTask, .delegationMessage,
+          .delegationResult(_, _, _, .background, _, _, _, _, _),
+          .modelIdentityChanged, .imported, .unknown:
           break
         }
       case .turn, .modelCallUsage:
@@ -526,7 +553,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           .assistantToolUse(let turnID, _, _, _, _, _), .turnCompleted(let turnID),
           .turnFailed(let turnID), .turnCancelled(let turnID):
           anchor = (turnID, message.entryIndex)
-        case .toolExecutionResult, .toolDenied, .toolClosed, .imported, .unknown:
+        case .delegatedTask, .delegationMessage, .delegationResult,
+          .toolExecutionResult, .toolDenied, .toolClosed, .imported, .unknown:
           anchor = nil
         }
       case .turn, .modelCallUsage, .content:
@@ -606,7 +634,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return terminalModelCallID
     case .cancelled(_, _, let terminalModelCallID):
       return terminalModelCallID
-    case .queued, .activeRunning, .activeAwaitingModelCallRecovery,
+    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
+      .activeAwaitingChild, .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .refused,
       .reconciliationRequired, .toolReconciliationRequired, .unknown:
       return nil
@@ -623,7 +652,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         .refused(_, _, let modelCallID),
         .reconciliationRequired(_, _, let modelCallID):
         modelCallIDs.insert(modelCallID.rawValue)
-      case .queued, .activeRunning, .activeAwaitingToolApproval,
+      case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
+        .activeAwaitingChild, .activeAwaitingToolApproval,
         .activeAwaitingToolRecovery, .failed, .completed, .cancelled,
         .toolReconciliationRequired, .unknown:
         break
@@ -697,6 +727,58 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return nil
     }
     switch message.entry {
+    case .delegatedTask(let spawningRequestID, let parentSessionID, let parentTurnID, let content):
+      return try semanticRecord(
+        message,
+        event: .processConservative(
+          SignalboxProcessConservativeEvent(
+            kind: "delegated_task",
+            diagnostic:
+              "Parent session \(parentSessionID.rawValue), turn \(parentTurnID.rawValue), spawned request \(spawningRequestID.rawValue): \(content)"
+          )
+        )
+      )
+    case .delegationMessage(
+      let spawningRequestID,
+      let messageID,
+      let senderSessionID,
+      let recipientSessionID,
+      _,
+      _,
+      let content
+    ):
+      return try semanticRecord(
+        message,
+        event: .processConservative(
+          SignalboxProcessConservativeEvent(
+            kind: "delegation_message",
+            diagnostic:
+              "Delegation \(spawningRequestID.rawValue) message \(messageID.rawValue) from \(senderSessionID.rawValue) to \(recipientSessionID.rawValue): \(content)"
+          )
+        )
+      )
+    case .delegationResult(
+      let awaitRequestID,
+      let spawningRequestID,
+      let childSessionID,
+      let mode,
+      _,
+      let outcome,
+      let content,
+      _,
+      _
+    ):
+      let deliveredContent = content.map { ": \($0)" } ?? ""
+      return try semanticRecord(
+        message,
+        event: .processConservative(
+          SignalboxProcessConservativeEvent(
+            kind: "delegation_result",
+            diagnostic:
+              "Delegation \(spawningRequestID.rawValue) child \(childSessionID.rawValue) delivered \(outcome.rawValue) to \(awaitRequestID.rawValue) in \(mode.rawValue) mode\(deliveredContent)"
+          )
+        )
+      )
     case .modelIdentityChanged(let turnID, let defaultsVersion, let selectedModelID):
       return try semanticRecord(
         message,
@@ -831,7 +913,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     sourceSessionID: String,
     requestID: String,
     toolAttemptID: SignalboxCanonicalUUID?,
-    output: String,
+    output: String?,
     status: SignalboxProcessToolStatus
   ) throws -> SignalboxStoredEvent {
     let correlation = ToolCorrelation(
@@ -1069,7 +1151,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .cancelled:
         content = nil
       }
-    case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
+      .activeAwaitingChild,
+      .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       content = nil
@@ -1168,10 +1252,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private func turnStateIsActive(_ state: SignalboxTranscriptTurnState) -> Bool {
     switch state {
-    case .activeRunning, .activeAwaitingToolApproval, .activeAwaitingModelCallRecovery,
-      .activeAwaitingToolRecovery, .reconciliationRequired, .toolReconciliationRequired:
+    case .activeRunning, .activeAwaitingChild, .activeAwaitingToolApproval,
+      .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery, .reconciliationRequired,
+      .toolReconciliationRequired:
       return true
-    case .queued, .failed, .completed, .refused, .cancelled, .unknown:
+    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .failed,
+      .completed, .refused, .cancelled, .unknown:
       return false
     }
   }
@@ -1266,9 +1352,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .toolDenied(let request, _),
       .toolClosed(let request, _):
       requestID = request.rawValue
+    case .delegationResult(let request, _, _, .foreground, _, _, _, _, _):
+      requestID = request.rawValue
     case .assistantToolUse:
       return false
-    case .modelIdentityChanged, .turnCompleted, .turnFailed, .turnCancelled, .imported, .unknown:
+    case .delegatedTask, .delegationMessage,
+      .delegationResult(_, _, _, .background, _, _, _, _, _), .modelIdentityChanged,
+      .turnCompleted, .turnFailed, .turnCancelled, .imported, .unknown:
       return false
     }
     let correlation = ToolCorrelation(
@@ -1467,7 +1557,16 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         attemptID: nil,
         closesAttemptWithoutID: true
       )
-    case .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
+    case .delegationResult(let requestID, _, _, .foreground, _, _, _, _, _):
+      return TerminalToolResultEvidence(
+        entryID: message.entryID,
+        requestID: requestID.rawValue,
+        attemptID: nil,
+        closesAttemptWithoutID: true
+      )
+    case .delegatedTask, .delegationMessage,
+      .delegationResult(_, _, _, .background, _, _, _, _, _),
+      .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
       .turnCancelled, .imported, .unknown:
       return nil
     }
@@ -1593,14 +1692,16 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
             }
             switch message.entry {
             case .toolExecutionResult(let requestID, _, _), .toolDenied(let requestID, _),
-              .toolClosed(let requestID, _):
+              .toolClosed(let requestID, _),
+              .delegationResult(let requestID, _, _, .foreground, _, _, _, _, _):
               return ToolCorrelation(
                 sourceSessionID: message.sourceSessionID.rawValue,
                 requestID: requestID.rawValue
               )
-            case .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
-              .turnCancelled, .imported,
-              .unknown:
+            case .delegatedTask, .delegationMessage,
+              .delegationResult(_, _, _, .background, _, _, _, _, _),
+              .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
+              .turnCancelled, .imported, .unknown:
               return nil
             }
           })
@@ -1789,13 +1890,18 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     for state: SignalboxTranscriptTurnState
   ) -> SignalboxProcessActivity {
     switch state {
-    case .queued:
+    case .queued, .queuedDelegated, .queuedDelegationWake:
       return .init(state: .queued, label: "Queued")
+    case .delegationTerminated(_, let outcome, _, _):
+      let label = outcome == .stopped ? "Stopped by parent" : "Cancelled by parent"
+      return .init(state: .cancelled, label: label)
     case .activeRunning(_, let currentModelCall):
       if let currentModelCall, case .unknown = currentModelCall.state {
         return .init(state: .recoveryRequired, label: "Recovery required")
       }
       return .init(state: .running, label: "Running")
+    case .activeAwaitingChild:
+      return .init(state: .running, label: "Awaiting child")
     case .activeAwaitingToolApproval:
       return .init(state: .waitingForToolDecision, label: "Tool decision unavailable")
     case .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery,
