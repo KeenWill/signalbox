@@ -16,16 +16,19 @@
 //! the adapter's own types, with usage reported. It deliberately asserts
 //! nothing about answer quality.
 //!
-//! This adapter is now wired into signalboxd alongside the Anthropic adapter
-//! (`agent/wire-openai-adapter`); this smoke still validates the crate
-//! directly through its own `ModelRuntime` implementation, not through the
-//! daemon composition root.
+//! This adapter is wired into signalboxd alongside the Anthropic adapter; this
+//! smoke still validates the crate directly through its own `ModelRuntime`
+//! implementation, not through the daemon composition root.
 //!
-//! Streamed delivery: the operation requests `DeliveryMode::Streamed`,
-//! matching the only delivery mode production ever selects
-//! (`RuntimeModelCallProvider` in `crates/model-provider-runtime` sets it
-//! unconditionally, generic over any adapter), so this smoke exercises the
-//! deployed SSE decoder rather than the buffered path production never uses.
+//! Streamed delivery: the operation requests `DeliveryMode::Streamed`, which
+//! is what `RuntimeModelCallProvider` in `crates/model-provider-runtime` sets
+//! for ordinary model calls, generic over any adapter, so the one paid
+//! exchange lands on the SSE decoder that carries production's main traffic.
+//! It is not the *only* mode production selects: the approval-judge and
+//! context-compaction callers in that same crate set `DeliveryMode::Buffered`,
+//! and this smoke deliberately leaves that decoder to the adapter's offline
+//! buffered fixtures rather than spending a second credentialed exchange on a
+//! required, twice-daily check.
 //!
 //! No prompt caching: this smoke sends one small, fixed prompt and nothing
 //! else. At that volume a cache write costs more than it could ever recoup,
@@ -212,6 +215,12 @@ fn require_prepared<C, P>(outcome: PreparationOutcome<C, P>) -> P {
 struct DecodedResponse {
     exchange: ExchangeFacts,
     usage: TokenUsage,
+    /// Whether the decoder reached this outcome only after consuming the
+    /// provider's final usage chunk, and therefore carries usage worth
+    /// asserting. False for the output-ceiling shape: the unrecognized-finish
+    /// branch ends the stream the moment it sees `length`, and the usage-only
+    /// chunk is valid only *after* a finish, so that record never arrives.
+    usage_is_final: bool,
 }
 
 /// Accepts a completion, or the adapter's own decoded-refusal shape, as
@@ -283,6 +292,7 @@ fn require_decoded_response(
         TerminalEvidence::Completed(completed) => DecodedResponse {
             exchange: completed.exchange,
             usage: completed.usage,
+            usage_is_final: true,
         },
         TerminalEvidence::ProviderError(error)
             if error.kind == ProviderErrorKind::Unrecognized
@@ -293,6 +303,7 @@ fn require_decoded_response(
             DecodedResponse {
                 exchange: error.exchange,
                 usage: error.usage,
+                usage_is_final: true,
             }
         }
         TerminalEvidence::BoundaryLoss(loss)
@@ -302,6 +313,7 @@ fn require_decoded_response(
             DecodedResponse {
                 exchange: loss.exchange,
                 usage: loss.usage,
+                usage_is_final: false,
             }
         }
         // Adapter-produced evidence is already credential-shape redacted, so
@@ -358,8 +370,19 @@ fn stopped_at_the_output_ceiling(finish: Option<&FinishReason>) -> bool {
 /// (the adapter's own streamed fixtures cover an `end_turn` with
 /// `output_tokens: Some(0)` as `Completed`), and a downgraded-refusal
 /// `ProviderError` can be blocked before any completion token is produced.
-/// Straight-line and credential-free: no test body branches on which
-/// accepted shape arrived.
+///
+/// The usage checks apply only when the outcome actually carries final usage.
+/// The output-ceiling shape does not: OpenAI sends usage in a trailing
+/// usage-only chunk that is valid only after a finish, and the decoder ends
+/// the stream the moment the `length` finish arrives, so that chunk is never
+/// consumed. Asserting usage there would fail every real ceiling response —
+/// exactly the outcome this smoke set out to stop treating as a break. What
+/// that shape still proves, and what stays asserted for it, is the definitive
+/// success status plus the classifier's own match on the provider's finish
+/// token.
+///
+/// Straight-line and credential-free: no test body branches on which accepted
+/// shape arrived; the one branch lives here and has its own coverage below.
 #[track_caller]
 fn assert_well_formed_response(decoded: &DecodedResponse) {
     assert_eq!(
@@ -367,6 +390,9 @@ fn assert_well_formed_response(decoded: &DecodedResponse) {
         Some(200),
         "the adapter no longer records the documented success status"
     );
+    if !decoded.usage_is_final {
+        return;
+    }
     assert!(
         decoded.usage.input_tokens.is_some_and(|tokens| tokens > 0),
         "the Chat Completions API no longer reports input usage the adapter can decode"
@@ -653,33 +679,57 @@ mod require_decoded_response_tests {
     }
 
     /// The shape `StreamDecoder` produces when the provider reports
-    /// `finish_reason: "length"`: the unrecognized-finish violation, with the
-    /// token retained verbatim and usage already accumulated.
-    fn stopped_at_ceiling(finish_token: &str) -> TerminalEvidence {
-        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+    /// `finish_reason: "length"`: the unrecognized-finish violation carrying
+    /// the token verbatim. Returns the payload rather than the wrapping
+    /// variant so a caller can perturb one field without destructuring.
+    ///
+    /// Usage is `unreported` because that is what the decoder can actually
+    /// retain here — it ends the stream on the finish chunk, before the
+    /// trailing usage-only chunk this smoke's request asks for.
+    fn stopped_at_ceiling(finish_token: &str, exchange: ExchangeFacts) -> BoundaryLossEvidence {
+        BoundaryLossEvidence {
             cause: LossCause::StreamProtocolViolation {
                 detail: "stream carries an unrecognized finish_reason".to_string(),
             },
-            exchange: exchange(200),
+            exchange,
             reported_model: None,
             finish_reported: Some(FinishReason::Unrecognized {
                 provider_token: finish_token.to_string(),
             }),
-            usage: usage(),
-        })
+            usage: TokenUsage::unreported(),
+        }
     }
 
     #[test]
     fn output_ceiling_truncation_is_accepted() {
         // A one-word prompt is a request, not an enforced bound. Running to
-        // the ceiling still proves the whole protocol surface, so it must not
-        // redden a required check.
-        let expected_usage = usage();
+        // the ceiling still proves the protocol surface, so it must not redden
+        // a required check.
+        let expected_exchange = exchange(200);
 
-        let decoded = require_decoded_response(stopped_at_ceiling("length"), &[]);
+        let decoded = require_decoded_response(
+            TerminalEvidence::BoundaryLoss(stopped_at_ceiling("length", expected_exchange.clone())),
+            &[],
+        );
 
-        assert_eq!(decoded.exchange, exchange(200));
-        assert_eq!(decoded.usage, expected_usage);
+        assert_eq!(decoded.exchange, expected_exchange);
+        assert!(
+            !decoded.usage_is_final,
+            "the ceiling shape never consumed the trailing usage chunk"
+        );
+    }
+
+    #[test]
+    fn an_accepted_output_ceiling_truncation_is_well_formed() {
+        // The end-to-end guarantee the live test depends on: this shape must
+        // survive `assert_well_formed_response` even though it carries no
+        // usage, which is the whole point of accepting it.
+        let decoded = require_decoded_response(
+            TerminalEvidence::BoundaryLoss(stopped_at_ceiling("length", exchange(200))),
+            &[],
+        );
+
+        assert_well_formed_response(&decoded);
     }
 
     #[test]
@@ -688,18 +738,22 @@ mod require_decoded_response_tests {
         // Only the output-ceiling token is accepted: a finish token this
         // adapter has never seen is exactly the compatibility break the smoke
         // exists to catch.
-        let _ = require_decoded_response(stopped_at_ceiling("stop_and_smell_the_roses"), &[]);
+        let _ = require_decoded_response(
+            TerminalEvidence::BoundaryLoss(stopped_at_ceiling(
+                "stop_and_smell_the_roses",
+                exchange(200),
+            )),
+            &[],
+        );
     }
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn an_output_ceiling_finish_from_a_non_200_status_panics() {
-        let TerminalEvidence::BoundaryLoss(mut loss) = stopped_at_ceiling("length") else {
-            panic!("fixture builds boundary-loss evidence");
-        };
-        loss.exchange = exchange(500);
-
-        let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
+        let _ = require_decoded_response(
+            TerminalEvidence::BoundaryLoss(stopped_at_ceiling("length", exchange(500))),
+            &[],
+        );
     }
 }
 
@@ -724,12 +778,37 @@ mod assert_well_formed_response_tests {
                 output_tokens: Some(1),
                 ..TokenUsage::default()
             },
+            usage_is_final: true,
         }
     }
 
     #[test]
     fn positive_usage_passes() {
         assert_well_formed_response(&well_formed());
+    }
+
+    #[test]
+    fn absent_usage_passes_when_the_outcome_never_carried_it() {
+        // The output-ceiling shape: the decoder ended the stream before the
+        // trailing usage chunk, so usage is unreported and must not be held
+        // to a bar the outcome cannot meet. The status check still applies.
+        let mut decoded = well_formed();
+        decoded.usage_is_final = false;
+        decoded.usage = TokenUsage::unreported();
+
+        assert_well_formed_response(&decoded);
+    }
+
+    #[test]
+    #[should_panic(expected = "documented success status")]
+    fn a_non_200_status_still_panics_without_final_usage() {
+        // Relaxing the usage bar must not relax the status bar with it.
+        let mut decoded = well_formed();
+        decoded.usage_is_final = false;
+        decoded.usage = TokenUsage::unreported();
+        decoded.exchange.http_status = Some(500);
+
+        assert_well_formed_response(&decoded);
     }
 
     #[test]

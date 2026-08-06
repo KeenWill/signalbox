@@ -474,11 +474,18 @@ The smoke also accepts one loss shape: the exchange that stopped at its own
 output ceiling. Chat Completions reports that as `finish_reason: "length"`,
 which this adapter deliberately leaves unmapped, so the decoder ends the stream
 as `BoundaryLoss` carrying the token verbatim. That is a truthful report about
-answer length, not a protocol break — the request was accepted, the body framed
-and decoded, and identity and usage reported — so failing the smoke on it would
-assert something about answer quality, which this smoke does not do. The
-acceptance is keyed to that exact token from a 200 exchange; any other
-unrecognized finish, and every other loss cause, still fails.
+answer length, not a protocol break — the request was accepted and the body
+framed and decoded — so failing the smoke on it would assert something about
+answer quality, which this smoke does not do. The acceptance is keyed to that
+exact token from a 200 exchange; any other unrecognized finish, and every other
+loss cause, still fails.
+
+That shape alone carries no usage, and the smoke does not demand any from it:
+the trailing usage-only chunk is valid only after a finish, and the decoder ends
+the stream on the finish chunk itself, so the record never arrives. The usage
+requirements above therefore apply to the two decoded shapes, which reach the
+caller only after that chunk is consumed; the ceiling shape is held to the
+success status and its own finish token.
 
 The smoke's target is deliberately a non-reasoning model, which is a separate
 concern from that ceiling. A reasoning model spends hidden reasoning tokens
