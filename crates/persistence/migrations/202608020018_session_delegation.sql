@@ -2003,10 +2003,30 @@ BEGIN
            AND source_relation.child_session_id = checked.parent_session_id
            AND (checked.command_source_kind = 'goal_command'
                 OR source_task.turn_id = checked.parent_turn_id)
+           -- `delegation_cascade_expected_frontier` derives a nested edge's
+           -- effective parent kind from the recorded prior result on its source
+           -- edge, falling back to that edge's own effective kind. An
+           -- already-terminal source edge therefore carries the kind that
+           -- actually terminalized it, which is the earlier command's kind
+           -- whenever a second descendant-scoped command of the opposite kind
+           -- re-traverses the tree. Mirror that derivation exactly;
+           -- `require_delegation_cascade_disposition_count` already does.
            AND checked.termination_kind = CASE source_event.outcome_kind
                 WHEN 'child_stopped' THEN 'stopped'
                 WHEN 'child_cancelled' THEN 'cancelled'
-                WHEN 'already_terminal' THEN source_authority.termination_kind
+                WHEN 'already_terminal' THEN COALESCE(
+                    (
+                        SELECT CASE prior.outcome_kind
+                            WHEN 'child_stopped' THEN 'stopped'
+                            WHEN 'child_cancelled' THEN 'cancelled'
+                            ELSE source_authority.termination_kind
+                        END
+                          FROM session_child_result AS prior
+                         WHERE prior.spawning_tool_request_id =
+                                source_event.spawning_tool_request_id
+                    ),
+                    source_authority.termination_kind
+                )
            END
     ) THEN
         RAISE EXCEPTION 'nested delegation termination lacks its immediate parent outcome'
@@ -4944,7 +4964,7 @@ CREATE UNIQUE INDEX delegation_child_waiting_update_once
     WHERE update_kind = 'child_waiting';
 CREATE UNIQUE INDEX delegation_lifecycle_update_once
     ON delegation_update_outbox_event(
-        spawning_tool_request_id, delegation_event_ordinal
+        spawning_tool_request_id, delegation_event_ordinal, session_id
     ) WHERE update_kind = 'child_lifecycle_disposition';
 CREATE UNIQUE INDEX delegation_child_result_update_once
     ON delegation_update_outbox_event(result_spawning_request_id)
@@ -5000,7 +5020,15 @@ BEGIN
                             'parent_turn_command', 'parent_goal_command'
                        )
                        AND relation.child_session_id = NEW.child_session_id
-                       AND NEW.session_id = relation.parent_session_id
+                       AND (
+                            NEW.session_id = relation.parent_session_id
+                            OR (
+                                NEW.session_id = relation.child_session_id
+                                AND event.outcome_kind IN (
+                                    'child_stopped', 'child_cancelled'
+                                )
+                            )
+                       )
                 )
                 WHEN 'child_result' THEN EXISTS (
                     SELECT 1
@@ -5123,10 +5151,13 @@ FOR EACH ROW EXECUTE FUNCTION require_delegation_wait_update();
 CREATE FUNCTION require_delegation_lifecycle_update()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    IF NEW.event_kind = 'outcome_recorded'
-        AND NEW.provenance_kind IN (
+    IF NEW.event_kind <> 'outcome_recorded'
+        OR NEW.provenance_kind NOT IN (
             'parent_turn_command', 'parent_goal_command'
-        ) AND (
+        ) THEN
+        RETURN NULL;
+    END IF;
+    IF (
         SELECT count(*) FROM delegation_update_outbox_event AS emitted
           JOIN session_delegation AS relation
             ON relation.spawning_tool_request_id = NEW.spawning_tool_request_id
@@ -5138,6 +5169,20 @@ BEGIN
         RAISE EXCEPTION 'delegation outcome requires exactly one lifecycle update'
             USING ERRCODE = '23503',
                 CONSTRAINT = 'delegation_lifecycle_update_required';
+    END IF;
+    IF NEW.outcome_kind IN ('child_stopped', 'child_cancelled') AND (
+        SELECT count(*) FROM delegation_update_outbox_event AS emitted
+          JOIN session_delegation AS relation
+            ON relation.spawning_tool_request_id = NEW.spawning_tool_request_id
+         WHERE emitted.update_kind = 'child_lifecycle_disposition'
+           AND emitted.spawning_tool_request_id = NEW.spawning_tool_request_id
+           AND emitted.delegation_event_ordinal = NEW.event_ordinal
+           AND emitted.session_id = relation.child_session_id
+    ) <> 1 THEN
+        RAISE EXCEPTION
+            'terminalized delegated child requires exactly one lifecycle update'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'delegation_child_lifecycle_update_required';
     END IF;
     RETURN NULL;
 END;
@@ -5565,6 +5610,28 @@ BEGIN
           FROM header;
 
         IF logical_disposition IS NOT NULL THEN
+            WITH header AS (
+                INSERT INTO delegation_outbox_event
+                    (event_kind, storage_version, session_id)
+                VALUES ('delegation_update', 1, frontier.child_session_id)
+                RETURNING event_sequence, event_kind, storage_version, session_id
+            )
+            INSERT INTO delegation_update_outbox_event
+                (event_sequence, event_kind, storage_version, session_id,
+                 update_kind, spawning_tool_request_id, child_session_id,
+                 delegation_event_ordinal, delegation_event_kind,
+                 outcome_kind, reason_kind, provenance_kind,
+                 provenance_session_id, provenance_turn_id,
+                 provenance_goal_generation, provenance_command_id)
+            SELECT
+                event_sequence, event_kind, storage_version, session_id,
+                'child_lifecycle_disposition',
+                frontier.spawning_tool_request_id, frontier.child_session_id,
+                event_ordinal, 'outcome_recorded', outcome_kind, reason_kind,
+                provenance_kind, frontier.parent_session_id, parent_turn,
+                root_goal_generation, checked_root_command
+              FROM header;
+
             INSERT INTO session_child_result
                 (spawning_tool_request_id, event_ordinal, event_kind,
                  outcome_kind)

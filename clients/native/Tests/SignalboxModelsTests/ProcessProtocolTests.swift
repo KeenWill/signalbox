@@ -1382,10 +1382,34 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
-  func testDelegationTerminalTurnRejectsContradictoryReason() throws {
+  func testDelegationTerminalTurnAdmitsCrossedParentPolicy() throws {
+    // A bound relationship maps the parent verb through its own policy, so a
+    // parent cancellation may stop the child and a parent stop may cancel it.
+    let stoppedByCancellation = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationTerminalTurnFrame(
+        turnID: turnID, outcome: "stopped", reason: "parent_cancelled")
+    )
+    let cancelledByStop = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationTerminalTurnFrame(
+        turnID: turnID, outcome: "cancelled", reason: "parent_stopped")
+    )
+
+    let stoppedTerminal = try ProcessProtocolFixture.delegationTerminal(
+      in: stoppedByCancellation.message)
+    XCTAssertEqual(stoppedTerminal.outcome, .stopped)
+    XCTAssertEqual(stoppedTerminal.reason, .parentCancelled)
+    let cancelledTerminal = try ProcessProtocolFixture.delegationTerminal(
+      in: cancelledByStop.message)
+    XCTAssertEqual(cancelledTerminal.outcome, .cancelled)
+    XCTAssertEqual(cancelledTerminal.reason, .parentStopped)
+  }
+
+  func testDelegationTerminalTurnRejectsANonTerminalOutcome() throws {
+    // `continue_running` reports an edge the cascade did not terminalize, so it
+    // is never a terminal turn state.
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.delegationTerminalTurnFrame(
-        turnID: turnID, reason: "parent_cancelled")
+        turnID: turnID, outcome: "continue_running", reason: "parent_stopped")
     )
 
     XCTAssertNotNil(ProcessProtocolFixture.turnStateDecodingDiagnostic(in: frame.message))
@@ -2454,7 +2478,7 @@ private enum ProcessProtocolFixture {
   }
 
   static func delegationTerminalTurnFrame(
-    turnID: String, reason: String = "parent_stopped"
+    turnID: String, outcome: String = "stopped", reason: String = "parent_stopped"
   ) -> Data {
     Data(
       """
@@ -2468,7 +2492,7 @@ private enum ProcessProtocolFixture {
           "state":{
             "type":"delegation_terminated",
             "spawning_request_id":"\(spawningRequestID)",
-            "outcome":"stopped",
+            "outcome":"\(outcome)",
             "reason":"\(reason)",
             "provenance":{
               "type":"parent_goal_command",
