@@ -343,6 +343,21 @@ impl StreamDecoder {
             if let Some(token) = choice.finish_reason {
                 let mut finish = map_finish(&token, self.stop_sequences);
                 if matches!(finish, FinishReason::Unrecognized { .. }) {
+                    // This branch ends the stream early, so `apply_done`'s
+                    // envelope checks never run for it. Apply the two that are
+                    // already decidable here *before* recording the finish, so
+                    // a malformed envelope reports the envelope defect and
+                    // carries no `finish_reported`. A caller cannot otherwise
+                    // tell "healthy stream hit an output bound" from "the
+                    // envelope was never well formed and also said `length`".
+                    if !self.saw_assistant_role {
+                        return self.violation(
+                            "stream terminated without establishing the assistant role",
+                        );
+                    }
+                    if self.reported_model.is_none() {
+                        return self.violation("stream terminated without a model identity");
+                    }
                     self.finish = Some(finish);
                     return self.violation("stream carries an unrecognized finish_reason");
                 }
@@ -974,6 +989,49 @@ mod tests {
         assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
         assert_eq!(error.usage.input_tokens, Some(25));
         assert_eq!(error.usage.output_tokens, Some(7));
+    }
+
+    #[test]
+    fn an_unrecognized_finish_without_the_assistant_role_reports_the_envelope_defect() {
+        // The unrecognized-finish branch ends the stream before `apply_done`,
+        // so it applies the role check itself and reports no finish. That is
+        // what lets a caller tell a malformed envelope from a healthy stream
+        // that merely hit an output bound.
+        let (terminal, _) = drive(&[
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\"delta\":{},\
+              \"finish_reason\":\"length\"}]}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a stream without the assistant role is protocol loss");
+        };
+        assert_eq!(
+            loss.cause,
+            LossCause::StreamProtocolViolation {
+                detail: "stream terminated without establishing the assistant role".to_string()
+            }
+        );
+        assert_eq!(loss.finish_reported, None);
+    }
+
+    #[test]
+    fn a_well_formed_unrecognized_finish_still_reports_its_token() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("an unrecognized finish is protocol loss");
+        };
+        assert_eq!(
+            loss.finish_reported,
+            Some(FinishReason::Unrecognized {
+                provider_token: "length".to_string()
+            })
+        );
     }
 
     #[test]

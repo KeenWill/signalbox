@@ -249,6 +249,14 @@ only after the complete upload. Why: without full-upload proof a refusal token
 cannot satisfy the completed-exchange precondition for the refusal disposition,
 so the adapter fails toward known failure rather than inventing evidence.
 
+Unrecognized finish reasons end the stream before the end-of-stream envelope
+checks would otherwise run, so that branch applies the two decidable ones —
+assistant role established and model identity reported — before recording the
+finish. A stream failing either reports the envelope defect and carries no
+`finish_reported`. Why: without that, a caller cannot distinguish a well-formed
+response that stopped at an output bound from an envelope that was never valid
+and also reported one.
+
 Post-finish error records: once a stream has reported why generation stopped, a
 later error record that classifies as `Unrecognized` is a protocol violation
 rather than definitive provider evidence. Why: it supersedes the reported finish
