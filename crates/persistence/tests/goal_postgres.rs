@@ -3272,6 +3272,295 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
     Ok(())
 }
 
+/// One derived cascade edge: which relationship it dispositions, the immediate
+/// parent kind that selected its action, and the causal source that supplied
+/// that kind.
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct NestedCascadeEdgeFacts {
+    spawning_tool_request_id: Uuid,
+    parent_session_id: Uuid,
+    termination_kind: String,
+    source_kind: String,
+    source_spawning_tool_request_id: Option<Uuid>,
+}
+
+/// S18 / INV-010 / INV-012: a descendant-scoped stop descends through each
+/// terminalized edge under that edge's own disposition kind, and stops
+/// descending at every surviving edge.
+///
+/// The tree is two levels deep so both recursive behaviors are separable from
+/// the direct-child case. Under the root stop, `bound_child` is *cancelled* by
+/// its own policy; its nested child's `on_parent_cancelled` therefore selects
+/// the plan, not its `on_parent_stopped`. The two nested policies are chosen so
+/// that reading the root kind instead of the immediate parent's disposition
+/// would invert both answers: `nested_flipped_child` would keep running rather
+/// than stop, and it would carry `parent_stopped_parent_and_descendants`.
+/// `background_child` survives, so `nested_pruned_child` must be absent from
+/// the frontier entirely: no authority row, no outcome, no logical terminal,
+/// and no contribution to the cascade's disposition count.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_nested_cascade_descends_by_immediate_parent_disposition()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let parent = 0xf600;
+    let bound_child = 0xf601;
+    let nested_flipped_child = 0xf602;
+    let background_child = 0xf603;
+    let nested_pruned_child = 0xf604;
+    let bound_request = 0xf610;
+    let nested_flipped_request = 0xf620;
+    let background_request = 0xf630;
+    let nested_pruned_request = 0xf640;
+    let bound_turn = 0xf611;
+    let nested_flipped_turn = 0xf621;
+    let background_turn = 0xf631;
+    let nested_pruned_turn = 0xf641;
+    let stop_command = 0xf650;
+    for (command_id, session_id, selection) in [
+        (0xf001, parent, 0xf201),
+        (0xf002, bound_child, 0xf202),
+        (0xf003, nested_flipped_child, 0xf203),
+        (0xf004, background_child, 0xf204),
+        (0xf005, nested_pruned_child, 0xf205),
+    ] {
+        CreateSessionRepository::new(pool.clone(), credential_pin())
+            .handle(creation_fixture(command_id, session_id, selection))
+            .await?;
+    }
+    // A root stop cancels this edge, so its own child is dispositioned as a
+    // cancelled parent rather than a stopped one.
+    insert_queued_delegation_fixture(
+        &pool,
+        DelegationFixture {
+            spawning_request: bound_request,
+            parent_session: parent,
+            parent_turn: 0xf612,
+            child_session: bound_child,
+            child_turn: bound_turn,
+            task_entry: 0xf613,
+            selection: 0xf202,
+            policy_kind: "bound",
+            on_parent_stopped: Some("cancel"),
+            on_parent_cancelled: Some("cancel"),
+        },
+    )
+    .await?;
+    insert_queued_delegation_fixture(
+        &pool,
+        DelegationFixture {
+            spawning_request: nested_flipped_request,
+            parent_session: bound_child,
+            parent_turn: bound_turn,
+            child_session: nested_flipped_child,
+            child_turn: nested_flipped_turn,
+            task_entry: 0xf623,
+            selection: 0xf203,
+            policy_kind: "bound",
+            on_parent_stopped: Some("keep_running"),
+            on_parent_cancelled: Some("stop"),
+        },
+    )
+    .await?;
+    // A background edge survives the root stop and closes its own branch.
+    insert_queued_delegation_fixture(
+        &pool,
+        DelegationFixture {
+            spawning_request: background_request,
+            parent_session: parent,
+            parent_turn: 0xf632,
+            child_session: background_child,
+            child_turn: background_turn,
+            task_entry: 0xf633,
+            selection: 0xf204,
+            policy_kind: "background",
+            on_parent_stopped: None,
+            on_parent_cancelled: None,
+        },
+    )
+    .await?;
+    insert_queued_delegation_fixture(
+        &pool,
+        DelegationFixture {
+            spawning_request: nested_pruned_request,
+            parent_session: background_child,
+            parent_turn: background_turn,
+            child_session: nested_pruned_child,
+            child_turn: nested_pruned_turn,
+            task_entry: 0xf643,
+            selection: 0xf205,
+            policy_kind: "bound",
+            on_parent_stopped: Some("stop"),
+            on_parent_cancelled: Some("stop"),
+        },
+    )
+    .await?;
+
+    let repository = GoalRepository::new(pool.clone());
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0xf660),
+                    session(parent),
+                    GoalUserAction::Attach(statement("stop the nested delegated descendants")),
+                ),
+                Some(turn_candidates(0xf661)),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(stop_command),
+                    session(parent),
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                ),
+                None,
+                |_| None,
+            )
+            .await?,
+    );
+
+    // The pruned grandchild is excluded from the derived frontier itself, so
+    // the stored count and the authority inventory both omit it.
+    let disposition_count: i64 = sqlx::query_scalar(
+        "SELECT disposition_count::bigint
+           FROM session_delegation_termination_cascade
+          WHERE root_command_id = $1",
+    )
+    .bind(Uuid::from_u128(stop_command))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(disposition_count, 3);
+    let edges: Vec<NestedCascadeEdgeFacts> = sqlx::query_as(
+        "SELECT spawning_tool_request_id, parent_session_id, termination_kind,
+                source_kind, source_spawning_tool_request_id
+           FROM session_delegation_parent_termination
+          WHERE root_command_id = $1
+          ORDER BY spawning_tool_request_id",
+    )
+    .bind(Uuid::from_u128(stop_command))
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        edges,
+        [
+            NestedCascadeEdgeFacts {
+                spawning_tool_request_id: Uuid::from_u128(bound_request),
+                parent_session_id: Uuid::from_u128(parent),
+                termination_kind: "stopped".into(),
+                source_kind: "root".into(),
+                source_spawning_tool_request_id: None,
+            },
+            NestedCascadeEdgeFacts {
+                spawning_tool_request_id: Uuid::from_u128(nested_flipped_request),
+                parent_session_id: Uuid::from_u128(bound_child),
+                termination_kind: "cancelled".into(),
+                source_kind: "parent_disposition".into(),
+                source_spawning_tool_request_id: Some(Uuid::from_u128(bound_request)),
+            },
+            NestedCascadeEdgeFacts {
+                spawning_tool_request_id: Uuid::from_u128(background_request),
+                parent_session_id: Uuid::from_u128(parent),
+                termination_kind: "stopped".into(),
+                source_kind: "root".into(),
+                source_spawning_tool_request_id: None,
+            },
+        ]
+    );
+    let outcomes: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT spawning_tool_request_id, outcome_kind, reason_kind
+           FROM session_delegation_event
+          WHERE provenance_command_id = $1
+          ORDER BY spawning_tool_request_id",
+    )
+    .bind(Uuid::from_u128(stop_command))
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        outcomes,
+        [
+            (
+                Uuid::from_u128(bound_request),
+                "child_cancelled".into(),
+                "parent_stopped_parent_and_descendants".into(),
+            ),
+            (
+                Uuid::from_u128(nested_flipped_request),
+                "child_stopped".into(),
+                "parent_cancelled_parent_and_descendants".into(),
+            ),
+            (
+                Uuid::from_u128(background_request),
+                "continue_running".into(),
+                "parent_stopped_parent_and_descendants".into(),
+            ),
+        ]
+    );
+    let terminalized: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT spawning_tool_request_id, disposition_kind
+           FROM session_delegation_logical_terminal
+          WHERE root_command_id = $1
+          ORDER BY spawning_tool_request_id",
+    )
+    .bind(Uuid::from_u128(stop_command))
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        terminalized,
+        [
+            (Uuid::from_u128(bound_request), "cancelled".into()),
+            (Uuid::from_u128(nested_flipped_request), "stopped".into()),
+        ]
+    );
+
+    // The surviving branch keeps its whole subtree runnable.
+    let pruned_edge_records: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)::bigint FROM session_delegation_parent_termination
+              WHERE spawning_tool_request_id = $1) AS authorities,
+            (SELECT count(*)::bigint FROM session_delegation_event
+              WHERE spawning_tool_request_id = $1
+                AND event_kind = 'outcome_recorded') AS outcomes,
+            (SELECT count(*)::bigint FROM session_delegation_logical_terminal
+              WHERE spawning_tool_request_id = $1) AS logical_terminals",
+    )
+    .bind(Uuid::from_u128(nested_pruned_request))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(pruned_edge_records, (0, 0, 0));
+    let runtime_terminal_turns: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT session_id FROM turn_lifecycle
+          WHERE delegation_runtime_terminal
+          ORDER BY session_id",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        runtime_terminal_turns,
+        [
+            Uuid::from_u128(bound_child),
+            Uuid::from_u128(nested_flipped_child),
+        ]
+    );
+    assert!(
+        StartEligibleTurnRepository::new(pool.clone())
+            .preview(session(nested_pruned_child), activation_identities(0xf670))
+            .await?
+            .is_some(),
+        "a pruned grandchild keeps its queued delegated turn eligible"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S18 / INV-005 / INV-032: a delegated turn that completes while holding
 /// next-safe-point steering reclassifies that steering into a successor turn.
 ///
