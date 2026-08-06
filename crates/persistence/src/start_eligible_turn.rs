@@ -516,6 +516,7 @@ async fn prepare_delegated_preview(
             defaults.direct_model_selection_id AS goal_defaults_direct_id,
             defaults.model_alias_id AS goal_defaults_alias_id,
             defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
+            defaults.model_settings AS goal_defaults_model_settings,
             task.requested_model_kind,
             task.requested_direct_model_selection_id,
             task.requested_model_alias_id,
@@ -638,6 +639,7 @@ async fn prepare_delegated_wake_preview(
             defaults.direct_model_selection_id AS goal_defaults_direct_id,
             defaults.model_alias_id AS goal_defaults_alias_id,
             defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
+            defaults.model_settings AS goal_defaults_model_settings,
             wake.requested_model_kind,
             wake.requested_direct_model_selection_id,
             wake.requested_model_alias_id,
@@ -1431,6 +1433,9 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartEligibleTurnR
         }
         SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. } => {
             StartEligibleTurnCorruption::Inconsistent("origin accepted-input identity").into()
+        }
+        SubmitInputRepositoryError::UnsupportedModelSetting(_) => {
+            StartEligibleTurnCorruption::Inconsistent("origin model settings").into()
         }
         SubmitInputRepositoryError::ModelExecution(_) => {
             StartEligibleTurnCorruption::Inconsistent("origin command application").into()

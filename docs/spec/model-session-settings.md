@@ -2,7 +2,9 @@
 
 Verified against PR #436 (`agent/model-settings-domain`) for its foundation
 proposal and domain/runtime value shapes, and PR #437
-(`agent/model-settings-adapters`) for provider-adapter translation.
+(`agent/model-settings-adapters`) for provider-adapter translation. Persistence
+evidence and its legacy cutover were verified through PR #441
+(`agent/model-settings-persistence`).
 
 This page is the foundation proposal at the bottom of the model-settings
 implementation stack. It specifies the cross-crate contract for model reasoning,
@@ -215,7 +217,11 @@ ignored and are not part of this stack's validation.
 Protocol version one adds a capability-catalog list request and ordered item
 stream, complete settings on creation/defaults reads and receipts, provenance-
 preserving overrides on defaults replacement and origin-producing input, typed
-unsupported-setting results, and the two durable settings events above. The
+unsupported-setting results, and the two durable settings events above. A
+transcript snapshot completeness is owned by
+[process-protocol](process-protocol.md#transcript-snapshots), and the
+legacy-null cutover is owned by
+[persistence-protocol](persistence-protocol.md#relational-representation). The
 protocol freeze condition has not occurred, so the same-tree protocol changes in
 place.
 

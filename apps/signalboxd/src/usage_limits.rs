@@ -7,8 +7,8 @@ use signalbox_application::{
     OperatorFailureClass, PreparedModelOperation,
 };
 use signalbox_domain::{
-    AuthorizedModelCall, CorrelatedModelCallTerminalObservation, ModelCallTerminalObservation,
-    ProviderReportedTokenUsage, ResolvedProviderTarget,
+    AuthorizedModelCall, CorrelatedModelCallTerminalObservation, FastMode,
+    ModelCallTerminalObservation, ProviderReportedTokenUsage, ResolvedProviderTarget,
 };
 use signalbox_model_provider_runtime::RuntimeModelCatalog;
 use signalbox_model_runtime::TokenUsage;
@@ -105,6 +105,22 @@ impl<P> UsageLimitedModelCallProvider<P> {
     }
 }
 
+fn configured_usage_limits(
+    models: &RuntimeModelCatalog,
+    adapters: &HashMap<String, ModelAdapter>,
+    target: ResolvedProviderTarget,
+    fast_mode: FastMode,
+) -> Option<ConfiguredUsageLimits> {
+    let selected = models.resolve(target)?;
+    let definition = models.effective_definition(selected, fast_mode)?;
+    let adapter = adapters.get(definition.provider_model()).copied()?;
+    Some(ConfiguredUsageLimits {
+        max_output_tokens: u64::from(definition.max_output_tokens()),
+        context_window_tokens: u64::from(definition.context_window_tokens()),
+        adapter,
+    })
+}
+
 fn exceeds_configured_limits(
     usage: impl Into<ReportedUsageLowerBound>,
     limits: ConfiguredUsageLimits,
@@ -179,20 +195,13 @@ where
     where
         Cancellation: Future<Output = ()> + Send + 'static,
     {
-        let definition = self
-            .models
-            .resolve(operation.request().call().target())
-            .ok_or(UsageLimitedProviderError::UnconfiguredTarget)?;
-        let adapter = self
-            .adapters
-            .get(definition.provider_model())
-            .copied()
-            .ok_or(UsageLimitedProviderError::UnconfiguredTarget)?;
-        let limits = ConfiguredUsageLimits {
-            max_output_tokens: u64::from(definition.max_output_tokens()),
-            context_window_tokens: u64::from(definition.context_window_tokens()),
-            adapter,
-        };
+        let limits = configured_usage_limits(
+            &self.models,
+            &self.adapters,
+            operation.request().call().target(),
+            operation.request().model_settings().effective().fast_mode(),
+        )
+        .ok_or(UsageLimitedProviderError::UnconfiguredTarget)?;
         self.inner
             .prepare_capability(operation, cancellation)
             .await
@@ -250,15 +259,28 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
-    use signalbox_domain::ProviderReportedTokenUsage;
+    use signalbox_domain::{
+        FastMode, ProviderModelIdentity, ProviderReportedTokenUsage, ResolvedProviderTarget,
+    };
+    use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
+    use uuid::Uuid;
 
     use crate::configuration::ModelAdapter;
 
-    use super::{ConfiguredUsageLimits, UsageLimitedProviderError, exceeds_configured_limits};
+    use super::{
+        ConfiguredUsageLimits, UsageLimitedProviderError, configured_usage_limits,
+        exceeds_configured_limits,
+    };
 
     #[derive(Debug)]
     struct FixtureProviderError;
+
+    fn target(value: u128) -> ResolvedProviderTarget {
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(value)))
+    }
 
     impl ClassifyOperatorFailure for FixtureProviderError {
         fn operator_failure_class(&self) -> OperatorFailureClass {
@@ -354,6 +376,36 @@ mod tests {
             ProviderReportedTokenUsage::unreported(),
             limits,
         ));
+    }
+
+    #[test]
+    fn mapped_fast_serving_uses_the_serving_targets_limits() {
+        let standard_model = "fixture-standard";
+        let fast_model = "fixture-fast";
+        let standard =
+            RuntimeModelDefinition::try_new(target(1), String::from(standard_model), 50, 100)
+                .expect("the standard fixture definition is valid")
+                .with_fast_target(target(2));
+        let fast = RuntimeModelDefinition::try_new(target(2), String::from(fast_model), 20, 60)
+            .expect("the fast fixture definition is valid");
+        let expected_output_limit = fast.max_output_tokens();
+        let expected_context_limit = fast.context_window_tokens();
+        let models = RuntimeModelCatalog::try_from_definitions([standard, fast])
+            .expect("the mapped target is complete");
+        let adapters = HashMap::from([
+            (String::from(standard_model), ModelAdapter::Anthropic),
+            (String::from(fast_model), ModelAdapter::Anthropic),
+        ]);
+
+        let limits = configured_usage_limits(&models, &adapters, target(1), FastMode::Enabled)
+            .expect("mapped fast limits resolve");
+
+        assert_eq!(limits.max_output_tokens, u64::from(expected_output_limit));
+        assert_eq!(
+            limits.context_window_tokens,
+            u64::from(expected_context_limit)
+        );
+        assert_eq!(limits.adapter, adapters[fast_model]);
     }
 
     #[test]
