@@ -7920,38 +7920,73 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// The delegation migration retains the reviewed lock, result, wake, and
-/// cascade predicates after PostgreSQL parses every definition.
+/// Every reviewed delegation function, constraint, and trigger the migration
+/// commissions is installed with its exact signature and wiring after
+/// PostgreSQL parses the migration.
+///
+/// Each object's own behavior is proved by the delegation lifecycle, delivery,
+/// wake, and cascade tests that exercise it; this proves only that the
+/// migration installed the reviewed set, which those tests cannot distinguish
+/// from an object that was never declared.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
--> Result<(), Box<dyn Error>> {
+async fn delegation_schema_installs_every_reviewed_object() -> Result<(), Box<dyn Error>> {
+    const REVIEWED_FUNCTIONS: [&str; 20] = [
+        "accepted_input_turn_is_first_nonterminal(uuid,uuid)",
+        "assert_model_call_steering_final_state(uuid)",
+        "delegation_cascade_expected_frontier(uuid,text)",
+        "guard_session_pending_delivery_append()",
+        "lock_delegation_parent_for_spawn()",
+        "lock_delegation_termination_frontier(uuid,text)",
+        "require_applied_goal_command_delegation_cascade()",
+        "require_applied_turn_command_delegation_cascade()",
+        "require_context_compaction_exact_evidence()",
+        "require_delegation_initial_task_purpose()",
+        "require_delegation_lifecycle_update()",
+        "require_delegation_update_subject()",
+        "require_delegation_wait_purpose()",
+        "require_delegation_wait_update()",
+        "require_delegation_wake_turn_origin()",
+        "require_semantic_delegation_result_delivery_mode()",
+        "require_session_delegation_event_payload()",
+        "require_terminal_delegated_turn_result()",
+        "turn_lifecycle_origin_semantic_entry(uuid,uuid,uuid)",
+        "turn_start_model_identity_boundary_is_valid(uuid,uuid)",
+    ];
+    const REVIEWED_CONSTRAINTS: [&str; 3] = [
+        "delegation_update_subject_shape",
+        "semantic_transcript_entry_payload_shape",
+        "session_child_result_delivery_sequence_shape",
+    ];
+    const NO_MISSING_OBJECTS: [String; 0] = [];
     let (container, pool, _database_url) = migrated_postgres().await?;
 
-    let spawn_lock: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef('lock_delegation_parent_for_spawn()'::regprocedure)",
+    let missing_functions: Vec<String> = sqlx::query_scalar(
+        "SELECT signature
+           FROM unnest($1::text[]) AS signature
+          WHERE to_regprocedure(signature) IS NULL
+          ORDER BY signature",
     )
-    .fetch_one(&pool)
+    .bind(REVIEWED_FUNCTIONS)
+    .fetch_all(&pool)
     .await?;
-    assert!(spawn_lock.contains("FOR NO KEY UPDATE"));
+    assert_eq!(missing_functions, NO_MISSING_OBJECTS);
 
-    let delivery_lock: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef('guard_session_pending_delivery_append()'::regprocedure)",
+    let missing_constraints: Vec<String> = sqlx::query_scalar(
+        "SELECT name
+           FROM unnest($1::text[]) AS name
+          WHERE NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = name
+          )
+          ORDER BY name",
     )
-    .fetch_one(&pool)
+    .bind(REVIEWED_CONSTRAINTS)
+    .fetch_all(&pool)
     .await?;
-    assert!(delivery_lock.contains("FOR NO KEY UPDATE"));
+    assert_eq!(missing_constraints, NO_MISSING_OBJECTS);
 
-    let cascade_frontier: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'delegation_cascade_expected_frontier(uuid,text)'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(cascade_frontier.contains("LEFT JOIN session_child_result"));
-    assert!(cascade_frontier.contains("parent.effective_parent_kind"));
-    assert!(cascade_frontier.contains("visited_session_ids"));
+    // A root session with no relationships closes the cascade frontier rather
+    // than returning an edge, so an unrelated stop commissions no dispositions.
     let empty_cascade_count: i64 = sqlx::query_scalar(
         "SELECT count(*)
            FROM delegation_cascade_expected_frontier($1, 'stopped')",
@@ -7961,16 +7996,6 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     .await?;
     assert_eq!(empty_cascade_count, 0);
 
-    let cascade_lock: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'lock_delegation_termination_frontier(uuid,text)'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(cascade_lock.contains("prior_edge_count"));
-    assert!(cascade_lock.contains("FOR NO KEY UPDATE"));
-    assert!(cascade_lock.contains("FOR UPDATE"));
     let early_cascade_lock_count: i64 = sqlx::query_scalar(
         "SELECT count(*)
            FROM pg_trigger
@@ -7985,158 +8010,6 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     .await?;
     assert_eq!(early_cascade_lock_count, 2);
 
-    let compaction_evidence: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'require_context_compaction_exact_evidence()'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(
-        compaction_evidence
-            .matches(
-                "entry.payload_kind = 'delegation_result' AND entry.tool_result_request_id IS NOT NULL"
-            )
-            .count(),
-        2
-    );
-
-    let delivery_shape: String = sqlx::query_scalar(
-        "SELECT pg_get_constraintdef(oid)
-           FROM pg_constraint
-          WHERE conname = 'session_child_result_delivery_sequence_shape'",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(delivery_shape.contains("delivery_kind IS NOT NULL"));
-
-    let lifecycle_update: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef('require_delegation_lifecycle_update()'::regprocedure)",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(lifecycle_update.contains("parent_turn_command"));
-    assert!(lifecycle_update.contains("parent_goal_command"));
-
-    let lifecycle_update_shape: String = sqlx::query_scalar(
-        "SELECT pg_get_constraintdef(oid)
-           FROM pg_constraint
-          WHERE conname = 'delegation_update_subject_shape'",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(lifecycle_update_shape.contains("parent_stopped_parent_and_descendants"));
-    assert!(lifecycle_update_shape.contains("parent_cancelled_parent_and_descendants"));
-    assert!(lifecycle_update_shape.contains("parent_turn_command"));
-    assert!(lifecycle_update_shape.contains("parent_goal_command"));
-
-    let lifecycle_update_subject: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef('require_delegation_update_subject()'::regprocedure)",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(lifecycle_update_subject.contains("parent_stopped_parent_and_descendants"));
-    assert!(lifecycle_update_subject.contains("parent_cancelled_parent_and_descendants"));
-    assert!(lifecycle_update_subject.contains("parent_turn_command"));
-    assert!(lifecycle_update_subject.contains("parent_goal_command"));
-
-    let wait_purpose: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef('require_delegation_wait_purpose()'::regprocedure)",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(wait_purpose.contains("state_kind = 'terminal'"));
-    assert!(wait_purpose.contains("terminal_disposition_kind = 'completed'"));
-    assert!(wait_purpose.contains("effect_class = 'effect_free'"));
-    assert!(wait_purpose.contains("session_await_registered"));
-    assert!(wait_purpose.contains("tool_request_id"));
-    assert!(wait_purpose.contains("result_text::jsonb"));
-
-    let spawn_purpose: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'require_delegation_initial_task_purpose()'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(spawn_purpose.contains("JOIN tool_attempt"));
-    assert!(spawn_purpose.contains("terminal_disposition_kind = 'completed'"));
-    assert!(spawn_purpose.contains("session_spawned"));
-
-    let late_wait: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef('require_delegation_wait_update()'::regprocedure)",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(late_wait.contains("wake.event_sequence > waiting_update_sequence"));
-    assert!(late_wait.contains("wake.awaiting_tool_request_id"));
-
-    let continued_call: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'assert_model_call_steering_final_state(uuid)'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(continued_call.contains("delegation_result"));
-    assert!(continued_call.contains("model_call_suffix_entry_is_valid"));
-    assert!(continued_call.contains("model_call_delivery_suffix_is_ordered"));
-    assert!(continued_call.contains("session_pending_delivery"));
-    let extended_validator_count: i64 = sqlx::query_scalar(
-        "SELECT count(*)
-           FROM pg_proc
-          WHERE proname IN (
-                'assert_tool_request_single_result',
-                'assert_tool_loop_turn_final_state_pre_delegation',
-                'assert_reconciliation_required_turn_final_state',
-                'continuation_frontier_closes_predecessor_tool_round'
-          )
-            AND pg_get_functiondef(oid) LIKE '%delegation_result%'",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(extended_validator_count, 4);
-
-    let model_boundary: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'turn_start_model_identity_boundary_is_valid(uuid,uuid)'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(model_boundary.contains("origin_kind = 'delegation'"));
-    assert!(model_boundary.contains("session_delegation_initial_task"));
-    assert!(model_boundary.contains("session_delegation_wake_turn_origin"));
-
-    let wake_origin: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'require_delegation_wake_turn_origin()'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(wake_origin.contains("first_delivery_sequence"));
-    assert!(wake_origin.contains("through_delivery_sequence"));
-    assert!(wake_origin.contains("delegation_delivery_semantic_entry"));
-    assert!(wake_origin.contains("starting_frontier_id"));
-    assert!(
-        wake_origin
-            .find("skips earlier delivery content")
-            .expect("the queued wake rejects a skipped FIFO prefix")
-            < wake_origin
-                .find("lifecycle.state_kind = 'queued'")
-                .expect("the queued wake keeps its early return")
-    );
-
-    let terminal_result_requirement: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'require_terminal_delegated_turn_result()'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(terminal_result_requirement.contains("state_kind = 'terminal'"));
-    assert!(terminal_result_requirement.contains("session_child_result"));
     let terminal_result_trigger_count: i64 = sqlx::query_scalar(
         "SELECT count(*)
            FROM pg_trigger
@@ -8149,25 +8022,6 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     .await?;
     assert_eq!(terminal_result_trigger_count, 2);
 
-    let origin_projection: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'turn_lifecycle_origin_semantic_entry(uuid,uuid,uuid)'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(origin_projection.contains("session_delegation_wake_turn_origin"));
-
-    let queue_eligibility: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'accepted_input_turn_is_first_nonterminal(uuid,uuid)'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(queue_eligibility.contains("session_delegation_initial_task"));
-    assert!(queue_eligibility.contains("session_delegation_wake_turn_origin"));
-
     let cascade_chain_trigger_count: i64 = sqlx::query_scalar(
         "SELECT count(*)
            FROM pg_trigger
@@ -8177,6 +8031,7 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     .fetch_one(&pool)
     .await?;
     assert_eq!(cascade_chain_trigger_count, 1);
+
     let reverse_cascade_trigger_count: i64 = sqlx::query_scalar(
         "SELECT count(*)
            FROM pg_trigger
@@ -8188,57 +8043,6 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     .fetch_one(&pool)
     .await?;
     assert_eq!(reverse_cascade_trigger_count, 2);
-    let reverse_goal_cascade: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'require_applied_goal_command_delegation_cascade()'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    let reverse_turn_cascade: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'require_applied_turn_command_delegation_cascade()'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(reverse_goal_cascade.contains("parent_and_descendants"));
-    assert!(reverse_goal_cascade.contains("session_delegation_termination_cascade"));
-    assert!(reverse_turn_cascade.contains("parent_and_descendants"));
-    assert!(reverse_turn_cascade.contains("session_delegation_termination_cascade"));
-
-    let event_semantics: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'require_session_delegation_event_payload()'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(event_semantics.contains("NEW.outcome_kind IN ('child_stopped', 'child_cancelled')"));
-    assert!(event_semantics.contains("terminal_disposition_kind = 'cancelled'"));
-    assert!(event_semantics.contains("payload_kind = 'turn_cancelled'"));
-    assert!(event_semantics.contains("turn_cancelled_outbox_event"));
-    assert!(event_semantics.contains("JOIN tool_attempt"));
-    assert!(event_semantics.contains("session_message_sent"));
-
-    let result_shape: String = sqlx::query_scalar(
-        "SELECT pg_get_constraintdef(oid)
-           FROM pg_constraint
-          WHERE conname = 'semantic_transcript_entry_payload_shape'",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(result_shape.contains("tool_result_request_id IS NULL"));
-
-    let result_mode: String = sqlx::query_scalar(
-        "SELECT pg_get_functiondef(
-            'require_semantic_delegation_result_delivery_mode()'::regprocedure
-         )",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(result_mode.contains("delivery.delivery_sequence IS NULL"));
-    assert!(result_mode.contains("NEW.tool_result_request_id IS NULL"));
 
     pool.close().await;
     drop(container);
