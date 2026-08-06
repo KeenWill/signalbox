@@ -136,6 +136,7 @@ impl PostgresEligibilitySweep {
                 SELECT active.session_id
                   FROM turn_lifecycle AS active
                  WHERE active.state_kind = 'active'
+                   AND NOT active.delegation_runtime_terminal
                    AND active.active_tool_round_call_id IS NOT NULL
                    AND (
                         active.active_phase_kind = 'running'

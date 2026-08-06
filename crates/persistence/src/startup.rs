@@ -228,6 +228,7 @@ impl PostgresStartupScanRepository {
                     SELECT session_id
                       FROM turn_lifecycle
                      WHERE state_kind = 'active'
+                       AND NOT delegation_runtime_terminal
                     UNION
                     SELECT session_id
                       FROM context_compaction_model_call
