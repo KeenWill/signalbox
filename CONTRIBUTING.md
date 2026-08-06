@@ -81,11 +81,12 @@ covers:
   contract cases plus provider-specific parsing and provenance cases;
   credentialed live-provider smoke tests may exist but are never the merge gate,
   except the specific owner-approved compatibility smokes carried by the Codex
-  CLI and OpenAI adapters, whose exact gated scope is recorded in each adapter's
-  own compatibility-smoke section of `docs/spec/runtime-substrate.md` rather
-  than restated here. A production isolation or containment claim for a runner
-  profile requires real containment testing of that profile; fake-runner tests
-  never substantiate an isolation label.
+  CLI, Anthropic, and OpenAI adapters, whose exact gated scope is recorded in
+  each adapter's own compatibility-smoke section of
+  `docs/spec/runtime-substrate.md` rather than restated here. A production
+  isolation or containment claim for a runner profile requires real containment
+  testing of that profile; fake-runner tests never substantiate an isolation
+  label.
 - **Restart and recovery:** stop the daemon at named durability boundaries
   (before acceptance; after acceptance but before scheduling; after attempt
   creation but before send; after send but before outcome persistence; during

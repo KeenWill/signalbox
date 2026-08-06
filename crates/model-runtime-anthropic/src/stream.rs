@@ -162,6 +162,29 @@ impl StreamDecoder {
         StreamStep::Terminal(Box::new(self.violation_evidence(detail)))
     }
 
+    /// Whether an error classification names no failure at all, and so adds
+    /// nothing to an already-reported stop reason.
+    ///
+    /// Every variant is enumerated rather than compared for equality: this
+    /// decides whether a provider error outranks a reported finish, so a new
+    /// classification must fail to compile here and have its post-finish
+    /// precedence chosen deliberately.
+    fn names_no_classified_failure(kind: signalbox_model_runtime::ProviderErrorKind) -> bool {
+        use signalbox_model_runtime::ProviderErrorKind as Kind;
+        match kind {
+            Kind::Unrecognized => true,
+            Kind::CredentialRejected
+            | Kind::PermissionDenied
+            | Kind::InvalidRequest
+            | Kind::TargetNotFound
+            | Kind::RequestTooLarge
+            | Kind::RateLimited
+            | Kind::QuotaExhausted
+            | Kind::Overloaded
+            | Kind::ProviderInternal => false,
+        }
+    }
+
     fn parse<'a, T: serde::Deserialize<'a>>(
         &self,
         record: &'a SseRecord,
@@ -199,6 +222,17 @@ impl StreamDecoder {
             .as_deref()
             .map(classify_error_token)
             .unwrap_or(signalbox_model_runtime::ProviderErrorKind::Unrecognized);
+        if self.finish.is_some() && Self::names_no_classified_failure(kind) {
+            // The provider already reported why generation stopped, and this
+            // event names no failure the adapter can classify, so it supersedes
+            // that stop reason with nothing. Worse, it is then indistinguishable
+            // from the refusal downgrade `execute` applies — an HTTP 200
+            // exchange, `Unrecognized`, and the same fabricated native facts —
+            // which would let a genuine failure pass as a decoded refusal. An
+            // event that *does* classify still outranks the stop reason,
+            // because it carries information the stop reason does not.
+            return self.violation("unclassifiable error event follows the reported stop_reason");
+        }
         StreamStep::Terminal(Box::new(TerminalEvidence::ProviderError(
             ProviderErrorEvidence {
                 exchange: self.exchange.clone(),
@@ -1308,6 +1342,63 @@ mod tests {
         );
         assert_eq!(error.exchange, exchange());
         assert_eq!(error.usage.input_tokens, Some(25));
+    }
+
+    #[test]
+    fn a_classified_error_event_after_the_stop_reason_stays_definitive() {
+        // The other half of the post-finish rule, and the half a blanket
+        // `self.finish.is_some()` condition would silently break: a typed
+        // error still outranks a reported stop reason, because it names a
+        // failure the stop reason does not.
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":2}}\n\n",
+            b"event: error\n\
+              data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\
+              \"message\":\"Overloaded\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::ProviderError(error)) = terminal else {
+            panic!("a classified error event outranks the reported stop reason");
+        };
+        // Classification is the whole subject here: it is what decides
+        // precedence over the reported stop reason. Native-token propagation
+        // is a separate fact, already covered by
+        // `mid_stream_error_event_is_definitive_provider_error_evidence`, so
+        // re-asserting the fixture's token spelling would only couple this
+        // case to a literal it does not care about.
+        assert_eq!(error.kind, ProviderErrorKind::Overloaded);
+    }
+
+    #[test]
+    fn an_unclassifiable_error_event_after_the_stop_reason_is_protocol_loss() {
+        // A *typed* error event still outranks a reported stop reason, because
+        // it carries information the stop reason does not (the sibling above).
+        // One whose type classifies as nothing carries none, and would reach
+        // the caller wearing the exact shape `execute` gives a downgraded
+        // refusal — HTTP 200, `Unrecognized`, and the same fabricated
+        // `error_token` — so a genuine failure could pass as a decoded
+        // refusal. It must stay a protocol violation.
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\
+              \"usage\":{\"output_tokens\":2}}\n\n",
+            b"event: error\n\
+              data: {\"type\":\"error\",\"error\":{\"type\":\"refusal\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("an unclassifiable post-stop-reason error event is protocol loss");
+        };
+        assert_eq!(
+            loss.cause,
+            LossCause::StreamProtocolViolation {
+                detail: "unclassifiable error event follows the reported stop_reason".to_string()
+            }
+        );
     }
 
     #[test]
