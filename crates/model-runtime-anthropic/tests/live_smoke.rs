@@ -276,13 +276,21 @@ fn refusal_finish_observed(observations: &[Observation<String>]) -> bool {
     observations
         .iter()
         .any(|observation| match &observation.fact {
-            ObservationFact::FinishReported(FinishReason::Refusal) => true,
-            // Every variant is named rather than caught by a wildcard: this
-            // discriminator decides whether a provider error is waved through as
-            // a refusal, so a future observation class must fail to compile here
-            // and be considered, not silently default to "no refusal".
-            ObservationFact::FinishReported(_)
-            | ObservationFact::SendCommenced
+            // Both owned enums are enumerated rather than wildcarded: this
+            // discriminator decides whether a provider error is waved through
+            // as a refusal, so a new observation class *or* a new finish
+            // reason must fail to compile here and be considered, not
+            // silently default to "no refusal".
+            ObservationFact::FinishReported(finish) => match finish {
+                FinishReason::Refusal => true,
+                FinishReason::EndTurn
+                | FinishReason::MaxOutputTokens
+                | FinishReason::ContextWindowExceeded
+                | FinishReason::StopSequence { .. }
+                | FinishReason::ToolUse
+                | FinishReason::Unrecognized { .. } => false,
+            },
+            ObservationFact::SendCommenced
             | ObservationFact::ExchangeEstablished(_)
             | ObservationFact::ProviderModelReported(_)
             | ObservationFact::TextDelta { .. }
@@ -499,6 +507,36 @@ mod require_decoded_response_tests {
                 usage: usage(),
             }),
             &[],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn an_ordinary_observation_is_not_mistaken_for_a_refusal() {
+        // The discriminator's negative path, exercised with real observations
+        // rather than an empty slice: a stream that reported usage and an
+        // end-turn finish never reported a refusal, so the downgrade-shaped
+        // provider error must still fail.
+        let observations = vec![
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::UsageReported(usage()),
+            },
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::FinishReported(FinishReason::EndTurn),
+            },
+        ];
+
+        let _ = require_decoded_response(
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                exchange: exchange(200),
+                reported_model: None,
+                kind: ProviderErrorKind::Unrecognized,
+                native: downgraded_refusal_facts(),
+                usage: usage(),
+            }),
+            &observations,
         );
     }
 
