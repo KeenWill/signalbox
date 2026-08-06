@@ -477,11 +477,11 @@ service_tiers = ["auto", "standard_only"]
 # Codex CLI catalog, read on 2026-08-06 from the model catalog the pinned CLI
 # fetches from its provider (`codex debug models`, client 0.146) and from the
 # provider's published CLI documentation. The CLI's set is not the API's: it
-# publishes no dated snapshots, it serves a model the API does not, and every
-# model it lists carries a 272000 window where the same model on Chat
-# Completions carries 1050000. The CLI validates neither a model spelling nor
-# an effort at startup — a wrong value fails at the provider — so these
-# spellings are the only guard a deployment gets.
+# publishes no dated snapshots, it serves a model the API does not, and the
+# models it shares with the API carry a 272000 window where Chat Completions
+# advertises 1050000 for the same spelling. The CLI validates neither a model
+# spelling nor an effort at startup — a wrong value fails at the provider — so
+# these spellings are the only guard a deployment gets.
 #
 # The CLI also lists gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, and
 # gpt-5.4-mini, whose spellings the OpenAI catalog above already claims under
@@ -523,11 +523,12 @@ service_tiers = ["auto", "standard_only"]
 # in the pinned 2.1.220 command-line program, with the provider's published
 # documentation for the subscription behavior around it.
 #
-# These rows name the aliases the program accepts for `--model`, because the
-# full model spellings are the ones the Anthropic catalog above already claims
-# under the one-adapter rule. Naming them this way is what lets one deployment
-# serve the same model over both surfaces — metered through the API family
-# above, subscription-billed through this one. The cost is that an alias
+# These rows name the aliases the program accepts for `--model` — its own
+# surface, unrelated to the client-facing `[[aliases]]` identities below —
+# because the full model spellings are the ones the Anthropic catalog above
+# already claims under the one-adapter rule. Naming them this way lets one
+# deployment serve the same model over both surfaces — metered through the API
+# family above, subscription-billed through this one. The cost is that an alias
 # tracks its family's latest model rather than pinning one, so the values below
 # describe what each alias resolves to today; a deployment that needs a pinned
 # identity spells the full model here instead and drops the colliding row
