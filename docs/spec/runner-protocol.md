@@ -45,8 +45,10 @@ No present runner surface provides workspace, Git, shell, build, test, or model
 execution. A future runner-side workstation registry and executor are
 unimplemented and undecided. The committed unimplemented runner foundation below
 continues to constrain sandbox, approval, workspace, credential, and generic
-execution behavior, but selects no workstation tool inventory, tool name,
-argument contract, or execution deadline. That registry work is recorded under
+execution behavior. Its existing per-tool compatibility constraints remain
+binding; the remaining registry inventory, any additional tool names,
+unconstrained argument details, and execution deadlines are undecided. That
+registry work is recorded under
 [Scheduling and runners](../open-questions.md#scheduling-and-runners).
 
 The tool loop remains serial: the daemon offers at most one live lease for a
