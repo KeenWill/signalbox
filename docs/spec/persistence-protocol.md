@@ -42,14 +42,13 @@ snapshot projection, and typed outbox records were verified through this PR
 (`agent/model-settings-persistence`); the defaults-replacement pointer-lock
 admission is verified through this PR (`agent/model-settings-execution`). This
 page covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+migrations), migration discipline, durable command storage and replay equality,
+the fail-closed reconstitution boundary, the lock protocol, pending-steering
+durable state, the corruption taxonomy, commit-ambiguity handling, and the
+transactional outbox. Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -1145,8 +1144,7 @@ storage below plus the delegation-stack extension identified inline:
   `delegation_outbox_event` header (both carrying allocator-owned
   `event_sequence`, closed `event_kind`, `storage_version`, and `session_id`)
   plus one typed record table per kind — `session_created_outbox_event`,
-  `input_accepted_outbox_event`,
-  `session_model_settings_changed_outbox_event`,
+  `input_accepted_outbox_event`, `session_model_settings_changed_outbox_event`,
   `turn_model_settings_resolved_outbox_event`, `goal_turn_retired_outbox_event`,
   `turn_activated_outbox_event`, `turn_failed_outbox_event`,
   `model_call_transition_outbox_event`, `tool_batch_transition_outbox_event`,
