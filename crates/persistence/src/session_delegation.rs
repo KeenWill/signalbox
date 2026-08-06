@@ -3,6 +3,7 @@
 use std::{error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
+use signalbox_application::DelegationMessageDeliveryProjection;
 use signalbox_domain::{
     BoundChildAction, ChildRelationshipPolicy, DelegatedSpawnRequest, DelegationAwaitRequest,
     DelegationContent, DelegationEvent, DelegationEventOrdinal, DelegationMessage,
@@ -50,6 +51,7 @@ impl RecordedDelegationWait {
 /// One successful peer-message receipt, equal replay included.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecordedDelegationMessage {
+    tool_request: ToolRequestId,
     message: DelegationMessageId,
     direction: DelegationMessageDirection,
     ordinal: DelegationEventOrdinal,
@@ -57,6 +59,10 @@ pub struct RecordedDelegationMessage {
 }
 
 impl RecordedDelegationMessage {
+    pub const fn tool_request(self) -> ToolRequestId {
+        self.tool_request
+    }
+
     pub const fn message(self) -> DelegationMessageId {
         self.message
     }
@@ -70,6 +76,28 @@ impl RecordedDelegationMessage {
     }
 
     pub const fn delivery_sequence(self) -> NonZeroU64 {
+        self.delivery_sequence
+    }
+}
+
+impl DelegationMessageDeliveryProjection for RecordedDelegationMessage {
+    fn tool_request(&self) -> ToolRequestId {
+        self.tool_request
+    }
+
+    fn message(&self) -> DelegationMessageId {
+        self.message
+    }
+
+    fn direction(&self) -> DelegationMessageDirection {
+        self.direction
+    }
+
+    fn ordinal(&self) -> DelegationEventOrdinal {
+        self.ordinal
+    }
+
+    fn delivery_sequence(&self) -> NonZeroU64 {
         self.delivery_sequence
     }
 }
@@ -327,6 +355,7 @@ impl SessionDelegationRepository {
                     "send_session_message requires an external-effect attempt",
                 ));
             }
+            let tool_request = request.request().id();
             let (_, event) = match relation.deliver_message(request, message, dispatch) {
                 Ok(recorded) => recorded,
                 Err(error) => {
@@ -380,6 +409,7 @@ impl SessionDelegationRepository {
             )
             .await?;
             let receipt = RecordedDelegationMessage {
+                tool_request,
                 message: stored_message.id(),
                 direction: stored_message.direction(),
                 ordinal: event.ordinal(),
@@ -1278,6 +1308,7 @@ async fn load_message_replay(
         return Err(SessionDelegationCorruption::Inconsistent("message replay").into());
     }
     Ok(Some(RecordedDelegationMessage {
+        tool_request: request.request().id(),
         message: DelegationMessageId::from_uuid(required(&row, "message_id")?),
         direction,
         ordinal: decode_ordinal(required(&row, "event_ordinal")?)?,
