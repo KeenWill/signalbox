@@ -8147,6 +8147,62 @@ mod tests {
         Ok(())
     }
 
+    /// Rejects one `delegation_terminated` wire shape named by its outcome and
+    /// reason spelling. Every other member carries the canonical parent-goal
+    /// cascade the admitted shapes also use.
+    #[track_caller]
+    fn assert_delegation_terminal_state_rejected(outcome: &str, reason: &str) {
+        serde_json::from_value::<TurnState>(serde_json::json!({
+            "type": "delegation_terminated",
+            "spawning_request_id": "00000000-0000-0000-0000-000000000004",
+            "outcome": outcome,
+            "reason": reason,
+            "provenance": {
+                "type": "parent_goal_command",
+                "parent_session_id": "00000000-0000-0000-0000-000000000001",
+                "goal_generation": "2",
+                "command_id": "00000000-0000-0000-0000-000000000007",
+                "descendant_scope": "parent_and_descendants"
+            }
+        }))
+        .expect_err("an inadmissible terminal outcome and reason pair must not decode");
+    }
+
+    /// Round trips one admitted `delegation_terminated` turn state through
+    /// serde and through the frame validator every transcript read and initial
+    /// follow snapshot runs.
+    #[track_caller]
+    fn assert_delegation_terminal_state_round_trips(
+        outcome: DelegationOutcome,
+        reason: DelegationReason,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::DelegationTerminated {
+            spawning_request_id: uuid(4),
+            outcome,
+            reason,
+            provenance: DelegationProvenance::ParentGoalCommand {
+                parent_session_id: uuid(1),
+                goal_generation: CanonicalU64::new(2),
+                command_id: uuid(7),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        };
+        let encoded = serde_json::to_value(&state)?;
+        assert_eq!(serde_json::from_value::<TurnState>(encoded)?, state);
+
+        let frame = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(1),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state,
+            },
+        )?;
+        assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        Ok(())
+    }
+
     #[test]
     fn awaiting_child_turn_state_round_trips_exact_wait_provenance()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8174,27 +8230,8 @@ mod tests {
         // termination policy and are covered by
         // `inv033_delegation_terminal_turn_state_round_trips_crossed_parent_policy`;
         // these two remain inadmissible on either half.
-        for (outcome, reason) in [
-            ("stopped", "child_completed"),
-            ("already_terminal", "parent_cancelled"),
-        ] {
-            assert!(
-                serde_json::from_value::<TurnState>(serde_json::json!({
-                    "type": "delegation_terminated",
-                    "spawning_request_id": "00000000-0000-0000-0000-000000000004",
-                    "outcome": outcome,
-                    "reason": reason,
-                    "provenance": {
-                        "type": "parent_goal_command",
-                        "parent_session_id": "00000000-0000-0000-0000-000000000001",
-                        "goal_generation": "2",
-                        "command_id": "00000000-0000-0000-0000-000000000007",
-                        "descendant_scope": "parent_and_descendants"
-                    }
-                }))
-                .is_err()
-            );
-        }
+        assert_delegation_terminal_state_rejected("stopped", "child_completed");
+        assert_delegation_terminal_state_rejected("already_terminal", "parent_cancelled");
         Ok(())
     }
 
@@ -8243,48 +8280,22 @@ mod tests {
         // parent stop may terminalize it with `cancel`. All four pairs must
         // survive validation and round trip, matching what `process_read`
         // projects.
-        for (outcome, reason) in [
-            (DelegationOutcome::Stopped, DelegationReason::ParentStopped),
-            (
-                DelegationOutcome::Stopped,
-                DelegationReason::ParentCancelled,
-            ),
-            (
-                DelegationOutcome::Cancelled,
-                DelegationReason::ParentStopped,
-            ),
-            (
-                DelegationOutcome::Cancelled,
-                DelegationReason::ParentCancelled,
-            ),
-        ] {
-            let state = TurnState::DelegationTerminated {
-                spawning_request_id: uuid(4),
-                outcome,
-                reason,
-                provenance: DelegationProvenance::ParentGoalCommand {
-                    parent_session_id: uuid(1),
-                    goal_generation: CanonicalU64::new(2),
-                    command_id: uuid(7),
-                    descendant_scope: DescendantTerminationScope::ParentAndDescendants,
-                },
-            };
-            let encoded = serde_json::to_value(&state)?;
-            assert_eq!(serde_json::from_value::<TurnState>(encoded)?, state);
-
-            // `ServerFrame::validate` runs the same predicate for every
-            // transcript read and initial follow snapshot.
-            let frame = ServerFrame::try_new(
-                request(1)?,
-                ServerMessage::TranscriptTurn {
-                    turn_id: uuid(1),
-                    acceptance_position: CanonicalU64::new(1),
-                    model_settings: None,
-                    state: state.clone(),
-                },
-            )?;
-            assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
-        }
+        assert_delegation_terminal_state_round_trips(
+            DelegationOutcome::Stopped,
+            DelegationReason::ParentStopped,
+        )?;
+        assert_delegation_terminal_state_round_trips(
+            DelegationOutcome::Stopped,
+            DelegationReason::ParentCancelled,
+        )?;
+        assert_delegation_terminal_state_round_trips(
+            DelegationOutcome::Cancelled,
+            DelegationReason::ParentStopped,
+        )?;
+        assert_delegation_terminal_state_round_trips(
+            DelegationOutcome::Cancelled,
+            DelegationReason::ParentCancelled,
+        )?;
         Ok(())
     }
 
@@ -12167,48 +12178,61 @@ mod tests {
         Ok(())
     }
 
+    /// Round trips one child-addressed lifecycle disposition through the frame
+    /// validator. The header session is the terminalized child, and the
+    /// canonical provenance names the commanding parent's descendant-scoped
+    /// turn command.
+    #[track_caller]
+    fn assert_child_addressed_disposition_round_trips(
+        outcome: DelegationOutcome,
+        reason: DelegationReason,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(5),
+                session_id: uuid(3),
+                event: SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome,
+                    reason,
+                    provenance: DelegationProvenance::ParentTurnCommand {
+                        parent_session_id: uuid(1),
+                        parent_turn_id: uuid(7),
+                        command_id: uuid(8),
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                },
+            },
+        )?;
+        assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        Ok(())
+    }
+
     #[test]
     fn child_addressed_lifecycle_disposition_round_trips_for_a_child_follower()
     -> Result<(), Box<dyn std::error::Error>> {
         // A descendant cascade addresses the terminalization to the child
-        // itself so live child followers observe it. The header session is the
-        // child, and the provenance still names the commanding parent.
-        for (outcome, reason) in [
-            (DelegationOutcome::Stopped, DelegationReason::ParentStopped),
-            (
-                DelegationOutcome::Cancelled,
-                DelegationReason::ParentCancelled,
-            ),
-            (
-                DelegationOutcome::Stopped,
-                DelegationReason::ParentCancelled,
-            ),
-            (
-                DelegationOutcome::Cancelled,
-                DelegationReason::ParentStopped,
-            ),
-        ] {
-            let frame = ServerFrame::try_new(
-                request(1)?,
-                ServerMessage::SessionEvent {
-                    cursor: CanonicalU64::new(5),
-                    session_id: uuid(3),
-                    event: SessionEvent::ChildLifecycleDisposition {
-                        spawning_request_id: uuid(2),
-                        child_session_id: uuid(3),
-                        outcome,
-                        reason,
-                        provenance: DelegationProvenance::ParentTurnCommand {
-                            parent_session_id: uuid(1),
-                            parent_turn_id: uuid(7),
-                            command_id: uuid(8),
-                            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
-                        },
-                    },
-                },
-            )?;
-            assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
-        }
+        // itself so live child followers observe it. A bound relationship maps
+        // the parent verb through its own policy, so all four outcome and
+        // reason pairs reach the child follower.
+        assert_child_addressed_disposition_round_trips(
+            DelegationOutcome::Stopped,
+            DelegationReason::ParentStopped,
+        )?;
+        assert_child_addressed_disposition_round_trips(
+            DelegationOutcome::Cancelled,
+            DelegationReason::ParentCancelled,
+        )?;
+        assert_child_addressed_disposition_round_trips(
+            DelegationOutcome::Stopped,
+            DelegationReason::ParentCancelled,
+        )?;
+        assert_child_addressed_disposition_round_trips(
+            DelegationOutcome::Cancelled,
+            DelegationReason::ParentStopped,
+        )?;
         Ok(())
     }
 
