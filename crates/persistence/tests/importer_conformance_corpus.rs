@@ -12,12 +12,7 @@
 //! under the domain's fixed version-1 projection. The remaining fixtures drive
 //! their public edge converters directly.
 
-use std::{
-    env,
-    fmt::Write,
-    path::{Path, PathBuf},
-    str,
-};
+use std::{fmt::Write, fs, path::Path, str};
 
 use expect_test::expect_file;
 use signalbox_application::ImportedConversationConverter;
@@ -38,10 +33,6 @@ use signalbox_domain::{
     SessionConfigurationDefaults, SessionId, TranscriptAncestry,
 };
 use sqlx::types::Uuid;
-
-/// Golden directory shared by every `expect_file!` above, stated once so the
-/// anchor guard below can resolve it from both directions.
-const GOLDEN_DIRECTORY: &str = "fixtures/importer-conformance/golden";
 
 const CLAUDE_V1_TOOL_ROUND: &[u8] =
     include_bytes!("fixtures/importer-conformance/claude-code-v1-tool-round.jsonl");
@@ -970,61 +961,44 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
     expect_file!["fixtures/importer-conformance/golden/adoption-modes.txt"].assert_eq(&rendered);
 }
 
-/// Reproduces the directory expect-test resolves the goldens above from.
+/// Root of the checkout this test was compiled from.
 ///
-/// expect-test joins a relative `expect_file!` path onto the directory of the
-/// calling source file, and that onto `CARGO_WORKSPACE_DIR` when the variable
-/// is set — otherwise onto the topmost ancestor of `CARGO_MANIFEST_DIR` that
-/// contains a `Cargo.toml`. Both branches are reachable in a legitimate run:
-/// Cargo discovers `.cargo/config.toml` from the working directory's
-/// ancestors rather than the manifest's, so a launch from outside the checkout
-/// (`cargo test --manifest-path <checkout>/Cargo.toml`) sets no variable and
-/// takes the walk. Mirroring the rule rather than requiring the variable is
-/// what lets the guard below hold for every launch.
-fn resolved_golden_directory() -> PathBuf {
-    let manifest = env::var_os("CARGO_MANIFEST_DIR")
-        .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from);
-    let workspace_root = match env::var_os("CARGO_WORKSPACE_DIR") {
-        Some(pinned) => PathBuf::from(pinned),
-        None => manifest
-            .ancestors()
-            .filter(|ancestor| ancestor.join("Cargo.toml").exists())
-            .last()
-            .expect("the crate manifest directory contains a Cargo.toml")
-            .to_path_buf(),
-    };
-    let source_directory = Path::new(file!())
-        .parent()
-        .expect("this source file has a parent directory");
-
-    workspace_root.join(source_directory).join(GOLDEN_DIRECTORY)
+/// `CARGO_MANIFEST_DIR` is `<root>/crates/persistence`, so the root is two
+/// levels above it. Taking it from the compile-time value rather than the
+/// process environment keeps it independent of where a run was launched.
+fn checkout_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("this crate sits two levels below the checkout root")
 }
 
-/// Guards that the goldens compared above belong to the checkout that was
-/// compiled.
+/// Guards the pin that keeps every `expect_file!` above inside the checkout
+/// being compiled.
 ///
-/// The topmost-ancestor walk escapes a linked worktree whose path lies inside
-/// another checkout: that outer checkout's root is such an ancestor, so the
-/// goldens read are the outer checkout's and corrupting one inside the
-/// worktree fails nothing. `.cargo/config.toml` pins `CARGO_WORKSPACE_DIR` per
-/// checkout to close that, but the pin is not always loaded, and a nested
-/// worktree driven from its outer checkout loads the outer pin. So this
-/// asserts the resolution that actually applies, rather than the presence of
-/// the pin: it passes whenever the goldens resolve inside this checkout, by
-/// either branch, and fails on every escape.
+/// expect-test resolves a relative golden path against `CARGO_WORKSPACE_DIR`,
+/// and without that variable against the topmost ancestor of
+/// `CARGO_MANIFEST_DIR` holding a `Cargo.toml`. That ancestor walk leaves a
+/// linked worktree whose path lies inside another checkout — the outer
+/// checkout's root is such an ancestor — so goldens are compared against the
+/// outer tree's files and `UPDATE_EXPECT=1` rewrites inline expectations into
+/// the outer tree's sources; corrupting a golden inside the worktree then
+/// fails nothing. `.cargo/config.toml` closes that by pinning the variable per
+/// checkout, and this asserts the checked-in pin itself: Cargo loads that file
+/// from the working directory's ancestors rather than the manifest's, so a
+/// guard that watched the loaded value would pass or fail on how a run was
+/// launched instead of on whether the mechanism is still there.
 #[test]
-fn s28_goldens_resolve_inside_the_compiled_checkout() {
-    let resolved = resolved_golden_directory();
-    let compiled = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join(GOLDEN_DIRECTORY)
-        .canonicalize()
-        .expect("the compiled checkout's golden directory exists");
+fn s28_inv038_goldens_are_pinned_to_the_compiled_checkout() {
+    let configuration = fs::read_to_string(checkout_root().join(".cargo/config.toml"))
+        .expect("the checkout's Cargo configuration is committed");
+    let configuration: toml::Table = configuration
+        .parse()
+        .expect("the checkout's Cargo configuration is TOML");
 
-    assert_eq!(
-        resolved.canonicalize().ok(),
-        Some(compiled),
-        "expect-test resolves goldens at {}, outside the compiled checkout",
-        resolved.display()
-    );
+    let pin = &configuration["env"]["CARGO_WORKSPACE_DIR"];
+
+    assert_eq!(pin["value"].as_str(), Some(""));
+    assert_eq!(pin["relative"].as_bool(), Some(true));
+    assert_eq!(pin["force"].as_bool(), Some(true));
 }
