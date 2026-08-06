@@ -1206,8 +1206,7 @@ fn validate_spawn_event(
 fn decode_outcome(row: &PgRow) -> Result<DelegationOutcome, SessionDelegationRepositoryError> {
     let kind = decode_outcome_kind(&required::<String>(row, "outcome_kind")?)?;
     let reason = decode_outcome_reason(&required::<String>(row, "reason_kind")?)?;
-    let content = row
-        .try_get::<Option<String>, _>("result_content_text")?
+    let content = optional::<String>(row, "result_content_text")?
         .map(DelegationContent::try_new)
         .transpose()
         .map_err(|_| SessionDelegationCorruption::Inconsistent("child result content"))?;
@@ -1790,6 +1789,16 @@ fn required<T>(row: &PgRow, column: &'static str) -> Result<T, SessionDelegation
 where
     for<'value> T: sqlx::Decode<'value, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
 {
+    optional(row, column)?.ok_or_else(|| SessionDelegationCorruption::Missing(column).into())
+}
+
+fn optional<T>(
+    row: &PgRow,
+    column: &'static str,
+) -> Result<Option<T>, SessionDelegationRepositoryError>
+where
+    for<'value> T: sqlx::Decode<'value, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+{
     let value = match row.try_get::<Option<T>, _>(column) {
         Ok(value) => value,
         Err(sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_)) => {
@@ -1797,7 +1806,7 @@ where
         }
         Err(error) => return Err(error.into()),
     };
-    value.ok_or_else(|| SessionDelegationCorruption::Missing(column).into())
+    Ok(value)
 }
 
 fn require_single(
