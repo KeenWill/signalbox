@@ -948,9 +948,9 @@ where
             ) => Ok(SessionDelegationExecutionDisposition::DurableCompletion(
                 invocation.durable_completion(),
             )),
-            UnboundExecutionDisposition::DurableCompletion(_) => {
-                Err(SessionDelegationExecutorError::PortContract)
-            }
+            UnboundExecutionDisposition::DurableCompletion(
+                ToolExecutorEvidence::KnownFailed { .. } | ToolExecutorEvidence::Ambiguous,
+            ) => Err(SessionDelegationExecutorError::PortContract),
             UnboundExecutionDisposition::ForegroundDelivered(result) => {
                 Ok(SessionDelegationExecutionDisposition::ForegroundDelivered(
                     ForegroundAwaitDelivered {
