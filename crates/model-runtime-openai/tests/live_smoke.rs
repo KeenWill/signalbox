@@ -338,12 +338,24 @@ fn require_decoded_response(
 /// downgraded-refusal shape, and the one signal a mid-stream native error
 /// record cannot manufacture.
 fn refusal_finish_observed(observations: &[Observation<String>]) -> bool {
-    observations.iter().any(|observation| {
-        matches!(
-            observation.fact,
-            ObservationFact::FinishReported(FinishReason::Refusal)
-        )
-    })
+    observations
+        .iter()
+        .any(|observation| match &observation.fact {
+            ObservationFact::FinishReported(FinishReason::Refusal) => true,
+            // Every variant is named rather than caught by a wildcard: this
+            // discriminator decides whether a provider error is waved through as
+            // a refusal, so a future observation class must fail to compile here
+            // and be considered, not silently default to "no refusal".
+            ObservationFact::FinishReported(_)
+            | ObservationFact::SendCommenced
+            | ObservationFact::ExchangeEstablished(_)
+            | ObservationFact::ProviderModelReported(_)
+            | ObservationFact::TextDelta { .. }
+            | ObservationFact::ThinkingDelta { .. }
+            | ObservationFact::ToolArgumentsDelta { .. }
+            | ObservationFact::ToolCallProposed(_)
+            | ObservationFact::UsageReported(_) => false,
+        })
 }
 
 /// The provider's own token for "generation stopped at the requested output
