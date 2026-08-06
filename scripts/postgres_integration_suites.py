@@ -368,10 +368,20 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     """Report every way the Rust workflow disagrees with the manifest.
 
     The workflow is checked for agreement, never parsed for meaning: this reads
-    a fixed artifact-name pattern and two literal substrings, and deliberately
-    does not reconstruct Cargo invocations out of YAML. What keeps the two
-    sides equal is that the workflow derives its matrix and its archive plan
-    from this module at run time; these assertions prove it still does.
+    the upload steps' artifact names and the commands the runner executes, and
+    deliberately does not reconstruct Cargo invocations out of YAML. What keeps
+    the two sides equal is that the workflow derives its matrix and its archive
+    plan from this module at run time; these assertions prove it still does.
+
+    The boundary, chosen rather than overlooked: this detects drift, not
+    sabotage. Shell control flow is not modelled, so `false && python3 …
+    --matrix` reads as an invocation. An author working around the gate has
+    unbounded options anyway — writing a literal matrix to `$GITHUB_OUTPUT`,
+    or invoking the reader and discarding it — and none of them is decidable
+    from the file. Modelling `&&` would buy one evasion at the price of making
+    this a partial shell interpreter, which is the coupling the manifest was
+    introduced to remove. What is caught is every way the derivation is
+    honestly lost: the invocation replaced, commented out, or merely named.
     """
     text = (root / WORKFLOW).read_text(encoding="utf-8")
     commands = workflow_shell_commands(text)
