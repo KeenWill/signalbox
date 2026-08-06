@@ -51,7 +51,9 @@ ARCHIVE_ARTIFACT = re.compile(
 SUITE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 RUNS_ON = re.compile(r"^[ ]*runs-on:[ ]*(?P<target>[^ #\n]+)", re.MULTILINE)
 SHELL_SCALAR = re.compile(r"^(?P<indent>[ ]*)(?:-[ ]+)?(?:run|command):(?P<inline>.*)$")
-BLOCK_INDICATOR = re.compile(r"[|>][+-]?\d*")
+# A block header carries its chomping and indentation indicators in either
+# order: `|2-` and `|-2` are the same scalar.
+BLOCK_INDICATOR = re.compile(r"[|>](?:[+-]\d*|\d+[+-]?)?")
 REQUIRED_MODES = ("--archive-plan", "--matrix")
 INTERPRETERS = ("python3", "python")
 COMMAND_SEPARATOR = re.compile(r"&&|\|\||[;|&\n]")
@@ -537,10 +539,16 @@ def runs_archived_ignored_tests(tokens: list[str]) -> bool:
 
 
 def runs_ignored_tests(arguments: list[str]) -> bool:
-    """Return whether one `cargo test` argument list reaches libtest's `--ignored`."""
+    """Return whether one `cargo test` argument list selects libtest's ignored tests.
+
+    Two spellings run them: `--ignored` runs only those, `--include-ignored`
+    runs them alongside the rest. Both execute tests the manifest is supposed
+    to be the sole description of, so both count.
+    """
     if "--" not in arguments:
         return False
-    return "--ignored" in arguments[arguments.index("--") + 1 :]
+    harness = arguments[arguments.index("--") + 1 :]
+    return "--ignored" in harness or "--include-ignored" in harness
 
 
 def documented_ignored_commands(text: str) -> list[tuple[int, list[str]]]:

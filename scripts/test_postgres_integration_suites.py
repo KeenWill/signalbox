@@ -436,6 +436,29 @@ class WorkflowAgreementTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("--run-ignored only", failures[0])
 
+    def test_the_include_ignored_spelling_is_reported(self) -> None:
+        # libtest runs the ignored tests under `--include-ignored` too, so it
+        # is as much an unmanifested run as `--ignored` is.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "      - run: cargo test -p alpha --tests -- --include-ignored\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("outside", failures[0])
+
+    def test_block_headers_are_recognized_in_either_indicator_order(self) -> None:
+        # `|2-` and `|-2` are the same scalar; a header read as command text
+        # would join a literal block's lines with spaces and fuse its commands.
+        commands = workflow_shell_commands(
+            "jobs:\n  a:\n    steps:\n"
+            "      - run: |2-\n"
+            "          echo first\n"
+            "          echo second\n"
+        )
+
+        self.assertEqual(commands, ["echo first\necho second"])
+
     def test_a_global_option_before_the_subcommand_is_reported(self) -> None:
         failures = self.disagreements(
             AGREEING_WORKFLOW
