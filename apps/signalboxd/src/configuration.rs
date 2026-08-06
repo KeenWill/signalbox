@@ -59,6 +59,9 @@ use uuid::Uuid;
 /// Non-secret reference pinned into every Anthropic operation.
 pub const ANTHROPIC_CREDENTIAL_REFERENCE: &str = "anthropic-primary";
 
+/// Non-secret reference pinned into every OpenAI operation.
+pub const OPENAI_CREDENTIAL_REFERENCE: &str = "openai-primary";
+
 /// Non-secret reference naming the deployment-selected ambient Codex login.
 pub const CODEX_CLI_CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 
@@ -79,6 +82,8 @@ pub enum ModelAdapter {
     ClaudeCli,
     /// The Codex CLI adapter.
     CodexCli,
+    /// OpenAI's HTTP Chat Completions adapter.
+    OpenAi,
 }
 
 impl ModelAdapter {
@@ -87,6 +92,7 @@ impl ModelAdapter {
             "anthropic" => Ok(Self::Anthropic),
             "claude_cli" => Ok(Self::ClaudeCli),
             "codex_cli" => Ok(Self::CodexCli),
+            "openai" => Ok(Self::OpenAi),
             _ => Err(HubModelConfigurationError::UnsupportedAdapter {
                 adapter: Arc::from(value),
             }),
@@ -98,11 +104,11 @@ impl ModelAdapter {
     ///
     /// Anthropic's Messages API and the Claude Code CLI both report input
     /// tokens exclusive of cache creation and cache reads, while the Codex
-    /// CLI's total already contains them.
+    /// CLI's total and OpenAI's `prompt_tokens` already contain them.
     pub(crate) const fn reports_cache_inclusive_input(self) -> bool {
         match self {
             Self::Anthropic | Self::ClaudeCli => false,
-            Self::CodexCli => true,
+            Self::CodexCli | Self::OpenAi => true,
         }
     }
 }
@@ -599,6 +605,8 @@ impl HubModelConfiguration {
             if !billing_kinds.contains_key(&credential_profile)
                 || (adapter == ModelAdapter::Anthropic
                     && credential_profile.as_ref() != ANTHROPIC_CREDENTIAL_REFERENCE)
+                || (adapter == ModelAdapter::OpenAi
+                    && credential_profile.as_ref() != OPENAI_CREDENTIAL_REFERENCE)
             {
                 return Err(HubModelConfigurationError::UnknownCredentialProfile {
                     adapter,
@@ -1269,6 +1277,11 @@ impl HubModelConfiguration {
     /// Reports whether at least one configured route requires Anthropic.
     pub fn uses_anthropic_adapter(&self) -> bool {
         self.uses_adapter(ModelAdapter::Anthropic)
+    }
+
+    /// Reports whether at least one configured route requires OpenAI.
+    pub fn uses_openai_adapter(&self) -> bool {
+        self.uses_adapter(ModelAdapter::OpenAi)
     }
 
     /// Returns the exact configured compaction system prompt.
@@ -2377,6 +2390,7 @@ fn validate_adapter_model_settings(
         ModelAdapter::CodexCli => {
             signalbox_model_runtime_codex_cli::validate_model_settings(&runtime)
         }
+        ModelAdapter::OpenAi => signalbox_model_runtime_openai::validate_model_settings(&runtime),
     };
     supported.map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)
 }
@@ -2443,23 +2457,43 @@ fn parse_reasoning_level(
     value: &str,
 ) -> Result<ReasoningLevel, HubModelConfigurationError> {
     match (adapter, value) {
-        (ModelAdapter::CodexCli, "none") => Ok(ReasoningLevel::None),
-        (ModelAdapter::CodexCli, "minimal") => Ok(ReasoningLevel::Minimal),
-        (ModelAdapter::Anthropic | ModelAdapter::ClaudeCli | ModelAdapter::CodexCli, "low") => {
-            Ok(ReasoningLevel::Low)
-        }
-        (ModelAdapter::Anthropic | ModelAdapter::ClaudeCli | ModelAdapter::CodexCli, "medium") => {
-            Ok(ReasoningLevel::Medium)
-        }
-        (ModelAdapter::Anthropic | ModelAdapter::ClaudeCli | ModelAdapter::CodexCli, "high") => {
-            Ok(ReasoningLevel::High)
-        }
-        (ModelAdapter::Anthropic | ModelAdapter::ClaudeCli | ModelAdapter::CodexCli, "xhigh") => {
-            Ok(ReasoningLevel::XHigh)
-        }
-        (ModelAdapter::Anthropic | ModelAdapter::ClaudeCli | ModelAdapter::CodexCli, "max") => {
-            Ok(ReasoningLevel::Max)
-        }
+        (ModelAdapter::CodexCli | ModelAdapter::OpenAi, "none") => Ok(ReasoningLevel::None),
+        (ModelAdapter::CodexCli | ModelAdapter::OpenAi, "minimal") => Ok(ReasoningLevel::Minimal),
+        (
+            ModelAdapter::Anthropic
+            | ModelAdapter::ClaudeCli
+            | ModelAdapter::CodexCli
+            | ModelAdapter::OpenAi,
+            "low",
+        ) => Ok(ReasoningLevel::Low),
+        (
+            ModelAdapter::Anthropic
+            | ModelAdapter::ClaudeCli
+            | ModelAdapter::CodexCli
+            | ModelAdapter::OpenAi,
+            "medium",
+        ) => Ok(ReasoningLevel::Medium),
+        (
+            ModelAdapter::Anthropic
+            | ModelAdapter::ClaudeCli
+            | ModelAdapter::CodexCli
+            | ModelAdapter::OpenAi,
+            "high",
+        ) => Ok(ReasoningLevel::High),
+        (
+            ModelAdapter::Anthropic
+            | ModelAdapter::ClaudeCli
+            | ModelAdapter::CodexCli
+            | ModelAdapter::OpenAi,
+            "xhigh",
+        ) => Ok(ReasoningLevel::XHigh),
+        (
+            ModelAdapter::Anthropic
+            | ModelAdapter::ClaudeCli
+            | ModelAdapter::CodexCli
+            | ModelAdapter::OpenAi,
+            "max",
+        ) => Ok(ReasoningLevel::Max),
         (ModelAdapter::CodexCli, "ultra") => Ok(ReasoningLevel::Ultra),
         _ => Err(HubModelConfigurationError::InvalidModelCapabilities),
     }
@@ -2481,6 +2515,12 @@ fn parse_service_tier(
             Ok(ServiceTier::CodexCli(CodexCliServiceTier::Priority))
         }
         (ModelAdapter::CodexCli, "flex") => Ok(ServiceTier::CodexCli(CodexCliServiceTier::Flex)),
+        (ModelAdapter::OpenAi, "auto") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Auto)),
+        (ModelAdapter::OpenAi, "default") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Default)),
+        (ModelAdapter::OpenAi, "flex") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Flex)),
+        (ModelAdapter::OpenAi, "scale") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Scale)),
+        (ModelAdapter::OpenAi, "priority") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Priority)),
+        (ModelAdapter::OpenAi, "fast") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Fast)),
         _ => Err(HubModelConfigurationError::InvalidModelCapabilities),
     }
 }
@@ -2975,6 +3015,29 @@ cache_read_input_usd_per_million_tokens = "0.30"
 [[aliases]]
 alias_id = "30000000-0000-4000-8000-000000000001"
 selection_id = "10000000-0000-4000-8000-000000000001"
+"#;
+
+    const OPENAI_PROFILE: &str = "openai-primary";
+    const OPENAI_MAPPING_AND_MODEL: &str = r#"
+[[credential_profiles]]
+name = "openai-primary"
+billing_kind = "api_metered"
+
+[[adapter_mappings]]
+model_family = "openai"
+adapter = "openai"
+credential_profile = "openai-primary"
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-00000000000e"
+target_id = "20000000-0000-4000-8000-00000000000e"
+model_family = "openai"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+reasoning_levels = ["minimal", "medium", "xhigh"]
+fast_mode = "request_control"
+service_tiers = ["flex", "priority"]
 "#;
 
     const CLAUDE_SUBSCRIPTION_PROFILE: &str = "claude-subscription-primary";
@@ -4449,6 +4512,97 @@ context_window_tokens = 200000
             !configuration
                 .cache_inclusive_input_targets()
                 .contains(&route.target())
+        );
+    }
+
+    /// OpenAI is an API-key adapter, so it mirrors Anthropic: the mapping is
+    /// pinned to the one profile the daemon binds its credential file to, and
+    /// `prompt_tokens` already contains the cache axes reported beside it.
+    #[test]
+    fn configured_openai_models_route_through_the_pinned_api_key_profile() {
+        let configuration =
+            HubModelConfiguration::parse(&format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}"))
+                .expect("the OpenAI mapping, profile, and model are valid");
+        let selection = DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-00000000000e").expect("fixture UUID is valid"),
+        );
+
+        let route = configuration
+            .resolve_direct_model(selection)
+            .expect("the OpenAI selection has an adapter route");
+
+        assert_eq!(route.adapter(), ModelAdapter::OpenAi);
+        assert_eq!(route.credential_profile(), OPENAI_PROFILE);
+        assert!(configuration.uses_openai_adapter());
+        assert_eq!(
+            configuration.adapter_for_provider_model("gpt-example"),
+            Some(ModelAdapter::OpenAi)
+        );
+        assert!(
+            configuration
+                .cache_inclusive_input_targets()
+                .contains(&route.target())
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_openai_mapping_naming_another_profile() {
+        let other_profile = "openai-secondary";
+        let configuration = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}").replace(
+            "credential_profile = \"openai-primary\"",
+            &format!("credential_profile = \"{other_profile}\""),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::UnknownCredentialProfile {
+                adapter: ModelAdapter::OpenAi,
+                credential_profile: Arc::from(other_profile),
+            })
+        );
+    }
+
+    /// `ultra` is the Codex effort value, so it is unsupported here even though
+    /// every lower level maps onto the OpenAI wire control.
+    #[test]
+    fn configuration_rejects_an_openai_reasoning_level_the_adapter_cannot_enforce() {
+        let configuration = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}").replace(
+            "reasoning_levels = [\"minimal\", \"medium\", \"xhigh\"]",
+            "reasoning_levels = [\"ultra\"]",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
+        );
+    }
+
+    /// Service-tier spellings are provider-tagged, so an Anthropic-only value
+    /// cannot be read as OpenAI's despite the shared word.
+    #[test]
+    fn configuration_rejects_another_providers_service_tier_on_an_openai_model() {
+        let configuration = format!("{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}").replace(
+            "service_tiers = [\"flex\", \"priority\"]",
+            "service_tiers = [\"standard_only\"]",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
+        );
+    }
+
+    /// Fast mode maps an absent tier onto `fast`, so a simultaneous explicit
+    /// non-fast tier is an adapter-level conflict caught before startup ends.
+    #[test]
+    fn configuration_rejects_openai_fast_mode_beside_a_conflicting_configured_tier() {
+        let configuration = format!(
+            "{CONFIGURATION}{OPENAI_MAPPING_AND_MODEL}\n[model_settings]\nfast_mode = \"enabled\"\nservice_tier = {{ provider = \"open_ai\", value = \"flex\" }}\n"
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelSettingsConfiguration)
         );
     }
 
