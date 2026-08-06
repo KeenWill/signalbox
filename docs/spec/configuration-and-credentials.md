@@ -29,11 +29,13 @@ composes (`crates/model-runtime/src/credential.rs` and the redaction pipeline in
 `crates/model-runtime-anthropic/src/runtime.rs`); the database-channel refusals
 in [process configuration](#process-configuration) were verified through PR #237
 (`agent/fix-pg-env-surface`), in `production_connection_options` under
-`crates/persistence/src/lib.rs`; the `signalboxd` binary name, its
-`apps/signalboxd` code homes, and the `config/signalboxd.example.toml`
-checked-in example path were verified through PR #258
-(`agent/signalboxd-rename`). The daemon-held GitHub credential channel and its
-code-host result redaction are verified through PR #270
+`crates/persistence/src/lib.rs` — the refusal's coverage of a real ambient
+`PGPASSWORD` process variable, rather than only an injected lookup, was
+additionally verified through this PR (`agent/fix9-pg-env`); the `signalboxd`
+binary name, its `apps/signalboxd` code homes, and the
+`config/signalboxd.example.toml` checked-in example path were verified through
+PR #258 (`agent/signalboxd-rename`). The daemon-held GitHub credential channel
+and its code-host result redaction are verified through PR #270
 (`agent/tool-batch-tier1`). The per-turn pinning behavior at a mid-session
 defaults boundary was verified through PR #272 (`agent/mid-session-model`). The
 credential-file value narrowing and the credential-shaped code-host detail were

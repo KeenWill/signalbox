@@ -240,12 +240,13 @@ pub fn local_test_connection_options(database_url: &str) -> Result<PgConnectOpti
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::process::Command;
 
     use expect_test::expect;
     use sqlx::postgres::PgSslMode;
 
     use super::{
-        commit_failure_is_ambiguous, local_test_connection_options,
+        commit_failure_is_ambiguous, local_test_connection_options, production_connection_options,
         production_connection_options_with_environment,
     };
 
@@ -283,6 +284,49 @@ mod tests {
         .expect_err("an ambient credential channel must fail closed");
 
         expect!["error with configuration: ambient PostgreSQL variables would shape the production connection: PGPASSWORD; unset them and carry every connection parameter in the database URL"].assert_eq(&error.to_string());
+    }
+
+    /// Marks the re-exec below as the child: every other test above proves the
+    /// refusal logic against an injected lookup, never the process
+    /// environment `production_connection_options` actually reads, so nothing
+    /// upstream of this marker check exercises `std::env::var_os` for real.
+    const REAL_ENV_CHILD_MARKER: &str = "SIGNALBOX_FIX9_ENV_REFUSAL_CHILD";
+
+    #[test]
+    fn production_options_refuse_a_real_ambient_pgpassword_variable() {
+        if std::env::var_os(REAL_ENV_CHILD_MARKER).is_some() {
+            // Child process: `PGPASSWORD` below is a real environment
+            // variable, not an injected lookup, so this proves the public,
+            // env-reading entry point — not just the testable inner
+            // function — refuses it.
+            let error = production_connection_options(DATABASE_URL)
+                .expect_err("a real ambient PGPASSWORD must be refused, not silently consulted");
+            assert!(
+                error.to_string().contains("PGPASSWORD"),
+                "refusal must name the offending channel: {error}"
+            );
+            return;
+        }
+
+        // Parent process: `Command::env` sets the child's environment without
+        // touching this process's, so the crate's forbidden `unsafe_code`
+        // never needs `std::env::set_var`.
+        let exe =
+            std::env::current_exe().expect("test binary path is available under `cargo test`");
+        let status = Command::new(exe)
+            .env(REAL_ENV_CHILD_MARKER, "1")
+            // Synthetic only: a value that must never reach a real connection
+            // attempt, since the refusal happens before any database contact.
+            .env("PGPASSWORD", "sb-fix9-synthetic-not-a-real-credential")
+            .arg("--exact")
+            .arg("tests::production_options_refuse_a_real_ambient_pgpassword_variable")
+            .status()
+            .expect("spawn self as the child process");
+
+        assert!(
+            status.success(),
+            "child process must observe the refusal and pass"
+        );
     }
 
     #[test]
