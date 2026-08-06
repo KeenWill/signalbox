@@ -226,8 +226,18 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
             usage: refused.usage,
         },
         // Adapter-produced evidence is already credential-shape redacted, so
-        // printing it here cannot surface credential material.
-        other => panic!("the pinned Claude Code CLI returned no decoded response: {other:?}"),
+        // printing it here cannot surface credential material. Enumerated
+        // explicitly, per docs/style.md's owned-enum rule, so a future
+        // `TerminalEvidence` variant fails to compile here instead of
+        // silently inheriting this panic path — a new terminal classification
+        // must be reviewed for whether it counts as decoded compatibility
+        // evidence, not absorbed as an ordinary rejection.
+        rejected @ (TerminalEvidence::ProviderError(_)
+        | TerminalEvidence::CancellationConfirmed(_)
+        | TerminalEvidence::ProvenUnsent(_)
+        | TerminalEvidence::BoundaryLoss(_)) => {
+            panic!("the pinned Claude Code CLI returned no decoded response: {rejected:?}")
+        }
     }
 }
 
@@ -498,36 +508,135 @@ fn reported_version_rejects_a_blank_first_line() {
     assert_eq!(reported_version("   \n2.1.220\n"), None);
 }
 
-/// The credentialed step is the only place the smoke workflow names the
-/// environment secret. A second reference would widen the window in which the
-/// key is readable beyond the one step that must spend it.
-#[test]
-fn the_smoke_workflow_scopes_the_credential_to_one_step() {
-    let references = CLAUDE_SMOKE_WORKFLOW
-        .matches(&format!("secrets.{SMOKE_CREDENTIAL_VARIABLE}"))
-        .count();
+/// Every place the smoke workflow is permitted to reach the credential's
+/// *value*, in file order. The single environment binding scopes the secret to
+/// the one step that spends the exchange, and the presence guard fails that
+/// step early with a clear message when the environment supplies nothing —
+/// `test -n` reads the variable without rendering it anywhere.
+const PERMITTED_CREDENTIAL_SITES: &[&str] = &[
+    "ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}",
+    "test -n \"${ANTHROPIC_API_KEY}\" \\",
+];
 
+/// Every line that reaches the credential's value, trimmed and in file order.
+///
+/// A line qualifies when it names the credential *and* expands something: that
+/// covers the GitHub expression form (`${{ secrets.… }}`), a braced shell
+/// expansion (`${…}`), and a bare one (`$…`) alike, while leaving the prose
+/// mentions in the header comment — which name the variable without reading it
+/// — out of the inventory. Factored out of the assertion so synthetic
+/// workflows can prove the scan actually catches each form.
+fn credential_reference_lines(workflow: &str) -> Vec<&str> {
+    workflow
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains(SMOKE_CREDENTIAL_VARIABLE) && line.contains('$'))
+        .collect()
+}
+
+/// Pins the complete inventory rather than counting one spelling. Asserting a
+/// count of the `${{ secrets.… }}` form alone would let a later
+/// `echo "$ANTHROPIC_API_KEY"`, or the variable handed to another command,
+/// place the key in the job log or a process listing that the environment's
+/// access controls do not cover — while the assertion still passed. Any added
+/// reference in any expansion form changes this inventory and fails here.
+#[test]
+fn the_smoke_workflow_reaches_the_credential_only_where_permitted() {
     assert_eq!(
-        references, 1,
-        "the smoke workflow must reference the {SMOKE_CREDENTIAL_VARIABLE} secret exactly \
-         once, in the single step that spends the exchange"
+        credential_reference_lines(CLAUDE_SMOKE_WORKFLOW),
+        PERMITTED_CREDENTIAL_SITES,
+        "the smoke workflow's credential references changed; every site that reads \
+         {SMOKE_CREDENTIAL_VARIABLE} must be reviewed before it is permitted"
     );
 }
 
-/// The credential is never rendered into a command line: an `echo`, a `printf`,
-/// or an argv expansion of it would place it in the job log or a process
-/// listing that the environment's access controls do not cover.
-#[test]
-fn the_smoke_workflow_never_renders_the_credential() {
-    let rendered = format!("${{{{ secrets.{SMOKE_CREDENTIAL_VARIABLE} }}}}");
-    let echoed = CLAUDE_SMOKE_WORKFLOW
-        .lines()
-        .filter(|line| line.contains(&rendered))
-        .find(|line| line.contains("echo") || line.contains("printf") || line.contains("run:"));
+/// The workflow text the scan fixtures extend, so each fixture differs from the
+/// permitted inventory by exactly the one line under test.
+fn permitted_credential_workflow() -> String {
+    PERMITTED_CREDENTIAL_SITES.join("\n")
+}
 
-    assert!(
-        echoed.is_none(),
-        "the smoke workflow renders the credential into a command: {echoed:?}"
+#[test]
+fn credential_scan_accepts_the_permitted_inventory() {
+    assert_eq!(
+        credential_reference_lines(&permitted_credential_workflow()),
+        PERMITTED_CREDENTIAL_SITES
+    );
+}
+
+/// A quoted braced expansion echoed into the job log is the leak this scan
+/// exists to catch, and it is not the `${{ secrets.… }}` spelling.
+#[test]
+fn credential_scan_detects_a_braced_shell_expansion() {
+    let workflow = format!(
+        "{}\necho \"${{{SMOKE_CREDENTIAL_VARIABLE}}}\"",
+        permitted_credential_workflow()
+    );
+
+    assert_ne!(
+        credential_reference_lines(&workflow),
+        PERMITTED_CREDENTIAL_SITES
+    );
+}
+
+/// The unbraced spelling leaks identically and must not slip past the scan.
+#[test]
+fn credential_scan_detects_a_bare_shell_expansion() {
+    let workflow = format!(
+        "{}\necho ${SMOKE_CREDENTIAL_VARIABLE}",
+        permitted_credential_workflow()
+    );
+
+    assert_ne!(
+        credential_reference_lines(&workflow),
+        PERMITTED_CREDENTIAL_SITES
+    );
+}
+
+/// Handing the value to another command puts it in that process's argv, which
+/// a process listing exposes without any `echo` at all.
+#[test]
+fn credential_scan_detects_an_argv_expansion() {
+    let workflow = format!(
+        "{}\nsome-tool --token \"${{{SMOKE_CREDENTIAL_VARIABLE}}}\"",
+        permitted_credential_workflow()
+    );
+
+    assert_ne!(
+        credential_reference_lines(&workflow),
+        PERMITTED_CREDENTIAL_SITES
+    );
+}
+
+/// A second environment binding forwards the value to a step that was never
+/// reviewed for it, so it is a change to the inventory even though nothing is
+/// rendered.
+#[test]
+fn credential_scan_detects_a_second_environment_binding() {
+    let workflow = format!(
+        "{}\nOTHER_TOKEN: ${{{{ secrets.{SMOKE_CREDENTIAL_VARIABLE} }}}}",
+        permitted_credential_workflow()
+    );
+
+    assert_ne!(
+        credential_reference_lines(&workflow),
+        PERMITTED_CREDENTIAL_SITES
+    );
+}
+
+/// Naming the variable in prose reads nothing, so the header comment's
+/// mentions must not inflate the inventory — otherwise the assertion would
+/// have to be relaxed to tolerate documentation.
+#[test]
+fn credential_scan_ignores_a_prose_mention() {
+    let workflow = format!(
+        "{}\n# the {SMOKE_CREDENTIAL_VARIABLE} secret is supplied by the environment",
+        permitted_credential_workflow()
+    );
+
+    assert_eq!(
+        credential_reference_lines(&workflow),
+        PERMITTED_CREDENTIAL_SITES
     );
 }
 
@@ -861,11 +970,35 @@ async fn assert_process_exits(pid: rustix::process::Pid) {
 /// integration test happens to produce.
 #[cfg(unix)]
 fn process_is_live(pid: rustix::process::Pid) -> bool {
-    let signalable = rustix::process::test_kill_process(pid).is_ok();
+    let signalability = Signalability::observe(pid);
     // Read the stat line only for a pid still worth classifying; an
     // unsignalable one is already gone.
-    let proc_stat = signalable.then(|| proc_stat_line(pid)).flatten();
-    classify_process_liveness(signalable, proc_stat.as_deref())
+    let proc_stat = match signalability {
+        Signalability::Signalable => proc_stat_line(pid),
+        Signalability::Unsignalable => None,
+    };
+    classify_process_liveness(signalability, proc_stat.as_deref())
+}
+
+/// Whether a pid can still be signalled — the first of the two observations
+/// liveness is classified from. A labeled pair rather than a `bool`, per
+/// `docs/style.md`'s label discipline: at a call site `Unsignalable` says what
+/// `false` would only imply, so a transposed or misread fixture stays visible.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Signalability {
+    Signalable,
+    Unsignalable,
+}
+
+#[cfg(unix)]
+impl Signalability {
+    fn observe(pid: rustix::process::Pid) -> Self {
+        match rustix::process::test_kill_process(pid) {
+            Ok(()) => Self::Signalable,
+            Err(_) => Self::Unsignalable,
+        }
+    }
 }
 
 /// The process's `/proc/<pid>/stat` line, or `None` where `/proc` is
@@ -882,13 +1015,13 @@ fn proc_stat_line(pid: rustix::process::Pid) -> Option<String> {
 /// `/proc` is unavailable (macOS), a signalable pid is treated as live, the best
 /// signal available.
 #[cfg(unix)]
-fn classify_process_liveness(signalable: bool, proc_stat: Option<&str>) -> bool {
-    if !signalable {
-        return false;
-    }
-    match proc_stat {
-        Some(stat) => !proc_stat_is_zombie(stat),
-        None => true,
+fn classify_process_liveness(signalability: Signalability, proc_stat: Option<&str>) -> bool {
+    match signalability {
+        Signalability::Unsignalable => false,
+        Signalability::Signalable => match proc_stat {
+            Some(stat) => !proc_stat_is_zombie(stat),
+            None => true,
+        },
     }
 }
 
@@ -896,7 +1029,10 @@ fn classify_process_liveness(signalable: bool, proc_stat: Option<&str>) -> bool 
 #[cfg(unix)]
 #[test]
 fn unsignalable_process_is_not_live() {
-    assert!(!classify_process_liveness(false, None));
+    assert!(!classify_process_liveness(
+        Signalability::Unsignalable,
+        None
+    ));
 }
 
 /// Signalability decides first: a stale stat line for a pid that can no longer
@@ -905,7 +1041,7 @@ fn unsignalable_process_is_not_live() {
 #[test]
 fn unsignalable_process_with_a_running_stat_line_is_not_live() {
     assert!(!classify_process_liveness(
-        false,
+        Signalability::Unsignalable,
         Some("4321 (claude) R 1 4321 4321 0 -1")
     ));
 }
@@ -915,7 +1051,7 @@ fn unsignalable_process_with_a_running_stat_line_is_not_live() {
 #[cfg(unix)]
 #[test]
 fn signalable_process_without_proc_is_live() {
-    assert!(classify_process_liveness(true, None));
+    assert!(classify_process_liveness(Signalability::Signalable, None));
 }
 
 /// A signalable pid whose stat line reports a zombie has exited; reporting it
@@ -924,7 +1060,7 @@ fn signalable_process_without_proc_is_live() {
 #[test]
 fn signalable_zombie_is_not_live() {
     assert!(!classify_process_liveness(
-        true,
+        Signalability::Signalable,
         Some("4321 (claude) Z 1 4321 4321 0 -1")
     ));
 }
@@ -935,7 +1071,7 @@ fn signalable_zombie_is_not_live() {
 #[test]
 fn signalable_running_process_is_live() {
     assert!(classify_process_liveness(
-        true,
+        Signalability::Signalable,
         Some("4321 (claude) R 1 4321 4321 0 -1")
     ));
 }
