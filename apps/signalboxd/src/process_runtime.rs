@@ -2013,8 +2013,8 @@ where
             )
             .await
         }
-        request @ ClientRequest::SpawnSession { .. } => {
-            reject_uncomposed_spawn(writer, version, request_id, request).await
+        ClientRequest::SpawnSession { .. } => {
+            reject_uncomposed_spawn(writer, version, request_id).await
         }
         ClientRequest::AwaitSession {
             session_id,
@@ -2085,12 +2085,10 @@ async fn reject_uncomposed_spawn<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
-    request: ClientRequest,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    debug_assert!(matches!(request, ClientRequest::SpawnSession { .. }));
     write_error(
         writer,
         version,

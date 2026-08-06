@@ -728,6 +728,13 @@ pub enum DelegationMessageDirection {
     ChildToParent,
 }
 
+/// Labeled parent and child endpoints used to restore one stored message.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DelegationMessageEndpoints {
+    pub parent: SessionId,
+    pub child: SessionId,
+}
+
 /// One immutable bidirectional message whose content is authoritative.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DelegationMessage {
@@ -747,15 +754,14 @@ impl DelegationMessage {
         request: &DelegationMessageRequest,
         id: DelegationMessageId,
         direction: DelegationMessageDirection,
-        parent: SessionId,
-        child: SessionId,
+        endpoints: DelegationMessageEndpoints,
     ) -> Option<Self> {
         let endpoints_match = match direction {
             DelegationMessageDirection::ParentToChild => {
-                request.request().session() == parent && request.peer() == child
+                request.request().session() == endpoints.parent && request.peer() == endpoints.child
             }
             DelegationMessageDirection::ChildToParent => {
-                request.request().session() == child && request.peer() == parent
+                request.request().session() == endpoints.child && request.peer() == endpoints.parent
             }
         };
         endpoints_match.then(|| Self {
@@ -3079,8 +3085,10 @@ mod aggregate_tests {
             &sending,
             delegation_message_id(5),
             DelegationMessageDirection::ParentToChild,
-            relation.parent(),
-            relation.child(),
+            DelegationMessageEndpoints {
+                parent: relation.parent(),
+                child: relation.child(),
+            },
         )
         .expect("fixture endpoints match the stored direction");
         let events = vec![
@@ -3122,8 +3130,10 @@ mod aggregate_tests {
             &sending,
             delegation_message_id(5),
             DelegationMessageDirection::ParentToChild,
-            relation.child(),
-            relation.parent(),
+            DelegationMessageEndpoints {
+                parent: relation.child(),
+                child: relation.parent(),
+            },
         )
         .expect("the swapped endpoint fixture admits its own direction");
         let input = SessionDelegationReconstitutionInput::new(

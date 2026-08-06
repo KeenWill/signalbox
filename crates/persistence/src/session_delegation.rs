@@ -7,14 +7,15 @@ use signalbox_application::DelegationMessageDeliveryProjection;
 use signalbox_domain::{
     BoundChildAction, ChildRelationshipPolicy, DelegatedSpawnRequest, DelegationAwaitRequest,
     DelegationContent, DelegationEvent, DelegationEventOrdinal, DelegationMessage,
-    DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationOutcome,
-    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenance,
-    DelegationProvenanceReconstitutionInput, DelegationRequestFailure, DelegationTransitionFailure,
-    DelegationWait, DelegationWaitMode, DurableCommandId, GoalGeneration, ReconstitutedToolAttempt,
-    SessionDelegation, SessionDelegationReconstitutionFailure,
-    SessionDelegationReconstitutionInput, SessionId, ToolAttemptEnd, ToolAttemptObservation,
-    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind,
-    ToolRequestId, ToolResultContent, ToolResultText, TurnId,
+    DelegationMessageDirection, DelegationMessageEndpoints, DelegationMessageId,
+    DelegationMessageRequest, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
+    DelegationProvenance, DelegationProvenanceReconstitutionInput, DelegationRequestFailure,
+    DelegationTransitionFailure, DelegationWait, DelegationWaitMode, DurableCommandId,
+    GoalGeneration, ReconstitutedToolAttempt, SessionDelegation,
+    SessionDelegationReconstitutionFailure, SessionDelegationReconstitutionInput, SessionId,
+    ToolAttemptEnd, ToolAttemptObservation, ToolDispatchAuthority, ToolEffectClass,
+    ToolExecutionError, ToolExecutionErrorKind, ToolRequestId, ToolResultContent, ToolResultText,
+    TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -203,6 +204,7 @@ pub enum RecordDelegationMessageOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionDelegationCorruption {
     Missing(&'static str),
+    InvalidColumn(&'static str),
     Inconsistent(&'static str),
     Unsupported { field: &'static str, value: String },
     Reconstitution(SessionDelegationReconstitutionFailure),
@@ -1159,8 +1161,7 @@ async fn load_events(
                     &logical,
                     DelegationMessageId::from_uuid(required(&row, "message_id")?),
                     direction,
-                    parent,
-                    child,
+                    DelegationMessageEndpoints { parent, child },
                 )
                 .ok_or(SessionDelegationCorruption::Inconsistent(
                     "message endpoints",
@@ -1739,8 +1740,7 @@ async fn load_message_replay(
             request,
             DelegationMessageId::from_uuid(required(&row, "message_id")?),
             direction,
-            parent,
-            child,
+            DelegationMessageEndpoints { parent, child },
         )
         .is_none()
     {
@@ -1790,8 +1790,14 @@ fn required<T>(row: &PgRow, column: &'static str) -> Result<T, SessionDelegation
 where
     for<'value> T: sqlx::Decode<'value, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
 {
-    row.try_get::<Option<T>, _>(column)?
-        .ok_or_else(|| SessionDelegationCorruption::Missing(column).into())
+    let value = match row.try_get::<Option<T>, _>(column) {
+        Ok(value) => value,
+        Err(sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_)) => {
+            return Err(SessionDelegationCorruption::InvalidColumn(column).into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    value.ok_or_else(|| SessionDelegationCorruption::Missing(column).into())
 }
 
 fn require_single(
