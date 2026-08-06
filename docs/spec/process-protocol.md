@@ -1404,11 +1404,12 @@ Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
   whose positive ordered recipient-wide range identifies the delivered
   delegation content that will wake an otherwise idle session;
 - `delegation_terminated { spawning_request_id, outcome, reason, provenance }`,
-  whose outcome is exactly `stopped` or `cancelled`, whose reason is the
-  matching `parent_stopped` or `parent_cancelled`, and whose parent turn- or
-  goal-command provenance carries `parent_and_descendants`; this delivered
-  logical state exposes no child transcript and does not erase retained physical
-  execution evidence;
+  whose outcome is exactly `stopped` or `cancelled` naming the bound-child
+  action, whose reason is exactly `parent_stopped` or `parent_cancelled` naming
+  independently whether the parent stopped or was cancelled — both cross-action
+  combinations are valid — and whose parent turn- or goal-command provenance
+  carries `parent_and_descendants`; this delivered logical state exposes no
+  child transcript and does not erase retained physical execution evidence;
 - `active_running { current_attempt_id, current_model_call }`, where
   `current_model_call` is null before preparation or `{ model_call_id, state }`
   with state exactly `prepared`, `in_flight`, or `cancellation_requested`;
