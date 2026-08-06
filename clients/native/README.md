@@ -72,6 +72,35 @@ selected with `--mock-server`. The real-server script builds `signalboxd`,
 starts it with an isolated temporary PostgreSQL database and Unix socket, and
 runs the macOS client exchanges without making a model call.
 
+`SIGNALBOX_NATIVE_SKIP_TESTING` and `SIGNALBOX_NATIVE_ONLY_TESTING` take
+space-separated `xcodebuild` test identifiers and select which suites
+`scripts/test-xcode.sh` runs.
+
+## Snapshot tests
+
+`Tests/SignalboxAppTests/LiveScreenSnapshotTests.swift` renders the screens
+`RootView` reaches and compares each against a committed golden under
+`Tests/SignalboxAppTests/__Snapshots__`. Rendering is in process — one screen
+hosted in one window, at a fixed canvas size and a pinned display scale — so it
+sees no scene lifecycle, no window chrome, and no sheet presentation; sheet
+content is snapshotted as its own screen. `ScreenshotScenario` selects the
+fixtures, the same seam the golden capture scripts below use.
+
+The suite runs as a report-only step in CI, which uploads the reference, the
+failed rendering, and their difference as an artifact when a comparison fails.
+Re-record the goldens after an intended visual change and read the resulting
+diff before committing it:
+
+```bash
+scripts/record-snapshots.sh
+SIGNALBOX_NATIVE_SNAPSHOT_RECORD=missing scripts/record-snapshots.sh
+scripts/test-xcode.sh
+```
+
+`SIGNALBOX_NATIVE_SNAPSHOT_RECORD` takes `all` (the recording script's default,
+rewriting every golden), `missing`, `failed`, or `never`. Only that script
+passes it to the suite; `scripts/test-xcode.sh` always compares.
+
 ## Screenshots
 
 Golden screenshots live under `Screenshots/iOS`, `Screenshots/iPadOS`, and
