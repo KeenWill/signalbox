@@ -648,14 +648,15 @@ Locks per transaction, in acquisition order:
   approval-judge, tool-loop, and lifecycle-transition transactions from holding
   these rows in reverse order.
 
-- **Delegated await and peer-message transactions**: before taking any scheduler
-  or relationship lock, await locks its parent delivery session and message
-  locks its recipient session `FOR NO KEY UPDATE`. Each transaction next locks
-  the issuing session's `session_scheduler` row `FOR UPDATE`, then the exact
-  `session_delegation` row `FOR UPDATE`. Delivery-sequence allocation runs while
-  the recipient session lock is held. Message recording claims the global
-  `message_id` before inserting the relationship event; a concurrent claim loser
-  returns the typed message-identity collision without leaving a partial event.
+- **Delegated await and peer-message transactions**: each transaction first
+  locks the issuing session's `session_scheduler` row `FOR UPDATE`, then locks
+  its delivery recipient session `FOR NO KEY UPDATE`, and only then takes the
+  exact `session_delegation` row `FOR UPDATE`. For a child-to-parent message
+  this is the same child-scheduler-before-parent-session prefix used by terminal
+  child observation. Delivery-sequence allocation runs while the recipient
+  session lock is held. Message recording claims the global `message_id` before
+  inserting the relationship event; a concurrent claim loser returns the typed
+  message-identity collision without leaving a partial event.
 
 - **ReplaceSessionDefaults**: an unseen command locks its
   `session_current_defaults` pointer row `FOR UPDATE` before loading and

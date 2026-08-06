@@ -981,7 +981,7 @@ where
                         if receipt.tool_request() == expected_request
                             && receipt.policy() == expected_policy =>
                     {
-                        completed(encode_spawn_receipt(receipt)?)
+                        durably_completed(encode_spawn_receipt(receipt)?)
                     }
                     SessionDelegationPortOutcome::Rejected => self.rejected(),
                     SessionDelegationPortOutcome::Applied(_) => {
@@ -1061,17 +1061,6 @@ where
             },
         ))
     }
-}
-
-fn completed<PortError>(
-    result: String,
-) -> Result<UnboundExecutionDisposition, SessionDelegationExecutorError<PortError>> {
-    let result = ToolResultText::try_new(result)
-        .map_err(|_| SessionDelegationExecutorError::ResultEncoding)?
-        .into_string();
-    Ok(UnboundExecutionDisposition::Completed(
-        ToolExecutorEvidence::CompletedText(result),
-    ))
 }
 
 fn durably_completed<PortError>(

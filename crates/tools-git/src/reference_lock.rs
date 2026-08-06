@@ -1192,6 +1192,7 @@ fn open_or_create_ref_directory_with_mode_tracked(
     open_or_create_ref_directory_with_mode_tracked_and_hook_inner(parent, name, mode, || Ok(()))
 }
 
+#[cfg(test)]
 pub(super) fn open_or_create_ref_directory_with_mode_tracked_and_hook<PostCreate>(
     parent: &OwnedFd,
     name: &OsStr,
