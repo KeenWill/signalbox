@@ -18,13 +18,12 @@ use crate::create_session_from_imported_frontier::{
     self, ImportedSessionCorruption, ImportedSessionRepositoryError,
 };
 use crate::mapping::{
-    PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
-    defaults_version_from_numeric, model_settings_from_json, session_id_from_uuid,
-    session_id_to_uuid, session_placement_event_kind_from_str,
+    PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
+    dangerous_tool_auto_approval_from_str, defaults_version_from_numeric, model_settings_from_json,
+    session_creation_cause_from_str, session_id_from_uuid, session_id_to_uuid,
+    session_placement_event_kind_from_str, tool_request_id_from_uuid,
 };
 
-// Applied migrations freeze this legacy storage spelling.
-const USER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
 
 /// A durable shape that cannot reconstruct one complete current session.
@@ -173,6 +172,7 @@ pub(crate) async fn load_session_from_connection(
             s.session_id AS stored_session_id,
             s.creation_cause AS stored_cause,
             s.ancestry_kind AS stored_ancestry,
+            s.spawning_tool_request_id AS stored_spawning_request_id,
             s.template_name AS stored_template_name,
             s.template_content_digest AS stored_template_digest,
             creation.storage_version AS create_storage_version,
@@ -310,6 +310,10 @@ fn decode_complete(
     let ancestry: String = required(&row, "stored_ancestry")?;
     let settings_authentication = authenticate_defaults_settings_version(&row, &ancestry);
     if ancestry == "imported_conversation" {
+        validate_imported_creation_provenance(
+            required(&row, "stored_cause")?,
+            row.try_get("stored_spawning_request_id")?,
+        )?;
         if row
             .try_get::<Option<String>, _>("stored_template_name")?
             .is_some()
@@ -342,7 +346,11 @@ fn decode_complete(
         );
     }
     let stored_session = session_id_from_uuid(required(&row, "stored_session_id")?);
-    let provenance = decode_provenance(required(&row, "stored_cause")?, ancestry)?;
+    let provenance = decode_provenance(
+        required(&row, "stored_cause")?,
+        ancestry,
+        row.try_get("stored_spawning_request_id")?,
+    )?;
     let template_provenance = decode_template_provenance(
         row.try_get("stored_template_name")?,
         row.try_get("stored_template_digest")?,
@@ -618,18 +626,8 @@ fn decode_ordinal(
 fn decode_provenance(
     cause: String,
     ancestry: String,
+    spawning_request: Option<Uuid>,
 ) -> Result<SessionCreationProvenance, SessionRepositoryError> {
-    // The current migration admits only the baseline storage spellings. This
-    // adapter-level representation check does not narrow the domain seam:
-    // `SessionReconstitutionInput` continues to accept any future provenance
-    // variant once its owning migration supplies a checked mapping.
-    if cause != USER_INITIATED {
-        return Err(SessionCorruption::Unsupported {
-            field: "creation cause",
-            value: cause,
-        }
-        .into());
-    }
     if ancestry != NO_ANCESTRY {
         return Err(SessionCorruption::Unsupported {
             field: "ancestry kind",
@@ -637,10 +635,50 @@ fn decode_provenance(
         }
         .into());
     }
-    Ok(SessionCreationProvenance::new(
-        SessionCreationCause::UserInitiated,
-        TranscriptAncestry::None,
-    ))
+    let Some(cause_kind) = session_creation_cause_from_str(&cause) else {
+        return Err(SessionCorruption::Unsupported {
+            field: "creation cause",
+            value: cause,
+        }
+        .into());
+    };
+    match (cause_kind, spawning_request) {
+        (SessionCreationCauseStorageKind::UserInitiated, None) => {
+            Ok(SessionCreationProvenance::new(
+                SessionCreationCause::UserInitiated,
+                TranscriptAncestry::None,
+            ))
+        }
+        (SessionCreationCauseStorageKind::Delegated, Some(request)) => Ok(
+            SessionCreationProvenance::delegated(tool_request_id_from_uuid(request)),
+        ),
+        (
+            SessionCreationCauseStorageKind::UserInitiated
+            | SessionCreationCauseStorageKind::Delegated,
+            _,
+        ) => Err(SessionCorruption::Inconsistent("creation cause provenance").into()),
+    }
+}
+
+fn validate_imported_creation_provenance(
+    cause: String,
+    spawning_request: Option<Uuid>,
+) -> Result<(), SessionRepositoryError> {
+    let Some(cause_kind) = session_creation_cause_from_str(&cause) else {
+        return Err(SessionCorruption::Unsupported {
+            field: "creation cause",
+            value: cause,
+        }
+        .into());
+    };
+    match (cause_kind, spawning_request) {
+        (SessionCreationCauseStorageKind::UserInitiated, None) => Ok(()),
+        (
+            SessionCreationCauseStorageKind::UserInitiated
+            | SessionCreationCauseStorageKind::Delegated,
+            _,
+        ) => Err(SessionCorruption::Inconsistent("creation cause provenance").into()),
+    }
 }
 
 fn decode_selection(
@@ -693,4 +731,134 @@ fn decode_selection(
             "model settings validation selection",
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use signalbox_domain::{SessionCreationCause, TranscriptAncestry};
+    use sqlx::types::Uuid;
+
+    use super::{
+        NO_ANCESTRY, SessionCorruption, SessionRepositoryError, decode_provenance,
+        validate_imported_creation_provenance,
+    };
+    use crate::mapping::session_creation_cause_to_str;
+
+    const NON_NONE_ANCESTRY: &str = "single_source";
+
+    fn spawning_request() -> Uuid {
+        Uuid::from_u128(1)
+    }
+
+    fn corruption(error: SessionRepositoryError) -> SessionCorruption {
+        let SessionRepositoryError::Corruption(corruption) = error else {
+            panic!("the mapping failure is durable corruption")
+        };
+        corruption
+    }
+
+    /// S18 / INV-003: the durable delegated spelling retains its exact request.
+    #[test]
+    fn s18_inv003_delegated_provenance_decodes_exactly() {
+        let request = spawning_request();
+        let provenance = decode_provenance(
+            String::from(session_creation_cause_to_str(
+                &SessionCreationCause::Delegated {
+                    spawning_request: signalbox_domain::ToolRequestId::from_uuid(request),
+                },
+            )),
+            String::from(NO_ANCESTRY),
+            Some(request),
+        )
+        .expect("the complete delegated storage shape decodes");
+
+        assert_eq!(
+            provenance.cause(),
+            SessionCreationCause::Delegated {
+                spawning_request: signalbox_domain::ToolRequestId::from_uuid(request),
+            }
+        );
+        assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
+    }
+
+    /// S18 / INV-003: delegated storage cannot omit its spawning request.
+    #[test]
+    fn s18_inv003_delegated_provenance_requires_spawning_request() {
+        let delegated = SessionCreationCause::Delegated {
+            spawning_request: signalbox_domain::ToolRequestId::from_uuid(spawning_request()),
+        };
+        let error = decode_provenance(
+            String::from(session_creation_cause_to_str(&delegated)),
+            String::from(NO_ANCESTRY),
+            None,
+        )
+        .expect_err("delegated provenance without its request is corrupt");
+
+        assert_eq!(
+            corruption(error),
+            SessionCorruption::Inconsistent("creation cause provenance")
+        );
+    }
+
+    /// S01 / INV-003: user-initiated storage cannot claim a spawning request.
+    #[test]
+    fn s01_inv003_user_initiated_provenance_rejects_spawning_request() {
+        let error = decode_provenance(
+            String::from(session_creation_cause_to_str(
+                &SessionCreationCause::UserInitiated,
+            )),
+            String::from(NO_ANCESTRY),
+            Some(spawning_request()),
+        )
+        .expect_err("user-initiated provenance cannot carry delegated authority");
+
+        assert_eq!(
+            corruption(error),
+            SessionCorruption::Inconsistent("creation cause provenance")
+        );
+    }
+
+    /// S28 / INV-003: an imported user-initiated row cannot silently discard
+    /// a contradictory delegated spawning identity.
+    #[test]
+    fn s28_inv003_imported_provenance_rejects_spawning_request() {
+        let error = validate_imported_creation_provenance(
+            String::from(session_creation_cause_to_str(
+                &SessionCreationCause::UserInitiated,
+            )),
+            Some(spawning_request()),
+        )
+        .expect_err("imported user-initiated provenance cannot carry a spawning request");
+
+        assert_eq!(
+            corruption(error),
+            SessionCorruption::Inconsistent("creation cause provenance")
+        );
+    }
+
+    /// S18 / INV-003: delegated creation cannot acquire transcript ancestry.
+    #[test]
+    fn s18_inv003_delegated_provenance_rejects_non_none_ancestry() {
+        let error =
+            decode_provenance(
+                String::from(session_creation_cause_to_str(
+                    &SessionCreationCause::Delegated {
+                        spawning_request: signalbox_domain::ToolRequestId::from_uuid(
+                            spawning_request(),
+                        ),
+                    },
+                )),
+                String::from(NON_NONE_ANCESTRY),
+                Some(spawning_request()),
+            )
+            .expect_err("delegated provenance cannot inherit transcript ancestry");
+
+        assert_eq!(
+            corruption(error),
+            SessionCorruption::Unsupported {
+                field: "ancestry kind",
+                value: String::from(NON_NONE_ANCESTRY),
+            }
+        );
+    }
 }
