@@ -13,7 +13,7 @@ use signalbox_model_runtime::{
     ModelOperation, ModelRuntime, NativeErrorFacts, ObservationFact, ObservationSink,
     PreparationDefect, PreparationFailure, PreparationOutcome, ProviderErrorEvidence,
     ProviderErrorKind, ProviderRequestId, ResponsePrefixBudget as PrefixBudget, SseFraming,
-    StreamInterruption, TerminalEvidence, TerminalReport, TokenUsage, UnsentCause,
+    StreamInterruption, TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss, UnsentCause,
     boundary_loss_evidence as exchange_loss, emit_provider_observation as emit,
     pre_exchange_loss_evidence as pre_exchange_loss, proven_unsent_evidence as proven_unsent,
     provider_response_body_too_large as response_body_too_large,
@@ -462,6 +462,9 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                 exchange,
                 reported_model: None,
                 finish_reported: None,
+                // The body is never read on this path, so no decoder saw the
+                // response's tool material.
+                tool_calls: ToolCallsAtLoss::Unobserved,
                 usage: TokenUsage::unreported(),
             })
         }

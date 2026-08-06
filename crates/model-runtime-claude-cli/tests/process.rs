@@ -10,8 +10,8 @@ use std::time::Duration;
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, CredentialReference, DeliveryMode,
     FinishReason, LossCause, ModelOperation, ModelRuntime, PreparationDefect, PreparationOutcome,
-    ProviderErrorKind, RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage, ToolChoice,
-    ToolDefinition, ToolName,
+    ProviderErrorKind, RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
+    ToolCallsAtLoss, ToolChoice, ToolDefinition, ToolName,
 };
 use signalbox_model_runtime_claude_cli::{
     ClaudeCliConfig, ClaudeCliPreparedRequest, ClaudeCliRuntime, DISABLED_CLAUDE_CLI_BUILTIN_TOOLS,
@@ -450,6 +450,37 @@ async fn truncated_stream_is_boundary_loss() {
         LossCause::StreamEndedWithoutTerminalMarker { .. }
     ));
     assert_eq!(result.spawns, 1);
+}
+
+/// a tool call the decoder rejects before registering it is still
+/// reported as opened.
+///
+/// The CLI announces a `tool_use` block for a tool this operation never
+/// declared. The decoder refuses it before `proposal_indexes` or any
+/// observation records it, so the loss evidence is the only place the fact can
+/// survive.
+#[tokio::test]
+async fn a_rejected_tool_use_still_reports_the_opened_call() {
+    let result = execute_scenario("undeclared_tool_use", OperationShape::Text).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+}
+
+/// The same loss shape without any tool call carries the negative fact, so the
+/// two are told apart by type rather than by the rendered detail.
+#[tokio::test]
+async fn a_protocol_loss_without_tool_calls_reports_none_opened() {
+    let result = execute_scenario("malformed_stream", OperationShape::Text).await;
+
+    assert_eq!(
+        boundary_loss(&result.evidence).tool_calls,
+        ToolCallsAtLoss::NoneOpened
+    );
 }
 
 #[tokio::test]

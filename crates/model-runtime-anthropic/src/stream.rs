@@ -21,7 +21,7 @@ use signalbox_model_runtime::{
     LossCause, Observation, ObservationFact, ObservationSink, ProviderErrorEvidence,
     ProviderJsonNestingValidator, ProviderMessageId, ProviderReportedModel, RefusalEvidence,
     SseRecord, StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
-    ToolName, validate_provider_json_nesting,
+    ToolCallsAtLoss, ToolName, validate_provider_json_nesting,
 };
 
 use crate::response::{convert_usage, map_finish};
@@ -123,13 +123,29 @@ impl StreamDecoder {
         }
     }
 
+    /// Whether a tool call had opened in the events decoded so far.
+    ///
+    /// `tool_call_ids` records every `tool_use` block the stream opened and is
+    /// never drained, so it answers this at any point in the decode. The
+    /// decoder reads every event it receives, which makes the negative case
+    /// the stated fact rather than an absence.
+    fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
+        if self.tool_call_ids.is_empty() {
+            ToolCallsAtLoss::NoneOpened
+        } else {
+            ToolCallsAtLoss::Opened
+        }
+    }
+
     /// Evidence for a stream that ended without `message_stop`.
     pub(crate) fn lost(self, interruption: StreamInterruption) -> TerminalEvidence {
+        let tool_calls = self.tool_calls_at_loss();
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause: LossCause::StreamEndedWithoutTerminalMarker { interruption },
             exchange: self.exchange,
             reported_model: self.reported_model,
             finish_reported: self.finish,
+            tool_calls,
             usage: self.usage,
         })
     }
@@ -141,6 +157,7 @@ impl StreamDecoder {
             exchange: self.exchange.clone(),
             reported_model: self.reported_model.clone(),
             finish_reported: self.finish.clone(),
+            tool_calls: self.tool_calls_at_loss(),
             usage: self.usage,
         })
     }
@@ -154,6 +171,7 @@ impl StreamDecoder {
             exchange: self.exchange.clone(),
             reported_model: self.reported_model.clone(),
             finish_reported: self.finish.clone(),
+            tool_calls: self.tool_calls_at_loss(),
             usage: self.usage,
         })
     }
@@ -719,7 +737,7 @@ mod tests {
         AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
         ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderErrorKind, ProviderMessageId,
         ProviderReportedModel, ProviderRequestId, SseFraming, SseRecord, StreamInterruption,
-        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName,
     };
 
     use super::{StreamDecoder, StreamStep};
@@ -1093,7 +1111,29 @@ mod tests {
             Some(ProviderReportedModel::new("model-exact-1"))
         );
         assert_eq!(loss.finish_reported, None);
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
         assert_eq!(loss.usage.input_tokens, Some(25));
+    }
+
+    /// a stream cut off mid-tool-call carries that fact typed.
+    ///
+    /// `tool_call_ids` records the opened block and is never drained, so the
+    /// fact survives to the loss whether or not the call ever produced an
+    /// argument delta or a proposal.
+    #[test]
+    fn a_stream_lost_after_a_tool_call_opened_reports_it_on_the_loss() {
+        let (evidence, _) = drive_to_eof(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\
+              \"name\":\"lookup\",\"input\":{}}}\n\n",
+        ]);
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("EOF before message_stop must never read as success");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
     }
 
     #[test]

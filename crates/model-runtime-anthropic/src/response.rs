@@ -6,7 +6,7 @@ use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
     LossCause, Observation, ObservationFact, ObservationSink, ProviderMessageId,
     ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId,
-    ToolCallProposal, ToolName, validate_provider_json_nesting,
+    ToolCallProposal, ToolCallsAtLoss, ToolName, validate_provider_json_nesting,
 };
 
 use crate::wire::{MessagesResponse, WireResponseBlock, WireUsage, parse_response_block};
@@ -86,6 +86,30 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
 /// evidence (per `docs/spec/runtime-substrate.md`, a success status without
 /// valid completion material is not definitive), with the facts observed
 /// before the defect retained.
+/// The tool fact for a buffered decode that stopped before classifying every
+/// content block.
+///
+/// The provider streams content blocks as opaque JSON values that this adapter
+/// classifies one at a time, so a decode that aborted mid-list proves only what
+/// it already classified: a decoded tool call is a fact, while the blocks the
+/// loop never reached cannot support "none opened".
+fn partial_tool_calls(tool_call_ids: &BTreeSet<String>) -> ToolCallsAtLoss {
+    if tool_call_ids.is_empty() {
+        ToolCallsAtLoss::Unobserved
+    } else {
+        ToolCallsAtLoss::Opened
+    }
+}
+
+/// The tool fact for a buffered decode that classified every content block.
+fn classified_tool_calls(tool_call_ids: &BTreeSet<String>) -> ToolCallsAtLoss {
+    if tool_call_ids.is_empty() {
+        ToolCallsAtLoss::NoneOpened
+    } else {
+        ToolCallsAtLoss::Opened
+    }
+}
+
 pub(crate) fn decode_buffered_response<C: Clone>(
     body: &[u8],
     exchange: ExchangeFacts,
@@ -101,6 +125,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model: None,
             finish_reported: None,
+            tool_calls: ToolCallsAtLoss::Unobserved,
             usage: TokenUsage::unreported(),
         });
     }
@@ -114,6 +139,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 exchange,
                 reported_model: None,
                 finish_reported: None,
+                tool_calls: ToolCallsAtLoss::Unobserved,
                 usage: TokenUsage::unreported(),
             });
         }
@@ -130,6 +156,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model: None,
             finish_reported: None,
+            tool_calls: ToolCallsAtLoss::Unobserved,
             usage: TokenUsage::unreported(),
         });
     }
@@ -165,6 +192,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: None,
+            tool_calls: ToolCallsAtLoss::Unobserved,
             usage,
         });
     }
@@ -183,6 +211,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                     exchange,
                     reported_model,
                     finish_reported: None,
+                    tool_calls: partial_tool_calls(&tool_call_ids),
                     usage,
                 });
             }
@@ -209,6 +238,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 exchange,
                 reported_model,
                 finish_reported: None,
+                tool_calls: partial_tool_calls(&tool_call_ids),
                 usage,
             });
         }
@@ -231,6 +261,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                     exchange,
                     reported_model,
                     finish_reported: None,
+                    tool_calls: partial_tool_calls(&tool_call_ids),
                     usage,
                 });
             }
@@ -247,6 +278,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                             exchange,
                             reported_model,
                             finish_reported: None,
+                            tool_calls: partial_tool_calls(&tool_call_ids),
                             usage,
                         });
                     }
@@ -266,6 +298,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                     exchange,
                     reported_model,
                     finish_reported: None,
+                    tool_calls: partial_tool_calls(&tool_call_ids),
                     usage,
                 });
             }
@@ -283,6 +316,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: None,
+            tool_calls: classified_tool_calls(&tool_call_ids),
             usage,
         });
     };
@@ -295,6 +329,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: None,
+            tool_calls: classified_tool_calls(&tool_call_ids),
             usage,
         });
     }
@@ -311,6 +346,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: None,
+            tool_calls: classified_tool_calls(&tool_call_ids),
             usage,
         });
     }
@@ -323,6 +359,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: Some(finish),
+            tool_calls: classified_tool_calls(&tool_call_ids),
             usage,
         });
     }
@@ -341,6 +378,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: Some(finish),
+            tool_calls: classified_tool_calls(&tool_call_ids),
             usage,
         });
     }
@@ -370,7 +408,8 @@ mod tests {
     use signalbox_model_runtime::{
         AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
         ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderMessageId, ProviderReportedModel,
-        ProviderRequestId, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+        ProviderRequestId, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
+        ToolCallsAtLoss, ToolName,
     };
 
     use super::{decode_buffered_response, map_finish};
@@ -565,6 +604,96 @@ mod tests {
             Some(ProviderReportedModel::new("model-exact-1"))
         );
         assert_eq!(loss.usage.input_tokens, Some(3));
+    }
+
+    /// a decode that stopped part way through the content blocks does
+    /// not report "no tool call opened".
+    ///
+    /// The provider sends content blocks as opaque values this adapter
+    /// classifies one at a time. A block it cannot classify ends the decode
+    /// with the following blocks unexamined, so their tool material is
+    /// unobserved — reporting it as absent would be a claim the decode never
+    /// established.
+    #[test]
+    fn a_decode_abandoned_mid_content_withholds_the_tool_fact() {
+        let (evidence, _) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [
+                    {"type": "quasar"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("an unclassifiable content block is not definitive completion material");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// A tool call already classified is a fact the same abandoned decode can
+    /// state, so the withholding above is not a blanket refusal to answer.
+    #[test]
+    fn a_decode_abandoned_after_a_tool_call_still_reports_it() {
+        let (evidence, _) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}},
+                    {"type": "quasar"}
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("an unclassifiable content block is not definitive completion material");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// A decode that classified every block states the fact either way, so a
+    /// caller reads the same vocabulary from a complete and a partial decode.
+    #[track_caller]
+    fn assert_classified_tool_fact(content: &str, expected: ToolCallsAtLoss) {
+        let (evidence, _) = decode(&format!(
+            r#"{{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [{content}],
+                "stop_reason": "quasar",
+                "usage": {{"input_tokens": 3, "output_tokens": 1}}
+            }}"#
+        ));
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("an unrecognized stop_reason is not definitive completion material");
+        };
+        assert_eq!(loss.tool_calls, expected);
+    }
+
+    #[test]
+    fn a_fully_classified_decode_states_the_tool_fact_either_way() {
+        assert_classified_tool_fact(
+            r#"{"type": "text", "text": "hi"}"#,
+            ToolCallsAtLoss::NoneOpened,
+        );
+        assert_classified_tool_fact(
+            r#"{"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}"#,
+            ToolCallsAtLoss::Opened,
+        );
     }
 
     #[test]

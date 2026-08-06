@@ -19,8 +19,8 @@ use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
     LossCause, Observation, ObservationFact, ObservationSink, ProviderErrorEvidence,
     ProviderJsonNestingValidator, ProviderReportedModel, RefusalEvidence, SseRecord,
-    StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
-    validate_provider_json_nesting,
+    StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
+    ToolCallsAtLoss, ToolName, validate_provider_json_nesting,
 };
 
 use crate::response::{StopSequences, convert_usage, map_finish};
@@ -59,6 +59,10 @@ pub(crate) struct StreamDecoder {
     refusal_text: String,
     tool_builders: BTreeMap<u32, ToolBuilder>,
     completed_tools: Vec<ToolCallProposal>,
+    /// Sticky: at least one tool call was announced by the provider. Neither
+    /// `tool_builders` (emptied by `finalize_tools`) nor `completed_tools`
+    /// (populated only there) survives every loss path.
+    opened_tool_calls: bool,
     final_usage_reported: bool,
 }
 
@@ -76,6 +80,7 @@ impl StreamDecoder {
             refusal_text: String::new(),
             tool_builders: BTreeMap::new(),
             completed_tools: Vec::new(),
+            opened_tool_calls: false,
             final_usage_reported: false,
         }
     }
@@ -179,6 +184,17 @@ impl StreamDecoder {
                 ));
             }
             if let Some(delta) = choice.delta {
+                if !delta.tool_calls.is_empty() {
+                    // Recorded here, before any of the checks below can end the
+                    // stream, and never cleared: this is the earliest point the
+                    // provider has demonstrably opened a tool call, and the
+                    // decoder's own tool state cannot answer for it later.
+                    // `tool_builders` is emptied by `finalize_tools`, and an
+                    // entry is created only after the index and type checks
+                    // pass, so a loss raised by one of those checks would see
+                    // no tool state at all.
+                    self.opened_tool_calls = true;
+                }
                 let mut known_indices: BTreeSet<u32> = self.tool_builders.keys().copied().collect();
                 let Ok(mut next_index) = u32::try_from(known_indices.len()) else {
                     return self.violation("stream carries too many tool-call indices");
@@ -357,13 +373,27 @@ impl StreamDecoder {
         StreamStep::Continue
     }
 
+    /// Whether a tool call had opened in the records decoded so far.
+    ///
+    /// The decoder reads every record it receives, so the negative case is the
+    /// stated fact rather than an absence.
+    fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
+        if self.opened_tool_calls {
+            ToolCallsAtLoss::Opened
+        } else {
+            ToolCallsAtLoss::NoneOpened
+        }
+    }
+
     /// Evidence for a stream that ended without `[DONE]`.
     pub(crate) fn lost(self, interruption: StreamInterruption) -> TerminalEvidence {
+        let tool_calls = self.tool_calls_at_loss();
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause: LossCause::StreamEndedWithoutTerminalMarker { interruption },
             exchange: self.exchange,
             reported_model: self.reported_model,
             finish_reported: self.finish,
+            tool_calls,
             usage: self.usage,
         })
     }
@@ -375,6 +405,7 @@ impl StreamDecoder {
             exchange: self.exchange.clone(),
             reported_model: self.reported_model.clone(),
             finish_reported: self.finish.clone(),
+            tool_calls: self.tool_calls_at_loss(),
             usage: self.usage,
         })
     }
@@ -388,6 +419,7 @@ impl StreamDecoder {
             exchange: self.exchange.clone(),
             reported_model: self.reported_model.clone(),
             finish_reported: self.finish.clone(),
+            tool_calls: self.tool_calls_at_loss(),
             usage: self.usage,
         })
     }
@@ -561,10 +593,10 @@ impl StreamDecoder {
 #[cfg(test)]
 mod tests {
     use signalbox_model_runtime::{
-        AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
-        ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderErrorKind, ProviderReportedModel,
-        ProviderRequestId, SseFraming, SseRecord, StreamInterruption, TerminalEvidence, TokenUsage,
-        ToolCallId, ToolCallProposal, ToolName,
+        AssistantPart, BoundaryLossEvidence, CompletionFinish, ExchangeFacts, FinishReason,
+        LossCause, Observation, ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderErrorKind,
+        ProviderReportedModel, ProviderRequestId, SseFraming, SseRecord, StreamInterruption,
+        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName,
     };
 
     use super::{StreamDecoder, StreamStep};
@@ -657,6 +689,102 @@ mod tests {
             panic!("a statusless stream error is definitive provider evidence");
         };
         assert_eq!(error.kind, expected, "native token {token}");
+    }
+
+    /// Reports the boundary loss a fixture ended on.
+    #[track_caller]
+    fn loss_of(terminal: Option<TerminalEvidence>) -> BoundaryLossEvidence {
+        match terminal {
+            Some(TerminalEvidence::BoundaryLoss(loss)) => loss,
+            other => panic!("fixture expected boundary loss, got {other:?}"),
+        }
+    }
+
+    /// an output-bound stop reached after a tool call opened is
+    /// distinguishable from a plain one without reading the violation detail.
+    ///
+    /// The provider announces a call's id and name and is then cut off by the
+    /// output bound before any argument fragment, so neither
+    /// `ToolArgumentsDelta` (needs a non-empty fragment) nor `ToolCallProposed`
+    /// (needs `finalize_tools`, which the unrecognized-finish return precedes)
+    /// is emitted. The observation stream cannot answer the question and the
+    /// loss evidence must.
+    #[test]
+    fn a_tool_call_opened_before_an_unrecognized_finish_is_typed_on_the_loss() {
+        let (terminal, observations) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+        ]);
+
+        let loss = loss_of(terminal);
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+        assert_eq!(
+            loss.finish_reported,
+            Some(FinishReason::Unrecognized {
+                provider_token: "length".to_string(),
+            })
+        );
+        assert_eq!(
+            observations,
+            vec![Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
+                    "model-exact-1"
+                )),
+            }],
+            "the opened call reaches no observation, so only the loss carries it"
+        );
+    }
+
+    /// The same stop with no tool call opened reports the other fact, so the
+    /// two are told apart by type rather than by the rendered detail.
+    #[test]
+    fn an_unrecognized_finish_without_tool_calls_reports_none_opened() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+        ]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// `finalize_tools` takes `tool_builders` before it can raise a violation,
+    /// so the decoder's tool state is already empty at that point; the fact
+    /// must survive it.
+    #[test]
+    fn a_violation_raised_after_the_tool_builders_are_taken_still_reports_opened() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\"}]}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        ]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// A sparse first index is rejected by the pre-scan, which runs before any
+    /// builder exists for it — the other point where decoder tool state is
+    /// blind to a call the provider announced.
+    #[test]
+    fn a_violation_raised_before_a_builder_exists_still_reports_opened() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n",
+        ]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// A stream that simply stops carries the negative fact, not an absence.
+    #[test]
+    fn a_stream_lost_before_any_tool_call_reports_none_opened() {
+        let (terminal, _) = drive_to_eof(&[first_chunk()]);
+
+        let TerminalEvidence::BoundaryLoss(loss) = terminal else {
+            panic!("an unterminated stream is boundary loss");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
     }
 
     #[test]

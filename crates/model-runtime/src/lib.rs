@@ -85,8 +85,8 @@ pub use evidence::{
     BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, ProvenUnsentEvidence,
     ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderRequestId,
-    RefusalEvidence, StreamInterruption, TerminalEvidence, TerminalReport, TransportFacts,
-    UnsentCause,
+    RefusalEvidence, StreamInterruption, TerminalEvidence, TerminalReport, ToolCallsAtLoss,
+    TransportFacts, UnsentCause,
 };
 pub use input_count::{InputTokenCountOutcome, ModelInputTokenCounter};
 pub use message::{

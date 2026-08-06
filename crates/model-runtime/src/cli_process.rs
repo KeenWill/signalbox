@@ -1556,12 +1556,19 @@ fn timeout_cause(labels: CliProcessLabels) -> LossCause {
     )))
 }
 
+/// Boundary loss raised before the child produced any decodable output.
+///
+/// The session's decoder is still owned by the caller at every one of these
+/// sites and is deliberately not consulted: no provider byte has been read, so
+/// it holds no view of the response's tool material and the fact is
+/// [`crate::ToolCallsAtLoss::Unobserved`].
 fn pre_exchange_boundary_loss(cause: LossCause) -> TerminalEvidence {
     TerminalEvidence::BoundaryLoss(crate::BoundaryLossEvidence {
         cause,
         exchange: crate::ExchangeFacts::default(),
         reported_model: None,
         finish_reported: None,
+        tool_calls: crate::ToolCallsAtLoss::Unobserved,
         usage: crate::TokenUsage::unreported(),
     })
 }

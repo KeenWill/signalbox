@@ -239,6 +239,22 @@ strings appear only as retained detail inside already-classified variants:
   terminal marker, stream protocol violation) and the partial facts observed
   before the loss.
 
+The partial facts include `ToolCallsAtLoss`: whether a tool call had opened in
+the response material the adapter decoded before the loss — opened, none opened,
+or unobserved. A tool call can open without producing any observation, because a
+provider may announce a call's identity and name and then be cut off before any
+argument fragment while the proposal observation is emitted only on
+finalization; and `LossCause` answers only *how* the exchange was lost. Without
+this fact the distinction is reachable only by reading a rendered violation
+detail, which the terminal-evidence rule above forbids. Like `finish_reported`,
+it reports the decoded prefix and nothing beyond it: none opened says no tool
+call opened in what the adapter decoded, never that the provider sent none.
+`Unobserved` is the honest answer where an adapter is not positioned to know — a
+body that never parsed, a decode abandoned with content blocks unexamined, a
+loss raised by a layer that reads no response material, and every Codex CLI loss
+raised before the agent-message envelope parses, since that adapter's item
+lifecycle carries no tool item.
+
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss
 in both direct HTTP adapters, never silently completed. A finish reason observed

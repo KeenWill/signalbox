@@ -104,6 +104,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text(fixtures::ANSWER)?;
             success_without_stop_reason()?;
         }
+        // A tool call the request never declared. The decoder rejects it
+        // before it becomes a proposal, so no observation and no proposal
+        // index record that the CLI opened one.
+        "undeclared_tool_use" => {
+            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
+            success("tool_use", None)?;
+        }
         "tool_round_trip" => {
             assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
             tool_result(fixtures::TOOL_ID)?;

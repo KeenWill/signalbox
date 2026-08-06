@@ -9,8 +9,9 @@ use signalbox_model_runtime::{
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
     ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
     ProviderReportedModel, ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence,
-    TerminalEvidence, TerminalTextCapture, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
-    provider_json_has_duplicate_members, redact_json, redact_text, validate_provider_json_nesting,
+    TerminalEvidence, TerminalTextCapture, TokenUsage, ToolCallId, ToolCallProposal,
+    ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members, redact_json, redact_text,
+    validate_provider_json_nesting,
 };
 
 use crate::SUPPORTED_CLAUDE_CLI_VERSION;
@@ -46,6 +47,12 @@ pub(crate) struct EventDecoder<C> {
     message_id: Option<ProviderMessageId>,
     native_message_id: Option<String>,
     content: Vec<AssistantPart>,
+    /// Sticky: the CLI announced at least one `tool_use` block. Set before the
+    /// block is validated, so a call this adapter rejects — an empty or
+    /// duplicate id, a name outside the private MCP namespace, an undeclared
+    /// tool — is still recorded as opened. `proposal_indexes` cannot answer
+    /// for those: the rejection returns before the insert.
+    opened_tool_calls: bool,
     proposal_indexes: HashMap<String, usize>,
     result_ids: HashSet<String>,
     emitted_tool_ids: HashSet<String>,
@@ -93,6 +100,7 @@ impl<C: Clone> EventDecoder<C> {
             message_id: None,
             native_message_id: None,
             content: Vec::new(),
+            opened_tool_calls: false,
             proposal_indexes: HashMap::new(),
             result_ids: HashSet::new(),
             emitted_tool_ids: HashSet::new(),
@@ -339,6 +347,7 @@ impl<C: Clone> EventDecoder<C> {
                 });
             }
             AssistantContent::ToolUse { id, name, input } => {
+                self.opened_tool_calls = true;
                 if id.is_empty() || self.proposal_indexes.contains_key(&id) {
                     return Err(DecodeFailure::stream_protocol(
                         "Claude tool_use carries an empty or duplicate id",
@@ -744,12 +753,26 @@ impl<C: Clone> EventDecoder<C> {
             .collect()
     }
 
+    /// Whether a tool call had opened in the events decoded so far.
+    ///
+    /// The adapter classifies every structured CLI event it reads, so the
+    /// negative case is the stated fact rather than an absence.
+    fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
+        if self.opened_tool_calls {
+            ToolCallsAtLoss::Opened
+        } else {
+            ToolCallsAtLoss::NoneOpened
+        }
+    }
+
     fn loss(self, cause: LossCause) -> TerminalEvidence {
+        let tool_calls = self.tool_calls_at_loss();
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause,
             exchange: self.exchange,
             reported_model: self.reported_model,
             finish_reported: self.finish_reported,
+            tool_calls,
             usage: self.usage,
         })
     }

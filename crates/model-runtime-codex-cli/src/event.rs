@@ -10,8 +10,8 @@ use signalbox_model_runtime::{
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
     ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
     ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence, TerminalEvidence, TokenUsage,
-    ToolCallId, ToolCallProposal, ToolName, provider_json_has_duplicate_members, redact_text,
-    trailing_credential_context, validate_provider_json_nesting,
+    ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members,
+    redact_text, trailing_credential_context, validate_provider_json_nesting,
 };
 
 use crate::status::classify_error;
@@ -332,7 +332,7 @@ impl<C: Clone> EventDecoder<C> {
                 provider_failure(self.exchange, self.usage, &message, sink)
             }
             Some(CliTerminal::Completed) => self.completed(sink),
-            None => boundary_loss(
+            None => boundary_loss_before_envelope(
                 self.exchange,
                 self.usage,
                 LossCause::StreamEndedWithoutTerminalMarker {
@@ -363,7 +363,7 @@ impl<C: Clone> EventDecoder<C> {
     }
 
     pub(crate) fn boundary_loss(self, cause: LossCause) -> TerminalEvidence {
-        boundary_loss(self.exchange, self.usage, cause)
+        boundary_loss_before_envelope(self.exchange, self.usage, cause)
     }
 
     pub(crate) fn boundary_loss_unless_provider_failure(
@@ -375,7 +375,9 @@ impl<C: Clone> EventDecoder<C> {
             Some(CliTerminal::Failed(message) | CliTerminal::Unrecoverable(message)) => {
                 provider_failure(self.exchange, self.usage, &message, sink)
             }
-            Some(CliTerminal::Completed) | None => boundary_loss(self.exchange, self.usage, cause),
+            Some(CliTerminal::Completed) | None => {
+                boundary_loss_before_envelope(self.exchange, self.usage, cause)
+            }
         }
     }
 
@@ -403,7 +405,7 @@ impl<C: Clone> EventDecoder<C> {
 
     fn completed(mut self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
         let Some(agent_message) = self.agent_message.take() else {
-            return boundary_loss(
+            return boundary_loss_before_envelope(
                 self.exchange,
                 self.usage,
                 LossCause::ResponseUnintelligible {
@@ -412,7 +414,7 @@ impl<C: Clone> EventDecoder<C> {
             );
         };
         if let Err(error) = validate_provider_json_nesting(agent_message.as_bytes()) {
-            return boundary_loss(
+            return boundary_loss_before_envelope(
                 self.exchange,
                 self.usage,
                 LossCause::ResponseUnintelligible {
@@ -421,7 +423,7 @@ impl<C: Clone> EventDecoder<C> {
             );
         }
         if let Err(error) = reject_duplicate_json_members(&agent_message) {
-            return boundary_loss(
+            return boundary_loss_before_envelope(
                 self.exchange,
                 self.usage,
                 LossCause::StreamProtocolViolation {
@@ -435,7 +437,7 @@ impl<C: Clone> EventDecoder<C> {
         let envelope: ModelEnvelope = match serde_json::from_str(&agent_message) {
             Ok(envelope) => envelope,
             Err(_) => {
-                return boundary_loss(
+                return boundary_loss_before_envelope(
                     self.exchange,
                     self.usage,
                     LossCause::ResponseUnintelligible {
@@ -448,9 +450,11 @@ impl<C: Clone> EventDecoder<C> {
         let mut content = match self.decode_content(&envelope, &mut *sink) {
             Ok(content) => content,
             Err(detail) => {
-                return boundary_loss(
+                return boundary_loss_after_envelope(
                     self.exchange,
                     self.usage,
+                    None,
+                    &envelope,
                     LossCause::ResponseUnintelligible { detail },
                 );
             }
@@ -491,9 +495,11 @@ impl<C: Clone> EventDecoder<C> {
             &envelope.text,
             reported_finish.clone(),
         ) {
-            return boundary_loss(
+            return boundary_loss_after_envelope(
                 self.exchange,
                 self.usage,
+                None,
+                &envelope,
                 LossCause::ResponseUnintelligible { detail },
             );
         }
@@ -532,10 +538,11 @@ impl<C: Clone> EventDecoder<C> {
                 && self.output_contract_name.is_none()
                 && envelope.outcome != EnvelopeOutcome::Refused
             {
-                return boundary_loss_with_finish(
+                return boundary_loss_after_envelope(
                     self.exchange,
                     self.usage,
                     Some(reported_finish),
+                    &envelope,
                     LossCause::ResponseUnintelligible {
                         detail: "streamed response envelope carries no completion material"
                             .to_string(),
@@ -1008,14 +1015,44 @@ fn provider_failure_classified<C: Clone>(
     })
 }
 
-fn boundary_loss(exchange: ExchangeFacts, usage: TokenUsage, cause: LossCause) -> TerminalEvidence {
-    boundary_loss_with_finish(exchange, usage, None, cause)
+/// Boundary loss raised before the response envelope was parsed.
+///
+/// This adapter cannot answer whether a tool call had opened at such a loss.
+/// The CLI's item lifecycle carries no tool item — `ItemDetails` has no tool
+/// variant — and a turn's tool calls exist only inside the agent-message
+/// envelope, which stays unparsed JSON text in `agent_message` until the
+/// terminal event. The fact is therefore [`ToolCallsAtLoss::Unobserved`], not
+/// a claim that none opened.
+fn boundary_loss_before_envelope(
+    exchange: ExchangeFacts,
+    usage: TokenUsage,
+    cause: LossCause,
+) -> TerminalEvidence {
+    boundary_loss_with_finish(exchange, usage, None, ToolCallsAtLoss::Unobserved, cause)
+}
+
+/// Boundary loss raised once the response envelope parsed, so the turn's tool
+/// announcements are in hand and the fact is stated rather than withheld.
+fn boundary_loss_after_envelope(
+    exchange: ExchangeFacts,
+    usage: TokenUsage,
+    finish_reported: Option<FinishReason>,
+    envelope: &ModelEnvelope,
+    cause: LossCause,
+) -> TerminalEvidence {
+    let tool_calls = if envelope.tool_calls.is_empty() {
+        ToolCallsAtLoss::NoneOpened
+    } else {
+        ToolCallsAtLoss::Opened
+    };
+    boundary_loss_with_finish(exchange, usage, finish_reported, tool_calls, cause)
 }
 
 fn boundary_loss_with_finish(
     exchange: ExchangeFacts,
     usage: TokenUsage,
     finish_reported: Option<FinishReason>,
+    tool_calls: ToolCallsAtLoss,
     cause: LossCause,
 ) -> TerminalEvidence {
     TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
@@ -1023,6 +1060,7 @@ fn boundary_loss_with_finish(
         exchange,
         reported_model: None,
         finish_reported,
+        tool_calls,
         usage,
     })
 }
