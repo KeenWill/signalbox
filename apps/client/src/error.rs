@@ -472,6 +472,10 @@ impl fmt::Display for RejectionDisplay {
                 formatter,
                 "delegation_message_conflict request={tool_request_id}"
             ),
+            RejectionDetail::DelegationMessageIdentityCollision { message_id } => write!(
+                formatter,
+                "delegation_message_identity_collision message={message_id}"
+            ),
             RejectionDetail::DelegationEventOrdinalExhausted {
                 spawning_request_id,
                 last,
@@ -732,6 +736,26 @@ mod tests {
                  (delegation_delivery_sequence_exhausted \
                  recipient_session={recipient_session_id} last={})",
                 u64::MAX
+            )
+        );
+    }
+
+    #[test]
+    fn delegation_message_identity_collision_names_the_message() {
+        let message_id = CanonicalUuid::from_uuid(Uuid::from_u128(18));
+        let error = ClientError::remote(
+            ErrorCode::Rejected,
+            "delegation message identity collision".to_owned(),
+            ErrorDetail::rejected(RejectionDetail::DelegationMessageIdentityCollision {
+                message_id,
+            }),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "rejected: delegation message identity collision \
+                 (delegation_message_identity_collision message={message_id})"
             )
         );
     }
