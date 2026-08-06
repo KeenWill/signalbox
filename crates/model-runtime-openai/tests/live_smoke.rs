@@ -15,8 +15,10 @@
 //! `require_decoded_response` below), through the adapter's own types, with
 //! usage reported. It deliberately asserts nothing about answer quality.
 //!
-//! This adapter is not yet wired into signalboxd (unlike the Anthropic
-//! adapter); this smoke validates the crate itself, in isolation.
+//! This adapter is now wired into signalboxd alongside the Anthropic adapter
+//! (`agent/wire-openai-adapter`); this smoke still validates the crate
+//! directly through its own `ModelRuntime` implementation, not through the
+//! daemon composition root.
 //!
 //! No prompt caching: this smoke sends one small, fixed prompt and nothing
 //! else. At that volume a cache write costs more than it could ever recoup,
