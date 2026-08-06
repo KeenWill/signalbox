@@ -68,7 +68,7 @@ const MODEL_VARIABLE: &str = "SIGNALBOX_CLAUDE_SMOKE_MODEL";
 
 const DEFAULT_EXECUTABLE: &str = "claude";
 
-/// The cheapest model the provider catalog offers, and the owner's selection
+/// The cheapest model the provider catalog offers, and the selected default
 /// for this smoke. A compatibility check buys protocol evidence, not answer
 /// quality, so the cheapest model that exercises the whole event stream is the
 /// right one.
