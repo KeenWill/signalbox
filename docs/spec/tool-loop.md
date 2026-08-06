@@ -29,7 +29,7 @@ at this foundation proposal extends the same laws to the runner locus. The
 non-overridable explicit-approval posture is verified through PR #366
 (`agent/exec-tools`). The daemon family inventory and the implemented Git and
 execution names were re-verified against implementation ref
-`c8f881f550b23f9e3ddbb01113a2fc478dc9cd96`; their daemon composition is the
+`c8f881f585b49fb11ae5718cd923029ed0218b5d`; their daemon composition is the
 implementing stack rooted at `agent/daemon-wiring`. This page owns logical tool
 requests, approval policy and decisions, physical tool attempts, result
 admission, intra-turn continuation, crash classification, the compiled registry,
@@ -266,8 +266,8 @@ The daemon composes it from these implemented families:
 - code-host and mapped GitHub pull-request tools;
 - mapped workspace read and mutation tools;
 - mapped conversation tools;
-- session plan tools and the optional `goal_declare` tool;
-- the local Git tools `git_status`, `git_diff`, `git_log`, `git_stage`,
+- session plan tools and `goal_declare`;
+- the mapped local Git tools `git_status`, `git_diff`, `git_log`, `git_stage`,
   `git_create_commit`, `git_branch_create`, and `git_branch_switch`; and
 - the execution tools `sandboxed_exec`, `unsandboxed_exec`, and
   `cargo_diagnostics`.
@@ -278,21 +278,25 @@ classes, bounds, and execution results; this cross-crate contract owns only
 their composition into one daemon catalog and name-directed executor. Mapped
 families are absent when their complete deployment configuration is absent.
 Local Git and execution tools bind the same configured workspace root used by
-the workspace families.
+the workspace families. The mapped composition admits the local Git family only
+with an explicit Git identity and a root that is a direct main repository
+worktree; otherwise startup fails closed rather than advertising a partial
+family. The mapping-free base composition remains available without Git tools.
 
 The implemented `git_push_configured` declaration is not part of the daemon
 registry. No production `GitPushTransport` exists, so no production composition
-can provide the transport authority that tool requires. Adding that authority
-and registering the tool are deferred; the seven local Git tools perform no
-remote operation.
+can provide the transport authority that tool requires. The seven local Git
+tools perform no remote operation. The transport design and any later
+registration remain undecided under
+[Daemon Git push transport](../open-questions.md#scheduling-and-runners).
 
 Runner-side remote tool execution is future and unimplemented. No present
 surface dispatches the daemon registry, the local Git family, or the execution
 family to a runner, and this page defines no runner-side workstation registry,
-placement policy, per-tool runner deadline, or remote-execution protocol. Future
-work remains constrained only by the open runner questions named below; it must
-define its own contract before any of these daemon-local tools can gain a runner
-locus.
+placement policy, per-tool runner deadline, or remote-execution protocol. The
+generic runner foundation supplies no tool inventory or execution path by
+itself; the workstation registry and executor remain undecided under
+[Scheduling and runners](../open-questions.md#scheduling-and-runners).
 
 Each provider operation carries the exact session-executable definition and
 locus snapshot prepared under
@@ -1018,10 +1022,10 @@ requested `history` contains at most 100 chronological events with independent
 preserving those labels.
 
 The merged catalog sorts declarations by checked tool name and rejects
-duplicates during construction. Its executor dispatches only those same four
-preexisting names, the two session-plan names, and the sixteen code-host names;
-disagreement between the advertised catalog and executor is classified as a
-daemon defect.
+duplicates during construction. Its name-directed executor covers the exact
+families composed into that catalog, including mapped families only when their
+complete deployment configuration is present; disagreement between the
+advertised catalog and executor is classified as a daemon defect.
 
 ## Persistence boundaries
 

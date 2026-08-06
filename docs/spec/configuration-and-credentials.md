@@ -47,9 +47,10 @@ process paths, and its ambient-login profile rule are verified against this PR
 (`agent/wire-claude-cli-adapter`), and the `openai` mapping with its pinned
 profile and conditional key path against this PR (`agent/wire-openai-adapter`).
 The composed code-host, pull-request, workspace, and conversation tool families
-are verified through PR #377 (`agent/tools-daemon-wiring`). Placement-scoped
-native conversation reads are verified through PR #400
-(`agent/scoped-visibility-wiring`). Invariant law lives in
+are verified through PR #377 (`agent/tools-daemon-wiring`). The mapped local Git
+identity and repository-root requirements are verified through this PR
+(`agent/daemon-wiring`). Placement-scoped native conversation reads are verified
+through PR #400 (`agent/scoped-visibility-wiring`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are verified through PR #376 (`agent/runner-daemon`).
@@ -509,18 +510,32 @@ four deployment-mapped tool families in the same closed-table style as
 The `[[tool_mappings]]` array may be absent for compatibility with deployments
 that have not enabled the configured composition. In that case production
 preserves the base catalog, including the code-host suite, without constructing
-pull-request, workspace, or conversation dependencies. When the array is present
-it must already be complete: an unknown, missing, or duplicate family; an
-unknown field; any fixed value with another spelling; a relative workspace root;
-or a dependency field on the wrong family is a sanitized configuration failure.
+pull-request, workspace, conversation, or local Git dependencies. When the array
+is present it must already be complete: an unknown, missing, or duplicate
+family; an unknown field; any fixed value with another spelling; a relative
+workspace root; or a dependency field on the wrong family is a sanitized
+configuration failure.
+
+The complete mapped composition also requires one `[git_identity]` table with
+exactly `author_name` and `author_email`. Both are nonempty, at most the Git
+identity bound of 256 UTF-8 bytes, have no leading or trailing whitespace,
+control character, `<`, or `>`, and are injected as both author and committer
+identity; no ambient Git configuration or process environment supplies either
+value. A missing table, unknown field, invalid value, or identity construction
+failure is a sanitized configuration failure.
+
 The root is opened once during tool construction and its pinned authority is
-cloned into both workspace suites, so a nonexistent, non-directory, or
-final-symlink root also fails startup. The GitHub policy admits exactly
-`https://api.github.com:443` for authenticated requests. The code-host
-`change_request_ci_job_log` operation retains the tool-loop-owned exception for
-one credential-free download from its validated, pinned, bounded public HTTPS
-redirect destination; the pull-request suite has no such exception. Model
-arguments cannot widen either admission rule.
+cloned into both workspace suites. The local Git suite independently binds that
+same root and requires a direct main worktree whose `.git` directory is inside
+the root. A nonexistent, non-directory, final-symlink, non-repository, linked,
+or externally administered root therefore fails startup for the complete mapped
+composition. The mapping-free base composition admits no root and constructs no
+Git suite, so existing base-only deployments remain valid. The GitHub policy
+admits exactly `https://api.github.com:443` for authenticated requests. The
+code-host `change_request_ci_job_log` operation retains the tool-loop-owned
+exception for one credential-free download from its validated, pinned, bounded
+public HTTPS redirect destination; the pull-request suite has no such exception.
+Model arguments cannot widen either admission rule.
 
 The optional `[tool_approval_postures]` table maps an exact composed tool name
 to one of `auto`, `delegated`, or `human`. The parser rejects non-string or

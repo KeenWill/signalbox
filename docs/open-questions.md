@@ -270,10 +270,7 @@ creation carrying placement in
 transcript boundary in
 [sessions-and-transcript](spec/sessions-and-transcript.md#semantic-transcript-entries);
 capability-derived tool advertisement in
-[model-call-execution](spec/model-call-execution.md#frontier-rendering); and Git
-subprocess deadlines, full-ref branch validation, unborn-HEAD clones, and honest
-output truncation in
-[tool-loop](spec/tool-loop.md#version-one-workstation-tool-contracts). Why: a
+[model-call-execution](spec/model-call-execution.md#frontier-rendering). Why: a
 decided question is a contract, and a contract binds only where the implementer
 of that contract reads it; a decision restated on this page would be a second
 authority over prose that already owns it, free to drift from the page it
@@ -283,6 +280,17 @@ defers rather than open questions
 ([runner protocol and placement](spec/runner-protocol.md#the-singleton-runner-rule-is-temporary)).
 The questions below remain open.
 
+- **Runner workstation tool execution.** No present runner surface executes a
+  workstation tool. The runner-side registry, its tool inventory and names,
+  placement and sandbox policy, per-tool deadlines, and the executor protocol
+  remain undecided. The generic catalog, declaration, registration, lease, and
+  dispatch vocabulary commits none of those choices. Blocks runner-side tool
+  execution.
+- **Daemon Git push transport.** `git_push_configured` is implemented as a
+  declaration and executor over an injected transport, but no production
+  `GitPushTransport` exists. The remote authority, credential and destination
+  policy, and production transport remain undecided; until they are decided the
+  tool stays absent from the daemon registry. Blocks daemon-side Git push.
 - **Workspace portability between runners.** Moving a session that owns a
   workspace to another runner requires that workspace to exist, or to be
   reconstructible, on the destination. Version one never carries a workspace
@@ -397,18 +405,16 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
 - **Large durable payload architecture.** Tool evidence is bounded by storage
   policy rather than by physics: 1 MiB of result text, 1 MiB of arguments, 4,096
   bytes of error detail, and 4,096 bytes of exact runner value, all held in
-  PostgreSQL `text` columns with no physical ceiling near those values. Version
-  one derives its
-  [process output caps](spec/tool-loop.md#version-one-workstation-tool-contracts)
-  from exactly those bounds, so oversized executor output is truncated honestly
-  before result admission rather than turning a working command into a failure;
-  `ResultTooLarge` remains the admission classification for an admitted result
-  that still exceeds the durable bound. Deliberately delivering larger payloads
-  — files well past 1 MiB — needs its own design: where the bytes live, how a
-  result references rather than embeds them, what the model and each client see,
-  and the abuse and denial-of-service controls a larger bound requires. Recorded
-  as a design question rather than a blocker; the truncating caps remain correct
-  until it is answered.
+  PostgreSQL `text` columns with no physical ceiling near those values. An
+  executor's capture policy must fit those bounds, so oversized executor output
+  is truncated honestly before result admission rather than turning a working
+  command into a failure; `ResultTooLarge` remains the admission classification
+  for an admitted result that still exceeds the durable bound. Deliberately
+  delivering larger payloads — files well past 1 MiB — needs its own design:
+  where the bytes live, how a result references rather than embeds them, what
+  the model and each client see, and the abuse and denial-of-service controls a
+  larger bound requires. Recorded as a design question rather than a blocker;
+  the truncating caps remain correct until it is answered.
 - **Repository configuration outside the model's writable root.** A session's
   `.git` sits inside its writable root, so repository-local Git configuration is
   model-writable, and version one answers that key by key: a forced transport

@@ -33,21 +33,20 @@ execution, and model calls remain unimplemented as labeled below. Remote
 transport and dynamic policy stay under [Open edges](#open-edges).
 
 The additive persisted `AlwaysConfirm` declaration vocabulary is verified
-through PR #366 (`agent/exec-tools`).
+through PR #366 (`agent/exec-tools`). The runner workstation-registry
+reclassification is verified through this PR (`agent/daemon-wiring`).
 
 ## Version-one executable boundary
 
 Version one runs one `signalbox-runner` on the same Ubuntu host and under the
 same effective user as `signalboxd`.
 
-**Committed unimplemented functionality.** No present runner surface provides
-workspace, Git, shell, build, test, or model execution. The committed closed
-runner tool families are:
-
-- workspace file read, write, and exact edit;
-- Git clone, fetch, branch creation, commit, and push;
-- serial shell execution; and
-- serial build/test execution.
+No present runner surface provides workspace, Git, shell, build, test, or model
+execution. A future runner-side workstation registry and executor are
+unimplemented and undecided; the generic runner protocol vocabulary commits no
+tool inventory, tool name, argument contract, or execution deadline. That work
+is recorded under
+[Scheduling and runners](../open-questions.md#scheduling-and-runners).
 
 The tool loop remains serial: the daemon offers at most one live lease for a
 session, the runner executes at most one dispatch at a time, and one result
@@ -418,10 +417,8 @@ are derived from that bound:
 - the message is exact nonempty UTF-8, excludes U+0000, and carries at most
   1,024 UTF-8 bytes, retained with no trimming, case folding, or other
   normalization. A runner whose captured text is longer truncates it to that cap
-  with the same head-and-tail `[signalbox: N bytes omitted]` marker a truncated
-  process stream carries
-  ([tool loop](tool-loop.md#version-one-workstation-tool-contracts)), rather
-  than emitting a frame it knows is inadmissible; and
+  with a head-and-tail `[signalbox: N bytes omitted]` marker rather than
+  emitting a frame it knows is inadmissible; and
 - the payload is one JSON object — `{}` when there is nothing structured to add,
   never absent and never JSON null — whose complete serialized form is at most
   2,048 UTF-8 bytes, whose member names use the code's checked-name syntax, and
@@ -749,15 +746,12 @@ profiles and repository entries read from strict runner configuration. The
 daemon currently admits exactly the `github-runner` credential-profile name,
 with an empty approval policy, so that name confers no execution authority.
 
-**Committed unimplemented functionality.** The execution catalog will have the
-single allowed class `workstation-v1`, place all ten runner-only declarations in
-that class, and define both `WorkspaceRestricted` (`workspace-restricted` on
-configuration and wire surfaces) and `Ambient` (`ambient`) sandbox profiles. The
-runner will explicitly advertise the class, its compiled tools,
-`WorktreePerSession`, and the available sandbox profiles; configuration will not
-add, remove, or rename a class. Both sandbox profiles must be advertised before
-a session can select them. An advertisement asserts availability only, while the
-daemon owns their fixed meaning and approval defaults (INV-042).
+The registration-only catalog remains empty. A future execution catalog,
+capability class, tool inventory, and sandbox-profile composition are
+unimplemented and undecided under
+[Scheduling and runners](../open-questions.md#scheduling-and-runners). The
+existing advertisement and validation vocabulary supplies no execution authority
+by itself (INV-042).
 
 One `RunnerCatalog` domain value contains allowed capability classes, complete
 runner-tool declarations, allowed workspace capabilities, and the two fixed
@@ -783,11 +777,10 @@ sandbox claim and checks each credential-profile claim against that same
 catalog. Dynamic catalog revisioning and reload remain deferred rather than
 being approximated by process-local mutation.
 
-**Committed unimplemented functionality.** Execution support will replace that
-empty catalog with the compiled workstation registry, exact `workstation-v1`
-class, and fixed profile definitions. The runner will independently derive its
-advertised class and tool names from executors compiled into its binary; exact
-registration validation will detect any disagreement.
+Future execution support may replace that empty catalog only after its registry,
+capability class, profiles, and executor contract are decided. Exact
+registration validation will continue to reject any disagreement between the
+daemon-authoritative catalog and a runner advertisement.
 
 Each `RunnerToolDeclaration` contains:
 
@@ -1033,14 +1026,13 @@ key, and whether that repository is empty or populated is a fact about the
 repository rather than a third value the request selects. A session with no
 worktree therefore has no session repository, and it reaches a repository only
 by cloning one into its writable root under a runner-configured repository key
-and the optional credential profile that key's entry names
-([tool loop](tool-loop.md#version-one-workstation-tool-contracts)). Credentials
-and sandbox constrain neither of those: every credential choice composes with
-every workspace choice, and either sandbox profile composes with every
-combination of the other two. Runner capability varies over the same axes: a
-runner may advertise no workspace capability and no repository entry at all, and
-such a runner is a fully usable placement target for every session composition
-that needs neither.
+and the optional credential profile that key's entry names. Credentials and
+sandbox constrain neither of those: every credential choice composes with every
+workspace choice, and either sandbox profile composes with every combination of
+the other two. Runner capability varies over the same axes: a runner may
+advertise no workspace capability and no repository entry at all, and such a
+runner is a fully usable placement target for every session composition that
+needs neither.
 
 The four repository/credential compositions have exact outcomes. No repository
 and no profile performs no repository operation and creates no grant; no
@@ -1493,9 +1485,7 @@ returns the matching ready receipt; conflicting facts fail closed. A clone of an
 empty repository is an ordinary success, not a failure and not a reason to
 remove the destination: the receipt and manifest record an unborn HEAD naming
 the branch the repository's first commit will be born on, and publication
-proceeds exactly as for a populated repository
-([tool loop](tool-loop.md#version-one-workstation-tool-contracts) owns the
-`git_clone` result shape).
+proceeds exactly as for a populated repository.
 
 A placement that requires no worktree and names no working directory still needs
 one writable root, and that private root is a managed workspace rather than
