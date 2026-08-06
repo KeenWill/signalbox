@@ -82,7 +82,12 @@ pub const DISABLED_CLAUDE_CLI_BUILTIN_TOOLS: &[&str] = &[
 ];
 
 /// Claude Code protocol snapshot covered by this adapter's offline fixtures.
-pub const SUPPORTED_CLAUDE_CLI_VERSION: &str = "2.1.220";
+///
+/// Derived by `build.rs` from the exact pin in this crate's `package.json`, so
+/// the manifest is the single source of truth and a Renovate bump carries the
+/// adapter's supported-version claim with it instead of leaving a second
+/// literal to update by hand.
+pub const SUPPORTED_CLAUDE_CLI_VERSION: &str = env!("SIGNALBOX_CLAUDE_CLI_VERSION");
 
 /// Stateless subscription-backed Claude Code CLI adapter.
 pub struct ClaudeCliRuntime {

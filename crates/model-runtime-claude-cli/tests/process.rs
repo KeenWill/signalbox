@@ -489,6 +489,20 @@ async fn success_without_stop_reason_is_protocol_boundary_loss() {
     assert_eq!(result.spawns, 1);
 }
 
+/// The `system/init` version handshake is the adapter's binding between the
+/// derived pin and the process it is actually talking to. Proving it rejects a
+/// drifted version keeps the derivation honest: the scripted successes above
+/// pass because the fake reports the derived version, not because the check is
+/// inert.
+#[tokio::test]
+async fn version_handshake_mismatch_is_protocol_boundary_loss() {
+    let result = execute_scenario("version_drift", OperationShape::Text).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(stream_protocol_detail(&loss.cause).contains(fixtures::DRIFTED_VERSION));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn duplicate_stream_member_is_protocol_boundary_loss() {
     let result = execute_scenario("duplicate_stream_member", OperationShape::Text).await;
