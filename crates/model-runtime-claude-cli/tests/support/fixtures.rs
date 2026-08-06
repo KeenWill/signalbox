@@ -52,6 +52,19 @@ pub const CREDENTIAL_PREFIX_MESSAGE_ID: &str = "message-synthetic-api_";
 pub const MESSAGE_ID_RECONSTRUCTED_CREDENTIAL: &str = "message-synthetic-api_key=zqx7vn4m2p";
 pub const CREDENTIAL_PREFIX_TOOL_ID: &str = "toolu_synthetic_api_";
 pub const TOOL_ID_RECONSTRUCTED_CREDENTIAL: &str = "toolu_synthetic_api_key=zqx7vn4m2p";
+/// The version the adapter's build script derives from the pin manifest, read
+/// here from the same build-script variable the adapter's own constant reads.
+/// The fake CLI reports it in its `system/init` handshake so a Renovate pin
+/// bump moves the offline handshake with the manifest; a literal here would
+/// make the decoder reject every scripted success on the next bump, exactly
+/// the hand-maintained second copy the derivation exists to remove.
+pub const SUPPORTED_VERSION: &str = env!("SIGNALBOX_CLAUDE_CLI_VERSION");
+
+/// A version no manifest pin can carry — the exact-pin gate rejects a
+/// prerelease suffix — so the drift scenario stays a mismatch whatever the
+/// manifest pins.
+pub const DRIFTED_VERSION: &str = "0.0.0-synthetic-drift";
+
 pub const INPUT_TOKENS: u64 = 11;
 pub const OUTPUT_TOKENS: u64 = 7;
 pub const CACHE_CREATION_TOKENS: u64 = 2;
