@@ -24,9 +24,10 @@ the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
 surface in PR #349 (`agent/review-orchestrator-wiring`), and the conversation
 import transport in PR #401 (`agent/import-chunks-protocol`), and the typed
-delegation session-follow events, queued task-origin projection, and delivered
-delegation transcript entries and typed parent-terminated turn projection
-against this PR (`agent/delegation`). This page is the normative boundary
+delegation session-follow events, queued task-origin projection, recipient
+routing, wake exclusion, delivered delegation transcript entries, and typed
+parent-terminated turn projection against this PR
+(`agent/delegation-persistence-schema`). This page is the normative boundary
 between a local client process and `signalboxd`; domain values, PostgreSQL
 records, and wire messages remain distinct representations. The path-scoped
 session-placement wire and terminal-client surface were verified through PR #400
@@ -1690,12 +1691,17 @@ never breaks a cross-relationship tie.
 
 The internal `delegation_wake` outbox event is a scheduler nudge, not a
 session-follow update. Clients observe the durable result or message update that
-caused it, never the wake itself.
+caused it, never the wake itself. Wake emission cardinality and transaction
+ownership belong to the
+[transactional-outbox persistence contract](persistence-protocol.md#transactional-outbox).
 
-The same durable fact may appear once on the parent and once on the child stream
-when both are affected; each event's own `session_id` identifies its stream.
-Cursor ordering, snapshot-first follow, deduplication, and resync rules are
-unchanged. No event embeds or links the child transcript.
+Each typed delegation update has one recipient stream except a stopped or
+cancelled `child_lifecycle_disposition` caused by a parent cascade, which is
+emitted on both the parent and child streams. Spawn, waiting, other lifecycle,
+and result updates go to the parent; messages go to their payload recipient.
+Each event's own `session_id` identifies that stream. Cursor ordering,
+snapshot-first follow, deduplication, and resync rules are unchanged. No event
+embeds or links the child transcript.
 
 `descendant_scope` is required on both `stop_goal` and `stop_turn`. The terminal
 client spells omission as `parent_alone` and `--descendants` as
