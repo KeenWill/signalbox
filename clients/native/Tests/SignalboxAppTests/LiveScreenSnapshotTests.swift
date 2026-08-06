@@ -54,7 +54,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
 
     /// The sheet is snapshotted as its own screen. Compositing it onto the
     /// window that presents it is what the golden capture scripts do; nothing
-    /// in process presents a sheet, and the owner deferred porting that seam.
+    /// in process presents a sheet, and porting that seam is deferred.
     func testSessionCreationSheetContent() async {
         let coordinator = AppCoordinator(
             isMockMode: ScreenshotScenario.newSession.requiresMockService,
