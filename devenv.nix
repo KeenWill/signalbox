@@ -456,7 +456,10 @@ in
         supervisor = sys.argv[2]
         content = config_path.read_text()
         document = tomllib.loads(content)
-        setting = f"exec_supervisor_executable = {json.dumps(supervisor)}"
+        setting = (
+            "exec_supervisor_executable = "
+            f"{json.dumps(supervisor, ensure_ascii=False)}"
+        )
         placeholder = re.compile(
             r'^exec_supervisor_executable = "/usr/local/bin/signalbox-exec-supervisor"\r?$',
             re.MULTILINE,
