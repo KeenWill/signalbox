@@ -970,30 +970,61 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
     expect_file!["fixtures/importer-conformance/golden/adoption-modes.txt"].assert_eq(&rendered);
 }
 
-/// Guards the anchor every `expect_file!` above resolves against.
+/// Reproduces the directory expect-test resolves the goldens above from.
 ///
-/// expect-test joins a relative golden path onto `CARGO_WORKSPACE_DIR`, and
-/// without that variable onto the topmost ancestor of `CARGO_MANIFEST_DIR`
-/// holding a `Cargo.toml` — a walk that escapes a git linked worktree created
-/// inside its origin checkout and silently reads the origin's goldens, so a
-/// corrupted golden inside the worktree fails nothing. `.cargo/config.toml`
-/// pins the variable to the checkout being compiled; this test fails if that
-/// pin is removed or stops taking effect.
+/// expect-test joins a relative `expect_file!` path onto the directory of the
+/// calling source file, and that onto `CARGO_WORKSPACE_DIR` when the variable
+/// is set — otherwise onto the topmost ancestor of `CARGO_MANIFEST_DIR` that
+/// contains a `Cargo.toml`. Both branches are reachable in a legitimate run:
+/// Cargo discovers `.cargo/config.toml` from the working directory's
+/// ancestors rather than the manifest's, so a launch from outside the checkout
+/// (`cargo test --manifest-path <checkout>/Cargo.toml`) sets no variable and
+/// takes the walk. Mirroring the rule rather than requiring the variable is
+/// what lets the guard below hold for every launch.
+fn resolved_golden_directory() -> PathBuf {
+    let manifest = env::var_os("CARGO_MANIFEST_DIR")
+        .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from);
+    let workspace_root = match env::var_os("CARGO_WORKSPACE_DIR") {
+        Some(pinned) => PathBuf::from(pinned),
+        None => manifest
+            .ancestors()
+            .filter(|ancestor| ancestor.join("Cargo.toml").exists())
+            .last()
+            .expect("the crate manifest directory contains a Cargo.toml")
+            .to_path_buf(),
+    };
+    let source_directory = Path::new(file!())
+        .parent()
+        .expect("this source file has a parent directory");
+
+    workspace_root.join(source_directory).join(GOLDEN_DIRECTORY)
+}
+
+/// Guards that the goldens compared above belong to the checkout that was
+/// compiled.
+///
+/// The topmost-ancestor walk escapes a linked worktree whose path lies inside
+/// another checkout: that outer checkout's root is such an ancestor, so the
+/// goldens read are the outer checkout's and corrupting one inside the
+/// worktree fails nothing. `.cargo/config.toml` pins `CARGO_WORKSPACE_DIR` per
+/// checkout to close that, but the pin is not always loaded, and a nested
+/// worktree driven from its outer checkout loads the outer pin. So this
+/// asserts the resolution that actually applies, rather than the presence of
+/// the pin: it passes whenever the goldens resolve inside this checkout, by
+/// either branch, and fails on every escape.
 #[test]
 fn s28_goldens_resolve_inside_the_compiled_checkout() {
-    let workspace_anchored = PathBuf::from(
-        env::var_os("CARGO_WORKSPACE_DIR")
-            .expect("`.cargo/config.toml` sets CARGO_WORKSPACE_DIR for cargo-run processes"),
-    )
-    .join("crates/persistence/tests")
-    .join(GOLDEN_DIRECTORY)
-    .canonicalize()
-    .expect("the workspace-anchored golden directory exists");
-    let manifest_anchored = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let resolved = resolved_golden_directory();
+    let compiled = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join(GOLDEN_DIRECTORY)
         .canonicalize()
-        .expect("the manifest-anchored golden directory exists");
+        .expect("the compiled checkout's golden directory exists");
 
-    assert_eq!(workspace_anchored, manifest_anchored);
+    assert_eq!(
+        resolved.canonicalize().ok(),
+        Some(compiled),
+        "expect-test resolves goldens at {}, outside the compiled checkout",
+        resolved.display()
+    );
 }

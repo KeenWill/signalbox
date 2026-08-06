@@ -21,9 +21,9 @@ signalbox-tool-contract = { path = "../tool-contract" }
 [dev-dependencies]
 tempfile = "3.27.0"
 
-# rustix omits mkfifoat on Apple targets, and the workspace forbids unsafe
-# code, so the FIFO fixture needs a safe wrapper there. Apple-only and
-# test-only: the Linux dependency graph is unchanged.
+# rustix omits mkfifoat on Apple targets, so the FIFO fixture needs a safe
+# wrapper there and nix supplies one. Apple-only and test-only: the Linux
+# dependency graph is unchanged.
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
 nix = { version = "0.31.3", default-features = false, features = ["fs"] }
 
