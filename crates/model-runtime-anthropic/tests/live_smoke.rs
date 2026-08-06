@@ -8,9 +8,12 @@
 //!
 //! What it proves is protocol compatibility, which is what a public API
 //! change actually breaks: `POST /v1/messages` still accepts the request the
-//! adapter builds, and its response still decodes as a completed or refused
-//! terminal outcome through the adapter's own types, with usage reported. It
-//! deliberately asserts nothing about answer quality.
+//! adapter builds, and its response still decodes as a completed outcome, or
+//! as the adapter's downgraded-refusal `ProviderError` shape (buffered
+//! delivery cannot prove a refusal arrived only after the complete upload, so
+//! `AnthropicRuntime::execute` never returns a raw `Refused` — see
+//! `require_decoded_response` below), through the adapter's own types, with
+//! usage reported. It deliberately asserts nothing about answer quality.
 //!
 //! No prompt caching: this smoke sends one small, fixed prompt and nothing
 //! else. At that volume a cache write costs more than it could ever recoup,
@@ -32,13 +35,13 @@
 use signalbox_model_runtime::{
     CancellationSignal, ConversationMessage, CredentialAccess, CredentialAccessError,
     CredentialAccessFailure, CredentialReference, CredentialValue, ExchangeFacts, ModelOperation,
-    ModelRuntime, ModelSettings, PreparationOutcome, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, TokenUsage,
+    ModelRuntime, ModelSettings, PreparationOutcome, ProviderErrorKind, RequestedTarget,
+    ResolvedTarget, TerminalEvidence, TokenUsage,
 };
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 
-/// The environment variable this smoke reads its API key from. Owner-managed
-/// in CI via the `anthropic-smoke` environment; see
+/// The environment variable this smoke reads its API key from. Configured in
+/// CI via the `anthropic-smoke` environment; see
 /// `.github/workflows/anthropic-smoke.yml`.
 const API_KEY_VARIABLE: &str = "ANTHROPIC_API_KEY";
 
@@ -49,6 +52,11 @@ const MODEL: &str = "claude-haiku-4-5";
 /// A trivial prompt keeps the exchange to the smallest billable turn that
 /// still exercises the whole response envelope.
 const PROMPT: &str = "Reply with the single word: ready";
+
+/// A cost cap, not a value Anthropic requires: Haiku completes this trivial
+/// prompt well inside it. Named so a reader does not mistake the bare literal
+/// for a provider-mandated minimum.
+const MAX_OUTPUT_TOKENS: u32 = 64;
 
 #[tokio::test]
 #[ignore = "spends one real Anthropic exchange; run only from the gated compatibility smoke"]
@@ -68,7 +76,7 @@ async fn the_anthropic_api_completes_one_exchange() {
         RequestedTarget::new(MODEL),
         ResolvedTarget::new(MODEL),
         vec![ConversationMessage::user_text(PROMPT)],
-        ModelSettings::new(64),
+        ModelSettings::new(MAX_OUTPUT_TOKENS),
     );
 
     let prepared = require_prepared(
@@ -142,10 +150,23 @@ struct DecodedResponse {
     usage: TokenUsage,
 }
 
-/// Accepts either a completion or a refusal: both are well-formed, decoded
-/// evidence proving the adapter's response contract still holds. Only a
+/// Accepts a completion, or the adapter's own decoded-refusal shape, as
+/// well-formed evidence that the response contract still holds. Only a
 /// terminal outcome the adapter never decoded (a transport, protocol, or
-/// provider-error class) fails this gate.
+/// genuine provider-error class) fails this gate.
+///
+/// `AnthropicRuntime::execute` never returns a raw `TerminalEvidence::Refused`
+/// to its caller: a fully buffered request exposes no independent proof that
+/// the response arrived only after the complete upload, so `execute`
+/// unconditionally downgrades a decoded refusal into
+/// `ProviderError { kind: Unrecognized, .. }` from the same HTTP 200 exchange
+/// before returning (`without_unproven_refusal`, runtime.rs:716,729-742; the
+/// "Refusal downgrade" rule in `docs/spec/runtime-substrate.md`). Matching the
+/// dead `Refused` arm here would make this smoke fail a correctly decoded
+/// refusal, so this recognizes what the adapter actually returns instead. The
+/// `http_status == 200` guard keeps this arm from also swallowing a genuine
+/// unrecognized 4xx/5xx provider error, which the assertions below must still
+/// fail on.
 #[track_caller]
 fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
     match evidence {
@@ -153,10 +174,15 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
             exchange: completed.exchange,
             usage: completed.usage,
         },
-        TerminalEvidence::Refused(refused) => DecodedResponse {
-            exchange: refused.exchange,
-            usage: refused.usage,
-        },
+        TerminalEvidence::ProviderError(error)
+            if error.kind == ProviderErrorKind::Unrecognized
+                && error.exchange.http_status == Some(200) =>
+        {
+            DecodedResponse {
+                exchange: error.exchange,
+                usage: error.usage,
+            }
+        }
         // Adapter-produced evidence is already credential-shape redacted, so
         // printing it here cannot surface credential material.
         other => panic!("the Anthropic API returned no decoded response: {other:?}"),
