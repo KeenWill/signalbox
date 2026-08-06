@@ -281,11 +281,12 @@ defers rather than open questions
 The questions below remain open.
 
 - **Runner workstation tool execution.** No present runner surface executes a
-  workstation tool. The runner-side registry, its tool inventory and names,
-  placement and sandbox policy, per-tool deadlines, and the executor protocol
-  remain undecided. The generic catalog, declaration, registration, lease, and
-  dispatch vocabulary commits none of those choices. Blocks runner-side tool
-  execution.
+  workstation tool. The runner-side registry's exact inventory, names, and
+  per-tool argument, effect, bound, and deadline contracts remain undecided. The
+  committed unimplemented runner protocol remains the owner of placement,
+  sandbox, approval, workspace, credential, and generic dispatch behavior; this
+  question cannot redefine those constraints. Blocks runner-side tool registry
+  and executor implementation.
 - **Daemon Git push transport.** `git_push_configured` is implemented as a
   declaration and executor over an injected transport, but no production
   `GitPushTransport` exists. The remote authority, credential and destination
