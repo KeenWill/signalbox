@@ -749,7 +749,6 @@ impl PostgresModelCallRepository {
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_session(&mut transaction, session).await?;
             if locked_delegation_logical_terminal(&mut transaction, session, observation.call())
                 .await?
             {
@@ -1083,13 +1082,15 @@ impl PostgresModelCallRepository {
     ) -> Result<RetainedModelCallObservationStatus, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_session(&mut transaction, session).await?;
             let correlation = observation.correlation();
             if correlation.session() != session {
                 return Err(ModelCallRepositoryError::InvalidTransition(
                     "retained observation session changed",
                 ));
             }
+            let delegation_logically_terminal =
+                locked_delegation_logical_terminal(&mut transaction, session, observation.call())
+                    .await?;
             let stored_row = sqlx::query(
                 "SELECT session_id, turn_id, turn_attempt_id,
                         resolved_provider_model_identity_id, context_frontier_id,
@@ -1118,9 +1119,7 @@ impl PostgresModelCallRepository {
                     "retained observation correlation changed",
                 ));
             }
-            if locked_delegation_logical_terminal(&mut transaction, session, observation.call())
-                .await?
-            {
+            if delegation_logically_terminal {
                 return Ok(RetainedModelCallObservationStatus::DiscardedByLogicalTerminal);
             }
             match (stored.state.as_str(), stored.disposition.as_deref()) {
@@ -1530,17 +1529,15 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
     }
 }
 
-/// Locks the delegated relationship owning this call's turn, then reports
-/// whether a cascade already delivered that turn's logical terminal.
+/// Locks the terminal-observation frontier, then reports whether a cascade
+/// already delivered this delegated turn's logical terminal.
 ///
-/// The cascade and a terminal-observation transaction share no lock until the
-/// relationship lock this takes, so reading the logical terminal before taking
-/// it decides on a snapshot the cascade can invalidate a moment later: the
-/// observation would then terminalize a turn whose stop was already delivered,
-/// replacing the relationship result the cascade recorded. Taking the lock
-/// first makes the answer authoritative for the rest of the transaction, for
-/// every terminal outcome kind — including the tool-round arm, which takes no
-/// relationship lock of its own.
+/// An ordinary call retains the model-execution scheduler lock. A delegated
+/// call instead shares peer-message ordering: canonical endpoint sessions,
+/// canonical endpoint schedulers, then the relationship. Besides making the
+/// logical-terminal read authoritative, this prevents a message transaction
+/// holding the parent session from waiting on a child scheduler held by an
+/// observation that is itself waiting for that parent session.
 async fn locked_delegation_logical_terminal(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1557,10 +1554,58 @@ async fn locked_delegation_logical_terminal(
     .fetch_optional(&mut *connection)
     .await?;
     let Some(turn) = turn else {
+        lock_session(connection, session).await?;
         return Ok(false);
     };
-    lock_delegated_child_result_frontier(connection, session, TurnId::from_uuid(turn)).await?;
+    let relation = sqlx::query_as::<_, (Uuid, Uuid)>(
+        crate::lock_inventory::DELEGATION_TERMINAL_RELATION_IDENTITY,
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some((spawning_request, parent)) = relation else {
+        lock_session(connection, session).await?;
+        return Ok(false);
+    };
+    let parent = session_id_from_uuid(parent);
+    let (first, second) = crate::lock_inventory::ordered_session_pair(session, parent);
+    lock_delegation_terminal_session(connection, first).await?;
+    if second != first {
+        lock_delegation_terminal_session(connection, second).await?;
+    }
+    lock_session(connection, first).await?;
+    if second != first {
+        lock_session(connection, second).await?;
+    }
+    let locked =
+        sqlx::query_as::<_, (Uuid, Uuid)>(crate::lock_inventory::DELEGATION_TERMINAL_RELATION)
+            .bind(session_id_to_uuid(session))
+            .bind(turn)
+            .fetch_optional(&mut *connection)
+            .await?;
+    if locked != Some((spawning_request, session_id_to_uuid(parent))) {
+        return Err(ModelCallCorruption::Inconsistent(
+            "delegated terminal relationship changed while locking",
+        )
+        .into());
+    }
     model_call_is_delegation_logically_terminal(connection, session, call).await
+}
+
+async fn lock_delegation_terminal_session(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<(), ModelCallRepositoryError> {
+    let locked = sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::DELEGATION_DELIVERY_SESSION)
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(connection)
+        .await?;
+    if locked.is_some_and(|locked| session_id_from_uuid(locked) == session) {
+        Ok(())
+    } else {
+        Err(ModelCallCorruption::Missing("delegated terminal endpoint session").into())
+    }
 }
 
 async fn model_call_is_delegation_logically_terminal(
