@@ -131,9 +131,12 @@ jobs:
       - name: Run native snapshot suite (report only)
         id: snapshots
         continue-on-error: true
-        run: clients/native/scripts/test-xcode.sh
+        # Not test-xcode.sh with a suite named here: test-snapshots.sh takes
+        # both the suite and the simulator from scripts/lib/snapshots.sh, which
+        # is the same owner the recording script reads, so a golden is never
+        # checked against a model it was not recorded against.
+        run: clients/native/scripts/test-snapshots.sh
         env:
-          SIGNALBOX_NATIVE_ONLY_TESTING: SignalboxAppTests/LiveScreenSnapshotTests
           SIGNALBOX_NATIVE_ENABLE_CODE_COVERAGE: "YES"
           SIGNALBOX_NATIVE_TEST_RESULT_BUNDLE_PATH: ${{ runner.temp }}/native-snapshots/SignalboxNative-Snapshots.xcresult
       # The library attaches the reference, the failed rendering, and their

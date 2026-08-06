@@ -63,17 +63,27 @@ private struct DelayedContentView: View {
     }
 }
 
-/// Fills the canvas with a shade that never repeats, so no two renderings the
+/// Moves a bar down the canvas, one point per tick, so no two renderings the
 /// settle gate compares can match by coincidence.
+///
+/// Monotone rather than cyclic, and that is the point: a shade that wrapped
+/// every twentieth tick could return to an earlier value between two samples
+/// taken `settleInterval` apart, the gate would accept it, and the expected
+/// failure would go unrecorded on whichever run the scheduler happened to
+/// delay. A position that only ever increases cannot come back within the
+/// canvas, which is far longer than any timeout this suite passes.
 private struct ContinuouslyChangingView: View {
-    @State private var shade = 0.0
+    @State private var tick = 0
 
     var body: some View {
-        Color(white: shade)
+        Color.black
+            .frame(height: 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .offset(y: Double(tick))
             .task {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .milliseconds(20))
-                    shade = (shade + 0.05).truncatingRemainder(dividingBy: 1)
+                    tick += 1
                 }
             }
     }

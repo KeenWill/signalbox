@@ -21,9 +21,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/scripts/lib/simulator.sh"
+# shellcheck source=/dev/null
+source "$ROOT/scripts/lib/snapshots.sh"
 
 RECORD_MODE="${SIGNALBOX_NATIVE_SNAPSHOT_RECORD:-all}"
-SNAPSHOT_SUITE="SignalboxAppTests/LiveScreenSnapshotTests"
+SNAPSHOT_SUITE="$SIGNALBOX_NATIVE_SNAPSHOT_SUITE"
 DERIVED_DATA_PATH="${SIGNALBOX_NATIVE_DERIVED_DATA_PATH:-$ROOT/.derivedData}"
 RESULT_BUNDLE_PATH="$DERIVED_DATA_PATH/Logs/Test/SignalboxNative-Record.xcresult"
 
@@ -41,17 +43,11 @@ all | missing | failed | never) ;;
 	;;
 esac
 
-if [[ -n "${XCODE_DESTINATION:-}" ]]; then
-	DESTINATION="$XCODE_DESTINATION"
-else
-	DEVICE_ID="$(simulator_resolve_iphone_ids "$SIMULATOR_DEFAULT_MIN_IOS_VERSION" | head -n 1)"
-	if [[ -z "$DEVICE_ID" ]]; then
-		echo "No available iPhone simulator found for iOS $SIMULATOR_DEFAULT_MIN_IOS_VERSION or newer. Set XCODE_DESTINATION to a valid xcodebuild destination."
-		exit 1
-	fi
-	echo "Using newest available iPhone simulator for iOS $SIMULATOR_DEFAULT_MIN_IOS_VERSION or newer: $DEVICE_ID"
-	DESTINATION="$(simulator_xcode_destination_for_id "$DEVICE_ID")"
-fi
+# The same destination scripts/test-snapshots.sh verifies against, from the
+# same owner: a reference recorded against one model and checked against
+# another reports a difference nobody introduced.
+DESTINATION="$(snapshot_xcode_destination)"
+echo "Recording $SNAPSHOT_SUITE against $DESTINATION"
 
 BUILD_CMD=(
 	xcodebuild
