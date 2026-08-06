@@ -230,7 +230,7 @@ impl EvalFamily {
     const fn model(self) -> &'static str {
         match self {
             Self::Git => GIT_MODEL,
-            Self::Workspace | Self::Web => DEFAULT_MODEL,
+            Self::Workspace | Self::Web | Self::Exec => DEFAULT_MODEL,
         }
     }
 
