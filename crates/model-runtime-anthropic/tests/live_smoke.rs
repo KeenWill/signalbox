@@ -9,11 +9,18 @@
 //! What it proves is protocol compatibility, which is what a public API
 //! change actually breaks: `POST /v1/messages` still accepts the request the
 //! adapter builds, and its response still decodes as a completed outcome, or
-//! as the adapter's downgraded-refusal `ProviderError` shape (buffered
-//! delivery cannot prove a refusal arrived only after the complete upload, so
-//! `AnthropicRuntime::execute` never returns a raw `Refused` — see
-//! `require_decoded_response` below), through the adapter's own types, with
-//! usage reported. It deliberately asserts nothing about answer quality.
+//! as the adapter's downgraded-refusal `ProviderError` shape (this transport
+//! exposes no independent proof that a response arrived only after the
+//! complete request was sent, so `AnthropicRuntime::execute` never returns a
+//! raw `Refused` — see `require_decoded_response` below), through the
+//! adapter's own types, with usage reported. It deliberately asserts nothing
+//! about answer quality.
+//!
+//! Streamed delivery: the operation requests `DeliveryMode::Streamed`,
+//! matching the only delivery mode production ever selects
+//! (`RuntimeModelCallProvider` in `crates/model-provider-runtime` sets it
+//! unconditionally), so this smoke exercises the deployed SSE decoder rather
+//! than the buffered path production never uses.
 //!
 //! No prompt caching: this smoke sends one small, fixed prompt and nothing
 //! else. At that volume a cache write costs more than it could ever recoup,
@@ -38,11 +45,13 @@ use signalbox_model_runtime::{
     LossCause, NativeErrorFacts, PreparationDefect, PreparationFailure, ProvenUnsentEvidence,
     ProviderErrorEvidence, RefusalEvidence, UnsentCause,
 };
+use std::time::Duration;
+
 use signalbox_model_runtime::{
     CancellationSignal, ConversationMessage, CredentialAccess, CredentialAccessError,
-    CredentialAccessFailure, CredentialReference, CredentialValue, ExchangeFacts, ModelOperation,
-    ModelRuntime, ModelSettings, PreparationOutcome, ProviderErrorKind, RequestedTarget,
-    ResolvedTarget, TerminalEvidence, TokenUsage,
+    CredentialAccessFailure, CredentialReference, CredentialValue, DeliveryMode, ExchangeFacts,
+    ModelOperation, ModelRuntime, ModelSettings, PreparationOutcome, ProviderErrorKind,
+    RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
 };
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 
@@ -64,19 +73,37 @@ const PROMPT: &str = "Reply with the single word: ready";
 /// for a provider-mandated minimum.
 const MAX_OUTPUT_TOKENS: u32 = 64;
 
+/// Bounds the one exchange well inside the workflow job's 10-minute budget.
+/// `AnthropicConfig::new()`'s own default (10 minutes) leaves no headroom for
+/// dependency setup and compilation ahead of it in that same job: if the
+/// provider ever stalls near the adapter's default, GitHub's job timeout
+/// fires first and kills the job before the adapter's own typed timeout
+/// evidence can be produced. A trivial one-word exchange healthy enough to
+/// prove compatibility completes in seconds; two minutes is generous
+/// slack, not a tight bound.
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+
+/// Applies this smoke's timeout policy on top of the adapter's documented
+/// defaults.
+fn anthropic_config() -> AnthropicConfig {
+    let mut config = AnthropicConfig::new();
+    config.exchange_timeout = EXCHANGE_TIMEOUT;
+    config
+}
+
 #[tokio::test]
 #[ignore = "spends one real Anthropic exchange; run only from the gated compatibility smoke"]
 async fn the_anthropic_api_completes_one_exchange() {
     let credential_reference = CredentialReference::new("anthropic-smoke");
     let runtime = AnthropicRuntime::new(
-        AnthropicConfig::new(),
+        anthropic_config(),
         EnvironmentCredential {
             variable: API_KEY_VARIABLE,
         },
     )
     .expect("smoke runtime configuration is valid");
 
-    let operation = ModelOperation::new(
+    let mut operation = ModelOperation::new(
         "anthropic-smoke".to_string(),
         credential_reference,
         RequestedTarget::new(MODEL),
@@ -84,6 +111,10 @@ async fn the_anthropic_api_completes_one_exchange() {
         vec![ConversationMessage::user_text(PROMPT)],
         ModelSettings::new(MAX_OUTPUT_TOKENS),
     );
+    // Matches the only delivery mode production ever selects (see the module
+    // doc comment); a buffered exchange here would prove nothing about the
+    // deployed SSE decoder.
+    operation.delivery = DeliveryMode::Streamed;
 
     let prepared = require_prepared(
         runtime
@@ -153,14 +184,18 @@ struct DecodedResponse {
 /// to its caller: a fully buffered request exposes no independent proof that
 /// the response arrived only after the complete upload, so `execute`
 /// unconditionally downgrades a decoded refusal into
-/// `ProviderError { kind: Unrecognized, .. }` from the same HTTP 200 exchange
-/// before returning (`without_unproven_refusal`, runtime.rs:716,729-742; the
-/// "Refusal downgrade" rule in `docs/spec/runtime-substrate.md`). Matching the
-/// dead `Refused` arm here would make this smoke fail a correctly decoded
-/// refusal, so this recognizes what the adapter actually returns instead. The
-/// `http_status == 200` guard keeps this arm from also swallowing a genuine
-/// unrecognized 4xx/5xx provider error, which the assertions below must still
-/// fail on.
+/// `ProviderError { kind: Unrecognized, native: { error_token: Some("refusal"), .. }, .. }`
+/// from the same HTTP 200 exchange before returning (`without_unproven_refusal`,
+/// runtime.rs:716,729-742; the "Refusal downgrade" rule in
+/// `docs/spec/runtime-substrate.md`). Matching the dead `Refused` arm here
+/// would make this smoke fail a correctly decoded refusal, so this recognizes
+/// what the adapter actually returns instead. The guard checks all three
+/// facts `without_unproven_refusal` sets — `kind`, `http_status == 200`, and
+/// `native.error_token == "refusal"` — not just the first two: a future
+/// HTTP-200 `Unrecognized` provider error reached some other way would share
+/// `kind` and status but not this exact token, and must still fail as a
+/// genuine, undecoded provider error rather than being waved through as a
+/// refusal it never was.
 #[track_caller]
 fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
     match evidence {
@@ -170,7 +205,8 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
         },
         TerminalEvidence::ProviderError(error)
             if error.kind == ProviderErrorKind::Unrecognized
-                && error.exchange.http_status == Some(200) =>
+                && error.exchange.http_status == Some(200)
+                && error.native.error_token.as_deref() == Some("refusal") =>
         {
             DecodedResponse {
                 exchange: error.exchange,
@@ -373,6 +409,23 @@ mod require_decoded_response_tests {
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
+    fn unrecognized_200_provider_error_without_the_refusal_token_panics() {
+        // Same `kind` and the same HTTP 200 status as the accepted
+        // downgraded-refusal shape, but missing `without_unproven_refusal`'s
+        // stable discriminator: a hypothetical future HTTP-200 Unrecognized
+        // provider error reached some other way must not be waved through as
+        // a refusal it never was.
+        let _ = require_decoded_response(TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            exchange: exchange(200),
+            reported_model: None,
+            kind: ProviderErrorKind::Unrecognized,
+            native: NativeErrorFacts::default(),
+            usage: usage(),
+        }));
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
     fn recognized_provider_error_panics() {
         let _ = require_decoded_response(TerminalEvidence::ProviderError(ProviderErrorEvidence {
             exchange: exchange(401),
@@ -423,19 +476,19 @@ mod require_decoded_response_tests {
 mod assert_well_formed_response_tests {
     use super::*;
 
-    fn decoded(
-        http_status: u16,
-        input_tokens: Option<u64>,
-        output_tokens: Option<u64>,
-    ) -> DecodedResponse {
+    /// The well-formed baseline every test perturbs by exactly one named
+    /// field, per docs/agents/testing-style.md rule 4 — never three
+    /// same-typed positional knobs a reader must cross-reference against a
+    /// definition to tell apart.
+    fn well_formed() -> DecodedResponse {
         DecodedResponse {
             exchange: ExchangeFacts {
-                http_status: Some(http_status),
+                http_status: Some(200),
                 ..ExchangeFacts::default()
             },
             usage: TokenUsage {
-                input_tokens,
-                output_tokens,
+                input_tokens: Some(3),
+                output_tokens: Some(1),
                 ..TokenUsage::default()
             },
         }
@@ -443,26 +496,32 @@ mod assert_well_formed_response_tests {
 
     #[test]
     fn positive_usage_passes() {
-        assert_well_formed_response(&decoded(200, Some(3), Some(1)));
+        assert_well_formed_response(&well_formed());
     }
 
     #[test]
     fn present_zero_output_tokens_passes() {
         // The exact edge both accept paths can legitimately report: a
         // present-but-zero output count is not a positivity requirement.
-        assert_well_formed_response(&decoded(200, Some(3), Some(0)));
+        let mut decoded = well_formed();
+        decoded.usage.output_tokens = Some(0);
+        assert_well_formed_response(&decoded);
     }
 
     #[test]
     #[should_panic(expected = "documented success status")]
     fn non_200_status_panics() {
-        assert_well_formed_response(&decoded(500, Some(3), Some(1)));
+        let mut decoded = well_formed();
+        decoded.exchange.http_status = Some(500);
+        assert_well_formed_response(&decoded);
     }
 
     #[test]
     #[should_panic(expected = "input usage")]
     fn missing_input_tokens_panics() {
-        assert_well_formed_response(&decoded(200, None, Some(1)));
+        let mut decoded = well_formed();
+        decoded.usage.input_tokens = None;
+        assert_well_formed_response(&decoded);
     }
 
     #[test]
@@ -470,13 +529,17 @@ mod assert_well_formed_response_tests {
     fn zero_input_tokens_panics() {
         // Unlike output, input tokens must be positive: a request that
         // reached the model always billed at least one.
-        assert_well_formed_response(&decoded(200, Some(0), Some(1)));
+        let mut decoded = well_formed();
+        decoded.usage.input_tokens = Some(0);
+        assert_well_formed_response(&decoded);
     }
 
     #[test]
     #[should_panic(expected = "output usage")]
     fn missing_output_tokens_panics() {
-        assert_well_formed_response(&decoded(200, Some(3), None));
+        let mut decoded = well_formed();
+        decoded.usage.output_tokens = None;
+        assert_well_formed_response(&decoded);
     }
 }
 
