@@ -1,5 +1,18 @@
 //! Reviewed SQL statements that acquire explicit persistence row locks.
 
+use signalbox_domain::SessionId;
+
+pub(crate) const fn ordered_session_pair(
+    first: SessionId,
+    second: SessionId,
+) -> (SessionId, SessionId) {
+    if first.as_uuid().as_u128() <= second.as_uuid().as_u128() {
+        (first, second)
+    } else {
+        (second, first)
+    }
+}
+
 pub(crate) const START_ELIGIBLE_TURN: &str = "SELECT
             EXISTS (
                 SELECT 1

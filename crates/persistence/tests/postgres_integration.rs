@@ -1182,6 +1182,50 @@ async fn s17_inv010_inv012_wait_replay_rejects_cross_wired_stored_turn()
     Ok(())
 }
 
+/// S18 / INV-010: relationship reconstitution rejects action payloads that a
+/// stored background policy is not permitted to carry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_background_policy_reconstitution_rejects_action_payloads()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
+    sqlx::query("ALTER TABLE session_delegation DROP CONSTRAINT session_delegation_policy_shape")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_delegation DISABLE TRIGGER session_delegation_is_append_only")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_delegation
+            SET on_parent_stopped = 'stop'
+          WHERE spawning_tool_request_id = $1",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = SessionDelegationRepository::new(pool.clone())
+        .record_wait(request, &dispatch)
+        .await
+        .expect_err("background action payload is durable corruption");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("background policy shape")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S17 / INV-005 / INV-032: foreground registration ends the physical await
 /// attempt and parks the same turn without retaining a live attempt.
 #[tokio::test(flavor = "multi_thread")]
