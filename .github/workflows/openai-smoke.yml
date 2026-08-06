@@ -39,6 +39,17 @@ on:
     branches: [main]
     paths:
       - "crates/model-runtime-openai/**"
+      - ".github/workflows/openai-smoke.yml"
+
+# Superseded pull-request runs release their slots against the public
+# concurrency cap. Every other event takes a group of its own: sharing one
+# group would let a third run cancel a second still pending behind the first,
+# which `cancel-in-progress: false` does not prevent.
+concurrency:
+  group: >-
+    openai-smoke-${{ github.event_name == 'pull_request'
+    && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions: {}
 
@@ -79,14 +90,15 @@ jobs:
             "${BASE_SHA}...${HEAD_SHA}" > "${changed_paths}"
           crate_changed=false
           while IFS= read -r -d '' path; do
-            if [[ "${path}" == crates/model-runtime-openai/* ]]; then
+            if [[ "${path}" == crates/model-runtime-openai/* \
+              || "${path}" == ".github/workflows/openai-smoke.yml" ]]; then
               crate_changed=true
               break
             fi
           done < "${changed_paths}"
           if [[ "${crate_changed}" != "true" ]]; then
             echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
-            echo "Not applicable: crates/model-runtime-openai/** did not change."
+            echo "Not applicable: neither crates/model-runtime-openai/** nor this workflow's own definition changed."
             exit 0
           fi
 
@@ -124,13 +136,23 @@ jobs:
         with:
           cache-on-failure: true
           key: openai-smoke
-      # Compile the smoke test binary before the credential is read anywhere
-      # in this job, so no repository build script or procedural macro
-      # executes while the API key is in scope.
+      # Compile before the credential exists in any step environment, and
+      # capture the resulting binary path: the credentialed step below
+      # executes that binary directly rather than invoking Cargo a second
+      # time, so no further build-freshness check (and therefore no build
+      # script or procedural macro) ever runs while the key is readable, even
+      # if this crate someday tracks OPENAI_API_KEY through `option_env!` or a
+      # build script's `rerun-if-env-changed`.
       - name: Build the smoke test binary
-        run: >-
-          cargo test --no-fail-fast -p signalbox-model-runtime-openai
-          --test live_smoke --no-run
+        id: build
+        run: |
+          set -euo pipefail
+          executable=$(cargo test --no-fail-fast -p signalbox-model-runtime-openai \
+            --test live_smoke --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' \
+            | tail -n1)
+          test -n "${executable}" || { echo "::error::no test executable produced"; exit 1; }
+          echo "executable=${executable}" >> "${GITHUB_OUTPUT}"
       # The key reaches only this step's environment — never argv, never
       # echoed, never exported to an earlier or later step.
       - name: Run one live exchange through the adapter
@@ -140,11 +162,10 @@ jobs:
           set -euo pipefail
           test -n "${OPENAI_API_KEY}" \
             || { echo "the openai-smoke environment provides no API key"; exit 1; }
-          test_name=the_openai_api_completes_one_exchange
           result="${RUNNER_TEMP}/openai-smoke-live-result"
-          cargo test --color never --no-fail-fast \
-            -p signalbox-model-runtime-openai --test live_smoke -- \
-            --ignored --exact "${test_name}" 2>&1 | tee "${result}"
+          "${{ steps.build.outputs.executable }}" \
+            --ignored --exact the_openai_api_completes_one_exchange \
+            2>&1 | tee "${result}"
           passed_count=$(sed -n \
             's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' \
             "${result}")

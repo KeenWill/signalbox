@@ -434,6 +434,68 @@ fast serving identity consumes the fast toggle during preparation, so neither
 the `speed` field nor its beta header is emitted for the counting or generation
 request in addition to that alternate target.
 
+### Compatibility smoke
+
+Both direct HTTP adapters carry a gated live compatibility smoke
+(`.github/workflows/anthropic-smoke.yml`, `.github/workflows/openai-smoke.yml`)
+that spends one real exchange against the cheapest model each provider currently
+advertises — `claude-haiku-4-5` for Anthropic, `gpt-5-nano` for OpenAI — run
+through this crate's own `ModelRuntime` implementation with a small fixed prompt
+and no provider-side prompt caching: at one exchange per gated run a cache write
+is never amortized by a later read, so caching would raise the cost of the run
+it is meant to cheapen. Unlike the Codex CLI smoke, there is no locally
+installed executable and therefore no version to verify beforehand; each adapter
+targets the provider's stable public API directly, so spending the one exchange
+is the whole smoke rather than a second gate behind a credential-free version
+probe.
+
+The smoke asserts only the protocol surfaces a provider-side change would move:
+a definitive HTTP 200, and the response decoding as `Completed` evidence, or as
+the adapter's downgraded-refusal `ProviderError` shape (`kind: Unrecognized`
+from that same 200 exchange — see the refusal-downgrade rule above; a raw
+`Refused` never leaves either adapter) — either way with provider-reported input
+and output usage present — and nothing about answer quality.
+
+The workflow reports on every pull request without a path filter. GitHub
+independently withholds secrets from ordinary fork `pull_request` runs
+regardless of environment policy. Its secretless eligibility job then checks the
+complete pull request file list: no change to the adapter crate or to the
+workflow's own definition is an immediate success; for a qualifying change it
+compares `github.event.pull_request.head.repo.full_name` with
+`github.repository`, fails a mismatch with a manual-dispatch instruction, and
+admits the live job only for a same-repository head. The credentialed job
+condition independently repeats that comparison. A final always-running job
+folds the eligibility and conditional live results into the required check, so a
+skipped or failed required smoke cannot appear green; for a pull request that
+requires the smoke, the aggregate also repeats the same-repository comparison.
+Manual dispatch remains available, and a path-filtered push to `main` — gated on
+the adapter crate and the workflow file itself, so an edit to the workflow's own
+definition cannot land unexercised — reruns the smoke after merge.
+
+The `anthropic-smoke` and `openai-smoke` environments are each configured for
+all branches, for the same reason the `codex-smoke` environment is: GitHub
+evaluates an environment used by `pull_request` against `GITHUB_REF`, the
+synthetic merge ref rather than the head branch. That setting admits fork and
+same-repository merge refs alike and supplies no security boundary. Forks are
+excluded, in order, by GitHub secret withholding and the three explicit
+repository-name comparisons above.
+
+Each workflow's own concurrency is two-tiered, matching the Codex smoke's shape:
+a workflow-level group keyed to the pull request ref (or the run id for every
+other event), so an unrelated concurrent run can never evict a whole run still
+in flight, and a job-level group fixed to the smoke job alone (`anthropic-smoke`
+/ `openai-smoke`) that serializes the one behavior that actually spends — a real
+provider exchange — without claiming to protect a third overlapping trigger's
+queued slot in that inner group from eviction.
+
+The credential (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) is referenced only in
+the step that spends the exchange, scoped to that step's environment alone,
+never echoed and never passed in argv. The crate is compiled before that step
+runs, and the compiled test binary's path is captured from that credential-free
+build and invoked directly rather than through a second `cargo test`, so no
+build-freshness check — and therefore no build script or procedural macro — ever
+runs while the key is readable.
+
 ## Codex CLI provider adapter
 
 `signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event

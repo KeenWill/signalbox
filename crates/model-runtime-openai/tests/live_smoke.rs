@@ -9,8 +9,11 @@
 //! What it proves is protocol compatibility, which is what a public API
 //! change actually breaks: `POST /v1/chat/completions` still accepts the
 //! request the adapter builds, and its response still decodes as a completed
-//! or refused terminal outcome through the adapter's own types, with usage
-//! reported. It deliberately asserts nothing about answer quality.
+//! outcome, or as the adapter's downgraded-refusal `ProviderError` shape
+//! (buffered delivery cannot prove a refusal arrived only after the complete
+//! upload, so `OpenAiRuntime::execute` never returns a raw `Refused` — see
+//! `require_decoded_response` below), through the adapter's own types, with
+//! usage reported. It deliberately asserts nothing about answer quality.
 //!
 //! This adapter is not yet wired into signalboxd (unlike the Anthropic
 //! adapter); this smoke validates the crate itself, in isolation.
@@ -35,13 +38,13 @@
 use signalbox_model_runtime::{
     CancellationSignal, ConversationMessage, CredentialAccess, CredentialAccessError,
     CredentialAccessFailure, CredentialReference, CredentialValue, ExchangeFacts, ModelOperation,
-    ModelRuntime, ModelSettings, PreparationOutcome, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, TokenUsage,
+    ModelRuntime, ModelSettings, PreparationOutcome, ProviderErrorKind, RequestedTarget,
+    ResolvedTarget, TerminalEvidence, TokenUsage,
 };
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 
-/// The environment variable this smoke reads its API key from. Owner-managed
-/// in CI via the `openai-smoke` environment; see
+/// The environment variable this smoke reads its API key from. Configured in
+/// CI via the `openai-smoke` environment; see
 /// `.github/workflows/openai-smoke.yml`.
 const API_KEY_VARIABLE: &str = "OPENAI_API_KEY";
 
@@ -158,10 +161,23 @@ struct DecodedResponse {
     usage: TokenUsage,
 }
 
-/// Accepts either a completion or a refusal: both are well-formed, decoded
-/// evidence proving the adapter's response contract still holds. Only a
+/// Accepts a completion, or the adapter's own decoded-refusal shape, as
+/// well-formed evidence that the response contract still holds. Only a
 /// terminal outcome the adapter never decoded (a transport, protocol, or
-/// provider-error class) fails this gate.
+/// genuine provider-error class) fails this gate.
+///
+/// `OpenAiRuntime::execute` never returns a raw `TerminalEvidence::Refused` to
+/// its caller: a fully buffered request exposes no independent proof that the
+/// response arrived only after the complete upload, so `execute`
+/// unconditionally downgrades a decoded refusal into
+/// `ProviderError { kind: Unrecognized, .. }` from the same HTTP 200 exchange
+/// before returning (`without_unproven_refusal`, runtime.rs:616,628-646; the
+/// "Refusal downgrade" rule in `docs/spec/runtime-substrate.md`). Matching the
+/// dead `Refused` arm here would make this smoke fail a correctly decoded
+/// refusal, so this recognizes what the adapter actually returns instead. The
+/// `http_status == 200` guard keeps this arm from also swallowing a genuine
+/// unrecognized 4xx/5xx provider error, which the assertions below must still
+/// fail on.
 #[track_caller]
 fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
     match evidence {
@@ -169,10 +185,15 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
             exchange: completed.exchange,
             usage: completed.usage,
         },
-        TerminalEvidence::Refused(refused) => DecodedResponse {
-            exchange: refused.exchange,
-            usage: refused.usage,
-        },
+        TerminalEvidence::ProviderError(error)
+            if error.kind == ProviderErrorKind::Unrecognized
+                && error.exchange.http_status == Some(200) =>
+        {
+            DecodedResponse {
+                exchange: error.exchange,
+                usage: error.usage,
+            }
+        }
         // Adapter-produced evidence is already credential-shape redacted, so
         // printing it here cannot surface credential material.
         other => panic!("the OpenAI API returned no decoded response: {other:?}"),
