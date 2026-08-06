@@ -10,11 +10,11 @@ use signalbox_domain::{
     DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationOutcome,
     DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenance,
     DelegationProvenanceReconstitutionInput, DelegationRequestFailure, DelegationTransitionFailure,
-    DelegationWait, DelegationWaitMode, DurableCommandId, GoalGeneration,
-    ReconstitutedToolAttempt, SessionDelegation,
-    SessionDelegationReconstitutionFailure, SessionDelegationReconstitutionInput, SessionId,
-    ToolAttemptEnd, ToolAttemptObservation, ToolDispatchAuthority, ToolEffectClass, ToolRequestId,
-    ToolResultContent, ToolResultText, TurnId,
+    DelegationWait, DelegationWaitMode, DurableCommandId, GoalGeneration, ReconstitutedToolAttempt,
+    SessionDelegation, SessionDelegationReconstitutionFailure,
+    SessionDelegationReconstitutionInput, SessionId, ToolAttemptEnd, ToolAttemptObservation,
+    ToolDispatchAuthority, ToolEffectClass, ToolRequestId, ToolResultContent, ToolResultText,
+    TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -845,13 +845,13 @@ async fn lock_message_sessions(
     peer: SessionId,
 ) -> Result<(), SessionDelegationRepositoryError> {
     let (first, second) = ordered_message_sessions(sender, peer);
-    lock_delivery_session(connection, first).await?;
-    if second != first {
-        lock_delivery_session(connection, second).await?;
-    }
     lock_tool_session(connection, first).await?;
     if second != first {
         lock_tool_session(connection, second).await?;
+    }
+    lock_delivery_session(connection, first).await?;
+    if second != first {
+        lock_delivery_session(connection, second).await?;
     }
     Ok(())
 }
