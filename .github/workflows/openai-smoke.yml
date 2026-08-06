@@ -1,5 +1,5 @@
 # Compatibility smoke for the direct OpenAI Chat Completions API adapter in
-# crates/model-runtime-openai. It spends one real, cheapest-model exchange
+# crates/model-runtime-openai. It spends one real, fraction-of-a-cent exchange
 # through the adapter's own HTTP client, so a change to that crate is proven
 # against the live API rather than assumed. The discipline it implements is
 # specified in the OpenAI adapter section of docs/spec/runtime-substrate.md.

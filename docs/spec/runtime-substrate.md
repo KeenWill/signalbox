@@ -442,38 +442,46 @@ request in addition to that alternate target.
 
 The OpenAI adapter carries a gated live compatibility smoke
 (`.github/workflows/openai-smoke.yml`) that spends one real exchange against the
-cheapest model the provider currently advertises — `gpt-5-nano` — run through
-this crate's own `ModelRuntime` implementation with a small fixed prompt and no
-provider-side prompt caching: at one exchange per gated run a cache write is
-never amortized by a later read, so caching would raise the cost of the run it
-is meant to cheapen. Unlike the Codex CLI smoke, there is no locally installed
-executable and therefore no version to verify beforehand; the adapter targets
-the provider's stable public API directly, so spending the one exchange is the
-whole smoke rather than a second gate behind a credential-free version probe.
+cheapest non-reasoning model the provider currently advertises — `gpt-4.1-nano`,
+for the determinism reason given below — run through this crate's own
+`ModelRuntime` implementation with a small fixed prompt and no provider-side
+prompt caching: at one exchange per gated run a cache write is never amortized
+by a later read, so caching would raise the cost of the run it is meant to
+cheapen. Unlike the Codex CLI smoke, there is no locally installed executable
+and therefore no version to verify beforehand; the adapter targets the
+provider's stable public API directly, so spending the one exchange is the whole
+smoke rather than a second gate behind a credential-free version probe.
 
 The smoke asserts only the protocol surfaces a provider-side change would move:
 a definitive HTTP 200, and the response decoding as `Completed` evidence, or as
 the adapter's downgraded-refusal `ProviderError` shape (`kind: Unrecognized`
 from that same 200 exchange — see the refusal-downgrade rule above; a raw
-`Refused` never leaves the adapter) — either way with provider-reported input
-usage present *and positive* (a request that reached the model always billed at
-least one input token) — and nothing about answer quality. Output usage is held
-to a looser bar: present, not positive. A valid `Completed` response can
-legitimately report zero output tokens, and a downgraded refusal can be blocked
-before any completion token is produced, so both accepted shapes share one
-output usage-presence check without demanding it be nonzero.
+`Refused` never leaves the adapter). That downgraded shape is accepted only when
+it also carries no native error material and the execution observed a reported
+refusal finish: a mid-stream native error record inside a 200 SSE body reaches
+the caller as `Unrecognized` from the same status, and those two further facts
+are what a genuine streamed failure cannot present. Either accepted shape must
+carry provider-reported input usage present *and positive* (a request that
+reached the model always billed at least one input token). The smoke asserts
+nothing about answer quality. Output usage is held to a looser bar: present, not
+positive. A valid `Completed` response can legitimately report zero output
+tokens, and a downgraded refusal can be blocked before any completion token is
+produced, so both accepted shapes share one output usage-presence check without
+demanding it be nonzero.
 
-`gpt-5`-family models spend hidden reasoning tokens against the same output
-ceiling as visible content; at the provider's default effort that spend is
-unbounded, up to the entire ceiling, which makes a `length` finish reason (and
-therefore `BoundaryLoss`) a live possibility on an ordinary exchange, not only
-on provider drift. The smoke pins the lowest reasoning effort the provider
-documents for this model family through an explicit `ModelSettings` control and
-a matching exact-target entry in its `ModelCapabilityCatalog`, rather than
-leaving the effort at the provider default or only enlarging the ceiling —
-enlarging the ceiling lowers the odds of an unbounded-effort truncation but does
-not bound it, and cannot distinguish that stochastic outcome from a real
-compatibility break.
+The smoke's target is deliberately a non-reasoning model. A reasoning model
+spends hidden reasoning tokens against the same output ceiling as visible
+content, and the Chat Completions surface offers no control that caps those
+tokens below the ceiling — `reasoning_effort` is a qualitative hint, so even its
+lowest setting leaves the worst case unbounded. Exhausting the ceiling that way
+returns a `length` finish reason, which this adapter does not decode as
+completion evidence, so the exchange fails as `BoundaryLoss` and is
+indistinguishable from a real compatibility break. Enlarging the ceiling lowers
+those odds without bounding them. A non-reasoning target removes the failure
+class instead: every token billed against the ceiling is visible output the
+fixed one-word prompt already bounds, and the ceiling reverts to a pure cost
+cap. The operation therefore sets no explicit provider control, and the smoke's
+`ModelCapabilityCatalog` is correspondingly empty.
 
 This smoke's required aggregate is merge-gating for a pull request that changes
 the adapter crate or the workflow itself — an explicit exception to

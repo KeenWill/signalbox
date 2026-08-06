@@ -44,21 +44,20 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::collections::BTreeSet;
 use std::time::Duration;
 
 #[cfg(test)]
 use signalbox_model_runtime::{
     BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
-    LossCause, NativeErrorFacts, PreparationDefect, PreparationFailure, ProvenUnsentEvidence,
-    ProviderErrorEvidence, RefusalEvidence, UnsentCause,
+    LossCause, PreparationDefect, PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence,
+    RefusalEvidence, UnsentCause,
 };
 use signalbox_model_runtime::{
     CancellationSignal, ConversationMessage, CredentialAccess, CredentialAccessError,
     CredentialAccessFailure, CredentialReference, CredentialValue, DeliveryMode, ExchangeFacts,
-    ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition, ModelOperation,
-    ModelRuntime, ModelSettings, PreparationOutcome, ProviderErrorKind, ReasoningLevel,
-    RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
+    FinishReason, ModelOperation, ModelRuntime, ModelSettings, NativeErrorFacts, Observation,
+    ObservationFact, PreparationOutcome, ProviderErrorKind, RequestedTarget, ResolvedTarget,
+    TerminalEvidence, TokenUsage,
 };
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 
@@ -67,44 +66,38 @@ use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 /// `.github/workflows/openai-smoke.yml`.
 const API_KEY_VARIABLE: &str = "OPENAI_API_KEY";
 
-/// The cheapest current OpenAI model, chosen so a compatibility run costs a
-/// small fraction of a cent.
-const MODEL: &str = "gpt-5-nano";
+/// The cheapest current OpenAI model that spends no hidden reasoning tokens,
+/// chosen so a compatibility run costs a small fraction of a cent *and*
+/// cannot truncate nondeterministically.
+///
+/// A `gpt-5`-family target always reasons: hidden reasoning tokens bill
+/// against the same `max_completion_tokens` ceiling as visible output, and no
+/// wire control caps them below that ceiling — `reasoning_effort` is a
+/// qualitative hint, not a token budget, so even its lowest setting leaves the
+/// worst case unbounded. Consuming the ceiling that way returns
+/// `finish_reason: "length"`, which this adapter deliberately refuses to
+/// decode (`map_finish` in `src/response.rs`: OpenAI reuses `length` for both
+/// the requested output ceiling and the model's context limit, and the adapter
+/// will not guess which one occurred), so the exchange fails as
+/// `BoundaryLoss` — indistinguishable from a real compatibility break. A
+/// required, twice-daily paid check cannot carry that stochastic red, and a
+/// non-reasoning target removes the whole failure class structurally rather
+/// than lowering its odds. This also matches the Chat Completions surface this
+/// adapter actually implements, and mirrors the Anthropic smoke, whose target
+/// spends no hidden reasoning either because extended thinking there is opt-in
+/// per request.
+const MODEL: &str = "gpt-4.1-nano";
 
 /// A trivial prompt keeps the exchange to the smallest billable turn that
 /// still exercises the whole response envelope.
 const PROMPT: &str = "Reply with the single word: ready";
 
-/// `gpt-5-nano` is a reasoning model: at the provider's *default* reasoning
-/// effort it can spend hidden reasoning tokens — billed against the same
-/// `max_completion_tokens` ceiling as visible output — unboundedly, up to the
-/// entire ceiling, before producing any visible reply. That is stochastic:
-/// raising the ceiling only makes the failure less likely, it does not make
-/// the exchange deterministic, and it cannot distinguish a real provider
-/// regression from an ordinary long reasoning trace. `REASONING_LEVEL` below
-/// is the actual fix — pinning the lowest effort the provider documents for
-/// `gpt-5`-family models bounds the hidden-token spend deterministically.
-/// This ceiling remains generous as a secondary cost-capped margin, not the
-/// primary defense: a `length` finish is not decoded as typed completion
-/// evidence by this adapter (see `map_finish` in `src/response.rs`: OpenAI
-/// reuses `length` for both the requested output ceiling and the model's
-/// context limit, and the adapter deliberately refuses to guess which one
-/// occurred rather than invent evidence), so a truncated exchange fails this
-/// smoke with `LossCause::ResponseUnintelligible` instead of asserting
-/// anything useful about the response contract.
+/// A generous ceiling for a one-word reply, kept only as a cost cap. With a
+/// non-reasoning `MODEL` (see above) every token billed against this ceiling
+/// is visible output the prompt already bounds, so the ceiling is no longer
+/// load-bearing for determinism: it exists so a pathological run cannot spend
+/// more than a fraction of a cent.
 const MAX_OUTPUT_TOKENS: u32 = 512;
-
-/// The lowest reasoning effort OpenAI documents for `gpt-5`-family models
-/// (`gpt-5-nano` included). Pinned explicitly, rather than left at the
-/// provider default, so this smoke's completion is deterministically
-/// sub-ceiling: the provider default can spend the entire
-/// `MAX_OUTPUT_TOKENS` budget on hidden reasoning before any visible reply
-/// (see above), which is exactly the nondeterminism a required, twice-daily
-/// paid check cannot tolerate. Pinning it requires an exact-target capability
-/// record — see `openai_config` below — because the adapter validates any
-/// explicit provider control against the exact target's declared
-/// capabilities before it will honor it.
-const REASONING_LEVEL: ReasoningLevel = ReasoningLevel::Minimal;
 
 /// Bounds the one exchange well inside the workflow job's 10-minute budget.
 /// `OpenAiConfig::new()`'s own default (10 minutes) leaves no headroom for
@@ -116,21 +109,14 @@ const REASONING_LEVEL: ReasoningLevel = ReasoningLevel::Minimal;
 /// not a tight bound.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 
-/// Declares `MODEL`'s exact-target capabilities so the adapter's preparation
-/// gate honors the explicit `REASONING_LEVEL` control below (an operation
-/// carrying an explicit provider control validates against the exact target
-/// record; an absent record fails preparation with `UnknownTarget`), and
-/// applies this smoke's timeout policy on top of the adapter's documented
-/// defaults.
+/// Applies this smoke's timeout policy on top of the adapter's documented
+/// defaults. The capability catalog stays empty: it gates explicit provider
+/// controls (reasoning effort, fast mode, service tier) against an exact-target
+/// record, and this operation sets none of them, so an entry would only assert
+/// a capability this smoke never exercises.
 fn openai_config() -> OpenAiConfig {
     let mut config = OpenAiConfig::new();
     config.exchange_timeout = EXCHANGE_TIMEOUT;
-    config.model_capabilities =
-        ModelCapabilityCatalog::try_from_definitions([ModelCapabilityDefinition::new(
-            ResolvedTarget::new(MODEL),
-            ModelCapabilities::new(BTreeSet::from([REASONING_LEVEL]), None, BTreeSet::new()),
-        )])
-        .expect("smoke capability catalog is valid");
     config
 }
 
@@ -146,8 +132,7 @@ async fn the_openai_api_completes_one_exchange() {
     )
     .expect("smoke runtime configuration is valid");
 
-    let mut settings = ModelSettings::new(MAX_OUTPUT_TOKENS);
-    settings.reasoning_level = Some(REASONING_LEVEL);
+    let settings = ModelSettings::new(MAX_OUTPUT_TOKENS);
     let mut operation = ModelOperation::new(
         "openai-smoke".to_string(),
         credential_reference,
@@ -171,7 +156,7 @@ async fn the_openai_api_completes_one_exchange() {
         .execute(prepared, &mut observations, CancellationSignal::never())
         .await;
 
-    let decoded = require_decoded_response(report.evidence);
+    let decoded = require_decoded_response(report.evidence, &observations);
     assert_well_formed_response(&decoded);
 }
 
@@ -205,7 +190,9 @@ impl CredentialAccess for EnvironmentCredential {
 fn require_prepared<C, P>(outcome: PreparationOutcome<C, P>) -> P {
     match outcome {
         PreparationOutcome::Prepared(prepared) => prepared,
-        PreparationOutcome::Cancelled { .. } => panic!("smoke preparation was not cancelled"),
+        PreparationOutcome::Cancelled { .. } => {
+            panic!("smoke preparation was unexpectedly cancelled")
+        }
         PreparationOutcome::Failed { failure, .. } => {
             panic!("smoke preparation failed: {failure:?}")
         }
@@ -238,19 +225,34 @@ struct DecodedResponse {
 /// keeps this arm from also swallowing a genuine unrecognized 4xx/5xx
 /// provider error, which the assertions below must still fail on.
 ///
-/// Unlike the Anthropic smoke, this guard cannot also require a stable
-/// `native.error_token` discriminator: `without_unproven_refusal` here always
-/// sets `error_token: None` (the refusal came from `finish_reason` or
-/// `message.refusal`, never a native error-envelope token — see runtime.rs),
-/// so there is no per-cause token to distinguish this shape from a
-/// hypothetical future HTTP-200 `Unrecognized` provider error reached some
-/// other way. Today `exchange()`'s branching only reaches `ProviderError` for
-/// a *non*-200 status through `finish_error`, so `kind == Unrecognized &&
-/// http_status == 200` is already unique to the refusal downgrade — the same
-/// structural fact the Anthropic guard also relies on, just without an
-/// available second signal to assert defensively alongside it.
+/// `kind` and outer status alone are not enough to identify that downgrade on
+/// this transport, because a genuine failure can wear the same two facts: a
+/// mid-stream `error` record inside an HTTP 200 SSE body is terminal
+/// `ProviderError` evidence carrying that same 200 (`stream.rs`), and an error
+/// whose native code and type are both unknown classifies as `Unrecognized`
+/// (`classify_error_envelope` in `status.rs` falls through to the status, which
+/// is zero for a record with no status of its own). Accepting on those two
+/// facts would turn a real streamed provider failure green as long as usage
+/// had accumulated. So this arm additionally requires two facts a native
+/// stream error cannot produce:
+///
+/// - `native == NativeErrorFacts::default()`. The downgrade fabricates no
+///   native material at all, while a native error record populates its facts
+///   from the provider's own error object (`into_native_facts` in `wire.rs`
+///   carries `type`, `code`, and `message` straight through).
+/// - An observed `FinishReported(FinishReason::Refusal)`. The decoder emits
+///   that fact only after the provider reports the refusal finish for the
+///   choice; the native-error branch returns terminal evidence immediately,
+///   emitting no finish at all.
+///
+/// Both are checked because either alone is defeatable: an error object with
+/// every field null would clear the first, and the second cannot by itself
+/// rule out a stream that reported a refusal finish and then failed natively.
 #[track_caller]
-fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
+fn require_decoded_response(
+    evidence: TerminalEvidence,
+    observations: &[Observation<String>],
+) -> DecodedResponse {
     match evidence {
         TerminalEvidence::Completed(completed) => DecodedResponse {
             exchange: completed.exchange,
@@ -258,7 +260,9 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
         },
         TerminalEvidence::ProviderError(error)
             if error.kind == ProviderErrorKind::Unrecognized
-                && error.exchange.http_status == Some(200) =>
+                && error.exchange.http_status == Some(200)
+                && error.native == NativeErrorFacts::default()
+                && refusal_finish_observed(observations) =>
         {
             DecodedResponse {
                 exchange: error.exchange,
@@ -266,8 +270,8 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
             }
         }
         // Adapter-produced evidence is already credential-shape redacted, so
-        // printing it here cannot surface credential material. Enumerated
-        // explicitly, per docs/style.md's owned-enum rule, so a future
+        // printing it here cannot surface credential material. Every variant
+        // is named rather than caught by a wildcard, so a future
         // `TerminalEvidence` variant fails to compile here instead of
         // silently inheriting this panic path.
         rejected @ (TerminalEvidence::Refused(_)
@@ -278,6 +282,19 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
             panic!("the OpenAI API returned no decoded response: {rejected:?}")
         }
     }
+}
+
+/// Whether this execution observed the provider reporting a refusal finish —
+/// the corroboration `require_decoded_response` requires before accepting the
+/// downgraded-refusal shape, and the one signal a mid-stream native error
+/// record cannot manufacture.
+fn refusal_finish_observed(observations: &[Observation<String>]) -> bool {
+    observations.iter().any(|observation| {
+        matches!(
+            observation.fact,
+            ObservationFact::FinishReported(FinishReason::Refusal)
+        )
+    })
 }
 
 /// Asserts a decoded response is well-formed under the compatibility-smoke
@@ -331,19 +348,42 @@ mod require_decoded_response_tests {
         }
     }
 
+    /// What the decoder emits before a refusal terminal: the corroboration a
+    /// native stream error never produces.
+    fn refusal_observed() -> Vec<Observation<String>> {
+        vec![Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::FinishReported(FinishReason::Refusal),
+        }]
+    }
+
+    /// The native error facts a mid-stream `error` record carries through
+    /// `into_native_facts`, as distinct from the downgrade's fabricated-free
+    /// `NativeErrorFacts::default()`.
+    fn native_stream_error_facts() -> NativeErrorFacts {
+        NativeErrorFacts {
+            error_token: Some("server_error".to_string()),
+            error_code: None,
+            message: Some("synthetic upstream failure".to_string()),
+        }
+    }
+
     #[test]
     fn completed_evidence_is_accepted() {
         let expected_exchange = exchange(200);
         let expected_usage = usage();
 
-        let decoded = require_decoded_response(TerminalEvidence::Completed(CompletionEvidence {
-            exchange: expected_exchange.clone(),
-            message_id: None,
-            reported_model: None,
-            finish: CompletionFinish::EndTurn,
-            content: Vec::new(),
-            usage: expected_usage,
-        }));
+        let decoded = require_decoded_response(
+            TerminalEvidence::Completed(CompletionEvidence {
+                exchange: expected_exchange.clone(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: Vec::new(),
+                usage: expected_usage,
+            }),
+            &[],
+        );
 
         assert_eq!(decoded.exchange, expected_exchange);
         assert_eq!(decoded.usage, expected_usage);
@@ -363,14 +403,17 @@ mod require_decoded_response_tests {
             ..TokenUsage::default()
         };
 
-        let decoded = require_decoded_response(TerminalEvidence::Completed(CompletionEvidence {
-            exchange: expected_exchange.clone(),
-            message_id: None,
-            reported_model: None,
-            finish: CompletionFinish::EndTurn,
-            content: Vec::new(),
-            usage: expected_usage,
-        }));
+        let decoded = require_decoded_response(
+            TerminalEvidence::Completed(CompletionEvidence {
+                exchange: expected_exchange.clone(),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::EndTurn,
+                content: Vec::new(),
+                usage: expected_usage,
+            }),
+            &[],
+        );
 
         assert_eq!(decoded.exchange, expected_exchange);
         assert_eq!(decoded.usage, expected_usage);
@@ -379,21 +422,23 @@ mod require_decoded_response_tests {
     #[test]
     fn downgraded_refusal_provider_error_is_accepted() {
         // The exact shape `without_unproven_refusal` constructs: `kind:
-        // Unrecognized` carried by the same HTTP 200 exchange. Unlike
-        // Anthropic's shape, OpenAI's native error_token stays `None` here
-        // (see runtime.rs: refusal came from `finish_reason` or
-        // `message.refusal`, not a native error-envelope token).
+        // Unrecognized` carried by the same HTTP 200 exchange, with no native
+        // material at all (OpenAI's refusal comes from `finish_reason` or
+        // `message.refusal`, not an error envelope), corroborated by the
+        // refusal finish the decoder reported on the way there.
         let expected_exchange = exchange(200);
         let expected_usage = usage();
 
-        let decoded =
-            require_decoded_response(TerminalEvidence::ProviderError(ProviderErrorEvidence {
+        let decoded = require_decoded_response(
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: expected_exchange.clone(),
                 reported_model: None,
                 kind: ProviderErrorKind::Unrecognized,
                 native: NativeErrorFacts::default(),
                 usage: expected_usage,
-            }));
+            }),
+            &refusal_observed(),
+        );
 
         assert_eq!(decoded.exchange, expected_exchange);
         assert_eq!(decoded.usage, expected_usage);
@@ -414,14 +459,16 @@ mod require_decoded_response_tests {
             ..TokenUsage::default()
         };
 
-        let decoded =
-            require_decoded_response(TerminalEvidence::ProviderError(ProviderErrorEvidence {
+        let decoded = require_decoded_response(
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: expected_exchange.clone(),
                 reported_model: None,
                 kind: ProviderErrorKind::Unrecognized,
                 native: NativeErrorFacts::default(),
                 usage: expected_usage,
-            }));
+            }),
+            &refusal_observed(),
+        );
 
         assert_eq!(decoded.exchange, expected_exchange);
         assert_eq!(decoded.usage, expected_usage);
@@ -429,14 +476,56 @@ mod require_decoded_response_tests {
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
+    fn native_stream_error_inside_a_200_body_panics() {
+        // A mid-stream `error` record whose native code and type are both
+        // unknown reaches the caller as `Unrecognized` carrying the outer
+        // HTTP 200 and whatever usage had accumulated — the same two facts
+        // the accepted downgrade shows. It is a genuine provider failure and
+        // must stay red; the native material it carries is what separates it.
+        let _ = require_decoded_response(
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                exchange: exchange(200),
+                reported_model: None,
+                kind: ProviderErrorKind::Unrecognized,
+                native: native_stream_error_facts(),
+                usage: usage(),
+            }),
+            &refusal_observed(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn unrefused_provider_error_without_native_material_panics() {
+        // The residual case native facts alone cannot catch: an error record
+        // carrying an empty error object would clear the native check. No
+        // refusal finish was ever reported for it, so the observation check
+        // still rejects it.
+        let _ = require_decoded_response(
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                exchange: exchange(200),
+                reported_model: None,
+                kind: ProviderErrorKind::Unrecognized,
+                native: NativeErrorFacts::default(),
+                usage: usage(),
+            }),
+            &[],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
     fn raw_refused_panics() {
-        let _ = require_decoded_response(TerminalEvidence::Refused(RefusalEvidence {
-            exchange: exchange(200),
-            message_id: None,
-            reported_model: None,
-            content: Vec::new(),
-            usage: usage(),
-        }));
+        let _ = require_decoded_response(
+            TerminalEvidence::Refused(RefusalEvidence {
+                exchange: exchange(200),
+                message_id: None,
+                reported_model: None,
+                content: Vec::new(),
+                usage: usage(),
+            }),
+            &refusal_observed(),
+        );
     }
 
     #[test]
@@ -445,57 +534,70 @@ mod require_decoded_response_tests {
         // Same `kind` as the accepted downgraded-refusal shape, but from a
         // real error status: the `http_status == 200` guard must keep this
         // from being swallowed as a well-formed decode.
-        let _ = require_decoded_response(TerminalEvidence::ProviderError(ProviderErrorEvidence {
-            exchange: exchange(500),
-            reported_model: None,
-            kind: ProviderErrorKind::Unrecognized,
-            native: NativeErrorFacts::default(),
-            usage: TokenUsage::unreported(),
-        }));
+        let _ = require_decoded_response(
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                exchange: exchange(500),
+                reported_model: None,
+                kind: ProviderErrorKind::Unrecognized,
+                native: NativeErrorFacts::default(),
+                usage: TokenUsage::unreported(),
+            }),
+            &refusal_observed(),
+        );
     }
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn recognized_provider_error_panics() {
-        let _ = require_decoded_response(TerminalEvidence::ProviderError(ProviderErrorEvidence {
-            exchange: exchange(401),
-            reported_model: None,
-            kind: ProviderErrorKind::CredentialRejected,
-            native: NativeErrorFacts::default(),
-            usage: TokenUsage::unreported(),
-        }));
+        let _ = require_decoded_response(
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                exchange: exchange(401),
+                reported_model: None,
+                kind: ProviderErrorKind::CredentialRejected,
+                native: NativeErrorFacts::default(),
+                usage: TokenUsage::unreported(),
+            }),
+            &refusal_observed(),
+        );
     }
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn cancellation_confirmed_panics() {
-        let _ = require_decoded_response(TerminalEvidence::CancellationConfirmed(
-            CancellationConfirmedEvidence {
+        let _ = require_decoded_response(
+            TerminalEvidence::CancellationConfirmed(CancellationConfirmedEvidence {
                 exchange: exchange(200),
                 reported_model: None,
                 native: NativeErrorFacts::default(),
-            },
-        ));
+            }),
+            &[],
+        );
     }
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn proven_unsent_panics() {
-        let _ = require_decoded_response(TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
-            cause: UnsentCause::CancelledBeforeSend,
-        }));
+        let _ = require_decoded_response(
+            TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                cause: UnsentCause::CancelledBeforeSend,
+            }),
+            &[],
+        );
     }
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn boundary_loss_panics() {
-        let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
-            cause: LossCause::UnexpectedHttpStatus,
-            exchange: exchange(200),
-            reported_model: None,
-            finish_reported: None,
-            usage: TokenUsage::unreported(),
-        }));
+        let _ = require_decoded_response(
+            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                cause: LossCause::UnexpectedHttpStatus,
+                exchange: exchange(200),
+                reported_model: None,
+                finish_reported: None,
+                usage: TokenUsage::unreported(),
+            }),
+            &[],
+        );
     }
 }
 
@@ -507,9 +609,8 @@ mod assert_well_formed_response_tests {
     use super::*;
 
     /// The well-formed baseline every test perturbs by exactly one named
-    /// field, per docs/agents/testing-style.md rule 4 — never three
-    /// same-typed positional knobs a reader must cross-reference against a
-    /// definition to tell apart.
+    /// field — never three same-typed positional knobs a reader must
+    /// cross-reference against a definition to tell apart.
     fn well_formed() -> DecodedResponse {
         DecodedResponse {
             exchange: ExchangeFacts {
@@ -591,7 +692,7 @@ mod require_prepared_tests {
     }
 
     #[test]
-    #[should_panic(expected = "smoke preparation was not cancelled")]
+    #[should_panic(expected = "smoke preparation was unexpectedly cancelled")]
     fn cancelled_outcome_panics() {
         let outcome: PreparationOutcome<String, u32> = PreparationOutcome::Cancelled {
             correlation: "call-1".to_string(),
@@ -627,15 +728,14 @@ mod require_prepared_tests {
     }
 }
 
-/// Proves the wiring between `openai_config`'s capability catalog and the
-/// pinned `REASONING_LEVEL` actually admits preparation, offline. An
-/// operation carrying an explicit provider control without a matching
-/// exact-target capability record fails preparation with `UnknownTarget`
-/// (`ModelCapabilityCatalog::validate_explicit`) — a mistake in the catalog
-/// below would otherwise surface only when the live smoke spends its one
-/// credentialed exchange, not before.
+/// Proves this smoke's own operation shape actually prepares, offline: the
+/// live test spends a credentialed exchange, so a settings or configuration
+/// mistake must fail here rather than there. `prepare` is where the adapter
+/// validates settings against the target's capabilities, so an accidental
+/// explicit provider control (which would demand an exact-target record this
+/// config deliberately does not carry) fails this test immediately.
 #[cfg(test)]
-mod reasoning_capability_tests {
+mod smoke_operation_tests {
     use super::*;
 
     #[derive(Debug)]
@@ -651,19 +751,18 @@ mod reasoning_capability_tests {
     }
 
     #[tokio::test]
-    async fn pinned_reasoning_effort_prepares_successfully() {
+    async fn the_smoke_operation_prepares_successfully() {
         let runtime = OpenAiRuntime::new(openai_config(), FixedCredential)
             .expect("smoke runtime configuration is valid");
-        let mut settings = ModelSettings::new(MAX_OUTPUT_TOKENS);
-        settings.reasoning_level = Some(REASONING_LEVEL);
-        let operation = ModelOperation::new(
-            "reasoning-capability-test".to_string(),
+        let mut operation = ModelOperation::new(
+            "smoke-operation-test".to_string(),
             CredentialReference::new("openai-smoke"),
             RequestedTarget::new(MODEL),
             ResolvedTarget::new(MODEL),
             vec![ConversationMessage::user_text(PROMPT)],
-            settings,
+            ModelSettings::new(MAX_OUTPUT_TOKENS),
         );
+        operation.delivery = DeliveryMode::Streamed;
 
         let _ = require_prepared(
             runtime
