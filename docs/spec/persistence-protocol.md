@@ -652,15 +652,24 @@ Locks per transaction, in acquisition order:
   approval-judge, tool-loop, and lifecycle-transition transactions from holding
   these rows in reverse order.
 
-- **Delegated await and peer-message transactions**: await locks its parent
-  delivery session before the issuing scheduler. Message locks both endpoint
-  `session` rows `FOR NO KEY UPDATE` in canonical session-ID order, then both
-  endpoint `session_scheduler` rows in that same order. Child terminalization
-  uses the same canonical endpoint-session prefix before taking the child
-  scheduler, so message, completion, and input submission never hold those row
-  classes in reverse order. Each transaction next locks the exact
-  `session_delegation` row `FOR UPDATE`. Delivery-sequence allocation runs while
-  the recipient session lock is held. Message recording claims the global
+- **Delegated await transactions**: await first locks its issuing delivery
+  session row `FOR NO KEY UPDATE`, then that session's `session_scheduler` row
+  `FOR UPDATE`, and only then the exact `session_delegation` row `FOR UPDATE`.
+  This session-before-scheduler prefix matches input transitions that can race
+  with await registration.
+
+- **Delegated peer-message transactions**: after a nonlocking peer-existence
+  read, message recording locks both endpoint session rows `FOR NO KEY UPDATE`
+  in ascending session-identity order, then both endpoint `session_scheduler`
+  rows `FOR UPDATE` in that same order, and only then the exact
+  `session_delegation` row `FOR UPDATE`. An absent peer instead locks the
+  issuing session and scheduler before returning the typed rejection. This
+  common endpoint order is acyclic with simultaneous input and opposite-
+  direction message transactions. Child terminalization uses the same canonical
+  endpoint-session prefix before taking the child scheduler, so message,
+  completion, and input submission never hold those row classes in reverse
+  order. Delivery-sequence allocation runs while the recipient session lock is
+  held. Message recording claims the global
   `message_id` before inserting the relationship event; a concurrent claim loser
   returns the typed message-identity collision without leaving a partial event.
 
