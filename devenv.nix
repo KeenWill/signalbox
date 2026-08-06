@@ -456,10 +456,11 @@ in
         supervisor = sys.argv[2]
         content = config_path.read_text()
         document = tomllib.loads(content)
-        setting = (
-            "exec_supervisor_executable = "
-            f"{json.dumps(supervisor, ensure_ascii=False)}"
-        )
+        encoded_supervisor = json.dumps(supervisor, ensure_ascii=False)
+        # JSON already escapes the C0 controls TOML forbids. TOML also forbids
+        # a raw DEL, which ensure_ascii=False deliberately preserves.
+        encoded_supervisor = encoded_supervisor.replace(chr(0x7F), r"\u007F")
+        setting = f"exec_supervisor_executable = {encoded_supervisor}"
         placeholder = re.compile(
             r'^exec_supervisor_executable = "/usr/local/bin/signalbox-exec-supervisor"\r?$',
             re.MULTILINE,
