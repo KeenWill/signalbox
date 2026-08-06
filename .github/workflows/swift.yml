@@ -138,16 +138,18 @@ jobs:
           SIGNALBOX_NATIVE_TEST_RESULT_BUNDLE_PATH: ${{ runner.temp }}/native-snapshots/SignalboxNative-Snapshots.xcresult
       # The library attaches the reference, the failed rendering, and their
       # difference to the failing test, so the result bundle is where a diff
-      # lives. Exporting only the failures keeps the artifact to the images a
-      # reader needs; manifest.json maps each exported file to its name.
+      # lives. Exported unfiltered rather than with `--only-failures`: the three
+      # images hang off an activity rather than off the failure itself, and that
+      # filter drops them, leaving an artifact of nothing but issue text. A run
+      # that took no failing snapshot has no attachments to export anyway.
+      # manifest.json maps each exported file to its name.
       - name: Export the native snapshot diffs
         if: ${{ always() && steps.snapshots.outcome == 'failure' }}
         continue-on-error: true
         run: |
           xcrun xcresulttool export attachments \
             --path "$RUNNER_TEMP/native-snapshots/SignalboxNative-Snapshots.xcresult" \
-            --output-path "$RUNNER_TEMP/native-snapshot-diffs" \
-            --only-failures
+            --output-path "$RUNNER_TEMP/native-snapshot-diffs"
       - name: Upload the native snapshot diffs
         if: ${{ always() && steps.snapshots.outcome == 'failure' }}
         continue-on-error: true
