@@ -24,8 +24,8 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantText, AuthorizedModelCall,
     CancelledModelCallTurnIdentities, CompletedModelCallIdentities, ContextFrontierId,
-    CreateSession, DeliveryRequest, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, ModelCallId, ModelCallTerminalIdentities,
+    CreateSession, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
+    DurableCommandId, FailedModelCallTurnIdentities, ModelCallId, ModelCallTerminalIdentities,
     ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionOverride,
     ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
     ProviderModelIdentity, ResolvedProviderTarget, ReviewChangeRequestNumber, ReviewConfidence,
@@ -1278,6 +1278,7 @@ async fn reconcile_review_turn(pool: &PgPool, turn: TurnId) -> ContextFrontierId
                     .expect("review fixture interrupt content is admitted"),
                 DeliveryRequest::Interrupt {
                     expected_active_turn: turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
                     configuration: PerInputConfigurationChoices::new(
                         SessionConfigurationDefaultsVersion::first(),
                         ModelSelectionOverride::UseSessionDefault,

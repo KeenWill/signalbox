@@ -17,8 +17,8 @@ use signalbox_application::{
     UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
-    ActivatedAcceptedInputTurn, AssistantText, DirectModelSelection, ModelCallId,
-    ProviderReportedTokenUsage, SessionId, ToolArgumentsKind, TurnAttemptId, TurnId,
+    ActivatedTurn, AssistantText, DirectModelSelection, ModelCallId, ProviderReportedTokenUsage,
+    SessionId, ToolArgumentsKind, TurnAttemptId, TurnId,
 };
 use signalbox_model_provider_runtime::{
     ApprovalJudgeModel, ApprovalJudgeModelError, ApprovalJudgeModelRequest,
@@ -156,7 +156,7 @@ pub trait ActivatedTurnExecution {
     /// Consumes one exact activation outcome and drives its initial call.
     fn execute(
         &self,
-        activated: Box<ActivatedAcceptedInputTurn>,
+        activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
 
     /// Reconciles a durable active tool turn for one scheduler hint.
@@ -273,7 +273,7 @@ where
 
     fn execute(
         &self,
-        activated: Box<ActivatedAcceptedInputTurn>,
+        activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let execution = self.execution.execute(activated);
         supervise_execution(self.fatal_signal.clone(), execution)
@@ -891,7 +891,7 @@ where
 
     fn execute(
         &self,
-        activated: Box<ActivatedAcceptedInputTurn>,
+        activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let repository = self.repository.clone();
         let gate = self.gate.clone();
@@ -1210,6 +1210,7 @@ where
                     };
                     match tool_outcome {
                         ToolExecutionServiceOutcome::AttemptCheckpointed(_)
+                        | ToolExecutionServiceOutcome::ChildWaitResumed(_)
                         | ToolExecutionServiceOutcome::PreflightFailed(_)
                         | ToolExecutionServiceOutcome::ObservationCommitted(_)
                         | ToolExecutionServiceOutcome::ObservationAlreadyCommitted(_)
@@ -1302,7 +1303,7 @@ where
 
     fn execute(
         &self,
-        activated: Box<ActivatedAcceptedInputTurn>,
+        activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let session = activated.session();
         let turn = activated.turn();
@@ -1383,7 +1384,7 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
 
     fn execute(
         &self,
-        activated: Box<ActivatedAcceptedInputTurn>,
+        activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let repository = self.repository.clone();
         let gate = self.gate.clone();
@@ -1446,7 +1447,7 @@ mod tests {
         StartEligibleTurnTransaction,
     };
     use signalbox_domain::{
-        AcceptedInputTurnActivationIdentities, ActivatedAcceptedInputTurn, ContextFrontierId,
+        AcceptedInputTurnActivationIdentities, ActivatedTurn, ContextFrontierId,
         SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
     };
     use tokio::sync::watch;
@@ -1612,7 +1613,7 @@ mod tests {
 
         fn execute(
             &self,
-            _activated: Box<ActivatedAcceptedInputTurn>,
+            _activated: Box<ActivatedTurn>,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }
@@ -1626,7 +1627,7 @@ mod tests {
 
         fn execute(
             &self,
-            _activated: Box<ActivatedAcceptedInputTurn>,
+            _activated: Box<ActivatedTurn>,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }
@@ -1657,7 +1658,7 @@ mod tests {
 
         fn execute(
             &self,
-            _activated: Box<ActivatedAcceptedInputTurn>,
+            _activated: Box<ActivatedTurn>,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }
@@ -1705,7 +1706,7 @@ mod tests {
 
         fn execute(
             &self,
-            _activated: Box<ActivatedAcceptedInputTurn>,
+            _activated: Box<ActivatedTurn>,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }

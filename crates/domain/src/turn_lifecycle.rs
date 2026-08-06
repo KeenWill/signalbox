@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    AppliedInterruptProof, ContextFrontier, CurrentTurnAttempt, DurableCommandId,
+    AppliedInterruptProof, ChildWait, ContextFrontier, CurrentTurnAttempt, DurableCommandId,
     FatalMismatchStopCauses, ModelCallId, ToolAttemptId, ToolRequestId, TurnId,
     fatal_mismatch::lifecycle::FatalMismatchReconciliationMarkerCandidate,
 };
@@ -330,6 +330,11 @@ pub enum ActiveTurnPhase {
         /// The request whose approval dependency remains durable.
         request: ToolRequestId,
     },
+    /// Orchestration waits on one exact foreground child result.
+    AwaitingChild {
+        /// The checked await request, spawning request, and child identity.
+        wait: ChildWait,
+    },
     /// Orchestration waits on an exact nonempty ambiguity set.
     AwaitingRecoveryDecision {
         /// The operations still blocking turn-level disposition.
@@ -560,6 +565,9 @@ mod tests {
         let awaiting_approval = ActiveTurnPhase::AwaitingApproval {
             request: request_id,
         };
+        let child_wait =
+            ChildWait::from_checked_parts(tool_request_id(2), tool_request_id(3), session_id(1));
+        let awaiting_child = ActiveTurnPhase::AwaitingChild { wait: child_wait };
         let awaiting_recovery = ActiveTurnPhase::AwaitingRecoveryDecision {
             ambiguous_operations: ambiguous.clone(),
             applied_interrupt: None,
@@ -567,6 +575,7 @@ mod tests {
 
         assert!(running.retains_progressing_slot());
         assert!(awaiting_approval.retains_progressing_slot());
+        assert!(awaiting_child.retains_progressing_slot());
         assert!(awaiting_recovery.retains_progressing_slot());
         assert!(matches!(
             &running,
@@ -576,6 +585,10 @@ mod tests {
         assert!(matches!(
             &awaiting_approval,
             ActiveTurnPhase::AwaitingApproval { request } if *request == request_id
+        ));
+        assert!(matches!(
+            &awaiting_child,
+            ActiveTurnPhase::AwaitingChild { wait } if *wait == child_wait
         ));
         assert!(matches!(
             &awaiting_recovery,

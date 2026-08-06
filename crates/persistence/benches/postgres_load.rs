@@ -1008,7 +1008,9 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         .await?;
     match ended.end() {
         ToolAttemptEnd::Completed { .. } => {}
-        ToolAttemptEnd::KnownFailed { .. } | ToolAttemptEnd::Ambiguous => {
+        ToolAttemptEnd::KnownFailed { .. }
+        | ToolAttemptEnd::AwaitingChild { .. }
+        | ToolAttemptEnd::Ambiguous => {
             return Err(error("tool attempt did not commit completion"));
         }
     }
