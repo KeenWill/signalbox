@@ -3,8 +3,6 @@
 //! Repository discovery and linked worktrees are deliberately unsupported. A
 //! suite binds one direct main worktree whose .git directory is inside the
 //! injected root. The local family has no remote operation.
-#![allow(dead_code)]
-
 mod arguments;
 mod bounded;
 mod branch;

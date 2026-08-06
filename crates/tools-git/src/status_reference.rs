@@ -45,6 +45,7 @@ impl StatusHeadSnapshot {
     }
 }
 
+#[cfg(test)]
 pub(super) fn status_head(
     authority: &PinnedRepository,
 ) -> Result<(Option<String>, bool, Option<git2::Oid>), LocalGitFailure> {
