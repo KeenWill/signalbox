@@ -1062,8 +1062,37 @@ fn message_race_disposition(outcome: RecordDelegationMessageOutcome) -> MessageR
     }
 }
 
+#[derive(sqlx::FromRow)]
+struct BackgroundWaitAtomicityEvidence {
+    wait_count: i64,
+    update_count: i64,
+    completed_attempt_count: i64,
+    result_text: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct ForegroundWaitAtomicityEvidence {
+    active_phase: String,
+    current_attempt: Option<Uuid>,
+    attempt_state: String,
+    terminal_disposition: String,
+    issuing_disposition: String,
+    update_count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct MessageAtomicityEvidence {
+    event_count: i64,
+    message_count: i64,
+    delivery_count: i64,
+    update_count: i64,
+    wake_count: i64,
+    completed_attempt_count: i64,
+}
+
 /// S17 / INV-032: a background wait, its completed receipt, and its update are
 /// one replay-idempotent commit.
+/// S18 / INV-010 / INV-012: equal replay still requires its exact dispatch.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
@@ -1081,7 +1110,7 @@ async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
             DelegationWaitMode::Background,
         )
         .await?;
-    repository_wait_dispatch(&pool, fixture, seed).await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
     let (request, recorded) = process_wait(
         repository
             .record_process_wait(
@@ -1113,16 +1142,30 @@ async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
             DelegationWaitMode::Foreground,
         )
         .await?;
-    let evidence: (i64, i64, i64, String) = sqlx::query_as(
+    let second_seed = DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED;
+    let second_fixture =
+        prepare_delegation_repository_fixture(&pool, second_seed, "background").await?;
+    let second_dispatch = repository_wait_dispatch(&pool, second_fixture, second_seed).await?;
+    let cross_wired = repository
+        .record_wait(
+            DelegationAwaitRequest::parse(
+                dispatch.request().clone(),
+                fixture.child,
+                DelegationWaitMode::Background,
+            )?,
+            &second_dispatch,
+        )
+        .await?;
+    let evidence: BackgroundWaitAtomicityEvidence = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM session_delegation_wait
-              WHERE awaiting_tool_request_id = $1),
+              WHERE awaiting_tool_request_id = $1) AS wait_count,
             (SELECT count(*) FROM delegation_update_outbox_event
-              WHERE awaiting_tool_request_id = $1),
+              WHERE awaiting_tool_request_id = $1) AS update_count,
             (SELECT count(*) FROM tool_attempt
               WHERE request_id = $1 AND state_kind = 'terminal'
-                AND terminal_disposition_kind = 'completed'),
-            (SELECT result_text FROM tool_attempt WHERE request_id = $1)",
+                AND terminal_disposition_kind = 'completed') AS completed_attempt_count,
+            (SELECT result_text FROM tool_attempt WHERE request_id = $1) AS result_text",
     )
     .bind(fixture.awaiting_request.into_uuid())
     .fetch_one(&pool)
@@ -1143,9 +1186,17 @@ async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
         ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::AwaitConflict)
     );
     assert_eq!(recorded.wait().mode(), DelegationWaitMode::Background);
-    assert_eq!((evidence.0, evidence.1, evidence.2), (1, 1, 1));
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&evidence.3)?,
+        cross_wired,
+        RecordDelegationWaitOutcome::Rejected(DelegationOperationRejection::StaleDispatch {
+            state: DelegationRequestExecutionState::AttemptEnded,
+        })
+    );
+    assert_eq!(evidence.wait_count, 1);
+    assert_eq!(evidence.update_count, 1);
+    assert_eq!(evidence.completed_attempt_count, 1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&evidence.result_text)?,
         serde_json::json!({
             "result": "session_await_registered",
             "tool_request_id": fixture.awaiting_request.as_uuid().to_string(),
@@ -1292,12 +1343,14 @@ async fn s17_inv005_inv032_delegation_repository_parks_foreground_wait_atomicall
         .await?;
     let replayed = repository.record_wait(request, &dispatch).await?;
     let replayed = recorded_wait(replayed);
-    let evidence: (String, Option<Uuid>, String, String, String, i64) = sqlx::query_as(
-        "SELECT lifecycle.active_phase_kind, lifecycle.current_attempt_id,
-                attempt.state_kind, attempt.terminal_disposition_kind,
-                issuing.end_disposition,
+    let evidence: ForegroundWaitAtomicityEvidence = sqlx::query_as(
+        "SELECT lifecycle.active_phase_kind AS active_phase,
+                lifecycle.current_attempt_id AS current_attempt,
+                attempt.state_kind AS attempt_state,
+                attempt.terminal_disposition_kind AS terminal_disposition,
+                issuing.end_disposition AS issuing_disposition,
                 (SELECT count(*) FROM delegation_update_outbox_event
-                  WHERE awaiting_tool_request_id = $1)
+                  WHERE awaiting_tool_request_id = $1) AS update_count
            FROM turn_lifecycle AS lifecycle
            JOIN tool_attempt AS attempt ON attempt.request_id = $1
            JOIN turn_attempt AS issuing
@@ -1313,12 +1366,12 @@ async fn s17_inv005_inv032_delegation_repository_parks_foreground_wait_atomicall
     assert_eq!(recorded, replayed);
     assert!(authenticated);
     assert_eq!(recorded.wait().mode(), DelegationWaitMode::Foreground);
-    assert_eq!(evidence.0, "awaiting_child");
-    assert_eq!(evidence.1, None);
-    assert_eq!(evidence.2, "terminal");
-    assert_eq!(evidence.3, "awaiting_child");
-    assert_eq!(evidence.4, "yielded_to_durable_wait");
-    assert_eq!(evidence.5, 1);
+    assert_eq!(evidence.active_phase, "awaiting_child");
+    assert_eq!(evidence.current_attempt, None);
+    assert_eq!(evidence.attempt_state, "terminal");
+    assert_eq!(evidence.terminal_disposition, "awaiting_child");
+    assert_eq!(evidence.issuing_disposition, "yielded_to_durable_wait");
+    assert_eq!(evidence.update_count, 1);
 
     pool.close().await;
     drop(container);
@@ -1327,6 +1380,7 @@ async fn s17_inv005_inv032_delegation_repository_parks_foreground_wait_atomicall
 
 /// S17 / INV-032: a message, recipient delivery, completed receipt, update,
 /// and wake are committed once, while physical replay returns the stored ID.
+/// S18 / INV-010 / INV-012: equal replay still requires its exact dispatch.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
@@ -1404,17 +1458,34 @@ async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
     let durable_completion = PostgresToolLoopRepository::new(pool.clone())
         .reread_durable_completion(dispatch.correlation())
         .await?;
-    let evidence: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+    let second_seed = DELEGATION_REPOSITORY_MESSAGE_RACE_SECOND_SEED;
+    let second_fixture =
+        prepare_delegation_repository_fixture(&pool, second_seed, "background").await?;
+    let second_dispatch = repository_message_dispatch(&pool, second_fixture, second_seed).await?;
+    let cross_wired = repository
+        .record_message(
+            DelegationMessageRequest::parse(
+                dispatch.request().clone(),
+                fixture.child,
+                RAW_DELEGATED_MESSAGE.to_owned(),
+            )?,
+            message,
+            &second_dispatch,
+        )
+        .await?;
+    let evidence: MessageAtomicityEvidence = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM session_delegation_event
-              WHERE provenance_tool_request_id = $1),
-            (SELECT count(*) FROM session_message WHERE message_id = $2),
-            (SELECT count(*) FROM session_message_delivery WHERE message_id = $2),
-            (SELECT count(*) FROM delegation_update_outbox_event WHERE message_id = $2),
-            (SELECT count(*) FROM delegation_wake_outbox_event WHERE message_id = $2),
+              WHERE provenance_tool_request_id = $1) AS event_count,
+            (SELECT count(*) FROM session_message WHERE message_id = $2) AS message_count,
+            (SELECT count(*) FROM session_message_delivery WHERE message_id = $2) AS delivery_count,
+            (SELECT count(*) FROM delegation_update_outbox_event WHERE message_id = $2)
+                AS update_count,
+            (SELECT count(*) FROM delegation_wake_outbox_event WHERE message_id = $2)
+                AS wake_count,
             (SELECT count(*) FROM tool_attempt
               WHERE request_id = $1 AND state_kind = 'terminal'
-                AND terminal_disposition_kind = 'completed')",
+                AND terminal_disposition_kind = 'completed') AS completed_attempt_count",
     )
     .bind(fixture.message_request.into_uuid())
     .bind(fixture.message_id)
@@ -1438,7 +1509,18 @@ async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
     );
     assert_eq!(recorded.ordinal().get(), 2);
     assert_eq!(recorded.delivery_sequence().get(), 1);
-    assert_eq!(evidence, (1, 1, 1, 1, 1, 1));
+    assert_eq!(
+        cross_wired,
+        RecordDelegationMessageOutcome::Rejected(DelegationOperationRejection::StaleDispatch {
+            state: DelegationRequestExecutionState::AttemptEnded,
+        })
+    );
+    assert_eq!(evidence.event_count, 1);
+    assert_eq!(evidence.message_count, 1);
+    assert_eq!(evidence.delivery_count, 1);
+    assert_eq!(evidence.update_count, 1);
+    assert_eq!(evidence.wake_count, 1);
+    assert_eq!(evidence.completed_attempt_count, 1);
 
     pool.close().await;
     drop(container);

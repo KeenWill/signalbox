@@ -4060,6 +4060,13 @@ pub enum RejectionDetail {
         /// Last representable event ordinal.
         last: CanonicalU64,
     },
+    /// A recipient cannot allocate another positive delivery sequence.
+    DelegationDeliverySequenceExhausted {
+        /// Recipient whose delivery sequence is exhausted.
+        recipient_session_id: CanonicalUuid,
+        /// Last representable delivery sequence.
+        last: CanonicalU64,
+    },
     /// The caller observed stale defaults.
     DefaultsVersionMismatch {
         /// Target session.
@@ -4176,6 +4183,7 @@ impl RejectionDetail {
             | Self::DelegationAwaitConflict { .. }
             | Self::DelegationMessageConflict { .. }
             | Self::DelegationEventOrdinalExhausted { .. }
+            | Self::DelegationDeliverySequenceExhausted { .. }
             | Self::DefaultsVersionMismatch { .. }
             | Self::UnknownModelAlias { .. }
             | Self::AcceptancePositionExhausted { .. }
@@ -6669,7 +6677,7 @@ impl ServerMessage {
                 ordinal,
                 delivery_sequence,
                 ..
-            } if ordinal.value() == 0 || delivery_sequence.value() == 0 => {
+            } if ordinal.value() < 2 || delivery_sequence.value() == 0 => {
                 return Err(FrameValidationError::DelegationShape);
             }
             Self::InputSubmitted { model_settings, .. } => model_settings.validate()?,
@@ -7058,6 +7066,9 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
             ..
         } => current_placement_version.value() == u64::MAX,
         RejectionDetail::DelegationEventOrdinalExhausted { last, .. } => last.value() == u64::MAX,
+        RejectionDetail::DelegationDeliverySequenceExhausted { last, .. } => {
+            last.value() == u64::MAX
+        }
         RejectionDetail::SessionNotFound { .. }
         | RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
@@ -7175,6 +7186,7 @@ fn validate_conversation_import_detail(
         | RejectionDetail::DelegationAwaitConflict { .. }
         | RejectionDetail::DelegationMessageConflict { .. }
         | RejectionDetail::DelegationEventOrdinalExhausted { .. }
+        | RejectionDetail::DelegationDeliverySequenceExhausted { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
         | RejectionDetail::UnknownModelAlias { .. }
         | RejectionDetail::AcceptancePositionExhausted { .. }
@@ -12553,6 +12565,56 @@ mod tests {
     }
 
     #[test]
+    fn inv033_delivery_sequence_exhaustion_round_trips_closed_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const FRAME_REQUEST: u64 = 51;
+        let ids = delegation_wire_identities();
+
+        assert_server_message_round_trip(
+            request(FRAME_REQUEST)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("delegation delivery sequence exhausted"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::DelegationDeliverySequenceExhausted {
+                        recipient_session_id: ids.child_session,
+                        last: CanonicalU64::new(u64::MAX),
+                    },
+                ),
+            },
+            &format!(
+                "{{\"type\":\"error\",\"code\":\"rejected\",\"message\":\"delegation delivery sequence exhausted\",\"detail\":{{\"type\":\"delegation_delivery_sequence_exhausted\",\"recipient_session_id\":\"{}\",\"last\":\"{}\"}}}}",
+                ids.child_session,
+                u64::MAX
+            ),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delivery_sequence_exhaustion_rejects_a_nonterminal_counter()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const FRAME_REQUEST: u64 = 52;
+        let ids = delegation_wire_identities();
+        let frame = ServerFrame::try_new(
+            request(FRAME_REQUEST)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("delegation delivery sequence exhausted"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::DelegationDeliverySequenceExhausted {
+                        recipient_session_id: ids.child_session,
+                        last: CanonicalU64::new(u64::MAX - 1),
+                    },
+                ),
+            },
+        );
+
+        assert_eq!(frame, Err(FrameValidationError::ErrorDetailShape));
+        Ok(())
+    }
+
+    #[test]
     fn inv033_delegation_request_content_validation_is_left_to_application_input()
     -> Result<(), Box<dyn std::error::Error>> {
         const EMPTY_TASK_FRAME_REQUEST: u64 = 43;
@@ -12703,6 +12765,26 @@ mod tests {
             foreground_registration,
             Err(FrameValidationError::DelegationShape)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_message_receipt_rejects_the_reserved_spawn_ordinal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const FRAME_REQUEST: u64 = 53;
+        let ids = delegation_wire_identities();
+        let receipt = ServerFrame::try_new(
+            request(FRAME_REQUEST)?,
+            ServerMessage::SessionMessageSent {
+                tool_request_id: ids.message_request,
+                message_id: ids.message,
+                direction: DelegationMessageDirection::ParentToChild,
+                ordinal: CanonicalU64::new(1),
+                delivery_sequence: CanonicalU64::new(1),
+            },
+        );
+
+        assert_eq!(receipt, Err(FrameValidationError::DelegationShape));
         Ok(())
     }
 

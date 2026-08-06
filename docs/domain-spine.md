@@ -6172,7 +6172,6 @@ pub enum ToolExecutorDisposition {
     DurableCompletion(CorrelatedDurableToolCompletion),
     DurableChildWait(CorrelatedDurableChildWait),
 }
-
 pub trait ToolExecutor {
     type Error: ClassifyOperatorFailure;
     fn execute(

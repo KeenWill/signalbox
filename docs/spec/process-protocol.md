@@ -1192,11 +1192,13 @@ only for request and child uniqueness. `await_session` additionally admits
 `delegation_await_conflict { tool_request_id }`; `send_session_message` admits
 that same relation detail and `delegation_message_conflict { tool_request_id }`.
 An exhausted relation event ordinal admits
-`delegation_event_ordinal_exhausted { spawning_request_id, last }`. These
-delegation details are closed; request-purpose, carried-argument, and bounded
-content failures occur while constructing the application input and therefore
-map to `invalid_request`, not `rejected`. A
-`create_session_from_imported_frontier` rejection admits
+`delegation_event_ordinal_exhausted { spawning_request_id, last }`. Exhausting
+the independent recipient-wide delivery counter admits
+`delegation_delivery_sequence_exhausted { recipient_session_id, last }`. Either
+`last` is the maximum unsigned 64-bit value. These delegation details are
+closed; request-purpose, carried-argument, and bounded content failures occur
+while constructing the application input and therefore map to `invalid_request`,
+not `rejected`. A `create_session_from_imported_frontier` rejection admits
 `imported_conversation_not_found { imported_conversation_id }` and
 `imported_frontier_position_out_of_range { imported_conversation_id, requested_position, last_position }`.
 The first names an imported conversation, never a session, as the absent target;
@@ -2040,6 +2042,9 @@ session; they never inline the child transcript. Lifecycle lines always show
 outcome, typed reason, and provenance, including `continue_running`. Background
 result wakes are labeled separately from foreground tool-result continuation so
 a user can see whether an old turn resumed or a new parent turn became eligible.
+Before presenting success, the terminal client requires every child or peer to
+be distinct from the invoking session in spawn, both await-result modes, and
+message receipts.
 
 `chat` is the plain line-oriented interactive surface for one live session. It
 opens one long-lived `follow_session` connection before accepting input and

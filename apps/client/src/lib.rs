@@ -1197,6 +1197,7 @@ async fn session_delegation(
                         && recorded_child == child_session_id
                         && recorded_mode == mode
                         && mode == DelegationWaitMode::Background
+                        && session_id != child_session_id
                     {
                         output.session_await_registered(tool_request_id, child_session_id, mode)?;
                         Ok(())
@@ -1219,6 +1220,7 @@ async fn session_delegation(
                     if mode == DelegationWaitMode::Foreground
                         && recorded_request == tool_request_id
                         && recorded_child == child_session_id
+                        && session_id != child_session_id
                         && delegation_provenance_matches(session_id, child_session_id, provenance)
                     {
                         output.child_result(
@@ -1277,7 +1279,7 @@ async fn session_delegation(
                     ordinal,
                     delivery_sequence,
                 } => {
-                    if recorded_request == tool_request_id {
+                    if recorded_request == tool_request_id && session_id != peer_session_id {
                         output.session_message_sent(
                             tool_request_id,
                             peer_session_id,
@@ -8323,7 +8325,7 @@ mod tests {
                 tool_request_id: request_id,
                 message_id,
                 direction: DelegationMessageDirection::ParentToChild,
-                ordinal: CanonicalU64::new(1),
+                ordinal: CanonicalU64::new(2),
                 delivery_sequence: CanonicalU64::new(1),
             },
         )
@@ -8333,10 +8335,134 @@ mod tests {
         assert_eq!(
             stdout,
             format!(
-                "message_request={request_id} peer_session={child_id} message={message_id} direction=parent_to_child ordinal=1 delivery_sequence=1\n"
+                "message_request={request_id} peer_session={child_id} message={message_id} direction=parent_to_child ordinal=2 delivery_sequence=1\n"
             )
         );
         assert_eq!(stderr, "");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegation_background_await_rejects_self_relationship() -> Result<(), Box<dyn Error>> {
+        let session_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SESSION)?);
+        let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_TURN)?);
+        let request_id =
+            CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_BACKGROUND_AWAIT_REQUEST)?);
+        let (exit, stdout, stderr) = run_delegation_verb(
+            &[
+                "session",
+                "await",
+                DELEGATION_SESSION,
+                DELEGATION_TURN,
+                DELEGATION_BACKGROUND_AWAIT_REQUEST,
+                DELEGATION_SESSION,
+                "--mode",
+                "background",
+            ],
+            ClientRequest::AwaitSession {
+                session_id,
+                turn_id,
+                tool_request_id: request_id,
+                child_session_id: session_id,
+                mode: DelegationWaitMode::Background,
+            },
+            ServerMessage::SessionAwaitRegistered {
+                tool_request_id: request_id,
+                child_session_id: session_id,
+                mode: DelegationWaitMode::Background,
+            },
+        )
+        .await?;
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert_eq!(stdout, "");
+        assert!(!stderr.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegation_foreground_await_rejects_self_relationship() -> Result<(), Box<dyn Error>> {
+        let session_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SESSION)?);
+        let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_TURN)?);
+        let request_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_AWAIT_REQUEST)?);
+        let spawn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SPAWN_REQUEST)?);
+        let child_turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD_TURN)?);
+        let (exit, stdout, stderr) = run_delegation_verb(
+            &[
+                "session",
+                "await",
+                DELEGATION_SESSION,
+                DELEGATION_TURN,
+                DELEGATION_AWAIT_REQUEST,
+                DELEGATION_SESSION,
+                "--mode",
+                "foreground",
+            ],
+            ClientRequest::AwaitSession {
+                session_id,
+                turn_id,
+                tool_request_id: request_id,
+                child_session_id: session_id,
+                mode: DelegationWaitMode::Foreground,
+            },
+            ServerMessage::ChildResult {
+                await_request_id: request_id,
+                spawning_request_id: spawn_id,
+                child_session_id: session_id,
+                outcome: DelegationOutcome::Returned,
+                content: Some(String::from("done")),
+                reason: DelegationReason::ChildCompleted,
+                provenance: DelegationProvenance::ChildTurn {
+                    child_session_id: session_id,
+                    child_turn_id,
+                },
+            },
+        )
+        .await?;
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert_eq!(stdout, "");
+        assert!(!stderr.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegation_message_rejects_self_peer() -> Result<(), Box<dyn Error>> {
+        let session_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SESSION)?);
+        let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_TURN)?);
+        let request_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_MESSAGE_REQUEST)?);
+        let message_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_MESSAGE)?);
+        let (exit, stdout, stderr) = run_delegation_verb(
+            &[
+                "session",
+                "message",
+                DELEGATION_SESSION,
+                DELEGATION_TURN,
+                DELEGATION_MESSAGE_REQUEST,
+                DELEGATION_SESSION,
+                "--content",
+                "status ready",
+            ],
+            ClientRequest::SendSessionMessage {
+                session_id,
+                turn_id,
+                tool_request_id: request_id,
+                peer_session_id: session_id,
+                content: String::from("status ready"),
+            },
+            ServerMessage::SessionMessageSent {
+                tool_request_id: request_id,
+                message_id,
+                direction: DelegationMessageDirection::ParentToChild,
+                ordinal: CanonicalU64::new(2),
+                delivery_sequence: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert_eq!(stdout, "");
+        assert!(!stderr.is_empty());
         Ok(())
     }
 

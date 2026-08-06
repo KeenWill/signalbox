@@ -479,7 +479,6 @@ pub enum ToolExecutorDisposition {
     /// The executor's transaction already parked this exact foreground wait.
     DurableChildWait(CorrelatedDurableChildWait),
 }
-
 impl CorrelatedToolExecutorEvidence {
     /// Returns the executor-supplied correlation.
     pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
