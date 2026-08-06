@@ -258,6 +258,22 @@ struct DecodedResponse {
 /// Both are checked because either alone is defeatable: an error object with
 /// every field null would clear the first, and the second cannot by itself
 /// rule out a stream that reported a refusal finish and then failed natively.
+///
+/// A third shape is accepted: the exchange that stopped at this smoke's own
+/// output ceiling. `PROMPT` asks for one word, but a prompt is a request, not
+/// an enforced bound, and Chat Completions has no control that caps visible
+/// output other than the ceiling itself. If the model ever runs to it, the
+/// provider reports `finish_reason: "length"`, which `map_finish` leaves
+/// `Unrecognized` on purpose (OpenAI reuses that token for both the requested
+/// ceiling and the context limit, and the adapter will not guess), so the
+/// decoder ends the stream as `BoundaryLoss` carrying the token verbatim.
+/// That outcome is a truthful report about answer length, not a protocol
+/// break: the request was accepted, the SSE body framed and decoded, the model
+/// identity reported, and usage reported — every surface this smoke exists to
+/// check. Failing a required, twice-daily paid check on it would be asserting
+/// something about answer quality, which the owning specification says this
+/// smoke does not do. The arm is keyed to that exact token, so any other
+/// unrecognized finish, and every other loss cause, still fails.
 #[track_caller]
 fn require_decoded_response(
     evidence: TerminalEvidence,
@@ -277,6 +293,15 @@ fn require_decoded_response(
             DecodedResponse {
                 exchange: error.exchange,
                 usage: error.usage,
+            }
+        }
+        TerminalEvidence::BoundaryLoss(loss)
+            if loss.exchange.http_status == Some(200)
+                && stopped_at_the_output_ceiling(loss.finish_reported.as_ref()) =>
+        {
+            DecodedResponse {
+                exchange: loss.exchange,
+                usage: loss.usage,
             }
         }
         // Adapter-produced evidence is already credential-shape redacted, so
@@ -305,6 +330,23 @@ fn refusal_finish_observed(observations: &[Observation<String>]) -> bool {
             ObservationFact::FinishReported(FinishReason::Refusal)
         )
     })
+}
+
+/// The provider's own token for "generation stopped at the requested output
+/// ceiling". Matched verbatim because the adapter deliberately does not map it
+/// to a typed finish: OpenAI reuses `length` for the requested ceiling and the
+/// context limit alike, so the adapter keeps the token rather than guessing
+/// which bound was hit.
+const OUTPUT_CEILING_FINISH_TOKEN: &str = "length";
+
+/// Whether the stream ended because generation reached an output bound rather
+/// than because the protocol broke.
+fn stopped_at_the_output_ceiling(finish: Option<&FinishReason>) -> bool {
+    matches!(
+        finish,
+        Some(FinishReason::Unrecognized { provider_token })
+            if provider_token == OUTPUT_CEILING_FINISH_TOKEN
+    )
 }
 
 /// Asserts a decoded response is well-formed under the compatibility-smoke
@@ -608,6 +650,56 @@ mod require_decoded_response_tests {
             }),
             &[],
         );
+    }
+
+    /// The shape `StreamDecoder` produces when the provider reports
+    /// `finish_reason: "length"`: the unrecognized-finish violation, with the
+    /// token retained verbatim and usage already accumulated.
+    fn stopped_at_ceiling(finish_token: &str) -> TerminalEvidence {
+        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::StreamProtocolViolation {
+                detail: "stream carries an unrecognized finish_reason".to_string(),
+            },
+            exchange: exchange(200),
+            reported_model: None,
+            finish_reported: Some(FinishReason::Unrecognized {
+                provider_token: finish_token.to_string(),
+            }),
+            usage: usage(),
+        })
+    }
+
+    #[test]
+    fn output_ceiling_truncation_is_accepted() {
+        // A one-word prompt is a request, not an enforced bound. Running to
+        // the ceiling still proves the whole protocol surface, so it must not
+        // redden a required check.
+        let expected_usage = usage();
+
+        let decoded = require_decoded_response(stopped_at_ceiling("length"), &[]);
+
+        assert_eq!(decoded.exchange, exchange(200));
+        assert_eq!(decoded.usage, expected_usage);
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn a_different_unrecognized_finish_still_panics() {
+        // Only the output-ceiling token is accepted: a finish token this
+        // adapter has never seen is exactly the compatibility break the smoke
+        // exists to catch.
+        let _ = require_decoded_response(stopped_at_ceiling("stop_and_smell_the_roses"), &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn an_output_ceiling_finish_from_a_non_200_status_panics() {
+        let TerminalEvidence::BoundaryLoss(mut loss) = stopped_at_ceiling("length") else {
+            panic!("fixture builds boundary-loss evidence");
+        };
+        loss.exchange = exchange(500);
+
+        let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
     }
 }
 

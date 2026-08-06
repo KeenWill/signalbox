@@ -470,19 +470,26 @@ tokens, and a downgraded refusal can be blocked before any completion token is
 produced, so both accepted shapes share one output usage-presence check without
 demanding it be nonzero.
 
-The smoke's target is deliberately a non-reasoning model. A reasoning model
-spends hidden reasoning tokens against the same output ceiling as visible
-content, and the Chat Completions surface offers no control that caps those
-tokens below the ceiling — `reasoning_effort` is a qualitative hint, so even its
-lowest setting leaves the worst case unbounded. Exhausting the ceiling that way
-returns a `length` finish reason, which this adapter does not decode as
-completion evidence, so the exchange fails as `BoundaryLoss` and is
-indistinguishable from a real compatibility break. Enlarging the ceiling lowers
-those odds without bounding them. A non-reasoning target removes the failure
-class instead: every token billed against the ceiling is visible output the
-fixed one-word prompt already bounds, and the ceiling reverts to a pure cost
-cap. The operation therefore sets no explicit provider control, and the smoke's
-`ModelCapabilityCatalog` is correspondingly empty.
+The smoke also accepts one loss shape: the exchange that stopped at its own
+output ceiling. Chat Completions reports that as `finish_reason: "length"`,
+which this adapter deliberately leaves unmapped, so the decoder ends the stream
+as `BoundaryLoss` carrying the token verbatim. That is a truthful report about
+answer length, not a protocol break — the request was accepted, the body framed
+and decoded, and identity and usage reported — so failing the smoke on it would
+assert something about answer quality, which this smoke does not do. The
+acceptance is keyed to that exact token from a 200 exchange; any other
+unrecognized finish, and every other loss cause, still fails.
+
+The smoke's target is deliberately a non-reasoning model, which is a separate
+concern from that ceiling. A reasoning model spends hidden reasoning tokens
+against the same ceiling as visible content, and Chat Completions offers no
+control that caps them below it — `reasoning_effort` is a qualitative hint, so
+even its lowest setting leaves the worst case unbounded. Such a run can consume
+the entire budget before emitting any visible reply, so it proves less about the
+response envelope while costing the same. A target with no reasoning tier makes
+every token billed against the ceiling visible output, and the ceiling a pure
+cost cap. The operation therefore sets no explicit provider control, and the
+smoke's `ModelCapabilityCatalog` is correspondingly empty.
 
 This smoke's required aggregate is merge-gating for a pull request that changes
 the adapter crate or the workflow itself — an explicit exception to
