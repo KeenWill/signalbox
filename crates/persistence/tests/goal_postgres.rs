@@ -3317,17 +3317,21 @@ async fn s18_inv010_inv012_nested_cascade_descends_by_immediate_parent_dispositi
     let background_turn = 0xf631;
     let nested_pruned_turn = 0xf641;
     let stop_command = 0xf650;
-    for (command_id, session_id, selection) in [
-        (0xf001, parent, 0xf201),
-        (0xf002, bound_child, 0xf202),
-        (0xf003, nested_flipped_child, 0xf203),
-        (0xf004, background_child, 0xf204),
-        (0xf005, nested_pruned_child, 0xf205),
-    ] {
-        CreateSessionRepository::new(pool.clone(), credential_pin())
-            .handle(creation_fixture(command_id, session_id, selection))
-            .await?;
-    }
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf001, parent, 0xf201))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf002, bound_child, 0xf202))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf003, nested_flipped_child, 0xf203))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf004, background_child, 0xf204))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf005, nested_pruned_child, 0xf205))
+        .await?;
     // A root stop cancels this edge, so its own child is dispositioned as a
     // cancelled parent rather than a stopped one.
     insert_queued_delegation_fixture(
