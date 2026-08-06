@@ -114,7 +114,8 @@ use signalbox_persistence::{
         SessionCredentialPin, SessionModelCredential, current_session_credential,
     },
     session_delegation::{
-        RecordDelegationMessageOutcome, RecordDelegationWaitOutcome, SessionDelegationRepository,
+        DelegationOperationRejection, RecordDelegationMessageOutcome, RecordDelegationWaitOutcome,
+        SessionDelegationRepository,
     },
     start_eligible_turn::{
         CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
@@ -221,6 +222,7 @@ const DELEGATION_REVERSE_INSERT_FIXTURE_SEED: u128 = 0xd7a0;
 const DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED: u128 = 0xd7b0;
 const DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED: u128 = 0xd7c0;
 const DELEGATION_REPOSITORY_MESSAGE_SEED: u128 = 0xd7d0;
+const DELEGATION_REPOSITORY_MESSAGE_RACE_SECOND_SEED: u128 = 0xe7d0;
 const DELEGATION_OUTBOX_COMMAND_ID: u128 = 0xdc00;
 const DELEGATION_LIFECYCLE_COMMAND_ID: u128 = 0xdd10;
 const DELEGATION_CASCADE_ROOT_COMMAND_ID: u128 = 0xe640;
@@ -982,6 +984,22 @@ async fn repository_message_dispatch(
         .map_err(Into::into)
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum MessageRaceDisposition {
+    IdentityCollision,
+    Recorded,
+}
+
+fn message_race_disposition(outcome: RecordDelegationMessageOutcome) -> MessageRaceDisposition {
+    match outcome {
+        RecordDelegationMessageOutcome::Recorded(_) => MessageRaceDisposition::Recorded,
+        RecordDelegationMessageOutcome::Rejected(
+            DelegationOperationRejection::MessageIdentityCollision,
+        ) => MessageRaceDisposition::IdentityCollision,
+        unexpected => panic!("unexpected message race outcome: {unexpected:?}"),
+    }
+}
+
 /// S17 / INV-032: a background wait, its completed receipt, and its update are
 /// one replay-idempotent commit.
 #[tokio::test(flavor = "multi_thread")]
@@ -1154,6 +1172,57 @@ async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
     assert_eq!(recorded.ordinal().get(), 2);
     assert_eq!(recorded.delivery_sequence().get(), 1);
     assert_eq!(evidence, (1, 1, 1, 1, 1, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-010 / INV-012: concurrent relationships cannot claim one global
+/// message identity; exactly one records and the loser is a typed rejection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_concurrent_message_identity_collision_is_typed()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first_seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let second_seed = DELEGATION_REPOSITORY_MESSAGE_RACE_SECOND_SEED;
+    let first_fixture =
+        prepare_delegation_repository_fixture(&pool, first_seed, "background").await?;
+    let second_fixture =
+        prepare_delegation_repository_fixture(&pool, second_seed, "background").await?;
+    let first_dispatch = repository_message_dispatch(&pool, first_fixture, first_seed).await?;
+    let second_dispatch = repository_message_dispatch(&pool, second_fixture, second_seed).await?;
+    let first_request = DelegationMessageRequest::parse(
+        first_dispatch.request().clone(),
+        first_fixture.child,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    let second_request = DelegationMessageRequest::parse(
+        second_dispatch.request().clone(),
+        second_fixture.child,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    let shared_message = DelegationMessageId::from_uuid(first_fixture.message_id);
+    let repository = SessionDelegationRepository::new(pool.clone());
+
+    let (first, second) = tokio::join!(
+        repository.record_message(first_request, shared_message, &first_dispatch),
+        repository.record_message(second_request, shared_message, &second_dispatch),
+    );
+    let mut dispositions = [
+        message_race_disposition(first?),
+        message_race_disposition(second?),
+    ];
+    dispositions.sort();
+
+    assert_eq!(
+        dispositions,
+        [
+            MessageRaceDisposition::IdentityCollision,
+            MessageRaceDisposition::Recorded,
+        ]
+    );
 
     pool.close().await;
     drop(container);
