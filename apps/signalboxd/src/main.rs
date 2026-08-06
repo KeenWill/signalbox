@@ -1260,6 +1260,7 @@ async fn run_hub(
             code_host_transport,
             tool_configuration.github_egress_policy(),
             tool_configuration.workspace_root(),
+            tool_configuration.git_identity().clone(),
             model_configuration.web_fetch_egress_policy(),
         ),
         None => DaemonTools::try_new_without_tool_mappings(

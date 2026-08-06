@@ -50,6 +50,7 @@ use signalbox_process_protocol::{
     MAX_MODEL_ALIAS_CATALOG_ENTRIES, MAX_MODEL_CAPABILITY_CATALOG_ENTRIES,
     MAX_RATE_VERSION_UTF8_BYTES,
 };
+use signalbox_tools_git::GitIdentity;
 use signalbox_tools_github::{GITHUB_CREDENTIAL_REFERENCE, GitHubEgressPolicy};
 use signalbox_tools_web::WebFetchEgressPolicy;
 use tokio::io::AsyncReadExt;
@@ -300,12 +301,18 @@ struct AdapterMapping {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaemonToolConfiguration {
     workspace_root: PathBuf,
+    git_identity: GitIdentity,
 }
 
 impl DaemonToolConfiguration {
     /// Absolute root pinned into both workspace tool families.
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
+    }
+
+    /// Explicit author and committer identity for daemon-local Git commits.
+    pub const fn git_identity(&self) -> &GitIdentity {
+        &self.git_identity
     }
 
     /// Fixed public-GitHub-only egress policy selected by the tool registry.
@@ -475,6 +482,7 @@ impl HubModelConfiguration {
                 "conversation_import",
                 "web_fetch",
                 "tool_mappings",
+                "git_identity",
                 "tool_approval_postures",
                 "approval_judge",
                 "repository_watch",
@@ -547,7 +555,8 @@ impl HubModelConfiguration {
             })
             .transpose()?
             .unwrap_or_default();
-        let daemon_tools = parse_tool_mappings(document.get("tool_mappings"))?;
+        let git_identity = parse_git_identity(document.get("git_identity"))?;
+        let daemon_tools = parse_tool_mappings(document.get("tool_mappings"), git_identity)?;
         let profile_tables = document
             .get("credential_profiles")
             .and_then(|item| item.as_array_of_tables())
@@ -1984,6 +1993,7 @@ fn divide_product_factor(left: &mut u128, right: &mut u128, factor: u128) -> Opt
 
 fn parse_tool_mappings(
     item: Option<&Item>,
+    git_identity: Option<GitIdentity>,
 ) -> Result<Option<DaemonToolConfiguration>, HubModelConfigurationError> {
     let Some(item) = item else {
         return Ok(None);
@@ -2033,7 +2043,29 @@ fn parse_tool_mappings(
     }
     Ok(Some(DaemonToolConfiguration {
         workspace_root: workspace_root.ok_or(HubModelConfigurationError::InvalidToolMappings)?,
+        git_identity: git_identity
+            .ok_or(HubModelConfigurationError::MissingGitIdentityConfiguration)?,
     }))
+}
+
+fn parse_git_identity(
+    item: Option<&Item>,
+) -> Result<Option<GitIdentity>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidGitIdentityConfiguration)?;
+    reject_unknown_fields(table, &["author_name", "author_email"])
+        .map_err(|_| HubModelConfigurationError::InvalidGitIdentityConfiguration)?;
+    let author_name = required_string(table, "author_name")
+        .map_err(|_| HubModelConfigurationError::InvalidGitIdentityConfiguration)?;
+    let author_email = required_string(table, "author_email")
+        .map_err(|_| HubModelConfigurationError::InvalidGitIdentityConfiguration)?;
+    GitIdentity::try_new(author_name, author_email)
+        .map(Some)
+        .map_err(|_| HubModelConfigurationError::InvalidGitIdentityConfiguration)
 }
 
 fn validate_github_tool_mapping(mapping: &Table) -> Result<(), HubModelConfigurationError> {
@@ -2549,6 +2581,10 @@ pub enum HubModelConfigurationError {
     InvalidBillingKind,
     /// The daemon tool mapping registry was incomplete or malformed.
     InvalidToolMappings,
+    /// Mapped daemon tools were configured without the required Git identity.
+    MissingGitIdentityConfiguration,
+    /// The daemon Git identity table was malformed or unsafe.
+    InvalidGitIdentityConfiguration,
     /// The per-tool approval posture table was malformed.
     InvalidToolApprovalPostures,
     /// The approval-judge selection table was malformed.
@@ -2684,6 +2720,12 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidToolMappings => {
                 "model configuration contains invalid daemon tool mappings"
+            }
+            Self::MissingGitIdentityConfiguration => {
+                "model configuration maps daemon tools without Git identity settings"
+            }
+            Self::InvalidGitIdentityConfiguration => {
+                "model configuration contains invalid Git identity settings"
             }
             Self::DuplicateToolFamily => "model configuration repeats a daemon tool family",
             Self::MissingCompaction => "model configuration has no compaction settings",
@@ -2947,6 +2989,8 @@ mod tests {
     const SECOND_WATCH_INTERVAL_SECONDS: u64 = 120;
     const SIGNAL_REVIEWER: &str = "signal-reviewer";
     const SECOND_SIGNAL_REVIEWER: &str = "review-bot[bot]";
+    const GIT_AUTHOR_NAME: &str = "Signalbox Daemon";
+    const GIT_AUTHOR_EMAIL: &str = "signalbox@example.test";
     const PROVIDER_WATCH_REPOSITORY: &str = "Namespace/Project";
     const PROVIDER_SECOND_WATCH_REPOSITORY: &str = "Namespace/Second";
     const PROVIDER_SIGNAL_REVIEWER: &str = "Signal-Reviewer";
@@ -2998,6 +3042,10 @@ workspace_root = "/srv/signalbox/workspace"
 [[tool_mappings]]
 family = "conversations"
 adapter = "application"
+
+[git_identity]
+author_name = "Signalbox Daemon"
+author_email = "signalbox@example.test"
 
 [[models]]
 selection_id = "10000000-0000-4000-8000-000000000001"
@@ -3825,6 +3873,8 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             Path::new("/srv/signalbox/workspace")
         );
         assert_eq!(daemon_tools.github_credential_profile(), "github-primary");
+        assert_eq!(daemon_tools.git_identity().name(), GIT_AUTHOR_NAME);
+        assert_eq!(daemon_tools.git_identity().email(), GIT_AUTHOR_EMAIL);
         assert_eq!(
             daemon_tools.github_egress_policy().admitted_origin(),
             "https://api.github.com"
@@ -4276,6 +4326,45 @@ context_window_tokens = 200000
         assert_eq!(
             HubModelConfiguration::parse(&relative).err(),
             Some(HubModelConfigurationError::InvalidToolMappings)
+        );
+    }
+
+    #[test]
+    fn tool_mapping_registry_requires_git_identity() {
+        let missing = CONFIGURATION.replace(
+            "[git_identity]\nauthor_name = \"Signalbox Daemon\"\nauthor_email = \"signalbox@example.test\"\n\n",
+            "",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&missing).err(),
+            Some(HubModelConfigurationError::MissingGitIdentityConfiguration)
+        );
+    }
+
+    #[test]
+    fn git_identity_rejects_an_unsafe_value() {
+        let invalid = CONFIGURATION.replace(
+            "author_email = \"signalbox@example.test\"",
+            "author_email = \"signalbox@example.test>\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&invalid).err(),
+            Some(HubModelConfigurationError::InvalidGitIdentityConfiguration)
+        );
+    }
+
+    #[test]
+    fn git_identity_rejects_an_unknown_field() {
+        let unknown = CONFIGURATION.replace(
+            "author_email = \"signalbox@example.test\"",
+            "author_email = \"signalbox@example.test\"\ncommitter_name = \"Ambient User\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unknown).err(),
+            Some(HubModelConfigurationError::InvalidGitIdentityConfiguration)
         );
     }
 
@@ -5112,7 +5201,7 @@ context_window_tokens = 200000
 mod checked_in_example {
     use std::path::{Path, PathBuf};
 
-    use super::HubModelConfiguration;
+    use super::{HubModelConfiguration, ModelAdapter};
 
     fn example_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/signalboxd.example.toml")
@@ -5125,5 +5214,152 @@ mod checked_in_example {
     fn the_example_catalog_parses_and_validates() {
         HubModelConfiguration::read(&example_path())
             .expect("the checked-in example catalog is a valid version 1 document");
+    }
+
+    /// Whether one line is commented-out configuration rather than active TOML.
+    fn is_inactive(line: &str) -> bool {
+        line == "#" || line.starts_with("# ")
+    }
+
+    /// Removes exactly one comment level, the edit a reader makes by hand.
+    fn uncomment(line: &str) -> &str {
+        if let Some(remainder) = line.strip_prefix("# ") {
+            return remainder;
+        }
+        if let Some(remainder) = line.strip_prefix('#') {
+            return remainder;
+        }
+        line
+    }
+
+    /// Activates every inactive block the example ships, the transformation an
+    /// operator performs when adopting a family the shipped document leaves
+    /// commented out.
+    ///
+    /// An inactive block is a run of consecutive commented lines whose first
+    /// line uncomments to a TOML table header. A run that opens with prose is
+    /// documentation, not configuration, and stays commented; prose written
+    /// inside an inactive block is doubly commented so that one level of
+    /// removal leaves it a comment.
+    fn activated(document: &str) -> String {
+        let lines: Vec<&str> = document.lines().collect();
+        let mut activated = String::with_capacity(document.len());
+        let mut index = 0;
+        while index < lines.len() {
+            let mut end = index;
+            while end < lines.len() && is_inactive(lines[end]) {
+                end += 1;
+            }
+            let opens_a_table = end > index && uncomment(lines[index]).starts_with('[');
+            while index < end {
+                activated.push_str(if opens_a_table {
+                    uncomment(lines[index])
+                } else {
+                    lines[index]
+                });
+                activated.push('\n');
+                index += 1;
+            }
+            if index < lines.len() && !is_inactive(lines[index]) {
+                activated.push_str(lines[index]);
+                activated.push('\n');
+                index += 1;
+            }
+        }
+        activated
+    }
+
+    /// Binds the example's documented placeholder paths to paths that exist,
+    /// which the wrapped-CLI process tables require of a real deployment.
+    fn with_existing_paths(document: &str, executable: &Path, working_directory: &Path) -> String {
+        let executable = executable.to_string_lossy();
+        let working_directory = working_directory.to_string_lossy();
+        document
+            .replace(CLAUDE_EXECUTABLE_PLACEHOLDER, &executable)
+            .replace(CLAUDE_BRIDGE_PLACEHOLDER, &executable)
+            .replace(CODEX_EXECUTABLE_PLACEHOLDER, &executable)
+            .replace(WORKING_DIRECTORY_PLACEHOLDER, &working_directory)
+    }
+
+    const CLAUDE_EXECUTABLE_PLACEHOLDER: &str = "/absolute/path/to/claude";
+    const CLAUDE_BRIDGE_PLACEHOLDER: &str = "/absolute/path/to/signalbox-claude-mcp-bridge";
+    const CODEX_EXECUTABLE_PLACEHOLDER: &str = "/absolute/path/to/codex";
+    const WORKING_DIRECTORY_PLACEHOLDER: &str = "/absolute/path/to/workspace";
+
+    #[test]
+    fn activation_uncomments_a_block_that_opens_a_table() {
+        let activated = activated("# [codex_cli]\n# executable = \"codex\"\n");
+
+        assert_eq!(activated, "[codex_cli]\nexecutable = \"codex\"\n");
+    }
+
+    #[test]
+    fn activation_leaves_a_block_that_opens_with_prose_commented() {
+        let activated = activated("# To serve it, add:\n# [codex_cli]\n");
+
+        assert_eq!(activated, "# To serve it, add:\n# [codex_cli]\n");
+    }
+
+    #[test]
+    fn activation_leaves_prose_inside_an_activated_block_commented() {
+        let activated = activated("# [[models]]\n# # Hard cap: 128000.\n");
+
+        assert_eq!(activated, "[[models]]\n# Hard cap: 128000.\n");
+    }
+
+    #[test]
+    fn activation_leaves_active_lines_unchanged() {
+        let activated = activated("version = 1\n\n[compaction]\n");
+
+        assert_eq!(activated, "version = 1\n\n[compaction]\n");
+    }
+
+    /// A commented model row that activation walks past would be catalog data
+    /// no test ever loads, so the example is written so that activation
+    /// consumes every one of them.
+    #[test]
+    fn activation_leaves_no_commented_model_row_behind() {
+        let document =
+            std::fs::read_to_string(example_path()).expect("the checked-in example is readable");
+
+        let activated = activated(&document);
+
+        assert!(!activated.contains("\n# [[models]]"));
+    }
+
+    /// Every model row the example ships for a family it leaves commented out
+    /// is catalog data an operator is invited to adopt by uncommenting it, so
+    /// the whole activated document must satisfy the same fail-closed loader —
+    /// including the adapter-specific reasoning levels and service tiers each
+    /// row declares, and the one-adapter-per-provider-model rule that a
+    /// spelling offered on two surfaces would violate.
+    #[test]
+    fn every_inactive_example_block_activates_into_a_valid_catalog() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let document =
+            std::fs::read_to_string(example_path()).expect("the checked-in example is readable");
+
+        let activated = with_existing_paths(&activated(&document), &executable, temporary.path());
+
+        let configuration = HubModelConfiguration::parse(&activated)
+            .expect("the example's commented families activate into a valid version 1 document");
+
+        assert_eq!(
+            configuration.adapter_for_provider_model("claude-fable-5"),
+            Some(ModelAdapter::Anthropic)
+        );
+        assert_eq!(
+            configuration.adapter_for_provider_model("gpt-5.6"),
+            Some(ModelAdapter::OpenAi)
+        );
+        assert_eq!(
+            configuration.adapter_for_provider_model("gpt-5.6-sol"),
+            Some(ModelAdapter::CodexCli)
+        );
+        assert_eq!(
+            configuration.adapter_for_provider_model("fable"),
+            Some(ModelAdapter::ClaudeCli)
+        );
     }
 }

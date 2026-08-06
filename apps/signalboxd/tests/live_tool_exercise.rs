@@ -85,6 +85,7 @@ const FIXTURE_HEAD_REVISION: &str = "59af8a3634792a30cfb9480bea08cb04acd17bbf";
 const SMOKE_ALIAS: u128 = 0x7fde05bcb4c344f78a87748814c80191;
 const TRANSCRIPT_MARKER: &str = "live conversation transcript marker";
 const SEED_PATH: &str = "seed.txt";
+const GIT_ADMINISTRATION_DIRECTORY: &str = ".git";
 const SEED_CONTENT: &str = "needle from the real workspace\n";
 const SEED_PATTERN: &str = "needle";
 const STAGED_PATH: &str = "staged.txt";
@@ -199,6 +200,7 @@ async fn run_live_smoke() -> SmokeResult {
     };
 
     let workspace = tempfile::tempdir()?;
+    git2::Repository::init(workspace.path())?;
     fs::write(workspace.path().join(SEED_PATH), SEED_CONTENT)?;
     let credential_directory = tempfile::tempdir()?;
     let credential_file = credential_directory.path().join("github-token");
@@ -218,6 +220,7 @@ async fn run_live_smoke() -> SmokeResult {
         .expect("the smoke configuration wires every deployment-owned family");
     let github_egress_policy = daemon_configuration.github_egress_policy();
     let configured_workspace = daemon_configuration.workspace_root().to_path_buf();
+    let git_identity = daemon_configuration.git_identity().clone();
     let web_fetch_egress_policy = model_configuration.web_fetch_egress_policy();
 
     let listener = LocalProcessListener::bind(&socket)?;
@@ -258,6 +261,7 @@ async fn run_live_smoke() -> SmokeResult {
         GitHubCodeHostTransport::try_new()?,
         github_egress_policy,
         &configured_workspace,
+        git_identity,
         web_fetch_egress_policy,
     )?;
     let (tool_catalog, tool_executor) = tools.into_parts();
@@ -464,6 +468,10 @@ workspace_root = "{}"
 [[tool_mappings]]
 family = "conversations"
 adapter = "application"
+
+[git_identity]
+author_name = "Signalbox Live Smoke"
+author_email = "signalbox-live@example.test"
 
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000001"
@@ -774,7 +782,8 @@ fn assert_workspace_read_results(results: &[Value]) -> SmokeResult {
     };
     assert_eq!(read["content"], SEED_CONTENT);
     assert_eq!(read["truncated"], false);
-    assert_eq!(list["entries"][0]["path"], SEED_PATH);
+    assert_eq!(list["entries"][0]["path"], GIT_ADMINISTRATION_DIRECTORY);
+    assert_eq!(list["entries"][1]["path"], SEED_PATH);
     assert_eq!(search["matches"][0]["path"], SEED_PATH);
     assert_eq!(search["matches"][0]["line"], 1);
     Ok(())

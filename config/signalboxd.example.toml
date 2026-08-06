@@ -6,13 +6,14 @@
 # restarts once any stored call references them.
 #
 # `max_output_tokens` is the deployment's per-selection output ceiling.
-# Anthropic receives it as the provider request limit. Codex CLI has no
-# provider-side control, so its adapter renders the value as advisory context
-# and the daemon rejects reported over-limit usage after completion. It is an
-# operator budget, not a declaration of the model's capability: the working
-# default below is well under each model's hard cap, which is recorded beside
-# the entry. Raise it per selection as the deployment requires, up to but never
-# above the model's cap.
+# Anthropic receives it as the provider request limit, OpenAI as the Chat
+# Completions completion limit, and Claude Code as its output-token environment
+# override. Codex CLI has no provider-side control, so that adapter renders the
+# value as advisory context and the daemon rejects reported over-limit usage
+# after completion. It is an operator budget, not a declaration of the model's
+# capability: the working default below is well under each model's hard cap,
+# which is recorded beside the entry. Raise it per selection as the deployment
+# requires, up to but never above the model's cap.
 version = 1
 
 # Omitted members inherit. Nullable knobs also accept "provider_default" to
@@ -48,7 +49,9 @@ model_family = "anthropic"
 adapter = "anthropic"
 credential_profile = "anthropic-primary"
 
-# To serve a Codex model family, add this mapping and process configuration:
+# To serve a Codex model family, add this mapping and process configuration,
+# then uncomment the Codex CLI catalog rows below.
+
 # [[adapter_mappings]]
 # model_family = "codex"
 # adapter = "codex_cli"
@@ -64,7 +67,9 @@ credential_profile = "anthropic-primary"
 # program this workspace builds: the adapter spawns it as Claude Code's only
 # tool server, and the deployment names it explicitly rather than having the
 # daemon guess a path from its own image. Claude Code exposes no service tier,
-# so a Claude model declares reasoning levels and fast mode only.
+# so a Claude model declares reasoning levels and fast mode only. Uncomment the
+# Claude Code catalog rows below with it.
+
 # [[credential_profiles]]
 # name = "claude-subscription-primary"
 # billing_kind = "subscription"
@@ -82,7 +87,9 @@ credential_profile = "anthropic-primary"
 # To serve an OpenAI model family, add this profile and mapping and set
 # OPENAI_API_KEY_FILE to the file holding the current key. Like the Anthropic
 # mapping, an openai mapping must name the openai-primary profile, because the
-# daemon binds its key file to that exact non-secret reference.
+# daemon binds its key file to that exact non-secret reference. Uncomment the
+# OpenAI catalog rows below with it.
+
 # [[credential_profiles]]
 # name = "openai-primary"
 # billing_kind = "api_metered"
@@ -181,6 +188,12 @@ workspace_root = "/srv/signalbox/workspace"
 [[tool_mappings]]
 family = "conversations"
 adapter = "application"
+
+# The complete mapped composition uses this explicit identity for both author
+# and committer fields. It never consults ambient Git configuration.
+[git_identity]
+author_name = "Signalbox Daemon"
+author_email = "signalbox@example.invalid"
 
 # Exact-name overrides are optional. Any composed tool omitted here retains its
 # existing permission default and session-blanket behavior.
@@ -292,6 +305,291 @@ provider_model = "claude-haiku-4-5"
 max_output_tokens = 8192
 context_window_tokens = 200000
 service_tiers = ["auto", "standard_only"]
+
+# The three catalogs below serve the families this file leaves commented out.
+# Uncomment one together with its credential profile, adapter mapping, and
+# process table above. Inside a commented catalog a doubly commented line is
+# prose: removing one comment level from the block leaves the configuration
+# active and the prose a comment.
+#
+# One rule shapes every spelling below. The daemon routes one `provider_model`
+# to exactly one adapter, so two families may not spell the same model the same
+# way, and a catalog that serves a provider through two surfaces must give each
+# surface its own spelling. Each catalog therefore claims only spellings the
+# others leave free and records what it gave up; a deployment that would rather
+# serve a model through the other family moves the row instead of copying it.
+#
+# Every capability value below was read from its provider on 2026-08-06 and
+# will go stale. A row whose value could not be established from a provider
+# source says so in place and carries the conservative value instead.
+
+# OpenAI Chat Completions catalog, read from the provider's model, pricing, and
+# deprecation pages under developers.openai.com/api/docs on 2026-08-06. Every
+# row is a Chat Completions model: the `-pro` variants serve only the Responses
+# API and are omitted, as are the retiring o-series, GPT-4o, and `-chat-latest`
+# spellings. Context windows and the recorded hard caps are the provider's;
+# `max_output_tokens` remains this deployment's budget, as the header states.
+#
+# Two provider behaviors bind these rows. Chat Completions rejects a request
+# that carries function tools together with a reasoning effort other than
+# "none" on GPT-5.4 and later, so a selection the daemon composes tools into
+# leaves its reasoning level unset; the levels a row declares are the model's
+# capability, not a claim that a tool-bearing call may use them. That
+# restriction was observed in provider error text reported by several client
+# projects and appears on no model page. And the "priority" tier was renamed
+# "fast" on 2026-07-30 with both spellings still accepted, so these rows
+# declare "fast". The "minimal" effort the request enum still admits is listed
+# by no current model page and appears on no row. Tier support is enumerated
+# only on the pricing page, not per model page.
+
+# [[models]]
+# # The family alias, which resolves to the snapshot the Codex CLI catalog
+# # below names directly. Hard cap: 128000.
+# selection_id = "76c8df9b-d86b-4d8a-b9e0-c0d23cfee74b"
+# target_id = "f193ba86-0000-4dc0-ae3c-3f403d82b608"
+# model_family = "openai"
+# provider_model = "gpt-5.6"
+# max_output_tokens = 8192
+# context_window_tokens = 1050000
+# reasoning_levels = ["none", "low", "medium", "high", "xhigh", "max"]
+# fast_mode = "request_control"
+# service_tiers = ["auto", "default", "flex", "fast"]
+
+# [[models]]
+# # Hard cap: 128000. Conservative-unverified reasoning levels: this model's
+# # page omits the per-model list, and only the family guide claims the full
+# # six, so the row declares the three every family member states.
+# selection_id = "d4648797-3280-42c3-a066-ee1d90fd1491"
+# target_id = "7484d265-ebb8-4160-beab-199ce0d12375"
+# model_family = "openai"
+# provider_model = "gpt-5.6-terra"
+# max_output_tokens = 8192
+# context_window_tokens = 1050000
+# reasoning_levels = ["low", "medium", "high"]
+# fast_mode = "request_control"
+# service_tiers = ["auto", "default", "flex", "fast"]
+
+# [[models]]
+# # Hard cap: 128000. Conservative-unverified reasoning levels, for the reason
+# # recorded on the sibling above.
+# selection_id = "e03090d5-b2a6-464b-9dca-0d6983ba6820"
+# target_id = "ccee15f7-4319-49d6-a69c-622376b45524"
+# model_family = "openai"
+# provider_model = "gpt-5.6-luna"
+# max_output_tokens = 8192
+# context_window_tokens = 1050000
+# reasoning_levels = ["low", "medium", "high"]
+# fast_mode = "request_control"
+# service_tiers = ["auto", "default", "flex", "fast"]
+
+# [[models]]
+# # Hard cap: 128000. The page states no "max" effort for this model.
+# selection_id = "d56708dc-c74b-4c1f-9b4e-c758e0038a06"
+# target_id = "dd7cbdbd-e8b6-4d45-8b1e-f26b4fe648a7"
+# model_family = "openai"
+# provider_model = "gpt-5.5"
+# max_output_tokens = 8192
+# context_window_tokens = 1050000
+# reasoning_levels = ["none", "low", "medium", "high", "xhigh"]
+# fast_mode = "request_control"
+# service_tiers = ["auto", "default", "flex", "fast"]
+
+# [[models]]
+# # Hard cap: 128000.
+# selection_id = "2f1d6347-adb9-4e1e-8c96-89bdc8eb491a"
+# target_id = "7a4f52c8-1b3e-4eea-baed-d618b4f061e7"
+# model_family = "openai"
+# provider_model = "gpt-5.4"
+# max_output_tokens = 8192
+# context_window_tokens = 1050000
+# reasoning_levels = ["none", "low", "medium", "high", "xhigh"]
+# fast_mode = "request_control"
+# service_tiers = ["auto", "default", "flex", "fast"]
+
+# [[models]]
+# # Hard cap: 128000.
+# selection_id = "9f0f3965-8c82-4b80-b26f-faf522fed556"
+# target_id = "825f939d-6296-4fc8-b7ac-453bf8a4036a"
+# model_family = "openai"
+# provider_model = "gpt-5.4-mini"
+# max_output_tokens = 8192
+# context_window_tokens = 400000
+# reasoning_levels = ["none", "low", "medium", "high", "xhigh"]
+# fast_mode = "request_control"
+# service_tiers = ["auto", "default", "flex", "fast"]
+
+# [[models]]
+# # Hard cap: 128000. The pricing page does not list this model under the fast
+# # tier, so the row declares neither it nor request-controlled fast mode.
+# selection_id = "09418ccf-8a20-4870-9deb-a1e23cd00da5"
+# target_id = "f0dd2bd0-1591-43df-8f2d-1cf4cc123f86"
+# model_family = "openai"
+# provider_model = "gpt-5.4-nano"
+# max_output_tokens = 8192
+# context_window_tokens = 400000
+# reasoning_levels = ["none", "low", "medium", "high", "xhigh"]
+# service_tiers = ["auto", "default", "flex"]
+
+# [[models]]
+# # Hard cap: 128000.
+# selection_id = "0fbf7f4a-1560-4a12-8e10-0c08592b1b6f"
+# target_id = "1be7be2b-e0e5-458b-8037-9cbb2941819e"
+# model_family = "openai"
+# provider_model = "gpt-5.2"
+# max_output_tokens = 8192
+# context_window_tokens = 400000
+# reasoning_levels = ["none", "low", "medium", "high", "xhigh"]
+# fast_mode = "request_control"
+# service_tiers = ["auto", "default", "flex", "fast"]
+
+# [[models]]
+# # Hard cap: 128000. The page states no "xhigh" effort for this model.
+# selection_id = "9ef024d0-763d-422a-ba83-b9e2a8622aad"
+# target_id = "e0dcd7b4-5b91-4c22-9661-d4577d2b861b"
+# model_family = "openai"
+# provider_model = "gpt-5.1"
+# max_output_tokens = 8192
+# context_window_tokens = 400000
+# reasoning_levels = ["none", "low", "medium", "high"]
+# fast_mode = "request_control"
+# service_tiers = ["auto", "default", "flex", "fast"]
+
+# [[models]]
+# # A model with no reasoning control, so the row declares no levels. Hard
+# # cap: 32768. The pricing page does not list this family under the flex
+# # tier.
+# selection_id = "b0d643f3-fd7c-49be-a69f-76405ec07e0d"
+# target_id = "31d03b4f-3260-4b77-84ce-abe5d5e17965"
+# model_family = "openai"
+# provider_model = "gpt-4.1"
+# max_output_tokens = 8192
+# context_window_tokens = 1047576
+# fast_mode = "request_control"
+# service_tiers = ["auto", "default", "fast"]
+
+# [[models]]
+# # Hard cap: 32768. No reasoning control, as above. The `gpt-4.1-nano`
+# # sibling is left out: the provider's deprecation summary retires it while
+# # its own model page carries no notice, and the conflict is unresolved.
+# selection_id = "c693956c-b6e7-4279-b33a-2d8f149cd944"
+# target_id = "e5eec7ba-b1ef-46b6-a5d8-bc8964d0e256"
+# model_family = "openai"
+# provider_model = "gpt-4.1-mini"
+# max_output_tokens = 8192
+# context_window_tokens = 1047576
+# fast_mode = "request_control"
+# service_tiers = ["auto", "default", "fast"]
+
+# Codex CLI catalog, read on 2026-08-06 from the model catalog the pinned CLI
+# fetches from its provider (`codex debug models`, client 0.146) and from the
+# provider's published CLI documentation. The CLI's set is not the API's: it
+# publishes no dated snapshots, it serves a model the API does not, and the
+# models it shares with the API carry a 272000 window where Chat Completions
+# advertises 1050000 for the same spelling. The CLI validates neither a model
+# spelling nor an effort at startup — a wrong value fails at the provider — so
+# these spellings are the only guard a deployment gets.
+#
+# The CLI also lists gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4, and
+# gpt-5.4-mini, whose spellings the OpenAI catalog above already claims under
+# the one-adapter rule; serving one of them here means moving its row. The
+# provider marks gpt-5.4 and gpt-5.4-mini for retirement.
+#
+# `max_output_tokens` is conservative-unverified on both rows: the fetched
+# catalog carries no output-token field under any name and the CLI exposes no
+# setting, so no provider ceiling is known and the value is purely the operator
+# budget the header describes. The catalog advertises no "none" or "minimal"
+# effort for any model, so no row declares them. A declared service tier is the
+# "priority" request value behind the CLI's fast speed tier.
+
+# [[models]]
+# # The CLI's own default model. Advertised window: 272000.
+# selection_id = "ff15fc0a-bac0-45df-9d59-ab3b79282a95"
+# target_id = "4d4a9f4c-ce89-4c75-ae2e-695cda3ae4bc"
+# model_family = "codex"
+# provider_model = "gpt-5.6-sol"
+# max_output_tokens = 8192
+# context_window_tokens = 272000
+# reasoning_levels = ["low", "medium", "high", "xhigh", "max", "ultra"]
+# fast_mode = "request_control"
+# service_tiers = ["priority"]
+
+# [[models]]
+# # Served only through this surface: the provider's API does not offer it.
+# # Advertised window: 128000. Its catalog entry advertises no speed tier, so
+# # the row declares neither a tier nor request-controlled fast mode.
+# selection_id = "bacd74df-e96b-4fcd-85be-749ec7b73123"
+# target_id = "ce659f71-9a81-433a-b94d-5c33db7cd493"
+# model_family = "codex"
+# provider_model = "gpt-5.3-codex-spark"
+# max_output_tokens = 8192
+# context_window_tokens = 128000
+# reasoning_levels = ["low", "medium", "high", "xhigh"]
+
+# Claude Code catalog, extracted on 2026-08-06 from the model catalog embedded
+# in the pinned 2.1.220 command-line program, with the provider's published
+# documentation for the subscription behavior around it.
+#
+# These rows name the aliases the program accepts for `--model` — its own
+# surface, unrelated to the client-facing `[[aliases]]` identities below —
+# because the full model spellings are the ones the Anthropic catalog above
+# already claims under the one-adapter rule. Naming them this way lets one
+# deployment serve the same model over both surfaces — metered through the API
+# family above, subscription-billed through this one. The cost is that an alias
+# tracks its family's latest model rather than pinning one, so the values below
+# describe what each alias resolves to today; a deployment that needs a pinned
+# identity spells the full model here instead and drops the colliding row
+# above.
+#
+# The program exposes no service tier, so no row declares one. It receives
+# `max_output_tokens` as its output-token environment override, so the value is
+# a real ceiling here as well as the operator budget the header describes.
+# Where a row declares no reasoning levels, the catalog entry carries no effort
+# capability at all. The 1000000 windows are the program's native windows for
+# those models; the provider gates the largest windows by subscription plan, so
+# a deployment on a plan that does not include one lowers the value here.
+
+# [[models]]
+# # Resolves to claude-fable-5. Hard cap: 128000.
+# selection_id = "2b7fc5c7-14b2-4030-9ed8-eab7602f908c"
+# target_id = "eb742137-caa4-48fb-be37-45d61265325c"
+# model_family = "claude_code"
+# provider_model = "fable"
+# max_output_tokens = 8192
+# context_window_tokens = 1000000
+# reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+
+# [[models]]
+# # Resolves to claude-opus-5, the one model in this set whose catalog entry
+# # carries the fast-mode capability. Fast mode is first-party only and gated
+# # on a paid subscription. Hard cap: 128000.
+# selection_id = "cbd836c0-6216-45d6-9040-79a0f0f0e1b1"
+# target_id = "32170981-560b-4e5c-a2ac-dec0c6a2af54"
+# model_family = "claude_code"
+# provider_model = "opus"
+# max_output_tokens = 8192
+# context_window_tokens = 1000000
+# reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+# fast_mode = "request_control"
+
+# [[models]]
+# # Resolves to claude-sonnet-5. Hard cap: 128000.
+# selection_id = "77fc24ee-f04d-4c6f-8069-1a7016009700"
+# target_id = "b878e9e7-1000-4dcb-a86e-2f42e4043498"
+# model_family = "claude_code"
+# provider_model = "sonnet"
+# max_output_tokens = 8192
+# context_window_tokens = 1000000
+# reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+
+# [[models]]
+# # Resolves to claude-haiku-4-5, which carries no effort capability and no
+# # enlarged window. Hard cap: 64000.
+# selection_id = "33841843-dbb7-4b10-a0ce-59d7a66a2b0d"
+# target_id = "4a1c4bd4-a970-4a50-ad6b-900e7a5f0089"
+# model_family = "claude_code"
+# provider_model = "haiku"
+# max_output_tokens = 8192
+# context_window_tokens = 200000
 
 # Aliases carry no name field: an alias is an opaque identity clients name
 # directly, and each one freezes to its selection at acceptance time. The
