@@ -213,8 +213,8 @@ impl SessionDelegationRepository {
     ) -> Result<RecordDelegationWaitOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_delivery_session(&mut transaction, request.request().session()).await?;
             lock_tool_session(&mut transaction, request.request().session()).await?;
+            lock_delivery_session(&mut transaction, request.request().session()).await?;
             if let Some(spawning_request) =
                 load_wait_replay_subject(&mut transaction, request.request().id()).await?
             {
@@ -338,12 +338,12 @@ impl SessionDelegationRepository {
     ) -> Result<RecordDelegationMessageOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            lock_tool_session(&mut transaction, request.request().session()).await?;
             if !delivery_session_exists(&mut transaction, request.peer()).await? {
                 return Ok(RecordDelegationMessageOutcome::Rejected(
                     DelegationOperationRejection::RelationshipNotFound,
                 ));
             }
-            lock_tool_session(&mut transaction, request.request().session()).await?;
             if let Some(receipt) = load_message_replay(&mut transaction, &request).await? {
                 if dispatch.request() != request.request() {
                     return Ok(RecordDelegationMessageOutcome::Rejected(
@@ -546,13 +546,14 @@ async fn load_wait_mode(
     connection: &mut PgConnection,
     request: ToolRequestId,
 ) -> Result<DelegationWaitMode, SessionDelegationRepositoryError> {
-    let value = sqlx::query_scalar::<_, String>(
+    let row = sqlx::query(
         "SELECT wait_mode FROM session_delegation_wait WHERE awaiting_tool_request_id = $1",
     )
     .bind(tool_request_id_to_uuid(request))
     .fetch_optional(connection)
     .await?
     .ok_or(SessionDelegationCorruption::Missing("delegation wait"))?;
+    let value: String = required(&row, "wait_mode")?;
     decode_wait_mode(&value)
 }
 

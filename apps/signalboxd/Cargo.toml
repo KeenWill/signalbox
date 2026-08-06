@@ -48,6 +48,7 @@ signalbox-runner-wire = { path = "../../crates/runner-wire" }
 signalbox-tools-basic = { path = "../../crates/tools-basic" }
 signalbox-tools-code-host = { path = "../../crates/tools-code-host" }
 signalbox-tools-conversations = { path = "../../crates/tools-conversations" }
+signalbox-tools-git = { path = "../../crates/tools-git" }
 signalbox-tools-github = { path = "../../crates/tools-github" }
 signalbox-tools-plan = { path = "../../crates/tools-plan" }
 signalbox-tools-web = { path = "../../crates/tools-web" }
@@ -87,6 +88,7 @@ url = "2.5.8"
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 
 [dev-dependencies]
+git2 = { version = "0.21.0", default-features = false, features = ["unstable-sha256"] }
 opentelemetry_sdk = { version = "0.32.0", default-features = false, features = [
     "testing",
     "trace",
