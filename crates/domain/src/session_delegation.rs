@@ -1495,6 +1495,8 @@ impl SessionDelegation {
         let mut seen_message_ids = HashSet::new();
         let mut seen_message_requests = HashSet::new();
         let mut seen_parent_commands = HashSet::new();
+        let mut seen_outcome_provenance = HashSet::new();
+        let mut seen_child_terminal = false;
         for (index, event) in relation.events.iter().enumerate() {
             let expected = u64::try_from(index)
                 .ok()
@@ -1525,10 +1527,11 @@ impl SessionDelegation {
                 DelegationEvent::OutcomeRecorded { outcome, .. } => {
                     lifecycle = validate_reconstituted_outcome(
                         &relation,
-                        index,
                         lifecycle,
                         outcome,
                         &mut seen_parent_commands,
+                        &mut seen_outcome_provenance,
+                        &mut seen_child_terminal,
                     )
                     .map_err(|failure| reconstitution_error(input.clone(), failure))?;
                 }
@@ -1983,38 +1986,23 @@ fn validate_reconstituted_message(
 
 fn validate_reconstituted_outcome(
     relation: &SessionDelegation,
-    index: usize,
     lifecycle: DelegationLifecycle,
     outcome: &DelegationOutcome,
     seen_parent_commands: &mut HashSet<DurableCommandId>,
+    seen_provenance: &mut HashSet<DelegationProvenance>,
+    seen_child_terminal: &mut bool,
 ) -> Result<DelegationLifecycle, SessionDelegationReconstitutionFailure> {
     if let Some(authority) = outcome.provenance().parent_command()
         && !seen_parent_commands.insert(authority.command())
     {
         return Err(SessionDelegationReconstitutionFailure::DuplicateOutcomeAuthority);
     }
-    if relation.events[..index]
-        .iter()
-        .filter_map(DelegationEvent::outcome)
-        .any(|prior| prior.provenance() == outcome.provenance())
-    {
+    if !seen_provenance.insert(outcome.provenance()) {
         return Err(SessionDelegationReconstitutionFailure::DuplicateOutcomeAuthority);
     }
     let records_terminal_evaluation = outcome.kind() == DelegationOutcomeKind::AlreadyTerminal;
-    let prior_child_terminal = relation.events[..index]
-        .iter()
-        .filter_map(DelegationEvent::outcome)
-        .any(|prior| {
-            matches!(
-                prior.kind(),
-                DelegationOutcomeKind::ResultReturned
-                    | DelegationOutcomeKind::ChildFailed
-                    | DelegationOutcomeKind::ChildStopped
-                    | DelegationOutcomeKind::ChildCancelled
-            )
-        });
     if lifecycle == DelegationLifecycle::Terminal
-        && (!records_terminal_evaluation || !prior_child_terminal)
+        && (!records_terminal_evaluation || !*seen_child_terminal)
     {
         return Err(SessionDelegationReconstitutionFailure::EventAfterTerminal);
     }
@@ -2023,6 +2011,15 @@ fn validate_reconstituted_outcome(
     }
     if !outcome_matches_relation(relation, outcome) {
         return Err(SessionDelegationReconstitutionFailure::OutcomeReasonMismatch);
+    }
+    if matches!(
+        outcome.kind(),
+        DelegationOutcomeKind::ResultReturned
+            | DelegationOutcomeKind::ChildFailed
+            | DelegationOutcomeKind::ChildStopped
+            | DelegationOutcomeKind::ChildCancelled
+    ) {
+        *seen_child_terminal = true;
     }
     match outcome.kind() {
         DelegationOutcomeKind::ContinueRunning => Ok(DelegationLifecycle::Active),
