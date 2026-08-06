@@ -10,10 +10,11 @@ use signalbox_domain::{
     DelegationMessageDirection, DelegationMessageEndpoints, DelegationMessageId,
     DelegationMessageRequest, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
     DelegationProvenance, DelegationProvenanceReconstitutionInput, DelegationTransitionFailure,
-    DelegationWait, DelegationWaitMode, DurableCommandId, GoalGeneration, SessionDelegation,
-    SessionDelegationReconstitutionFailure, SessionDelegationReconstitutionInput, SessionId,
-    ToolAttemptEnd, ToolAttemptObservation, ToolDispatchAuthority, ToolEffectClass, ToolRequestId,
-    ToolResultContent, ToolResultText, TurnId,
+    DelegationWait, DelegationWaitMode, DurableCommandId, GoalGeneration, ReconstitutedToolAttempt,
+    SessionDelegation, SessionDelegationReconstitutionFailure,
+    SessionDelegationReconstitutionInput, SessionId, ToolAttemptEnd, ToolAttemptObservation,
+    ToolDispatchAuthority, ToolEffectClass, ToolRequestId, ToolResultContent, ToolResultText,
+    TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -33,8 +34,8 @@ use crate::{
         turn_id_to_uuid,
     },
     tool_loop::{
-        ToolLoopRepositoryError, load_active_batch_from_connection, load_request_by_id,
-        load_requests_by_id, lock_tool_session, persist_ended_attempt,
+        ToolLoopRepositoryError, load_active_batch_from_connection, load_attempts_by_id,
+        load_request_by_id, load_requests_by_id, lock_tool_session, persist_ended_attempt,
     },
 };
 
@@ -233,6 +234,7 @@ impl SessionDelegationRepository {
                 {
                     return Err(SessionDelegationCorruption::Inconsistent("stored wait row").into());
                 }
+                validate_wait_replay_attempt(&mut transaction, dispatch, wait).await?;
                 return Ok(RecordDelegationWaitOutcome::Recorded(
                     RecordedDelegationWait { wait },
                 ));
@@ -362,6 +364,7 @@ impl SessionDelegationRepository {
                         DelegationOperationRejection::StaleDispatch,
                     ));
                 }
+                validate_message_replay_attempt(&mut transaction, dispatch, receipt).await?;
                 return Ok(RecordDelegationMessageOutcome::Recorded(receipt));
             }
             let Some(spawning_request) =
@@ -442,7 +445,8 @@ impl SessionDelegationRepository {
                 ordinal: event.ordinal(),
                 delivery_sequence,
             };
-            let ended = complete_attempt(dispatch, message_receipt(dispatch, receipt)?)?;
+            let ended =
+                complete_attempt(dispatch, message_receipt(dispatch.request().id(), receipt)?)?;
             persist_ended_attempt(&mut transaction, &ended).await?;
             Ok(RecordDelegationMessageOutcome::Recorded(receipt))
         }
@@ -521,13 +525,13 @@ fn wait_receipt(wait: DelegationWait) -> Result<ToolResultText, SessionDelegatio
 }
 
 fn message_receipt(
-    dispatch: &ToolDispatchAuthority,
+    request: ToolRequestId,
     receipt: RecordedDelegationMessage,
 ) -> Result<ToolResultText, SessionDelegationRepositoryError> {
     ToolResultText::try_new(
         serde_json::json!({
             "result": "session_message_sent",
-            "tool_request_id": dispatch.request().id().as_uuid().to_string(),
+            "tool_request_id": request.as_uuid().to_string(),
             "message_id": receipt.message().as_uuid().to_string(),
             "direction": delegation_message_direction_to_str(receipt.direction()),
             "ordinal": receipt.ordinal().get(),
@@ -536,6 +540,75 @@ fn message_receipt(
         .to_string(),
     )
     .map_err(|_| SessionDelegationCorruption::Inconsistent("message receipt").into())
+}
+
+async fn validate_wait_replay_attempt(
+    connection: &mut PgConnection,
+    dispatch: &ToolDispatchAuthority,
+    wait: DelegationWait,
+) -> Result<(), SessionDelegationRepositoryError> {
+    let expected_end = match wait.mode() {
+        DelegationWaitMode::Background => ToolAttemptEnd::Completed {
+            result: ToolResultContent::Text(wait_receipt(wait)?),
+        },
+        DelegationWaitMode::Foreground => ToolAttemptEnd::AwaitingChild {
+            spawning_request: wait.spawning_request(),
+            child: wait.child(),
+        },
+    };
+    validate_replay_attempt(
+        connection,
+        dispatch,
+        ToolEffectClass::EffectFree,
+        expected_end,
+        "stored wait attempt",
+    )
+    .await
+}
+
+async fn validate_message_replay_attempt(
+    connection: &mut PgConnection,
+    dispatch: &ToolDispatchAuthority,
+    receipt: RecordedDelegationMessage,
+) -> Result<(), SessionDelegationRepositoryError> {
+    validate_replay_attempt(
+        connection,
+        dispatch,
+        ToolEffectClass::ExternalEffect,
+        ToolAttemptEnd::Completed {
+            result: ToolResultContent::Text(message_receipt(dispatch.request().id(), receipt)?),
+        },
+        "stored message attempt",
+    )
+    .await
+}
+
+async fn validate_replay_attempt(
+    connection: &mut PgConnection,
+    dispatch: &ToolDispatchAuthority,
+    expected_effect: ToolEffectClass,
+    expected_end: ToolAttemptEnd,
+    corruption_label: &'static str,
+) -> Result<(), SessionDelegationRepositoryError> {
+    let attempt_id = dispatch.attempt().attempt();
+    let mut attempts = load_attempts_by_id(connection, &[attempt_id]).await?;
+    let Some(ReconstitutedToolAttempt::Ended(ended)) = attempts.remove(&attempt_id) else {
+        return Err(SessionDelegationCorruption::Inconsistent(corruption_label).into());
+    };
+    let dispatched = dispatch.attempt();
+    if ended.attempt() != dispatched.attempt()
+        || ended.request() != dispatched.request()
+        || ended.session() != dispatched.session()
+        || ended.turn() != dispatched.turn()
+        || ended.issuing_attempt() != dispatched.issuing_attempt()
+        || ended.generation() != dispatched.generation()
+        || dispatched.effect_class() != expected_effect
+        || ended.effect_class() != dispatched.effect_class()
+        || ended.end() != &expected_end
+    {
+        return Err(SessionDelegationCorruption::Inconsistent(corruption_label).into());
+    }
+    Ok(())
 }
 
 struct StoredDelegationWaitReplay {
@@ -723,13 +796,7 @@ async fn load_events(
                     DelegationMessageRequest::parse(request, peer, content).map_err(|_| {
                         SessionDelegationCorruption::Inconsistent("message request purpose")
                     })?;
-                let stored_source = session_id_from_uuid(required(&row, "provenance_session_id")?);
-                if logical.request().session() != stored_source {
-                    return Err(SessionDelegationCorruption::Inconsistent(
-                        "message provenance session",
-                    )
-                    .into());
-                }
+                validate_message_provenance(&row, logical.request())?;
                 let message = DelegationMessage::reconstitute(
                     &logical,
                     DelegationMessageId::from_uuid(required(&row, "message_id")?),
@@ -1349,6 +1416,9 @@ async fn load_message_replay(
 ) -> Result<Option<RecordedDelegationMessage>, SessionDelegationRepositoryError> {
     let row = sqlx::query(
         "SELECT relation.parent_session_id, relation.child_session_id,
+                event.provenance_kind, event.provenance_session_id,
+                event.provenance_turn_id, event.provenance_goal_generation,
+                event.provenance_tool_request_id, event.provenance_command_id,
                 message.message_id, message.direction, message.content_text,
                 message.event_ordinal,
                 delivery.recipient_session_id AS delivery_recipient_session_id,
@@ -1381,6 +1451,7 @@ async fn load_message_replay(
     };
     let parent = session_id_from_uuid(required(&row, "parent_session_id")?);
     let child = session_id_from_uuid(required(&row, "child_session_id")?);
+    validate_message_provenance(&row, request.request())?;
     let direction = decode_direction(&required::<String>(&row, "direction")?)?;
     let content: String = required(&row, "content_text")?;
     let delivery_recipient = session_id_from_uuid(required(&row, "delivery_recipient_session_id")?);
@@ -1417,6 +1488,28 @@ async fn load_message_replay(
         ordinal: decode_ordinal(required(&row, "event_ordinal")?)?,
         delivery_sequence,
     }))
+}
+
+fn validate_message_provenance(
+    row: &PgRow,
+    request: &signalbox_domain::ToolRequest,
+) -> Result<(), SessionDelegationRepositoryError> {
+    let kind: String = required(row, "provenance_kind")?;
+    let session = session_id_from_uuid(required(row, "provenance_session_id")?);
+    let turn = turn_id_from_uuid(required(row, "provenance_turn_id")?);
+    let tool_request = tool_request_id_from_uuid(required(row, "provenance_tool_request_id")?);
+    let goal_generation: Option<Decimal> = row.try_get("provenance_goal_generation")?;
+    let command: Option<Uuid> = row.try_get("provenance_command_id")?;
+    if kind != "tool_request"
+        || session != request.session()
+        || turn != request.turn()
+        || tool_request != request.id()
+        || goal_generation.is_some()
+        || command.is_some()
+    {
+        return Err(SessionDelegationCorruption::Inconsistent("message provenance").into());
+    }
+    Ok(())
 }
 
 const fn message_recipient(
