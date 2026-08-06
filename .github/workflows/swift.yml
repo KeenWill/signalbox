@@ -156,13 +156,29 @@ jobs:
       # `gh`, `jq`, and `unzip` are all preinstalled on the macOS runner image,
       # so nothing here installs a tool onto a runner whose minutes are the
       # expensive ones.
+      #
+      # The token is set on this step alone, so the simulator suite above ran in
+      # an environment holding no credential. That is a scoping statement, not
+      # an isolation boundary, and it is worth being exact about which: the
+      # suite executes pull-request-controlled code on this runner, so code that
+      # ran earlier can reach a later step's `gh` whatever this step's `env`
+      # says. The accepted exposure is a read-only `github.token` on a public
+      # repository, carrying `actions: read` and `contents: read` and no write
+      # scope anywhere — everything it can reach is already readable by any
+      # authenticated account. Isolating the fetch in a job that checks out
+      # nothing would buy nothing against that, and would cost a second macOS
+      # runner and an artifact round-trip on a report that gates nothing. Grant
+      # this step no scope whose loss would matter.
       - name: Fetch the main-branch native coverage baseline
         id: baseline
         if: ${{ always() && github.event_name == 'pull_request' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # The base commit this pull request is open against — the same tree
+          # the merge measured above was built on. See the selection below for
+          # why this, and not the branch's merge-base, is the attributable one.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           # Must name this file. The runs endpoint is per-workflow, and a
           # baseline from another workflow's artifact would be a different
           # measurement wearing this one's label.
@@ -199,17 +215,6 @@ jobs:
             exit 0
           }
 
-          # The merge-base is what makes a delta this branch's own. The compare
-          # endpoint reports it without the deep history this shallow checkout
-          # does not have; `per_page=1` truncates the file list it also returns
-          # and nothing here reads. An error leaves it empty, which the
-          # selection below treats as "no merge-base run", not as a failure.
-          if ! merge_base="$(gh api \
-            "repos/$GITHUB_REPOSITORY/compare/main...$HEAD_SHA?per_page=1" \
-            --jq '.merge_base_commit.sha')"; then
-            merge_base=''
-          fi
-
           # Successful pushes to main only, and both halves of that matter. A
           # pull-request run measured a synthetic merge commit that never
           # landed. A run that ended red lost something its per-suite
@@ -222,13 +227,24 @@ jobs:
             unavailable "the list of \`main\` runs of this workflow could not be read"
           fi
 
-          # The merge-base run first when there is one, then the most recent
-          # runs, each tagged with which of the two it is. The label travels
-          # with the number from here to the rendered sentence.
+          # The run that measured this pull request's own base first when there
+          # is one, then the most recent runs, each tagged with which of the
+          # two it is. The label travels with the number from here to the
+          # rendered sentence.
+          #
+          # The base, not the branch's merge-base. A `pull_request` checkout is
+          # `refs/pull/N/merge` — this branch merged into the base it is open
+          # against — so the tree measured above already contains everything on
+          # `main` up to that base. Subtracting a merge-base measurement would
+          # subtract the fork point instead, leaving every commit that landed on
+          # `main` in between inside a delta the report calls this branch's own
+          # doing. Against the base those cancel, and the claim is true. When
+          # the branch is current with `main` the two commits coincide, which is
+          # why the older selection looked right whenever anyone checked it.
           candidates="$(printf '%s' "$runs" | jq -r \
-            --arg sha "$merge_base" --argjson cap "$CANDIDATE_LIMIT" '
+            --arg sha "$BASE_SHA" --argjson cap "$CANDIDATE_LIMIT" '
               ([.workflow_runs[] | select(.head_sha == $sha)] | first) as $exact
-              | [ $exact | select(. != null) | {label: "merge-base", run: .} ]
+              | [ $exact | select(. != null) | {label: "base", run: .} ]
                 + ([.workflow_runs[]
                     | select($exact == null or .id != $exact.id)
                     | {label: "latest-main", run: .}][0:$cap])
@@ -266,11 +282,37 @@ jobs:
             fi
             # Only the machine-readable report is extracted; the rendered
             # Markdown beside it in the same artifact is the previous run's
-            # comment, which nothing here reads.
+            # comment, which nothing here reads. The previous candidate's file
+            # is removed first: `unzip` leaves the old one in place when this
+            # artifact has no member to overwrite it, and the check below would
+            # then read one run's report under another run's provenance.
+            rm -f "$baseline_dir/$SUMMARY_FILE"
             unzip -o -q "$baseline_dir/artifact.zip" "$SUMMARY_FILE" -d "$baseline_dir" || true
             rm -f "$baseline_dir/artifact.zip"
             if [ ! -s "$baseline_dir/$SUMMARY_FILE" ]; then
               [ -n "$reason" ] || reason="the artifact from run $run_id holds no \`$SUMMARY_FILE\`"
+              continue
+            fi
+            # A present-but-unusable report must not end the scan. A report
+            # command that died partway leaves truncated output behind and the
+            # always-running upload step publishes it, so the newest candidate
+            # is exactly the one likely to carry it — and ending here would
+            # report "unreadable" while an older run holds a perfectly good
+            # artifact. This is a pre-filter on the contract the summarizer's
+            # loader enforces, not a second implementation of the reason
+            # strings: the summarizer stays the authority on what a reader is
+            # told, including for a baseline that validates here and still
+            # fails to load at render time.
+            if ! jq -e '
+                  ((
+                    [.targets[]?
+                      | select(((.name // "") | endswith(".xctest")) | not)
+                      | .executableLines // 0
+                    ] | add
+                  ) // 0) > 0
+                ' "$baseline_dir/$SUMMARY_FILE" > /dev/null 2>&1; then
+              [ -n "$reason" ] || reason="the \`$SUMMARY_FILE\` from run $run_id is not a readable coverage report"
+              rm -f "$baseline_dir/$SUMMARY_FILE"
               continue
             fi
 

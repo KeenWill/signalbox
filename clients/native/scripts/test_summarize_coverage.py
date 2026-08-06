@@ -59,7 +59,7 @@ def baseline_of(*, executable: int, covered: int, label: str | None = None) -> o
     return summarize_coverage.Baseline(
         covered=covered,
         executable=executable,
-        label=summarize_coverage.MERGE_BASE if label is None else label,
+        label=summarize_coverage.BASE if label is None else label,
         sha="abc1234",
         date="2026-08-01T09:00:00Z",
     )
@@ -251,24 +251,25 @@ class BaselineDeltaTests(unittest.TestCase):
         self.assertIn("**60.00%** of product lines covered (60/100)", rendered)
         self.assertIn("+10.00 pp", rendered)
 
-    def test_a_merge_base_baseline_claims_the_delta_for_this_branch(self) -> None:
-        """A delta against the commit the branch left main at is the
-        branch's own doing, and the report says exactly that."""
+    def test_a_base_baseline_claims_the_delta_for_this_branch(self) -> None:
+        """The run measures this branch merged into its current base, so a
+        delta against that same base is the branch's own doing, and the
+        report says exactly that."""
         rendered = summarize_coverage.render(
             one_target_report(executable=100, covered=60),
             REPOSITORY_ROOT,
             0,
             TITLE,
-            baseline=baseline_of(executable=100, covered=50, label=summarize_coverage.MERGE_BASE),
+            baseline=baseline_of(executable=100, covered=50, label=summarize_coverage.BASE),
         )
 
-        self.assertIn("merge-base of this branch with `main`", rendered)
+        self.assertIn("the base this pull request is open against", rendered)
         self.assertIn("this branch's own doing", rendered)
 
     def test_a_latest_main_baseline_disclaims_it(self) -> None:
-        """The fallback baseline is not the merge-base, so the delta is not
-        attributable to this branch alone. Rendering both the same way would
-        make an unattributable number read as an attributable one."""
+        """The fallback baseline is not the pull request's base, so the delta
+        is not attributable to this branch alone. Rendering both the same way
+        would make an unattributable number read as an attributable one."""
         rendered = summarize_coverage.render(
             one_target_report(executable=100, covered=60),
             REPOSITORY_ROOT,
@@ -277,7 +278,7 @@ class BaselineDeltaTests(unittest.TestCase):
             baseline=baseline_of(executable=100, covered=50, label=summarize_coverage.LATEST_MAIN),
         )
 
-        self.assertIn("**not** this branch's merge-base", rendered)
+        self.assertIn("**not** the base this pull request is open against", rendered)
         self.assertIn("carries whatever else landed on `main` in between", rendered)
 
     def test_the_baseline_commit_and_date_are_named(self) -> None:
@@ -336,7 +337,7 @@ class BaselineLoadingTests(unittest.TestCase):
             path = written(directory, "coverage.json", json.dumps(document))
 
             baseline, reason = summarize_coverage.load_baseline(
-                path, summarize_coverage.MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z"
+                path, summarize_coverage.BASE, "abc1234", "2026-08-01T09:00:00Z"
             )
 
         self.assertEqual(reason, "")
@@ -351,7 +352,7 @@ class BaselineLoadingTests(unittest.TestCase):
             path = written(directory, "coverage.json", '{"targets": [')
 
             baseline, reason = summarize_coverage.load_baseline(
-                path, summarize_coverage.MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z"
+                path, summarize_coverage.BASE, "abc1234", "2026-08-01T09:00:00Z"
             )
 
         self.assertIsNone(baseline)
@@ -364,7 +365,7 @@ class BaselineLoadingTests(unittest.TestCase):
             path = written(directory, "coverage.json", json.dumps({"targets": [{"name": "App.app"}]}))
 
             baseline, reason = summarize_coverage.load_baseline(
-                path, summarize_coverage.MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z"
+                path, summarize_coverage.BASE, "abc1234", "2026-08-01T09:00:00Z"
             )
 
         self.assertIsNone(baseline)
@@ -376,7 +377,7 @@ class BaselineLoadingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             baseline, reason = summarize_coverage.load_baseline(
                 Path(directory) / "absent.json",
-                summarize_coverage.MERGE_BASE,
+                summarize_coverage.BASE,
                 "abc1234",
                 "2026-08-01T09:00:00Z",
             )
@@ -393,7 +394,7 @@ class BaselineLoadingTests(unittest.TestCase):
             path = written(directory, "coverage.json", json.dumps(document))
 
             baseline, reason = summarize_coverage.load_baseline(
-                path, summarize_coverage.MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z"
+                path, summarize_coverage.BASE, "abc1234", "2026-08-01T09:00:00Z"
             )
 
         self.assertIsNone(baseline)

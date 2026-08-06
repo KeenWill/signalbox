@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from summarize_coverage import (  # noqa: E402
     EXPORT_TYPE,
     LATEST_MAIN,
-    MERGE_BASE,
+    BASE,
     OUTSIDE_WORKSPACE,
     Baseline,
     Counter,
@@ -59,7 +59,7 @@ def export(*files: dict) -> dict:
     return {"type": EXPORT_TYPE, "version": "2.0.1", "data": [{"files": list(files)}]}
 
 
-def baseline_of(*, lines: int, covered: int, label: str = MERGE_BASE) -> Baseline:
+def baseline_of(*, lines: int, covered: int, label: str = BASE) -> Baseline:
     """One baseline whose only knob is the line percentage it carries."""
     counter = Counter(count=lines, covered=covered)
     return Baseline(
@@ -288,9 +288,10 @@ class BaselineDeltaTests(unittest.TestCase):
 
         self.assertNotIn("+10.00%", report)
 
-    def test_a_merge_base_baseline_claims_the_delta_for_this_branch(self) -> None:
-        """A delta against the commit the branch left main at is the
-        branch's own doing, and the report says exactly that."""
+    def test_a_base_baseline_claims_the_delta_for_this_branch(self) -> None:
+        """The run measures this branch merged into its current base, so a
+        delta against that same base is the branch's own doing, and the
+        report says exactly that."""
         document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
 
         report = render(
@@ -298,16 +299,16 @@ class BaselineDeltaTests(unittest.TestCase):
             REPO_ROOT,
             0,
             "Rust coverage (report only)",
-            baseline=baseline_of(lines=100, covered=50, label=MERGE_BASE),
+            baseline=baseline_of(lines=100, covered=50, label=BASE),
         )
 
-        self.assertIn("merge-base of this branch with `main`", report)
+        self.assertIn("the base this pull request is open against", report)
         self.assertIn("this branch's own doing", report)
 
     def test_a_latest_main_baseline_disclaims_it(self) -> None:
-        """The fallback baseline is not the merge-base, so the delta is not
-        attributable to this branch alone. Rendering both the same way would
-        make an unattributable number read as an attributable one."""
+        """The fallback baseline is not the pull request's base, so the delta
+        is not attributable to this branch alone. Rendering both the same way
+        would make an unattributable number read as an attributable one."""
         document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
 
         report = render(
@@ -318,7 +319,7 @@ class BaselineDeltaTests(unittest.TestCase):
             baseline=baseline_of(lines=100, covered=50, label=LATEST_MAIN),
         )
 
-        self.assertIn("**not** this branch's merge-base", report)
+        self.assertIn("**not** the base this pull request is open against", report)
         self.assertIn("carry whatever else landed on `main` in between", report)
 
     def test_the_baseline_commit_and_date_are_named(self) -> None:
@@ -414,7 +415,7 @@ class BaselineLoadingTests(unittest.TestCase):
                 json.dumps(export(coverage_file("/repo/crates/domain/src/a.rs", lines=200, covered=50))),
             )
 
-            baseline, reason = load_baseline(path, MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z")
+            baseline, reason = load_baseline(path, BASE, "abc1234", "2026-08-01T09:00:00Z")
 
         self.assertEqual(reason, "")
         assert baseline is not None
@@ -427,7 +428,7 @@ class BaselineLoadingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = written(directory, "summary.json", '{"type": "llvm.coverage.json.expo')
 
-            baseline, reason = load_baseline(path, MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z")
+            baseline, reason = load_baseline(path, BASE, "abc1234", "2026-08-01T09:00:00Z")
 
         self.assertIsNone(baseline)
         self.assertIn("could not be read", reason)
@@ -438,7 +439,7 @@ class BaselineLoadingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = written(directory, "summary.json", json.dumps({"type": "cargo.metadata", "data": []}))
 
-            baseline, reason = load_baseline(path, MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z")
+            baseline, reason = load_baseline(path, BASE, "abc1234", "2026-08-01T09:00:00Z")
 
         self.assertIsNone(baseline)
         self.assertIn("could not be read", reason)
@@ -448,7 +449,7 @@ class BaselineLoadingTests(unittest.TestCase):
         one that is not there is an expected outcome here."""
         with tempfile.TemporaryDirectory() as directory:
             baseline, reason = load_baseline(
-                Path(directory) / "absent.json", MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z"
+                Path(directory) / "absent.json", BASE, "abc1234", "2026-08-01T09:00:00Z"
             )
 
         self.assertIsNone(baseline)
@@ -461,7 +462,7 @@ class BaselineLoadingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = written(directory, "summary.json", json.dumps(export()))
 
-            baseline, reason = load_baseline(path, MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z")
+            baseline, reason = load_baseline(path, BASE, "abc1234", "2026-08-01T09:00:00Z")
 
         self.assertIsNone(baseline)
         self.assertEqual(reason, "the baseline summary measured no lines")

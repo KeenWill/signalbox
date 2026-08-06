@@ -31,16 +31,23 @@ from pathlib import Path
 # it distinguishes product code from test code.
 TEST_BUNDLE_SUFFIX = ".xctest"
 
-# The two baselines a caller can supply, which are not interchangeable. A
-# merge-base baseline was measured at the commit this branch left `main`, so a
-# delta against it is this branch's own doing. A latest-main baseline was
-# measured at whatever `main` most recently ran, so a delta against it also
-# carries every other change that landed in between. Rendering the same delta
-# without naming which one produced it would let an unattributable number read
-# as an attributable one, so the label is required whenever a baseline is.
-MERGE_BASE = "merge-base"
+# The two baselines a caller can supply, which are not interchangeable, and
+# which one is attributable follows from what the workflow measures. A
+# `pull_request` run measures the merge of this branch's head into the base it
+# is currently open against, so the only subtraction that isolates this branch
+# is one against that same base: a BASE baseline was measured at the pull
+# request's current base commit, and a delta against it is this branch's own
+# doing. A LATEST_MAIN baseline was measured at whatever `main` most recently
+# ran, which may be behind or ahead of that base, so a delta against it also
+# carries every other change that landed in between. (The branch's merge-base
+# is deliberately not offered: against a merged measurement it would attribute
+# everything that landed on `main` since the fork point to this branch.)
+# Rendering the same delta without naming which one produced it would let an
+# unattributable number read as an attributable one, so the label is required
+# whenever a baseline is.
+BASE = "base"
 LATEST_MAIN = "latest-main"
-BASELINE_LABELS = (MERGE_BASE, LATEST_MAIN)
+BASELINE_LABELS = (BASE, LATEST_MAIN)
 
 
 @dataclass
@@ -134,19 +141,19 @@ def baseline_note(baseline: Baseline) -> list[str]:
     a fact a reader cannot recover from the label and can from the date.
     """
     measured = f"`{baseline.sha}`, measured {baseline.date}."
-    if baseline.label == MERGE_BASE:
+    if baseline.label == BASE:
         provenance = [
-            "Compared against the merge-base of this branch with `main`:",
+            "Compared against the base this pull request is open against:",
             measured,
-            "The delta above is this branch's own doing — every change on it",
-            "since that commit.",
+            "This run measured that base with this branch merged into it, so the",
+            "delta above is this branch's own doing.",
         ]
     else:
         provenance = [
             "Compared against the most recent `main` push this workflow measured:",
             measured,
-            "That is **not** this branch's merge-base, so the delta above also",
-            "carries whatever else landed on `main` in between.",
+            "That is **not** the base this pull request is open against, so the",
+            "delta above also carries whatever else landed on `main` in between.",
         ]
     return provenance + [
         "",
