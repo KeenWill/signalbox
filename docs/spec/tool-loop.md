@@ -798,11 +798,12 @@ never from model arguments.
   either `background`, or `bound` with separately labeled `on_parent_stopped`
   and `on_parent_cancelled` actions (`keep_running`, `stop`, or `cancel`). It
   atomically creates one delegated, no-ancestry child and its initial task work,
-  then returns the child session identity. Equal physical replay of the same
-  logical request returns that child; a second child cannot attach to the
-  request. Version one imposes no fixed active-child-count limit; admission
-  checks the complete locked relationship inventory for request and child
-  uniqueness.
+  closes the spawning physical attempt with its matching receipt in that same
+  transaction, then returns the child session identity as a durable completion.
+  Equal physical replay of the same logical request returns that child; a second
+  child cannot attach to the request. Version one imposes no fixed
+  active-child-count limit; admission checks the complete locked relationship
+  inventory for request and child uniqueness.
 
 - `await_session` takes the related child identity and `foreground` or
   `background`. Foreground converts the exact logical request into a durable
