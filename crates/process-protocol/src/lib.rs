@@ -4053,6 +4053,11 @@ pub enum RejectionDetail {
         /// Conflicting logical message request.
         tool_request_id: CanonicalUuid,
     },
+    /// A daemon-minted message identity was already claimed.
+    DelegationMessageIdentityCollision {
+        /// Colliding message identity.
+        message_id: CanonicalUuid,
+    },
     /// A relationship cannot allocate another positive event ordinal.
     DelegationEventOrdinalExhausted {
         /// Relationship's spawning request identity.
@@ -4182,6 +4187,7 @@ impl RejectionDetail {
             | Self::DelegationRelationNotFound { .. }
             | Self::DelegationAwaitConflict { .. }
             | Self::DelegationMessageConflict { .. }
+            | Self::DelegationMessageIdentityCollision { .. }
             | Self::DelegationEventOrdinalExhausted { .. }
             | Self::DelegationDeliverySequenceExhausted { .. }
             | Self::DefaultsVersionMismatch { .. }
@@ -7088,6 +7094,7 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::DelegationRelationNotFound { .. }
         | RejectionDetail::DelegationAwaitConflict { .. }
         | RejectionDetail::DelegationMessageConflict { .. }
+        | RejectionDetail::DelegationMessageIdentityCollision { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
         | RejectionDetail::UnknownModelAlias { .. }
         | RejectionDetail::AcceptancePositionExhausted { .. }
@@ -7181,6 +7188,7 @@ fn validate_conversation_import_detail(
         | RejectionDetail::DelegationRelationNotFound { .. }
         | RejectionDetail::DelegationAwaitConflict { .. }
         | RejectionDetail::DelegationMessageConflict { .. }
+        | RejectionDetail::DelegationMessageIdentityCollision { .. }
         | RejectionDetail::DelegationEventOrdinalExhausted { .. }
         | RejectionDetail::DelegationDeliverySequenceExhausted { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
@@ -12552,6 +12560,31 @@ mod tests {
                 "{{\"type\":\"error\",\"code\":\"rejected\",\"message\":\"delegation delivery sequence exhausted\",\"detail\":{{\"type\":\"delegation_delivery_sequence_exhausted\",\"recipient_session_id\":\"{}\",\"last\":\"{}\"}}}}",
                 ids.child_session,
                 u64::MAX
+            ),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_message_identity_collision_round_trips_closed_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const FRAME_REQUEST: u64 = 54;
+        let ids = delegation_wire_identities();
+
+        assert_server_message_round_trip(
+            request(FRAME_REQUEST)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("delegation message identity collision"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::DelegationMessageIdentityCollision {
+                        message_id: ids.message,
+                    },
+                ),
+            },
+            &format!(
+                "{{\"type\":\"error\",\"code\":\"rejected\",\"message\":\"delegation message identity collision\",\"detail\":{{\"type\":\"delegation_message_identity_collision\",\"message_id\":\"{}\"}}}}",
+                ids.message
             ),
         )?;
         Ok(())

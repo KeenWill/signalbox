@@ -1187,8 +1187,10 @@ rejection: admission checks the complete locked parent relationship inventory
 only for request and child uniqueness. `await_session` additionally admits
 `delegation_relation_not_found { session_id, peer_session_id }` and
 `delegation_await_conflict { tool_request_id }`; `send_session_message` admits
-that same relation detail and `delegation_message_conflict { tool_request_id }`.
-An exhausted relation event ordinal admits
+that same relation detail, `delegation_message_conflict { tool_request_id }`,
+and `delegation_message_identity_collision { message_id }` when a concurrent
+operation already claimed the daemon-minted message identity. An exhausted
+relation event ordinal admits
 `delegation_event_ordinal_exhausted { spawning_request_id, last }`. Exhausting
 the independent recipient-wide delivery counter admits
 `delegation_delivery_sequence_exhausted { recipient_session_id, last }`. Either

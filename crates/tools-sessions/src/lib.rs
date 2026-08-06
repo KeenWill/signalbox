@@ -19,7 +19,8 @@ use signalbox_domain::{
 };
 use signalbox_model_provider_runtime::render_delegation_outcome;
 use signalbox_tool_contract::{
-    ToolContract, ToolContractCompileError, compile_contract_definition,
+    CANONICAL_UUID_TEXT_BYTES, ToolContract, ToolContractCompileError, compile_contract_definition,
+    decode_canonical_uuid,
 };
 
 /// Model-facing child-spawn tool name.
@@ -37,7 +38,6 @@ pub const SESSION_DELEGATION_TOOL_NAMES: [&str; 3] = [
 /// Exact UTF-8 byte ceiling owned by delegated content.
 pub const MAX_DELEGATION_CONTENT_BYTES: usize = DelegationContent::MAX_UTF8_BYTES;
 
-const UUID_TEXT_BYTES: usize = 36;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded session-delegation arguments";
 const REJECTED_DETAIL: &str = "session-delegation request rejected";
 
@@ -111,7 +111,7 @@ impl From<DelegationWaitModeArguments> for DelegationWaitMode {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AwaitSessionArguments {
-    #[schemars(length(min = UUID_TEXT_BYTES, max = UUID_TEXT_BYTES))]
+    #[schemars(length(min = CANONICAL_UUID_TEXT_BYTES, max = CANONICAL_UUID_TEXT_BYTES))]
     child_session_id: String,
     mode: DelegationWaitModeArguments,
 }
@@ -119,7 +119,7 @@ struct AwaitSessionArguments {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SendSessionMessageArguments {
-    #[schemars(length(min = UUID_TEXT_BYTES, max = UUID_TEXT_BYTES))]
+    #[schemars(length(min = CANONICAL_UUID_TEXT_BYTES, max = CANONICAL_UUID_TEXT_BYTES))]
     peer_session_id: String,
     #[schemars(length(min = 1, max = MAX_DELEGATION_CONTENT_BYTES))]
     content: String,
@@ -445,7 +445,8 @@ pub enum SessionDelegationPortOutcome<Value> {
 /// Nonblocking result of registering or observing one child wait.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AwaitSessionPortOutcome {
-    /// Background delivery was registered or equally replayed.
+    /// Background delivery and physical-attempt closure committed atomically,
+    /// or their exact durable result was equally replayed.
     BackgroundRegistered(AwaitSessionReceipt),
     /// A foreground result whose wait and physical attempt closed atomically.
     Delivered(DeliveredChildResult),
@@ -472,20 +473,22 @@ pub trait SessionDelegationPort: Send {
 
     /// Registers or observes one wait without waiting for child completion.
     ///
-    /// Before returning [`AwaitSessionPortOutcome::ForegroundPending`] or
-    /// [`AwaitSessionPortOutcome::Delivered`], the port commits the wait
-    /// registration, physical-attempt closure, and turn `AwaitingChild` state
-    /// in one durable transaction. For immediate delivery, the associated
-    /// durable result delivery is committed in that transaction as well.
-    /// Either handoff stops local execution; it does not authorize a later
-    /// parking or attempt-closure write.
+    /// Before returning any successful outcome, the port commits the wait
+    /// registration and physical-attempt closure in one durable transaction.
+    /// A background registration commits its completed receipt there. A
+    /// foreground wait additionally commits the turn `AwaitingChild` state;
+    /// for immediate delivery, it also commits the associated durable result
+    /// delivery. A successful handoff stops local execution; it does not
+    /// authorize a later parking or attempt-closure write.
     fn await_session(
         &mut self,
         request: DelegationAwaitRequest,
         dispatch: ToolDispatchAuthority,
     ) -> impl Future<Output = Result<AwaitSessionPortOutcome, Self::Error>> + Send;
 
-    /// Appends or equally replays one relationship message.
+    /// Appends or equally replays one relationship message. An applied outcome
+    /// proves the message effect and physical-attempt closure committed in the
+    /// same durable transaction; no later attempt-closure write is authorized.
     fn send_session_message(
         &mut self,
         request: DelegationMessageRequest,
@@ -649,13 +652,7 @@ fn decode_arguments(
 }
 
 fn canonical_session_id(value: &str) -> Result<SessionId, InvalidSessionDelegationArguments> {
-    if value.len() != UUID_TEXT_BYTES {
-        return Err(InvalidSessionDelegationArguments);
-    }
-    let parsed = uuid::Uuid::parse_str(value).map_err(|_| InvalidSessionDelegationArguments)?;
-    if parsed.hyphenated().to_string() != value {
-        return Err(InvalidSessionDelegationArguments);
-    }
+    let parsed = decode_canonical_uuid(value).ok_or(InvalidSessionDelegationArguments)?;
     Ok(SessionId::from_uuid(parsed))
 }
 
