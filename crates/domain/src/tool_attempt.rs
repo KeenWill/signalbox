@@ -960,7 +960,15 @@ impl ToolAttemptReconstitutionInput {
     /// ordering, uniqueness, or approval correlation. Version one accepts only
     /// the first dispatch generation.
     pub fn reconstitute(self) -> Result<ReconstitutedToolAttempt, ToolAttemptReconstitutionError> {
-        if self.generation != ToolDispatchGeneration::first() {
+        if self.generation != ToolDispatchGeneration::first()
+            || matches!(
+                (&self.effect_class, &self.state),
+                (
+                    ToolEffectClass::ExternalEffect,
+                    ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::AwaitingChild { .. })
+                )
+            )
+        {
             return Err(ToolAttemptReconstitutionError {
                 input: Box::new(self),
             });
@@ -1016,7 +1024,7 @@ impl ToolAttemptReconstitutionInput {
     }
 }
 
-/// Stored attempt facts used a dispatch generation outside version one.
+/// Stored attempt facts used a combination no live version-one transition admits.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolAttemptReconstitutionError {
     input: Box<ToolAttemptReconstitutionInput>,
@@ -1103,6 +1111,31 @@ mod tests {
             .clone()
             .reconstitute()
             .expect_err("version one cannot restore later-generation authority");
+
+        assert_eq!(error.into_input(), input);
+    }
+
+    /// S18 / INV-011: restart cannot admit an external-effect child wait that
+    /// the live transition forbids.
+    #[test]
+    fn s18_inv011_reconstitution_rejects_external_effect_child_wait() {
+        let input = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(1),
+            tool_request_id(2),
+            session_id(3),
+            turn_id(4),
+            turn_attempt_id(5),
+            ToolEffectClass::ExternalEffect,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::AwaitingChild {
+                spawning_request: tool_request_id(6),
+                child: session_id(7),
+            }),
+        );
+        let error = input
+            .clone()
+            .reconstitute()
+            .expect_err("external effects cannot restore as child waits");
 
         assert_eq!(error.into_input(), input);
     }
