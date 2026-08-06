@@ -990,6 +990,9 @@ impl ReconstitutedSessionCreation {
 ## domain: session_delegation
 
 ```rust
+pub const fn spawn_session_tool_name() -> &'static str;
+pub const fn await_session_tool_name() -> &'static str;
+pub const fn send_session_message_tool_name() -> &'static str;
 pub enum BoundChildAction { KeepRunning, Stop, Cancel }
 pub enum ChildRelationshipPolicy {
     Background,
@@ -1090,9 +1093,19 @@ pub enum DelegationProvenanceReconstitutionInput {
 }
 
 pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
+pub struct DelegationMessageEndpoints {
+    pub parent: SessionId,
+    pub child: SessionId,
+}
 pub struct DelegationMessage { /* private */ }
-// sealed: SessionDelegation::deliver_message
+// sealed: SessionDelegation::deliver_message or DelegationMessage::reconstitute
 impl DelegationMessage {
+    pub fn reconstitute(
+        request: &DelegationMessageRequest,
+        id: DelegationMessageId,
+        direction: DelegationMessageDirection,
+        endpoints: DelegationMessageEndpoints,
+    ) -> Option<Self>;
     // accessors: id(), direction(), content(), provenance()
 }
 pub enum DelegationOutcomeReason {
@@ -1134,8 +1147,12 @@ impl ChildWait {
     // accessors: awaiting_request(), spawning_request(), child()
 }
 pub struct DelegationWait { /* private */ }
-// sealed: SessionDelegation::register_wait
+// sealed: SessionDelegation::register_wait or DelegationWait::reconstitute
 impl DelegationWait {
+    pub fn reconstitute(
+        relation: &SessionDelegation,
+        awaiting_request: &DelegationAwaitRequest,
+    ) -> Option<Self>;
     // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
 }
 pub struct DelegationEventOrdinal(/* private NonZeroU64 */);
@@ -1161,6 +1178,41 @@ impl DelegationEvent {
     // accessors: ordinal(), message(), outcome()
 }
 pub enum DelegationLifecycle { Active, Terminal }
+pub struct SessionDelegationReconstitutionInput { /* private complete stored relation */ }
+impl SessionDelegationReconstitutionInput {
+    pub fn new(
+        spawning_request: DelegatedSpawnRequest,
+        child: SessionId,
+        child_turn: TurnId,
+        events: Vec<DelegationEvent>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> Result<SessionDelegation, SessionDelegationReconstitutionError>;
+    // accessors: spawning_request(), child(), child_turn(), events()
+}
+pub enum SessionDelegationReconstitutionFailure {
+    SameSession,
+    MissingSpawnEvent,
+    NoncontiguousEventOrdinal,
+    InvalidSpawnEvent,
+    InvalidMessageProvenance,
+    DuplicateMessageIdentity,
+    DuplicateMessageRequest,
+    DuplicateOutcomeAuthority,
+    OutcomeReasonMismatch,
+    EventAfterTerminal,
+}
+pub struct SessionDelegationReconstitutionError { /* private unchanged input + failure */ }
+impl SessionDelegationReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        SessionDelegationReconstitutionInput,
+        SessionDelegationReconstitutionFailure,
+    );
+    // accessors: input(), failure()
+}
 pub struct SessionDelegation { /* private */ }
 impl SessionDelegation {
     pub fn register_wait(
@@ -4477,6 +4529,10 @@ impl CurrentToolAttempt {
         self,
         observation: CorrelatedToolAttemptObservation,
     ) -> Result<EndedToolAttempt, ToolAttemptTransitionError>;
+    pub fn end_foreground_child_wait(
+        self,
+        wait: ChildWait,
+    ) -> Result<EndedToolAttempt, ToolAttemptTransitionError>;
     pub fn classify_crash_loss(self) -> ToolAttemptCrashOutcome;
     // accessors: attempt(), request(), session(), turn(), issuing_attempt(), effect_class(),
     // generation(), state()
@@ -4498,6 +4554,7 @@ pub enum ToolAttemptTransitionFailure {
     InvalidPreflightError,
     InvalidObservationError,
     EffectFreeCannotBeAmbiguous,
+    InvalidChildWait,
 }
 pub struct ToolAttemptTransitionError { /* private */ }
 // accessors: attempt(), failure(), into_parts()
@@ -9620,64 +9677,64 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 ## Inventory
 
-| Module                                             | Public types         |
-| -------------------------------------------------- | -------------------- |
-| domain: lib.rs identities                          | 24                   |
-| domain: actor                                      | 1                    |
-| domain: imported_conversation                      | 32 (+5 free fn)      |
-| domain: session_template                           | 6                    |
-| domain: session_placement                          | 18                   |
-| domain: session                                    | 22                   |
-| domain: session_delegation                         | 32                   |
-| domain: imported_session                           | 18                   |
-| domain: configuration                              | 24                   |
-| domain: model_settings                             | 25                   |
-| domain: accepted_input                             | 5                    |
-| domain: delivery_request                           | 2                    |
-| domain: user_content                               | 4                    |
-| domain: submit_input                               | 32                   |
-| domain: queue_order                                | 5 (+1 free fn)       |
-| domain: repo_watch                                 | 49                   |
-| domain: turn_lifecycle                             | 10                   |
-| domain: turn_eligibility                           | 35                   |
-| domain: turn_attempt                               | 13                   |
-| domain: model_call                                 | 12                   |
-| domain: context_compaction                         | 12                   |
-| domain: model_execution                            | 51                   |
-| domain: context_frontier                           | 6                    |
-| domain: semantic_entry                             | 4                    |
-| domain: tool                                       | 45                   |
-| domain: tool_attempt                               | 27                   |
-| domain: tool_execution                             | 20                   |
-| domain: provider_evidence                          | 5                    |
-| domain: applied_interrupt                          | 2                    |
-| domain: fatal_mismatch                             | 0                    |
-| domain: replace_session_defaults                   | 13                   |
-| domain: goal                                       | 25                   |
-| domain: goal_command                               | 5                    |
-| domain: review_workflow                            | 83 (+1 free fn)      |
-| domain: session_metadata                           | 15                   |
-| domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **745 (+7 free fn)** |
-| application: approval_judge                        | 1 (incl. 1 trait)    |
-| application: conversation_import                   | 12 (incl. 4 traits)  |
-| application: create_session                        | 8 (incl. 2 traits)   |
-| application: update_session_placement              | 4 (incl. 1 trait)    |
-| application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
-| application: list_conversations                    | 8 (incl. 2 traits)   |
-| application: load_session                          | 2 (incl. 1 trait)    |
-| application: model_execution                       | 32 (incl. 8 traits)  |
-| application: tool_loop                             | 23 (incl. 5 traits)  |
-| application: operator_failure                      | 2 (incl. 1 trait)    |
-| application: replace_session_defaults              | 5 (incl. 1 trait)    |
-| application: repo_watch                            | 33 (incl. 4 traits)  |
-| application: review_orchestration                  | 37 (incl. 2 traits)  |
-| application: review_workflow                       | 9 (incl. 2 traits)   |
-| application: session_metadata                      | 12 (incl. 4 traits)  |
-| application: scheduler                             | 15 (incl. 5 traits)  |
-| application: start_eligible_turn                   | 5 (incl. 2 traits)   |
-| application: startup_scan                          | 7 (incl. 2 traits)   |
-| application: submit_input                          | 7 (incl. 2 traits)   |
-| application: tool_dispatch_gate                    | 2                    |
-| application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **238**              |
+| Module                                             | Public types          |
+| -------------------------------------------------- | --------------------- |
+| domain: lib.rs identities                          | 24                    |
+| domain: actor                                      | 1                     |
+| domain: imported_conversation                      | 32 (+5 free fn)       |
+| domain: session_template                           | 6                     |
+| domain: session_placement                          | 18                    |
+| domain: session                                    | 22                    |
+| domain: session_delegation                         | 36 (+3 free fn)       |
+| domain: imported_session                           | 18                    |
+| domain: configuration                              | 24                    |
+| domain: model_settings                             | 25                    |
+| domain: accepted_input                             | 5                     |
+| domain: delivery_request                           | 2                     |
+| domain: user_content                               | 4                     |
+| domain: submit_input                               | 32                    |
+| domain: queue_order                                | 5 (+1 free fn)        |
+| domain: repo_watch                                 | 49                    |
+| domain: turn_lifecycle                             | 10                    |
+| domain: turn_eligibility                           | 35                    |
+| domain: turn_attempt                               | 13                    |
+| domain: model_call                                 | 12                    |
+| domain: context_compaction                         | 12                    |
+| domain: model_execution                            | 51                    |
+| domain: context_frontier                           | 6                     |
+| domain: semantic_entry                             | 4                     |
+| domain: tool                                       | 45                    |
+| domain: tool_attempt                               | 27                    |
+| domain: tool_execution                             | 20                    |
+| domain: provider_evidence                          | 5                     |
+| domain: applied_interrupt                          | 2                     |
+| domain: fatal_mismatch                             | 0                     |
+| domain: replace_session_defaults                   | 13                    |
+| domain: goal                                       | 25                    |
+| domain: goal_command                               | 5                     |
+| domain: review_workflow                            | 83 (+1 free fn)       |
+| domain: session_metadata                           | 15                    |
+| domain: runner                                     | 63                    |
+| **signalbox-domain total**                         | **749 (+10 free fn)** |
+| application: approval_judge                        | 1 (incl. 1 trait)     |
+| application: conversation_import                   | 12 (incl. 4 traits)   |
+| application: create_session                        | 8 (incl. 2 traits)    |
+| application: update_session_placement              | 4 (incl. 1 trait)     |
+| application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
+| application: list_conversations                    | 8 (incl. 2 traits)    |
+| application: load_session                          | 2 (incl. 1 trait)     |
+| application: model_execution                       | 32 (incl. 8 traits)   |
+| application: tool_loop                             | 23 (incl. 5 traits)   |
+| application: operator_failure                      | 2 (incl. 1 trait)     |
+| application: replace_session_defaults              | 5 (incl. 1 trait)     |
+| application: repo_watch                            | 33 (incl. 4 traits)   |
+| application: review_orchestration                  | 37 (incl. 2 traits)   |
+| application: review_workflow                       | 9 (incl. 2 traits)    |
+| application: session_metadata                      | 12 (incl. 4 traits)   |
+| application: scheduler                             | 15 (incl. 5 traits)   |
+| application: start_eligible_turn                   | 5 (incl. 2 traits)    |
+| application: startup_scan                          | 7 (incl. 2 traits)    |
+| application: submit_input                          | 7 (incl. 2 traits)    |
+| application: tool_dispatch_gate                    | 2                     |
+| application: tool_loop_ports                       | 8 (incl. 2 traits)    |
+| **signalbox-application total**                    | **238**               |
