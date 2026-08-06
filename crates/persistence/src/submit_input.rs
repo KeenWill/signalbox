@@ -945,18 +945,21 @@ where
                     "executing tool batch cannot project cancellation",
                 )
             })?;
-            if scheduling.is_some() {
+            // The scheduling projection is built from `queued_input_origin`, so
+            // it carries an active turn only for an accepted-input origin. A
+            // delegation-origin active turn is absent from it and must be
+            // reconstituted through the delegated live-turn loader, exactly as
+            // the recovery arm below decides.
+            let projected_active_turn = scheduling
+                .as_ref()
+                .and_then(AcceptedInputSchedulingProjection::active_turn_execution);
+            if let Some(active_turn) = projected_active_turn {
                 let Some(scheduling) = scheduling else {
                     return Err(SubmitInputCorruption::Inconsistent(
                         "tool interrupt scheduling projection",
                     )
                     .into());
                 };
-                let active_turn = scheduling.active_turn_execution().ok_or(
-                    SubmitInputCorruption::Inconsistent(
-                        "applied interrupt lacks active turn execution",
-                    ),
-                )?;
                 let identities = attach_interrupt_reclassification_candidates_for_active(
                     cancellation_identities,
                     &active_turn,
