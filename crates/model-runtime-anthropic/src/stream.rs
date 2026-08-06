@@ -1323,6 +1323,32 @@ mod tests {
     }
 
     #[test]
+    fn a_classified_error_event_after_the_stop_reason_stays_definitive() {
+        // The other half of the post-finish rule, and the half a blanket
+        // `self.finish.is_some()` condition would silently break: a typed
+        // error still outranks a reported stop reason, because it names a
+        // failure the stop reason does not.
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":2}}\n\n",
+            b"event: error\n\
+              data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\
+              \"message\":\"Overloaded\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::ProviderError(error)) = terminal else {
+            panic!("a classified error event outranks the reported stop reason");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Overloaded);
+        assert_eq!(
+            error.native.error_token,
+            Some("overloaded_error".to_string())
+        );
+    }
+
+    #[test]
     fn an_unclassifiable_error_event_after_the_stop_reason_is_protocol_loss() {
         // A *typed* error event still outranks a reported stop reason, because
         // it carries information the stop reason does not (the sibling above).
