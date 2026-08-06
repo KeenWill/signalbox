@@ -153,6 +153,7 @@ const APPROVAL_TOOL_NAME: &str = "current_time";
 const APPROVAL_ARGUMENTS: &str = "{}";
 const APPROVAL_PROPOSAL: &[(&str, &str)] = &[(APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS)];
 const APPROVAL_RECOMMENDATION: &str = "approve";
+const APPROVAL_DENIAL: &str = "deny";
 const APPROVAL_JUDGE_CREDENTIAL: &str = "fixture-credential";
 const APPROVAL_JUDGE_RATIONALE: &str = "fixture rationale";
 const APPROVAL_JUDGE_ESTIMATED_PROVENANCE: &str = "estimated";
@@ -2878,6 +2879,17 @@ struct AppliedApprovalJudgeProjection {
     decision_source: String,
     delegate_model_selection_id: Uuid,
     delegate_model_call_id: Uuid,
+    rationale: String,
+    active_phase: String,
+}
+
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct DeniedApprovalJudgeProjection {
+    judge_state: String,
+    recommendation: String,
+    decision_kind: String,
+    decision_source: String,
+    denial_reason: Option<String>,
     rationale: String,
     active_phase: String,
 }
@@ -5964,6 +5976,38 @@ async fn approval_judge_terminal_transition_accepts_estimated_usage_provenance()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn human_only_request_never_prepares_a_delegate_judge_call() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ea0;
+    let (fixture, model_repository, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS)
+            .await?;
+    let outcome = model_repository
+        .approval_judge_repository()
+        .prepare(
+            fixture.session,
+            fixture.turn,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+            None,
+        )
+        .await?;
+    let judge_calls: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tool_approval_judge_model_call WHERE request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(outcome, PrepareApprovalJudgeOutcome::NoWork);
+    assert_eq!(judge_calls, 0);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_judge_repository_defaults_to_durable_producing_model_after_catalog_removal()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
@@ -6227,6 +6271,149 @@ async fn approval_judge_repository_atomically_applies_provenanced_approval()
     assert_eq!(
         approval.rationale().map(ToolDecisionRationale::as_str),
         Some(APPROVAL_JUDGE_RATIONALE)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The judge arm of the transcript projection's `UNION ALL` reaches process
+/// readers: a terminal delegate judge call's reported tokens join the producing
+/// model call's own row in `ProcessTranscriptSnapshot::model_call_usage`, which
+/// carries exactly those two calls.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_approval_judge_usage_joins_the_transcript_usage_projection()
+-> Result<(), Box<dyn Error>> {
+    const JUDGE_INPUT_TOKENS: u64 = 13;
+    const JUDGE_OUTPUT_TOKENS: u64 = 7;
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7f40;
+    let (fixture, model_repository, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let repository = model_repository.approval_judge_repository();
+    let judge_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0));
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(fixture.session, fixture.turn, judge_call, None)
+            .await?,
+    );
+    let rationale = ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
+
+    repository.authorize(&prepared).await?;
+    repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            rationale,
+            ProviderReportedTokenUsage::unreported()
+                .with_input_tokens(Some(JUDGE_INPUT_TOKENS))
+                .with_output_tokens(Some(JUDGE_OUTPUT_TOKENS)),
+            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+        )
+        .await?;
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("the delegated fixture session stays process-readable");
+    let usage = snapshot.model_call_usage();
+
+    assert_eq!(usage.len(), 2);
+    assert_eq!(usage[0].turn(), fixture.turn);
+    assert_eq!(usage[0].call(), fixture.call);
+    assert_eq!(usage[0].usage().input_tokens(), None);
+    assert_eq!(usage[0].usage().output_tokens(), None);
+    assert_eq!(usage[0].usage().cache_creation_input_tokens(), None);
+    assert_eq!(usage[0].usage().cache_read_input_tokens(), None);
+    assert_eq!(usage[1].turn(), fixture.turn);
+    assert_eq!(usage[1].call(), judge_call);
+    assert_eq!(
+        usage[1].provenance(),
+        ProcessModelCallUsageProvenance::Reported
+    );
+    assert_eq!(usage[1].usage().input_tokens(), Some(JUDGE_INPUT_TOKENS));
+    assert_eq!(usage[1].usage().output_tokens(), Some(JUDGE_OUTPUT_TOKENS));
+    assert_eq!(usage[1].usage().cache_creation_input_tokens(), None);
+    assert_eq!(usage[1].usage().cache_read_input_tokens(), None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_repository_atomically_applies_a_delegate_denial()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ef8;
+    let (fixture, model_repository, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let request = requests[0];
+    let repository = model_repository.approval_judge_repository();
+    let judge_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0));
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(fixture.session, fixture.turn, judge_call, None)
+            .await?,
+    );
+
+    repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
+    let outcome = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Deny,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+        )
+        .await?;
+    let stored: DeniedApprovalJudgeProjection = sqlx::query_as(
+        "SELECT judge.state_kind AS judge_state,
+                judge.recommendation_kind AS recommendation,
+                decision.decision_kind, decision.decision_source,
+                decision.denial_reason, decision.rationale,
+                lifecycle.active_phase_kind AS active_phase
+           FROM tool_approval_judge_model_call AS judge
+           JOIN tool_approval_decision AS decision
+             ON decision.request_id = judge.request_id
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.turn_id = judge.turn_id
+            AND lifecycle.session_id = judge.session_id
+          WHERE judge.model_call_id = $1",
+    )
+    .bind(judge_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(outcome, CompleteApprovalJudgeOutcome::Decided);
+    assert_eq!(stored.judge_state, "terminal");
+    assert_eq!(stored.recommendation, APPROVAL_DENIAL);
+    assert_eq!(stored.decision_kind, APPROVAL_DENIAL);
+    assert_eq!(stored.decision_source, APPROVAL_DELEGATE_SOURCE);
+    assert_eq!(stored.denial_reason, None);
+    assert_eq!(stored.rationale, APPROVAL_JUDGE_RATIONALE);
+    assert_eq!(stored.active_phase, "running");
+    let (event_turn, approval) = dispatched_tool_approval_decision(&pool, request)
+        .await?
+        .expect("the delegate denial appends its typed outbox event");
+    assert_eq!(event_turn, fixture.turn);
+    assert_eq!(
+        approval.decision(),
+        &ToolApprovalDecision::Deny { reason: None }
     );
 
     pool.close().await;

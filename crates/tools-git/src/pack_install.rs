@@ -14,7 +14,7 @@ use rustix::{
     io::dup,
 };
 
-use crate::descriptor::{FileIdentity, file_identity};
+use crate::descriptor::{FileIdentity, file_identity, mode_from_metadata_bits, permission_bits};
 use crate::failure::LocalGitFailure;
 use crate::pinning::PinnedObjectDatabase;
 
@@ -68,7 +68,7 @@ pub(super) fn pack_installation_mode(pack_directory: &OwnedFd) -> Result<Mode, L
         .metadata()
         .map_err(|_| LocalGitFailure::Operation)?;
     let mode = (metadata.mode() & 0o666) | 0o600;
-    Ok(Mode::from_raw_mode(mode))
+    Ok(mode_from_metadata_bits(mode))
 }
 
 #[derive(Debug)]
@@ -161,7 +161,7 @@ where
             .map_err(|_| LocalGitFailure::Operation)?,
     );
     if destination
-        .set_permissions(fs::Permissions::from_mode(mode.bits()))
+        .set_permissions(fs::Permissions::from_mode(permission_bits(mode)))
         .is_err()
     {
         remove_owned_pack_lock(pack_directory, &temporary_name, &destination, identity);

@@ -17,7 +17,8 @@ use sha2::Sha256;
 
 use crate::descriptor::{
     FileIdentity, QuarantineDirectory, descriptor_path, file_identity, file_snapshot_identity,
-    remove_entry_if_identity, unsupported_common_directory_is_absent,
+    mode_from_metadata_bits, permission_bits, remove_entry_if_identity,
+    unsupported_common_directory_is_absent,
 };
 use crate::failure::LocalGitFailure;
 use crate::layout::object_id_bytes;
@@ -296,7 +297,9 @@ impl IndexLock {
         };
         guard
             .lock
-            .set_permissions(fs::Permissions::from_mode(missing_index_mode.bits()))
+            .set_permissions(fs::Permissions::from_mode(permission_bits(
+                missing_index_mode,
+            )))
             .map_err(|_| LocalGitFailure::Operation)?;
         let (expected_index, prepared_content) = copy_index_snapshot_at(
             &guard.parent,
@@ -902,7 +905,7 @@ pub(super) fn index_installation_mode(
         fs::File::from(dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?)
             .metadata()
             .map_err(|_| LocalGitFailure::Operation)?;
-    Ok(Mode::from_raw_mode((metadata.mode() & 0o666) | 0o600))
+    Ok(mode_from_metadata_bits((metadata.mode() & 0o666) | 0o600))
 }
 
 pub(super) fn write_index_entries(
