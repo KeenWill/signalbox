@@ -4,7 +4,9 @@ The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
 The daemon web-tool composition and conservative declaration defaults are
-verified against PR #433 (`agent/web-search-wiring`).
+verified against PR #433 (`agent/web-search-wiring`). The durable-command
+version cross-link was re-verified through this PR
+(`agent/model-settings-persistence`).
 
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
@@ -1234,9 +1236,8 @@ independently. The current kind-scoped versions and their compatibility gates
 are owned by
 [identity and commands](identity-and-commands.md#durable-command-records) and
 [persistence protocol](persistence-protocol.md#relational-representation).
-`SubmitInput` and `DecideToolRequest` remain version 1; registry inspection
-validates the supported version set for the selected kind rather than applying
-one global version constant.
+Registry inspection validates the supported version set for the selected kind
+rather than applying one global version constant.
 
 ## Open edges
 

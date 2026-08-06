@@ -13,7 +13,8 @@ The descendant-termination command scope was re-verified through this PR
 (`agent/delegation-command-scope`).
 
 The model/session-settings wire vocabulary was verified through PR #439
-(`agent/model-settings-protocol`).
+(`agent/model-settings-protocol`), and its transcript-turn settings snapshot was
+verified through this PR (`agent/model-settings-persistence`).
 
 The tool-approval decision event surface is verified against this implementing
 change.
@@ -1342,7 +1343,11 @@ One logical snapshot is a bounded message sequence sharing the request identity:
 
 1. `transcript_snapshot_start { session_id, cursor }`; the runner proposal also
    requires the same complete nullable `runner` object as the session summary;
-2. one `transcript_turn` per turn, with canonical decimal `acceptance_position`;
+2. one `transcript_turn` per turn, with canonical decimal `acceptance_position`
+   and required-nullable `model_settings`; a settings-aware turn carries the
+   complete owning turn, accepted input, defaults epoch, requested and selected
+   model, per-call override, resolved settings, and adjustment provenance, while
+   a turn committed before settings evidence existed carries null;
 3. one `transcript_model_call_usage` per terminal model call followed by one
    `transcript_model_calls_end`;
 4. the entry messages below in frontier-member order; and
@@ -1402,11 +1407,12 @@ Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
   whose positive ordered recipient-wide range identifies the delivered
   delegation content that will wake an otherwise idle session;
 - `delegation_terminated { spawning_request_id, outcome, reason, provenance }`,
-  whose outcome is exactly `stopped` or `cancelled`, whose reason is the
-  matching `parent_stopped` or `parent_cancelled`, and whose parent turn- or
-  goal-command provenance carries `parent_and_descendants`; this delivered
-  logical state exposes no child transcript and does not erase retained physical
-  execution evidence;
+  whose outcome is exactly `stopped` or `cancelled` naming the bound-child
+  action, whose reason is exactly `parent_stopped` or `parent_cancelled` naming
+  independently whether the parent stopped or was cancelled — both cross-action
+  combinations are valid — and whose parent turn- or goal-command provenance
+  carries `parent_and_descendants`; this delivered logical state exposes no
+  child transcript and does not erase retained physical execution evidence;
 - `active_running { current_attempt_id, current_model_call }`, where
   `current_model_call` is null before preparation or `{ model_call_id, state }`
   with state exactly `prepared`, `in_flight`, or `cancellation_requested`;
@@ -1872,12 +1878,15 @@ the snapshot remains authoritative.
 This ordering closes the snapshot/subscription race: every listed client-visible
 transition committed before the snapshot is represented by its durable queued
 content, turn state, and current model-call projection even when it adds no
-semantic transcript entry, while a compaction commit also carries its durable
-`context_compacted` event. A transition committed after the snapshot has a
-greater cursor and was observed by the preexisting subscription. A refused turn
-is therefore terminal in the initial snapshot and cannot leave `send` waiting
-for an event at or below the snapshot cursor. Previously seen transient display
-state may always be replaced by the new snapshot (INV-032).
+semantic transcript entry. Each settings-aware turn projection also carries the
+complete frozen settings fact that its at-or-below-cursor
+`turn_model_settings_resolved` event established, while a compaction commit
+retains its durable `context_compacted` observation behavior. A transition
+committed after the snapshot has a greater cursor and was observed by the
+preexisting subscription. A refused turn is therefore terminal in the initial
+snapshot and cannot leave `send` waiting for an event at or below the snapshot
+cursor. Previously seen transient display state may always be replaced by the
+new snapshot (INV-032).
 
 Followers forward durable transition events and additionally forward a correctly
 correlated `TextDelta` emitted while the selected session turn is active. The

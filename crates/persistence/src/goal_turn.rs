@@ -15,6 +15,7 @@ use crate::{
         defaults_version_to_numeric, input_position_from_numeric, input_position_to_numeric,
         session_id_to_uuid, turn_id_to_uuid,
     },
+    model_settings_resolution,
     outbox::{self, OutboxEvent},
 };
 
@@ -248,6 +249,16 @@ pub(crate) async fn insert_goal_turn(
     .bind(input_position_to_numeric(position))
     .execute(&mut *connection)
     .await?;
+
+    let settings_event = model_settings_resolution::event_from_origin(
+        candidates.accepted_input(),
+        candidates.turn(),
+        configuration,
+    )
+    .ok_or(GoalCorruption::Inconsistent(
+        "goal turn model settings event",
+    ))?;
+    model_settings_resolution::persist(connection, session, &settings_event).await?;
 
     let (source_event, predecessor) = match source {
         GoalTurnSource::UserEvent(event) => (Some(Decimal::from(event.get())), None),
