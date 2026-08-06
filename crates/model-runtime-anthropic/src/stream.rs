@@ -199,6 +199,18 @@ impl StreamDecoder {
             .as_deref()
             .map(classify_error_token)
             .unwrap_or(signalbox_model_runtime::ProviderErrorKind::Unrecognized);
+        if self.finish.is_some() && kind == signalbox_model_runtime::ProviderErrorKind::Unrecognized
+        {
+            // The provider already reported why generation stopped, and this
+            // event names no failure the adapter can classify, so it supersedes
+            // that stop reason with nothing. Worse, it is then indistinguishable
+            // from the refusal downgrade `execute` applies — an HTTP 200
+            // exchange, `Unrecognized`, and the same fabricated native facts —
+            // which would let a genuine failure pass as a decoded refusal. An
+            // event that *does* classify still outranks the stop reason,
+            // because it carries information the stop reason does not.
+            return self.violation("unclassifiable error event follows the reported stop_reason");
+        }
         StreamStep::Terminal(Box::new(TerminalEvidence::ProviderError(
             ProviderErrorEvidence {
                 exchange: self.exchange.clone(),
@@ -1308,6 +1320,35 @@ mod tests {
         );
         assert_eq!(error.exchange, exchange());
         assert_eq!(error.usage.input_tokens, Some(25));
+    }
+
+    #[test]
+    fn an_unclassifiable_error_event_after_the_stop_reason_is_protocol_loss() {
+        // A *typed* error event still outranks a reported stop reason, because
+        // it carries information the stop reason does not (the sibling above).
+        // One whose type classifies as nothing carries none, and would reach
+        // the caller wearing the exact shape `execute` gives a downgraded
+        // refusal — HTTP 200, `Unrecognized`, and the same fabricated
+        // `error_token` — so a genuine failure could pass as a decoded
+        // refusal. It must stay a protocol violation.
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\
+              \"usage\":{\"output_tokens\":2}}\n\n",
+            b"event: error\n\
+              data: {\"type\":\"error\",\"error\":{\"type\":\"refusal\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("an unclassifiable post-stop-reason error event is protocol loss");
+        };
+        assert_eq!(
+            loss.cause,
+            LossCause::StreamProtocolViolation {
+                detail: "unclassifiable error event follows the reported stop_reason".to_string()
+            }
+        );
     }
 
     #[test]
