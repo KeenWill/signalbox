@@ -1957,9 +1957,9 @@ impl EffectivePrivilege {
     /// Which file a `PATH` search must return when its first candidate carries
     /// only the "other" execute bit.
     ///
-    /// Unprivileged, the owner holds no execute permission, so the search skips
-    /// the shadow and finds the runnable file in the later directory. As root
-    /// the shadow is genuinely executable, so returning it is correct rather
+    /// Unprivileged, the file owner holds no execute permission, so the search
+    /// skips the shadow and finds the runnable file in the later directory. As
+    /// root the shadow is genuinely executable, so returning it is correct rather
     /// than a defect — the case has a real answer in both environments, which
     /// is why the test asserts one instead of returning early. It previously
     /// returned early under root and reported success without creating a
@@ -1981,14 +1981,14 @@ impl EffectivePrivilege {
 /// the opposite of what it names.
 #[cfg(unix)]
 struct OtherOnlyCandidates {
-    /// Earlier on the search path, executable only by "other".
+    /// Earlier on the search path, not executable by its file owner.
     shadow: std::path::PathBuf,
-    /// Later on the search path, executable by its owner.
+    /// Later on the search path, executable by its file owner.
     on_path: std::path::PathBuf,
 }
 
-/// Writes a fixture file whose only permission bits belong to "other", so its
-/// owner may read it but not execute it.
+/// Writes a fixture file whose only permission bits belong to "other", so the
+/// file owner may read it but not execute it.
 #[cfg(unix)]
 fn other_only_fixture(directory: &std::path::Path, name: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -2003,12 +2003,12 @@ fn other_only_fixture(directory: &std::path::Path, name: &str) -> std::path::Pat
     path
 }
 
-/// A file whose only execute bit belongs to "other" is not executable by its
-/// owner, so it cannot shadow the runnable executable in a later directory,
-/// exactly as normal PATH lookup skips it — and under an effective root uid,
-/// which may execute a file carrying any execute bit, it legitimately does
-/// shadow it. Both outcomes are asserted, so neither environment reports a pass
-/// without having checked anything.
+/// A file whose only execute bit belongs to "other" is not executable by
+/// its owner, so it cannot shadow the runnable executable in a later
+/// directory, exactly as normal PATH lookup skips it — and under an effective
+/// root uid, which may execute a file carrying any execute bit, it legitimately
+/// does shadow it. Both outcomes are asserted, so neither environment reports a
+/// pass without having checked anything.
 #[cfg(unix)]
 #[test]
 fn executable_resolution_skips_an_other_only_execute_bit() {
