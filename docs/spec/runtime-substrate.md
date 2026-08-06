@@ -478,7 +478,9 @@ answer length, not a protocol break — the request was accepted and the body
 framed and decoded — so failing the smoke on it would assert something about
 answer quality, which this smoke does not do. The acceptance is keyed to that
 exact token from a 200 exchange; any other unrecognized finish, and every other
-loss cause, still fails.
+loss cause, still fails, as does a `length` finish from a stream that never
+reported a model identity: that branch returns before the decoder's own
+end-of-stream validations, so the reported identity is checked here instead.
 
 That shape alone carries no usage, and the smoke does not demand any from it:
 the trailing usage-only chunk is valid only after a finish, and the decoder ends

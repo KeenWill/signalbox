@@ -59,8 +59,8 @@ use signalbox_model_runtime::{
     CancellationSignal, ConversationMessage, CredentialAccess, CredentialAccessError,
     CredentialAccessFailure, CredentialReference, CredentialValue, DeliveryMode, ExchangeFacts,
     FinishReason, ModelOperation, ModelRuntime, ModelSettings, NativeErrorFacts, Observation,
-    ObservationFact, PreparationOutcome, ProviderErrorKind, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, TokenUsage,
+    ObservationFact, PreparationOutcome, ProviderErrorKind, ProviderReportedModel, RequestedTarget,
+    ResolvedTarget, TerminalEvidence, TokenUsage,
 };
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 
@@ -151,9 +151,10 @@ async fn the_openai_api_completes_one_exchange() {
         vec![ConversationMessage::user_text(PROMPT)],
         settings,
     );
-    // Matches the only delivery mode production ever selects (see the module
-    // doc comment); a buffered exchange here would prove nothing about the
-    // deployed SSE decoder.
+    // The mode `RuntimeModelCallProvider` sets for ordinary model calls, so
+    // the one paid exchange lands on the decoder carrying production's main
+    // traffic. Production's buffered call sites are covered offline instead;
+    // see the module doc comment.
     operation.delivery = DeliveryMode::Streamed;
 
     let prepared = require_prepared(
@@ -308,6 +309,7 @@ fn require_decoded_response(
         }
         TerminalEvidence::BoundaryLoss(loss)
             if loss.exchange.http_status == Some(200)
+                && loss.reported_model.is_some()
                 && stopped_at_the_output_ceiling(loss.finish_reported.as_ref()) =>
         {
             DecodedResponse {
@@ -678,23 +680,24 @@ mod require_decoded_response_tests {
         );
     }
 
-    /// The shape `StreamDecoder` produces when the provider reports
-    /// `finish_reason: "length"`: the unrecognized-finish violation carrying
-    /// the token verbatim. Returns the payload rather than the wrapping
-    /// variant so a caller can perturb one field without destructuring.
+    /// The well-formed output-ceiling loss every rejection case below perturbs
+    /// by exactly one named field: what `StreamDecoder` produces when an
+    /// otherwise healthy 200 stream reports `finish_reason: "length"` — the
+    /// unrecognized-finish violation, carrying the token verbatim and the
+    /// model identity the stream had already reported.
     ///
     /// Usage is `unreported` because that is what the decoder can actually
-    /// retain here — it ends the stream on the finish chunk, before the
+    /// retain here: it ends the stream on the finish chunk, before the
     /// trailing usage-only chunk this smoke's request asks for.
-    fn stopped_at_ceiling(finish_token: &str, exchange: ExchangeFacts) -> BoundaryLossEvidence {
+    fn stopped_at_ceiling() -> BoundaryLossEvidence {
         BoundaryLossEvidence {
             cause: LossCause::StreamProtocolViolation {
                 detail: "stream carries an unrecognized finish_reason".to_string(),
             },
-            exchange,
-            reported_model: None,
+            exchange: exchange(200),
+            reported_model: Some(ProviderReportedModel::new("model-exact-1")),
             finish_reported: Some(FinishReason::Unrecognized {
-                provider_token: finish_token.to_string(),
+                provider_token: "length".to_string(),
             }),
             usage: TokenUsage::unreported(),
         }
@@ -705,14 +708,12 @@ mod require_decoded_response_tests {
         // A one-word prompt is a request, not an enforced bound. Running to
         // the ceiling still proves the protocol surface, so it must not redden
         // a required check.
-        let expected_exchange = exchange(200);
+        let expected = stopped_at_ceiling();
 
-        let decoded = require_decoded_response(
-            TerminalEvidence::BoundaryLoss(stopped_at_ceiling("length", expected_exchange.clone())),
-            &[],
-        );
+        let decoded =
+            require_decoded_response(TerminalEvidence::BoundaryLoss(expected.clone()), &[]);
 
-        assert_eq!(decoded.exchange, expected_exchange);
+        assert_eq!(decoded.exchange, expected.exchange);
         assert!(
             !decoded.usage_is_final,
             "the ceiling shape never consumed the trailing usage chunk"
@@ -724,10 +725,8 @@ mod require_decoded_response_tests {
         // The end-to-end guarantee the live test depends on: this shape must
         // survive `assert_well_formed_response` even though it carries no
         // usage, which is the whole point of accepting it.
-        let decoded = require_decoded_response(
-            TerminalEvidence::BoundaryLoss(stopped_at_ceiling("length", exchange(200))),
-            &[],
-        );
+        let decoded =
+            require_decoded_response(TerminalEvidence::BoundaryLoss(stopped_at_ceiling()), &[]);
 
         assert_well_formed_response(&decoded);
     }
@@ -738,22 +737,34 @@ mod require_decoded_response_tests {
         // Only the output-ceiling token is accepted: a finish token this
         // adapter has never seen is exactly the compatibility break the smoke
         // exists to catch.
-        let _ = require_decoded_response(
-            TerminalEvidence::BoundaryLoss(stopped_at_ceiling(
-                "stop_and_smell_the_roses",
-                exchange(200),
-            )),
-            &[],
-        );
+        let mut loss = stopped_at_ceiling();
+        loss.finish_reported = Some(FinishReason::Unrecognized {
+            provider_token: "stop_and_smell_the_roses".to_string(),
+        });
+
+        let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
     }
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn an_output_ceiling_finish_from_a_non_200_status_panics() {
-        let _ = require_decoded_response(
-            TerminalEvidence::BoundaryLoss(stopped_at_ceiling("length", exchange(500))),
-            &[],
-        );
+        let mut loss = stopped_at_ceiling();
+        loss.exchange = exchange(500);
+
+        let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn an_output_ceiling_finish_without_a_reported_model_panics() {
+        // The `length` branch returns before the decoder's own end-of-stream
+        // validations, so a stream that never reported a model identity can
+        // still reach this arm carrying the token. That is a malformed
+        // envelope, not an output-ceiling stop, and must stay red.
+        let mut loss = stopped_at_ceiling();
+        loss.reported_model = None;
+
+        let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
     }
 }
 
