@@ -29,12 +29,13 @@ CLI redaction contract was verified through PR #316
 single-split parity, and geometric work bound). Exact Codex CLI usage-axis
 projection is verified against PR #389 (`agent/cost-accounting`). Model-settings
 mappings and advisory exceptions are verified against PR #437
-(`agent/model-settings-adapters`). This page covers the provider-neutral
-operation, observation, and evidence vocabulary; SSE framing; structured-output
-and tool decode; `ScriptedModel`; the four provider adapters; and their
-credential boundaries. Layer-2 authorization and evidence classification
-([model-call-execution](model-call-execution.md)), credential channels,
-delivery, and rotation discipline
+(`agent/model-settings-adapters`). The Anthropic compatibility smoke was
+verified through PR #465 (`agent/anthropic-api-smoke`). This page covers the
+provider-neutral operation, observation, and evidence vocabulary; SSE framing;
+structured-output and tool decode; `ScriptedModel`; the four provider adapters;
+and their credential boundaries. Layer-2 authorization and evidence
+classification ([model-call-execution](model-call-execution.md)), credential
+channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -436,15 +437,14 @@ request in addition to that alternate target.
 
 ### Compatibility smoke
 
-Both direct HTTP adapters carry a gated live compatibility smoke
-(`.github/workflows/anthropic-smoke.yml`, `.github/workflows/openai-smoke.yml`)
-that spends one real exchange against the cheapest model each provider currently
-advertises — `claude-haiku-4-5` for Anthropic, `gpt-5-nano` for OpenAI — run
+The Anthropic adapter carries a gated live compatibility smoke
+(`.github/workflows/anthropic-smoke.yml`) that spends one real exchange against
+the cheapest model the provider currently advertises — `claude-haiku-4-5` — run
 through this crate's own `ModelRuntime` implementation with a small fixed prompt
 and no provider-side prompt caching: at one exchange per gated run a cache write
 is never amortized by a later read, so caching would raise the cost of the run
 it is meant to cheapen. Unlike the Codex CLI smoke, there is no locally
-installed executable and therefore no version to verify beforehand; each adapter
+installed executable and therefore no version to verify beforehand; the adapter
 targets the provider's stable public API directly, so spending the one exchange
 is the whole smoke rather than a second gate behind a credential-free version
 probe.
@@ -453,7 +453,7 @@ The smoke asserts only the protocol surfaces a provider-side change would move:
 a definitive HTTP 200, and the response decoding as `Completed` evidence, or as
 the adapter's downgraded-refusal `ProviderError` shape (`kind: Unrecognized`
 from that same 200 exchange — see the refusal-downgrade rule above; a raw
-`Refused` never leaves either adapter) — either way with provider-reported input
+`Refused` never leaves the adapter) — either way with provider-reported input
 and output usage present — and nothing about answer quality.
 
 The workflow reports on every pull request without a path filter. GitHub
@@ -472,29 +472,33 @@ Manual dispatch remains available, and a path-filtered push to `main` — gated 
 the adapter crate and the workflow file itself, so an edit to the workflow's own
 definition cannot land unexercised — reruns the smoke after merge.
 
-The `anthropic-smoke` and `openai-smoke` environments are each configured for
-all branches, for the same reason the `codex-smoke` environment is: GitHub
-evaluates an environment used by `pull_request` against `GITHUB_REF`, the
-synthetic merge ref rather than the head branch. That setting admits fork and
-same-repository merge refs alike and supplies no security boundary. Forks are
-excluded, in order, by GitHub secret withholding and the three explicit
-repository-name comparisons above.
+The `anthropic-smoke` environment is configured for all branches, for the same
+reason the `codex-smoke` environment is: GitHub evaluates an environment used by
+`pull_request` against `GITHUB_REF`, the synthetic merge ref rather than the
+head branch. That setting admits fork and same-repository merge refs alike and
+supplies no security boundary. Forks are excluded, in order, by GitHub secret
+withholding and the three explicit repository-name comparisons above.
 
-Each workflow's own concurrency is two-tiered, matching the Codex smoke's shape:
-a workflow-level group keyed to the pull request ref (or the run id for every
-other event), so an unrelated concurrent run can never evict a whole run still
-in flight, and a job-level group fixed to the smoke job alone (`anthropic-smoke`
-/ `openai-smoke`) that serializes the one behavior that actually spends — a real
-provider exchange — without claiming to protect a third overlapping trigger's
-queued slot in that inner group from eviction.
+The workflow's own concurrency is a single group keyed to the pull request ref
+(or the run id for every other event), so a run superseded only by a newer push
+to the same ref releases its slot, exactly as the Codex smoke's own
+workflow-level group does. There is deliberately no additional job-level group
+serializing the live exchange itself: a fixed inner group shared across every
+ref — which an earlier revision of this workflow carried — lets an unrelated
+smoke-required run evict this job's queued slot even though
+`cancel-in-progress: false` does not protect it, because GitHub keeps at most
+one running and one pending member per concurrency group and replaces the
+pending one when a third arrives. That would fail a required check that never
+tested its own head. A concurrent real exchange costs a small fraction of a
+cent; required-check integrity is worth more than serializing that spend.
 
-The credential (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) is referenced only in
-the step that spends the exchange, scoped to that step's environment alone,
-never echoed and never passed in argv. The crate is compiled before that step
-runs, and the compiled test binary's path is captured from that credential-free
-build and invoked directly rather than through a second `cargo test`, so no
-build-freshness check — and therefore no build script or procedural macro — ever
-runs while the key is readable.
+The credential (`ANTHROPIC_API_KEY`) is referenced only in the step that spends
+the exchange, scoped to that step's environment alone, never echoed and never
+passed in argv. The crate is compiled before that step runs, and the compiled
+test binary's path is captured from that credential-free build and invoked
+directly rather than through a second `cargo test`, so no build-freshness check
+— and therefore no build script or procedural macro — ever runs while the key is
+readable.
 
 ## Codex CLI provider adapter
 
