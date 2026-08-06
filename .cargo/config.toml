@@ -1,15 +1,13 @@
-# Anchors expect-test's file resolution to the checkout being compiled.
+# Anchors the source rewrites `UPDATE_EXPECT=1` performs on inline
+# `expect![...]` literals to the checkout being compiled.
 #
-# `expect_file!` golden paths, and the source rewrites `UPDATE_EXPECT=1`
-# performs on inline `expect![...]` literals, are resolved relative to
-# `CARGO_WORKSPACE_DIR` when it is set. When it is not set, expect-test falls
-# back to walking up from `CARGO_MANIFEST_DIR` and taking the *topmost*
-# ancestor that contains a `Cargo.toml`. A nested linked worktree — one whose
-# path lies inside another checkout — has that outer checkout's root as such an
-# ancestor, so the walk escapes the worktree: goldens are compared against the
-# outer checkout's files and inline expectations are rewritten into the outer
-# checkout's sources. Corrupting a golden inside the worktree then does not
-# fail that worktree's tests.
+# expect-test locates the source file to rewrite by joining `file!()` onto a
+# workspace root it derives at run time: `CARGO_WORKSPACE_DIR` when that is
+# set, and otherwise the *topmost* ancestor of `CARGO_MANIFEST_DIR` that
+# contains a `Cargo.toml`. A nested linked worktree — one whose path lies
+# inside another checkout — has that outer checkout's root as such an ancestor,
+# so the walk escapes the worktree and accepted expectations are written into
+# the outer checkout's sources.
 #
 # `relative = true` resolves the value against the directory holding this
 # `.cargo` directory, which is the root of whichever checkout Cargo discovered
@@ -17,12 +15,16 @@
 # inherited value from the surrounding environment from reintroducing the
 # escape.
 #
-# Cargo discovers this file from the working directory's ancestors, not from
-# the manifest's, so a run launched outside a checkout
-# (`cargo test --manifest-path <checkout>/Cargo.toml`) does not load it and
-# falls back to the walk above. Whether that fallback happens to land on the
-# right tree therefore says nothing about whether this pin is still here, which
-# is why the guard in crates/persistence/tests/importer_conformance_corpus.rs
-# reads this file directly rather than watching the loaded value.
+# This pin covers only inline literals, and only when it is loaded. Cargo
+# discovers this file from the working directory's ancestors rather than the
+# manifest's, so a run launched outside a checkout
+# (`cargo test --manifest-path <checkout>/Cargo.toml`) loads no pin, or the
+# wrong checkout's, and takes the walk whatever is committed here. File goldens
+# must therefore not depend on it:
+# crates/persistence/tests/importer_conformance_corpus.rs builds its
+# `expect_file!` paths absolute from the compile-time `CARGO_MANIFEST_DIR`,
+# which expect-test uses verbatim, and a new file golden should do the same.
+# The guard in that file asserts this pin is still committed, since whether the
+# fallback happens to land on the right tree says nothing about that.
 [env]
 CARGO_WORKSPACE_DIR = { value = "", relative = true, force = true }
