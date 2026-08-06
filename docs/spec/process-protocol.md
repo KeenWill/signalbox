@@ -2032,6 +2032,9 @@ session; they never inline the child transcript. Lifecycle lines always show
 outcome, typed reason, and provenance, including `continue_running`. Background
 result wakes are labeled separately from foreground tool-result continuation so
 a user can see whether an old turn resumed or a new parent turn became eligible.
+Before presenting success, the terminal client requires every child or peer to
+be distinct from the invoking session in spawn, both await-result modes, and
+message receipts.
 
 `chat` is the plain line-oriented interactive surface for one live session. It
 opens one long-lived `follow_session` connection before accepting input and
