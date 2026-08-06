@@ -57,6 +57,8 @@ def write_manifest_workflow(root: Path, *names: str) -> None:
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
         "      - run: python3 scripts/postgres_integration_suites.py --matrix\n"
+        "      - run: python3 scripts/postgres_integration_suites.py"
+        " --archive-plan\n"
         f"{uploads}",
         encoding="utf-8",
     )
@@ -645,9 +647,16 @@ class DocsConsistencyTests(unittest.TestCase):
 
         failures = run_checks(self.root)
 
-        self.assertEqual(failure_categories(failures), ["suite-manifest"])
-        self.assertIn(
-            "scripts/postgres_integration_suites.py", failures[0].message
+        # One per required invocation: the build's archive plan and the run
+        # job's shard matrix are separate readings of the manifest.
+        self.assertEqual(
+            failure_categories(failures), ["suite-manifest", "suite-manifest"]
+        )
+        self.assertTrue(
+            all(
+                "scripts/postgres_integration_suites.py" in failure.message
+                for failure in failures
+            )
         )
 
     def test_workflow_running_ignored_tests_outside_the_manifest_fails(self) -> None:

@@ -35,6 +35,7 @@ from postgres_integration_suites import (
     parse_suites,
     run_matrix,
     workflow_disagreements,
+    workflow_shell_commands,
 )
 
 READER = Path(__file__).resolve().parent / "postgres_integration_suites.py"
@@ -245,6 +246,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: python3 scripts/postgres_integration_suites.py --archive-plan
+      - run: python3 scripts/postgres_integration_suites.py --matrix
       - uses: actions/upload-artifact@v7
         with:
           name: postgres-integration-archive-alpha
@@ -275,7 +277,37 @@ class WorkflowAgreementTests(unittest.TestCase):
         failures = self.disagreements(stripped)
 
         self.assertEqual(len(failures), 1)
-        self.assertIn("postgres_integration_suites.py", failures[0])
+        self.assertIn("--archive-plan", failures[0])
+
+    def test_each_required_invocation_is_checked_separately(self) -> None:
+        stripped = AGREEING_WORKFLOW.replace(
+            "      - run: python3 scripts/postgres_integration_suites.py"
+            " --matrix\n",
+            "",
+        )
+
+        failures = self.disagreements(stripped)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("--matrix", failures[0])
+
+    def test_the_reader_named_only_in_a_comment_is_not_an_invocation(self) -> None:
+        # A filename occurrence is not the workflow reading the manifest. If a
+        # comment satisfied this check, the workflow could restate package and
+        # feature selection while the docs gate kept treating the manifest as
+        # ground truth.
+        commented = AGREEING_WORKFLOW.replace(
+            "      - run: python3 scripts/postgres_integration_suites.py"
+            " --archive-plan\n",
+            "      # was: python3 scripts/postgres_integration_suites.py"
+            " --archive-plan\n"
+            "      - run: cargo nextest archive -p alpha\n",
+        )
+
+        failures = self.disagreements(commented)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("--archive-plan", failures[0])
 
     def test_a_suite_without_an_artifact_is_reported(self) -> None:
         failures = self.disagreements(
@@ -298,6 +330,55 @@ class WorkflowAgreementTests(unittest.TestCase):
         failures = self.disagreements(
             AGREEING_WORKFLOW
             + "      - run: cargo test -p alpha --tests -- --ignored\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("outside", failures[0])
+
+    def test_a_backslash_continued_ignored_run_is_reported(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "      - run: |\n"
+            "          cargo test -p alpha --tests \\\n"
+            "            -- --ignored\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("outside", failures[0])
+
+    def test_a_multi_command_block_without_ignored_is_allowed(self) -> None:
+        # Flattening a `|` block joins its commands into one string; that must
+        # not invent an ignored-test run out of neighbouring lines.
+        self.assertEqual(
+            self.disagreements(
+                AGREEING_WORKFLOW
+                + "      - run: |\n"
+                "          cargo test -p alpha --tests\n"
+                "          echo done\n"
+            ),
+            [],
+        )
+
+    def test_a_folded_scalar_ignored_run_is_reported(self) -> None:
+        # The shape the previous workflow used, and the one a reader is most
+        # likely to reach for: no backslashes, the arguments simply wrapped.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "      - run: >-\n"
+            "          cargo test -p alpha --tests\n"
+            "          -- --ignored\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("outside", failures[0])
+
+    def test_a_matrix_command_scalar_ignored_run_is_reported(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "          - suite: alpha\n"
+            "            command: >-\n"
+            "              cargo test -p alpha --tests\n"
+            "              -- --ignored\n"
         )
 
         self.assertEqual(len(failures), 1)
@@ -329,6 +410,22 @@ class WorkflowAgreementTests(unittest.TestCase):
 
         self.assertEqual(len(failures), 1)
         self.assertIn("windows-latest", failures[0])
+
+    def test_a_block_indicator_is_not_command_text(self) -> None:
+        commands = workflow_shell_commands(
+            "jobs:\n"
+            "  a:\n"
+            "    steps:\n"
+            "      - run: >-\n"
+            "          cargo nextest run\n"
+            "          --workspace-remap .\n"
+            "      - run: |2\n"
+            "          echo indented\n"
+        )
+
+        self.assertEqual(
+            commands, ["cargo nextest run --workspace-remap .", "echo indented"]
+        )
 
     def test_the_repository_workflow_agrees_with_its_manifest(self) -> None:
         manifest = ROOT / ".github/postgres-integration-suites.toml"

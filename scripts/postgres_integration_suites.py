@@ -46,6 +46,9 @@ ARCHIVE_ARTIFACT = re.compile(
 )
 SUITE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 RUNS_ON = re.compile(r"^[ ]*runs-on:[ ]*(?P<target>[^ #\n]+)", re.MULTILINE)
+SHELL_SCALAR = re.compile(r"^(?P<indent>[ ]*)(?:-[ ]+)?(?:run|command):(?P<inline>.*)$")
+BLOCK_INDICATOR = re.compile(r"[|>][+-]?\d*")
+REQUIRED_INVOCATIONS = (f"{EMITTER} --archive-plan", f"{EMITTER} --matrix")
 
 
 class ManifestError(Exception):
@@ -208,6 +211,46 @@ def archive_plan(suites: tuple[Suite, ...]) -> str:
     return "".join(f"{row}\n" for row in rows)
 
 
+def workflow_shell_commands(text: str) -> list[str]:
+    """Return each `run:`/`command:` scalar in a workflow, flattened to one line.
+
+    A shell command in a workflow can be spelled four ways — inline, a literal
+    `|` block, a folded `>-` block, or backslash continuations — and a check
+    that reads only physical lines sees a different command in each. So every
+    scalar is collected whole: the opening key's own text plus every following
+    line indented past it, joined with spaces, comment lines and continuation
+    backslashes dropped.
+
+    This is containment, not interpretation. It answers "does this text appear
+    inside a command" without reconstructing what the command selects — the
+    inference the suite manifest exists to make unnecessary.
+    """
+    lines = text.splitlines()
+    commands: list[str] = []
+    index = 0
+    while index < len(lines):
+        match = SHELL_SCALAR.match(lines[index])
+        if match is None:
+            index += 1
+            continue
+        indentation = len(match.group("indent"))
+        # `|`, `>-`, `|+2` and friends open a block; they are not command text.
+        inline = match.group("inline").strip()
+        body = ["" if BLOCK_INDICATOR.fullmatch(inline) else inline]
+        index += 1
+        while index < len(lines):
+            line = lines[index]
+            if line.strip() and len(line) - len(line.lstrip(" ")) <= indentation:
+                break
+            if line.strip() and not line.lstrip().startswith("#"):
+                body.append(line.strip())
+            index += 1
+        joined = " ".join(part.removesuffix("\\").strip() for part in body if part)
+        if joined:
+            commands.append(joined)
+    return commands
+
+
 def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     """Report every way the Rust workflow disagrees with the manifest.
 
@@ -218,13 +261,18 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     from this module at run time; these assertions prove it still does.
     """
     text = (root / WORKFLOW).read_text(encoding="utf-8")
+    commands = workflow_shell_commands(text)
     failures: list[str] = []
 
-    if EMITTER not in text:
-        failures.append(
-            f"{WORKFLOW} does not invoke {EMITTER}, so its PostgreSQL "
-            f"integration jobs no longer derive from {MANIFEST}"
-        )
+    # Both invocations, and inside an actual command — the filename appearing
+    # in a comment is not the workflow reading the manifest, and each mode
+    # feeds a different job: `--archive-plan` the build, `--matrix` the shards.
+    for invocation in REQUIRED_INVOCATIONS:
+        if not any(invocation in command for command in commands):
+            failures.append(
+                f"{WORKFLOW} runs no `{invocation}` command, so its PostgreSQL "
+                f"integration jobs no longer derive from {MANIFEST}"
+            )
 
     named = {match.group("suite") for match in ARCHIVE_ARTIFACT.finditer(text)}
     expected = {suite.name for suite in suites}
@@ -241,22 +289,23 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
 
     # An ignored-test run spelled directly in the workflow is a run the
     # manifest does not describe, which is precisely the drift this gate
-    # exists to prevent. `--ignored` reaches libtest only after a `--`.
+    # exists to prevent. `--ignored` reaches libtest only after a `--`, and it
+    # is searched for across the whole flattened command, because the wrapping
+    # that separates it from `cargo test` is a matter of YAML spelling.
     #
-    # Prose that merely mentions the command — a comment saying what a job
-    # does not do — is not a command, and an apostrophe in it is not an
-    # unterminated quote. Anything shlex cannot read as a command line is
-    # therefore skipped rather than raised.
-    for command in re.finditer(r"cargo\s+test\b[^\n]*", text):
-        try:
-            arguments = shlex.split(command.group(0), comments=True)
-        except ValueError:
-            continue
-        if "--" in arguments and "--ignored" in arguments:
-            failures.append(
-                f"{WORKFLOW} runs ignored tests through `cargo test` outside "
-                f"{MANIFEST}: {command.group(0).strip()}"
-            )
+    # Anything shlex cannot read as a command line is skipped rather than
+    # raised: an apostrophe in prose is not an unterminated quote.
+    for command in commands:
+        for occurrence in re.finditer(r"cargo\s+test\b.*", command):
+            try:
+                arguments = shlex.split(occurrence.group(0), comments=True)
+            except ValueError:
+                continue
+            if "--" in arguments and "--ignored" in arguments:
+                failures.append(
+                    f"{WORKFLOW} runs ignored tests through `cargo test` "
+                    f"outside {MANIFEST}: {occurrence.group(0).strip()}"
+                )
 
     targets = {match.group("target") for match in RUNS_ON.finditer(text)}
     if targets and targets != {"ubuntu-latest"}:
