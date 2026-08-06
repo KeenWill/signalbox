@@ -518,6 +518,87 @@ const PERMITTED_CREDENTIAL_SITES: &[&str] = &[
     "test -n \"${ANTHROPIC_API_KEY}\" \\",
 ];
 
+/// The workflow's active lines, trimmed and in file order, each paired with
+/// the indentation it was written at.
+///
+/// Blank lines and comments are dropped everywhere the assertions below look,
+/// because a commented-out line is text GitHub never acts on. Treating it as
+/// declared is the exact drift these assertions exist to catch: a commented-out
+/// `cron` entry still reads as a scheduled firing to a substring search while
+/// no firing happens. The indentation travels with each line so a lookup can be
+/// scoped to the block that owns it rather than to the whole document.
+fn active_workflow_lines(workflow: &str) -> Vec<(usize, &str)> {
+    workflow
+        .lines()
+        .map(|line| (line.len() - line.trim_start().len(), line.trim()))
+        .filter(|(_, content)| !content.is_empty() && !content.starts_with('#'))
+        .collect()
+}
+
+/// The lines nested under `key` within `block`, or nothing when `block` does
+/// not declare `key` at its own level.
+///
+/// The key must appear at the indentation `block` opens at, so a same-named key
+/// belonging to a deeper structure is not mistaken for this one, and the value
+/// runs until the first line that returns to that indentation or shallower.
+fn mapping_value_block<'b, 's>(block: &'b [(usize, &'s str)], key: &str) -> &'b [(usize, &'s str)] {
+    let Some(&(level, _)) = block.first() else {
+        return &[];
+    };
+    let header = format!("{key}:");
+    let Some(start) = block.iter().position(|(indent, content)| {
+        *indent == level
+            && content
+                .strip_prefix(&header)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+    }) else {
+        return &[];
+    };
+    let body = &block[start + 1..];
+    let extent = body
+        .iter()
+        .position(|(indent, _)| *indent <= level)
+        .unwrap_or(body.len());
+    &body[..extent]
+}
+
+/// The entries of the YAML sequence declared at `path`, in file order, with the
+/// `- ` marker removed.
+///
+/// Each element of `path` names a mapping key matched only within the block the
+/// previous element opened, so `["on", "push", "paths"]` reads the push
+/// trigger's own filter and cannot be satisfied by the same entry written under
+/// a different trigger. Comments are already gone, so a commented-out entry is
+/// absent rather than declared.
+///
+/// Accepted limit: a sequence must be indented under its key, which is how this
+/// workflow writes them. Reformatting one flush with its key would return no
+/// entries and fail the assertion that asked for it — loud rather than vacuous,
+/// which is the safe direction for a check whose whole job is to notice that a
+/// trigger stopped existing.
+fn workflow_sequence_at(workflow: &str, path: &[&str]) -> Vec<String> {
+    let lines = active_workflow_lines(workflow);
+    let mut block = lines.as_slice();
+    for key in path {
+        block = mapping_value_block(block, key);
+    }
+    block
+        .iter()
+        .filter_map(|(_, content)| content.strip_prefix("- "))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether `fragment` appears on a line the workflow actually acts on.
+///
+/// The plain `str::contains` these assertions used before was satisfied by a
+/// commented-out occurrence, so a disabled step still read as present.
+fn workflow_declares(workflow: &str, fragment: &str) -> bool {
+    active_workflow_lines(workflow)
+        .iter()
+        .any(|(_, content)| content.contains(fragment))
+}
+
 /// Every line that reaches the credential's value, trimmed and in file order.
 ///
 /// A line qualifies when it names the credential anywhere outside a comment.
@@ -525,15 +606,15 @@ const PERMITTED_CREDENTIAL_SITES: &[&str] = &[
 /// covers the GitHub expression form, a braced shell expansion, and a bare
 /// one, but not a read that never expands anything — `printenv
 /// ANTHROPIC_API_KEY` writes the value to the job log without a `$` in sight.
-/// Only the comment prefix is excluded, because prose that names the variable
-/// reads nothing; every executable mention is inventoried whether it expands
-/// or not. Factored out of the assertion so synthetic workflows can prove the
-/// scan catches each form.
+/// Only comments are excluded, because prose that names the variable reads
+/// nothing; every executable mention is inventoried whether it expands or not.
+/// Factored out of the assertion so synthetic workflows can prove the scan
+/// catches each form.
 fn credential_reading_lines(workflow: &str) -> Vec<&str> {
-    workflow
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.starts_with('#') && line.contains(SMOKE_CREDENTIAL_VARIABLE))
+    active_workflow_lines(workflow)
+        .into_iter()
+        .filter(|(_, content)| content.contains(SMOKE_CREDENTIAL_VARIABLE))
+        .map(|(_, content)| content)
         .collect()
 }
 
@@ -664,8 +745,10 @@ fn credential_scan_ignores_a_prose_mention() {
 #[test]
 fn the_smoke_workflow_installs_the_pinned_cli_without_lifecycle_scripts() {
     assert!(
-        CLAUDE_SMOKE_WORKFLOW
-            .contains("npm ci --ignore-scripts --prefix crates/model-runtime-claude-cli"),
+        workflow_declares(
+            CLAUDE_SMOKE_WORKFLOW,
+            "npm ci --ignore-scripts --prefix crates/model-runtime-claude-cli"
+        ),
         "the smoke workflow no longer installs the pinned CLI from the lockfile with \
          lifecycle scripts disabled"
     );
@@ -679,7 +762,10 @@ fn the_smoke_workflow_installs_the_pinned_cli_without_lifecycle_scripts() {
 #[test]
 fn the_smoke_workflow_places_the_native_binary_explicitly() {
     assert!(
-        CLAUDE_SMOKE_WORKFLOW.contains("node node_modules/@anthropic-ai/claude-code/install.cjs"),
+        workflow_declares(
+            CLAUDE_SMOKE_WORKFLOW,
+            "node node_modules/@anthropic-ai/claude-code/install.cjs"
+        ),
         "the smoke workflow no longer runs the pinned package's installer, so the \
          launcher it probes has no native binary behind it"
     );
@@ -689,32 +775,31 @@ fn the_smoke_workflow_places_the_native_binary_explicitly() {
 /// unchanged pin can stop working between adapter changes. The twice-daily
 /// canary is what finds that without waiting for the next pull request;
 /// dropping either firing would halve the detection window silently.
+///
+/// Read from `on.schedule` itself rather than searched for as text, and pinned
+/// as the complete list rather than counted. A count over the raw document was
+/// satisfied by a firing that had been commented out — the text stays, the
+/// schedule does not — and said nothing about a third firing being added.
 #[test]
 fn the_smoke_workflow_runs_a_twice_daily_drift_canary() {
-    let crons = ["0 13 * * *", "0 1 * * *"];
-    let declared = crons
-        .iter()
-        .filter(|cron| CLAUDE_SMOKE_WORKFLOW.contains(&format!("cron: \"{cron}\"")))
-        .count();
-
     assert_eq!(
-        declared,
-        crons.len(),
-        "the smoke workflow no longer schedules both daily drift-canary firings"
+        workflow_sequence_at(CLAUDE_SMOKE_WORKFLOW, &["on", "schedule"]),
+        ["cron: \"0 13 * * *\"", "cron: \"0 1 * * *\""],
+        "the smoke workflow no longer schedules exactly the two daily drift-canary firings"
     );
 }
 
 /// A change to the workflow is a change to the gate itself, so a push to
-/// `main` touching only this file must run it. Asserted as the path-list entry
-/// specifically: an occurrence count would stay satisfied if this trigger were
-/// deleted while the same path appeared twice somewhere else.
+/// `main` touching only this file must run it. Read from the `on.push.paths`
+/// list specifically: searching every line of the document would stay satisfied
+/// if this trigger were deleted while the identical entry appeared under some
+/// other trigger, and a commented-out entry would count as declared.
 #[test]
 fn the_smoke_workflow_push_trigger_names_its_own_definition() {
     assert!(
-        CLAUDE_SMOKE_WORKFLOW
-            .lines()
-            .map(str::trim)
-            .any(|line| line == "- \".github/workflows/claude-smoke.yml\""),
+        workflow_sequence_at(CLAUDE_SMOKE_WORKFLOW, &["on", "push", "paths"])
+            .iter()
+            .any(|entry| entry == "\".github/workflows/claude-smoke.yml\""),
         "the smoke workflow's push path filter no longer lists its own definition, \
          so a push that changes only this file would not run it"
     );
@@ -723,15 +808,97 @@ fn the_smoke_workflow_push_trigger_names_its_own_definition() {
 /// The pull-request side is gated by the eligibility job rather than a `paths`
 /// filter, so the same self-change parity has to be asserted in that predicate
 /// too — and separately from the push trigger above, since either can be
-/// dropped without changing the other.
+/// dropped without changing the other. The predicate is a shell fragment rather
+/// than a YAML node, so it is matched as a line the workflow acts on; that is
+/// what keeps a commented-out clause from reading as an active one.
 #[test]
 fn the_smoke_gate_predicate_names_the_workflow_definition() {
     assert!(
-        CLAUDE_SMOKE_WORKFLOW
-            .contains("|| \"${path}\" == \".github/workflows/claude-smoke.yml\" ]]; then"),
+        workflow_declares(
+            CLAUDE_SMOKE_WORKFLOW,
+            "|| \"${path}\" == \".github/workflows/claude-smoke.yml\" ]]; then"
+        ),
         "the eligibility gate's changed-path predicate no longer names this workflow, \
          so a pull request that changes only this file would report not-applicable"
     );
+}
+
+/// A workflow whose triggers deliberately repeat one another's entries and
+/// carry disabled ones, so the fixtures below prove a lookup reads the context
+/// it asked for rather than anywhere the same text happens to appear.
+const SCOPING_FIXTURE_WORKFLOW: &str = r#"
+name: fixture
+on:
+  pull_request:
+    paths:
+      - "fixture/decoy.yml"
+  push:
+    branches: [main]
+    paths:
+      - "fixture/wanted.yml"
+      # - "fixture/retired.yml"
+  schedule:
+    - cron: "0 13 * * *"
+    # - cron: "0 1 * * *"
+jobs:
+  build:
+    steps:
+      - run: echo fixture
+"#;
+
+/// The failure the push-trigger assertion is meant to survive: the entry is
+/// gone from `push.paths` but still present elsewhere in the document.
+#[test]
+fn workflow_sequence_excludes_an_entry_from_another_trigger() {
+    assert!(
+        SCOPING_FIXTURE_WORKFLOW.contains("fixture/decoy.yml"),
+        "the fixture must contain the decoy for this to prove anything"
+    );
+
+    assert_eq!(
+        workflow_sequence_at(SCOPING_FIXTURE_WORKFLOW, &["on", "push", "paths"]),
+        ["\"fixture/wanted.yml\""]
+    );
+}
+
+/// The failure the drift-canary assertion is meant to survive: the firing's
+/// text remains but GitHub no longer schedules it.
+#[test]
+fn workflow_sequence_excludes_a_commented_out_entry() {
+    assert!(
+        SCOPING_FIXTURE_WORKFLOW.contains("cron: \"0 1 * * *\""),
+        "the fixture must contain the disabled firing for this to prove anything"
+    );
+
+    assert_eq!(
+        workflow_sequence_at(SCOPING_FIXTURE_WORKFLOW, &["on", "schedule"]),
+        ["cron: \"0 13 * * *\""]
+    );
+}
+
+/// An undeclared path yields nothing rather than falling back to a wider scope,
+/// so a deleted trigger fails its assertion instead of matching a sibling.
+#[test]
+fn workflow_sequence_is_empty_for_an_undeclared_path() {
+    assert_eq!(
+        workflow_sequence_at(SCOPING_FIXTURE_WORKFLOW, &["on", "push", "tags"]),
+        Vec::<String>::new()
+    );
+}
+
+/// The line-level check carries the same rule, so a step that was commented out
+/// no longer reads as one the workflow runs.
+#[test]
+fn workflow_declares_excludes_a_commented_out_line() {
+    assert!(SCOPING_FIXTURE_WORKFLOW.contains("fixture/retired.yml"));
+    assert!(!workflow_declares(
+        SCOPING_FIXTURE_WORKFLOW,
+        "fixture/retired.yml"
+    ));
+    assert!(workflow_declares(
+        SCOPING_FIXTURE_WORKFLOW,
+        "run: echo fixture"
+    ));
 }
 
 #[test]
