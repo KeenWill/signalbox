@@ -556,6 +556,29 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testToolReconciliationSideProjectionAcceptsForegroundDelegationResult() throws {
+    let snapshot = try ProcessProjectionFixture
+      .snapshotWithForegroundDelegationReconciliationResult()
+    let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.toolNames(in: projection),
+      ProcessProjectionFixture.reconciliationSuffixToolNames
+    )
+    XCTAssertEqual(
+      ProcessProjectionFixture.conservativeKinds(in: projection),
+      ProcessProjectionFixture.foregroundDelegationResultKinds
+    )
+    XCTAssertEqual(
+      ProcessProjectionFixture.toolSummaries(in: projection),
+      ProcessProjectionFixture.foregroundDelegationToolSummaries
+    )
+  }
+
   func testToolReconciliationSideProjectionRejectsAttemptlessDeniedSuffix() throws {
     let snapshot = try ProcessProjectionFixture
       .snapshotWithAttemptlessDeniedReconciliationResults()
@@ -6271,6 +6294,15 @@ private enum ProcessProjectionFixture {
   static let reconciliationClosedEntry = "33333333-3333-4333-8333-333333333333"
   static let reconciliationClosedOutput = "Ambiguous fixture tool closed."
   static let reconciliationDeniedOutput = "Fixture tool request denied."
+  static let delegationSpawningRequest = "22222222-3333-4333-8333-333333333333"
+  static let delegationChildSession = "11111111-3333-4333-8333-333333333333"
+  static let delegationChildTurn = "aaaaaaaa-3333-4333-8333-333333333333"
+  static let delegationResultContent = "Delegated fixture inspected."
+  static let foregroundDelegationResultKinds = ["delegation_result"]
+  static let foregroundDelegationToolSummaries = [
+    "\(proposedToolName): \(delegationResultContent)",
+    "\(reconciliationSuffixToolName): \(reconciliationSuffixOutput)",
+  ]
   static let reconciliationSuffixToolNames = [
     proposedToolName, reconciliationSuffixToolName,
   ]
@@ -9942,6 +9974,17 @@ private enum ProcessProjectionFixture {
     }
   }
 
+  static func conservativeKinds(
+    in projection: SignalboxProcessTranscriptProjection
+  ) -> [String] {
+    projection.records.compactMap { record in
+      guard case .processConservative(let event) = record.event else {
+        return nil
+      }
+      return event.kind
+    }
+  }
+
   static func toolSummaries(
     in projection: SignalboxProcessTranscriptProjection
   ) -> [String] {
@@ -10191,6 +10234,55 @@ private enum ProcessProjectionFixture {
             "type":"tool_closed",
             "tool_request_id":"\(proposedToolRequest)",
             "content":"\(reconciliationClosedOutput)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"3",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationSuffixResultEntry)",
+          "entry":{
+            "type":"tool_execution_result",
+            "tool_request_id":"\(reconciliationSuffixToolRequest)",
+            "tool_attempt_id":"\(reconciliationSuffixAttempt)",
+            "content":"\(reconciliationSuffixOutput)"
+          }
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithForegroundDelegationReconciliationResult() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try reconciliationResultSnapshot(
+      trailingEntries: [],
+      entryCount: 4,
+      resultEntries: [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"2",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationClosedEntry)",
+          "entry":{
+            "type":"delegation_result",
+            "await_request_id":"\(proposedToolRequest)",
+            "spawning_request_id":"\(delegationSpawningRequest)",
+            "child_session_id":"\(delegationChildSession)",
+            "mode":"foreground",
+            "delivery_sequence":null,
+            "outcome":"returned",
+            "content":"\(delegationResultContent)",
+            "reason":"child_completed",
+            "provenance":{
+              "type":"child_turn",
+              "child_session_id":"\(delegationChildSession)",
+              "child_turn_id":"\(delegationChildTurn)"
+            }
           }
         }
         """,

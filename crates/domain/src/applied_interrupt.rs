@@ -403,9 +403,10 @@ mod tests {
     };
     use crate::{
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
-        AcceptedInputQueueOrderError, AcceptedInputQueueWork, DeliveryRequest, DurableCommandId,
-        ModelSelectionOverride, PerInputConfigurationChoices, SessionConfigurationDefaultsVersion,
-        SessionId, SessionInputPosition, SteeringBinding, SteeringReclassificationReason, TurnId,
+        AcceptedInputQueueOrderError, AcceptedInputQueueWork, DeliveryRequest,
+        DescendantTerminationScope, DurableCommandId, ModelSelectionOverride,
+        PerInputConfigurationChoices, SessionConfigurationDefaultsVersion, SessionId,
+        SessionInputPosition, SteeringBinding, SteeringReclassificationReason, TurnId,
     };
 
     fn choices() -> PerInputConfigurationChoices {
@@ -418,6 +419,7 @@ mod tests {
     fn interrupt_delivery(predecessor: TurnId) -> DeliveryRequest {
         DeliveryRequest::Interrupt {
             expected_active_turn: predecessor,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: choices(),
         }
     }

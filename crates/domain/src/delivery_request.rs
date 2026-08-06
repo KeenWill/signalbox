@@ -8,7 +8,8 @@
 //! and no independent configuration by construction.
 
 use crate::{
-    ModelSelectionOverride, ModelSettingsOverlay, SessionConfigurationDefaultsVersion, TurnId,
+    DescendantTerminationScope, ModelSelectionOverride, ModelSettingsOverlay,
+    SessionConfigurationDefaultsVersion, TurnId,
 };
 
 /// The caller's complete per-input configuration choice for new logical work.
@@ -108,6 +109,8 @@ pub enum DeliveryRequest {
     Interrupt {
         /// The turn the caller expects to be active.
         expected_active_turn: TurnId,
+        /// Whether interrupting the parent also terminates its descendants.
+        descendant_scope: DescendantTerminationScope,
         /// The successor's version-bound configuration choice.
         configuration: PerInputConfigurationChoices,
     },
@@ -130,7 +133,8 @@ mod tests {
     use super::{DeliveryRequest, PerInputConfigurationChoices};
     use crate::test_support::{direct, turn_id};
     use crate::{
-        ModelSelectionOverride, ModelSelectionRequest, SessionConfigurationDefaultsVersion,
+        DescendantTerminationScope, ModelSelectionOverride, ModelSelectionRequest,
+        SessionConfigurationDefaultsVersion,
     };
 
     fn first_version() -> SessionConfigurationDefaultsVersion {
@@ -173,19 +177,23 @@ mod tests {
     fn s07_inv008_inv028_interrupt_carries_target_and_choices() {
         let expected_active_turn = turn_id(1);
         let configuration = choices();
+        let descendant_scope = DescendantTerminationScope::ParentAlone;
         let request = DeliveryRequest::Interrupt {
             expected_active_turn,
+            descendant_scope,
             configuration,
         };
 
         let DeliveryRequest::Interrupt {
             expected_active_turn: carried_turn,
+            descendant_scope: carried_scope,
             configuration: carried_configuration,
         } = request
         else {
             panic!("constructed interrupt must remain an interrupt");
         };
         assert_eq!(carried_turn, expected_active_turn);
+        assert_eq!(carried_scope, descendant_scope);
         assert_eq!(carried_configuration, configuration);
     }
 
@@ -248,6 +256,7 @@ mod tests {
         let start = DeliveryRequest::StartWhenNoActiveTurn { configuration };
         let interrupt = DeliveryRequest::Interrupt {
             expected_active_turn: turn_id(1),
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration,
         };
         let next_safe_point = DeliveryRequest::NextSafePoint {
@@ -269,6 +278,23 @@ mod tests {
             interrupt,
             DeliveryRequest::Interrupt {
                 expected_active_turn: turn_id(2),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                configuration,
+            }
+        );
+        assert_eq!(
+            interrupt,
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                configuration,
+            }
+        );
+        assert_ne!(
+            interrupt,
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(1),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
                 configuration,
             }
         );
@@ -302,6 +328,7 @@ mod tests {
             interrupt,
             DeliveryRequest::Interrupt {
                 expected_active_turn: turn_id(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
                 configuration: later_configuration,
             }
         );
@@ -309,6 +336,7 @@ mod tests {
             interrupt,
             DeliveryRequest::Interrupt {
                 expected_active_turn: turn_id(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
                 configuration: explicit_configuration,
             }
         );

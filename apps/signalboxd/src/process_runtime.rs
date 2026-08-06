@@ -41,7 +41,7 @@ use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextCompactionId,
     ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
     DecideToolRequestRejectedResult, DecideToolRequestResult, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, FastMode as DomainFastMode,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId, FastMode as DomainFastMode,
     FastModeOverlay as DomainFastModeOverlay, FrozenModelSelection, Goal, GoalBlockProvenance,
     GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult,
     GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction,
@@ -99,9 +99,12 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError},
     goal_turn::GoalTurnCandidates,
     outbox::{
-        DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
-        DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
-        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
+        DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
+        DispatchedDelegationWaitMode, DispatchedModelCallDisposition, DispatchedModelCallState,
+        DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
+        DispatchedToolBatchState, OutboxDeliveryDecision, OutboxDispatchError,
+        OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
@@ -123,11 +126,16 @@ use signalbox_persistence::{
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
 };
 use signalbox_process_protocol::{
-    BillingRateVersion, CanonicalDollarAmount, CanonicalU64, CanonicalUuid, ClientRequest,
-    ConversationCursor as WireConversationCursor, ConversationImportFormat,
-    ConversationImportRejectionClass, ConversationOrigin as WireConversationOrigin,
+    BillingRateVersion, BoundChildAction as WireBoundChildAction, CanonicalDollarAmount,
+    CanonicalU64, CanonicalUuid, ClientRequest, ConversationCursor as WireConversationCursor,
+    ConversationImportFormat, ConversationImportRejectionClass,
+    ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
+    DelegationOutcome as WireDelegationOutcome, DelegationPolicy as WireDelegationPolicy,
+    DelegationProvenance as WireDelegationProvenance, DelegationReason as WireDelegationReason,
+    DelegationWaitMode as WireDelegationWaitMode,
+    DescendantTerminationScope as WireDescendantTerminationScope,
     EffectiveModelSettings as WireEffectiveModelSettings, ErrorCode, ErrorDetail,
     FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall,
     FastMode as WireFastMode, FastModeOverlay as WireFastModeOverlay, FrameDecodeErrorKind,
@@ -378,7 +386,7 @@ impl ProcessRuntime {
         let connection_dependencies = ConnectionDependencies {
             recovery_reporter: self.recovery_reporter,
             pool: self.pool.clone(),
-            eligibility_nudge: self.eligibility_nudge,
+            eligibility_nudge: self.eligibility_nudge.clone(),
             tool_dispatch_gate: self.tool_dispatch_gate,
             model_configuration: self.model_configuration,
             context_compaction_model: self.context_compaction_model,
@@ -386,7 +394,13 @@ impl ProcessRuntime {
             fanouts: fanouts.clone(),
         };
         let server = serve_connections(&self.listener, connection_dependencies, shutdown.clone());
-        let dispatcher = dispatch_updates(self.pool, fanouts, self.metrics, shutdown);
+        let dispatcher = dispatch_updates(
+            self.pool,
+            self.eligibility_nudge,
+            fanouts,
+            self.metrics,
+            shutdown,
+        );
         let result = tokio::try_join!(server, dispatcher);
         let cleanup = self.listener.cleanup();
 
@@ -409,6 +423,7 @@ impl ProviderTextDeltaSink for ProcessProviderTextDeltaSink {
 
 async fn dispatch_updates(
     pool: PgPool,
+    eligibility_nudge: InProcessEligibilityNudge,
     fanouts: ProcessFanouts,
     metrics: Option<TelemetryMetrics>,
     mut shutdown: watch::Receiver<bool>,
@@ -427,9 +442,11 @@ async fn dispatch_updates(
                     event.sequence(),
                     event.kind(),
                 );
-                let update = ProcessUpdate::from(event);
-                let _ = fanouts.durable.send(update.clone());
-                let _ = fanouts.streaming.send(update);
+                nudge_delegation_wake(&eligibility_nudge, event.session(), event.kind());
+                if let Some(update) = ProcessUpdate::from_outbox(event) {
+                    let _ = fanouts.durable.send(update.clone());
+                    let _ = fanouts.streaming.send(update);
+                }
                 OutboxDeliveryDecision::Delivered
             })
             .await
@@ -446,6 +463,16 @@ async fn dispatch_updates(
                 return Err(ProcessRuntimeError::UnexpectedDispatcherRetry);
             }
         }
+    }
+}
+
+fn nudge_delegation_wake(
+    eligibility_nudge: &impl EligibilityNudge,
+    session: SessionId,
+    event: &DispatchedOutboxEventKind,
+) {
+    if matches!(event, DispatchedOutboxEventKind::DelegationWake(_)) {
+        let _ = eligibility_nudge.nudge(session);
     }
 }
 
@@ -492,8 +519,10 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
         | DispatchedOutboxEventKind::InputAccepted { .. }
         | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::ToolBatchTransition { .. }
+        | DispatchedOutboxEventKind::ContextCompacted { .. }
+        | DispatchedOutboxEventKind::DelegationUpdate(_)
         | DispatchedOutboxEventKind::ToolApprovalDecided { .. }
-        | DispatchedOutboxEventKind::ContextCompacted { .. } => {}
+        | DispatchedOutboxEventKind::DelegationWake(_) => {}
     }
 }
 
@@ -1300,6 +1329,7 @@ where
         ClientRequest::StopGoal {
             command_id,
             session_id,
+            descendant_scope,
         } => {
             handle_goal_user_command(
                 writer,
@@ -1307,7 +1337,9 @@ where
                 request_id,
                 command_id.into_uuid(),
                 session_id,
-                GoalUserAction::Stop,
+                GoalUserAction::Stop {
+                    descendant_scope: decode_descendant_scope(descendant_scope),
+                },
                 services,
             )
             .await
@@ -1933,6 +1965,7 @@ where
             expected_active_turn_id,
             content,
             expected_defaults_version,
+            descendant_scope,
             model_settings,
         } => {
             handle_stop_turn(
@@ -1944,6 +1977,7 @@ where
                 expected_active_turn_id,
                 content,
                 expected_defaults_version,
+                decode_descendant_scope(descendant_scope),
                 model_settings,
                 &services.pool,
                 &services.eligibility_nudge,
@@ -5530,7 +5564,22 @@ fn transcript_entry_reference(
     entry: &ProcessTranscriptEntry,
 ) -> signalbox_domain::SemanticTranscriptEntryRef {
     let (source_session, entry) = match entry {
-        ProcessTranscriptEntry::ModelIdentityChanged {
+        ProcessTranscriptEntry::DelegatedTask {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::DelegationMessage {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::DelegationResult {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::ModelIdentityChanged {
             source_session,
             entry,
             ..
@@ -5608,6 +5657,76 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
         .to_string();
     let entry_id = reference.entry().into_uuid().hyphenated().to_string();
     match entry {
+        ProcessTranscriptEntry::DelegatedTask {
+            entry_index,
+            spawning_request,
+            parent_session,
+            parent_turn,
+            content,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "delegated_task",
+            "spawning_request_id": spawning_request.into_uuid().hyphenated().to_string(),
+            "parent_session_id": parent_session.into_uuid().hyphenated().to_string(),
+            "parent_turn_id": parent_turn.into_uuid().hyphenated().to_string(),
+            "content": content,
+        }),
+        ProcessTranscriptEntry::DelegationMessage {
+            entry_index,
+            spawning_request,
+            message,
+            sender,
+            recipient,
+            ordinal,
+            delivery_sequence,
+            content,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "delegation_message",
+            "spawning_request_id": spawning_request.into_uuid().hyphenated().to_string(),
+            "message_id": message.into_uuid().hyphenated().to_string(),
+            "sender_session_id": sender.into_uuid().hyphenated().to_string(),
+            "recipient_session_id": recipient.into_uuid().hyphenated().to_string(),
+            "ordinal": ordinal,
+            "delivery_sequence": delivery_sequence,
+            "content": content,
+        }),
+        ProcessTranscriptEntry::DelegationResult {
+            entry_index,
+            awaiting_request,
+            spawning_request,
+            child,
+            mode,
+            delivery_sequence,
+            outcome,
+            content,
+            reason,
+            provenance,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "delegation_result",
+            "await_request_id": awaiting_request.into_uuid().hyphenated().to_string(),
+            "spawning_request_id": spawning_request.into_uuid().hyphenated().to_string(),
+            "child_session_id": child.into_uuid().hyphenated().to_string(),
+            "mode": match mode {
+                DispatchedDelegationWaitMode::Foreground => WireDelegationWaitMode::Foreground,
+                DispatchedDelegationWaitMode::Background => WireDelegationWaitMode::Background,
+            },
+            "delivery_sequence": delivery_sequence,
+            "outcome": wire_delegation_outcome(*outcome),
+            "content": content,
+            "reason": wire_delegation_reason(*reason),
+            "provenance": wire_delegation_provenance(*provenance),
+        }),
         ProcessTranscriptEntry::ModelIdentityChanged {
             entry_index,
             turn,
@@ -8727,6 +8846,7 @@ where
         content,
         DeliveryRequest::Interrupt {
             expected_active_turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: PerInputConfigurationChoices::with_model_settings(
                 expected_version,
                 ModelSelectionOverride::UseSessionDefault,
@@ -8757,6 +8877,17 @@ where
     .await
 }
 
+const fn decode_descendant_scope(
+    value: WireDescendantTerminationScope,
+) -> DescendantTerminationScope {
+    match value {
+        WireDescendantTerminationScope::ParentAlone => DescendantTerminationScope::ParentAlone,
+        WireDescendantTerminationScope::ParentAndDescendants => {
+            DescendantTerminationScope::ParentAndDescendants
+        }
+    }
+}
+
 /// Stops the exact active turn through the accepted interrupt treatment.
 ///
 /// The delivery is the `Interrupt` treatment the turn lifecycle already
@@ -8779,6 +8910,7 @@ async fn handle_stop_turn<Writer>(
     expected_active_turn_id: CanonicalUuid,
     content: InputContent,
     expected_defaults_version: CanonicalU64,
+    descendant_scope: DescendantTerminationScope,
     model_settings: WireModelSettingsOverlay,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
@@ -8822,6 +8954,7 @@ where
         content,
         DeliveryRequest::Interrupt {
             expected_active_turn,
+            descendant_scope,
             configuration: PerInputConfigurationChoices::with_model_settings(
                 expected_version,
                 ModelSelectionOverride::UseSessionDefault,
@@ -9826,6 +9959,110 @@ where
     Writer: AsyncWrite + Unpin,
 {
     match entry {
+        ProcessTranscriptEntry::DelegatedTask {
+            entry_index,
+            source_session,
+            entry,
+            spawning_request,
+            parent_session,
+            parent_turn,
+            content,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::DelegatedTask {
+                        spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+                        parent_session_id: wire_uuid(parent_session.into_uuid()),
+                        parent_turn_id: wire_uuid(parent_turn.into_uuid()),
+                        content: content.clone(),
+                    },
+                },
+            )
+            .await
+        }
+        ProcessTranscriptEntry::DelegationMessage {
+            entry_index,
+            source_session,
+            entry,
+            spawning_request,
+            message,
+            sender,
+            recipient,
+            ordinal,
+            delivery_sequence,
+            content,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::DelegationMessage {
+                        spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+                        message_id: wire_uuid(message.into_uuid()),
+                        sender_session_id: wire_uuid(sender.into_uuid()),
+                        recipient_session_id: wire_uuid(recipient.into_uuid()),
+                        ordinal: CanonicalU64::new(*ordinal),
+                        delivery_sequence: CanonicalU64::new(*delivery_sequence),
+                        content: content.clone(),
+                    },
+                },
+            )
+            .await
+        }
+        ProcessTranscriptEntry::DelegationResult {
+            entry_index,
+            source_session,
+            entry,
+            awaiting_request,
+            spawning_request,
+            child,
+            mode,
+            delivery_sequence,
+            outcome,
+            content,
+            reason,
+            provenance,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::DelegationResult {
+                        await_request_id: wire_uuid(awaiting_request.into_uuid()),
+                        spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+                        child_session_id: wire_uuid(child.into_uuid()),
+                        mode: match mode {
+                            DispatchedDelegationWaitMode::Foreground => {
+                                WireDelegationWaitMode::Foreground
+                            }
+                            DispatchedDelegationWaitMode::Background => {
+                                WireDelegationWaitMode::Background
+                            }
+                        },
+                        delivery_sequence: delivery_sequence.map(CanonicalU64::new),
+                        outcome: wire_delegation_outcome(*outcome),
+                        content: content.clone(),
+                        reason: wire_delegation_reason(*reason),
+                        provenance: wire_delegation_provenance(*provenance),
+                    },
+                },
+            )
+            .await
+        }
         ProcessTranscriptEntry::ModelIdentityChanged {
             entry_index,
             source_session,
@@ -10875,6 +11112,35 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             accepted_input_id: wire_uuid(accepted_input.into_uuid()),
             content: InputContent::new(content.clone()),
         },
+        ProcessTurnState::QueuedDelegated {
+            spawning_request,
+            parent_session,
+            parent_turn,
+            content,
+        } => TurnState::QueuedDelegated {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            parent_session_id: wire_uuid(parent_session.into_uuid()),
+            parent_turn_id: wire_uuid(parent_turn.into_uuid()),
+            content: InputContent::new(content.clone()),
+        },
+        ProcessTurnState::QueuedDelegationWake {
+            first_delivery_sequence,
+            through_delivery_sequence,
+        } => TurnState::QueuedDelegationWake {
+            first_delivery_sequence: CanonicalU64::new(*first_delivery_sequence),
+            through_delivery_sequence: CanonicalU64::new(*through_delivery_sequence),
+        },
+        ProcessTurnState::DelegationTerminated {
+            spawning_request,
+            outcome,
+            reason,
+            provenance,
+        } => TurnState::DelegationTerminated {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            outcome: wire_delegation_outcome(*outcome),
+            reason: wire_delegation_reason(*reason),
+            provenance: wire_delegation_provenance(*provenance),
+        },
         ProcessTurnState::ActiveRunning {
             current_attempt,
             current_model_call,
@@ -10909,6 +11175,15 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                 tool_request_id: wire_uuid(request.into_uuid()),
             }
         }
+        ProcessTurnState::ActiveAwaitingChild {
+            awaiting_request,
+            spawning_request,
+            child,
+        } => TurnState::ActiveAwaitingChild {
+            await_request_id: wire_uuid(awaiting_request.into_uuid()),
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            child_session_id: wire_uuid(child.into_uuid()),
+        },
         ProcessTurnState::ActiveAwaitingToolRecovery {
             ended_attempt,
             recovery_attempt,
@@ -11539,7 +11814,7 @@ where
         GoalUserAction::Attach(_) | GoalUserAction::Resume(_) | GoalUserAction::Supersede(_) => {
             true
         }
-        GoalUserAction::Stop => false,
+        GoalUserAction::Stop { .. } => false,
     };
     let command = GoalUserCommand::new(DurableCommandId::from_uuid(command_uuid), session, action);
     let candidates = schedules_turn.then(|| {
@@ -11955,13 +12230,13 @@ enum ProcessUpdate {
     ProviderTextDelta(ProviderTextDelta),
 }
 
-impl From<&DispatchedOutboxEvent> for ProcessUpdate {
-    fn from(event: &DispatchedOutboxEvent) -> Self {
-        Self::Durable {
+impl ProcessUpdate {
+    fn from_outbox(event: &DispatchedOutboxEvent) -> Option<Self> {
+        Some(Self::Durable {
             cursor: event.sequence(),
             session: event.session(),
-            event: ProcessUpdateEvent::from(event.kind()),
-        }
+            event: ProcessUpdateEvent::from_outbox(event.kind())?,
+        })
     }
 }
 
@@ -12031,11 +12306,12 @@ enum ProcessUpdateEvent {
         operation: DispatchedReconciliationOperation,
         terminal_frontier: signalbox_domain::ContextFrontierId,
     },
+    DelegationUpdate(DispatchedDelegationUpdate),
 }
 
-impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
-    fn from(event: &DispatchedOutboxEventKind) -> Self {
-        match event {
+impl ProcessUpdateEvent {
+    fn from_outbox(event: &DispatchedOutboxEventKind) -> Option<Self> {
+        Some(match event {
             DispatchedOutboxEventKind::SessionCreated => Self::SessionCreated,
             DispatchedOutboxEventKind::SessionModelSettingsChanged(event) => {
                 Self::SessionModelSettingsChanged(event.clone())
@@ -12149,11 +12425,13 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
                 operation: *operation,
                 terminal_frontier: *terminal_frontier,
             },
-        }
+            DispatchedOutboxEventKind::DelegationUpdate(update) => {
+                Self::DelegationUpdate(update.clone())
+            }
+            DispatchedOutboxEventKind::DelegationWake(_) => return None,
+        })
     }
-}
 
-impl ProcessUpdateEvent {
     fn wire(&self) -> Result<SessionEvent, ProcessConnectionError> {
         let event = match self {
             Self::SessionCreated => SessionEvent::SessionCreated {},
@@ -12348,8 +12626,167 @@ impl ProcessUpdateEvent {
                     }
                 }
             },
+            Self::DelegationUpdate(update) => wire_delegation_update(update),
         };
         Ok(event)
+    }
+}
+
+fn wire_delegation_update(update: &DispatchedDelegationUpdate) -> SessionEvent {
+    match update {
+        DispatchedDelegationUpdate::ChildSpawned {
+            spawning_request,
+            child,
+            policy,
+        } => SessionEvent::ChildSpawned {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            child_session_id: wire_uuid(child.into_uuid()),
+            relationship: wire_delegation_policy(*policy),
+        },
+        DispatchedDelegationUpdate::ChildWaiting {
+            spawning_request,
+            child,
+            awaiting_request,
+            mode,
+        } => SessionEvent::ChildWaiting {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            child_session_id: wire_uuid(child.into_uuid()),
+            await_request_id: wire_uuid(awaiting_request.into_uuid()),
+            mode: match mode {
+                DispatchedDelegationWaitMode::Foreground => WireDelegationWaitMode::Foreground,
+                DispatchedDelegationWaitMode::Background => WireDelegationWaitMode::Background,
+            },
+        },
+        DispatchedDelegationUpdate::ChildLifecycleDisposition {
+            spawning_request,
+            child,
+            event_ordinal: _,
+            outcome,
+            reason,
+            provenance,
+        } => SessionEvent::ChildLifecycleDisposition {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            child_session_id: wire_uuid(child.into_uuid()),
+            outcome: wire_delegation_outcome(*outcome),
+            reason: wire_delegation_reason(*reason),
+            provenance: wire_delegation_provenance(*provenance),
+        },
+        DispatchedDelegationUpdate::ChildResult {
+            spawning_request,
+            child,
+            outcome,
+            reason,
+            provenance,
+            content,
+        } => SessionEvent::ChildResult {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            child_session_id: wire_uuid(child.into_uuid()),
+            outcome: wire_delegation_outcome(*outcome),
+            reason: wire_delegation_reason(*reason),
+            provenance: wire_delegation_provenance(*provenance),
+            content: content.clone(),
+        },
+        DispatchedDelegationUpdate::SessionMessage {
+            spawning_request,
+            message,
+            sender,
+            recipient,
+            message_ordinal,
+            delivery_sequence,
+            content,
+        } => SessionEvent::SessionMessage {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            message_id: wire_uuid(message.into_uuid()),
+            sender_session_id: wire_uuid(sender.into_uuid()),
+            recipient_session_id: wire_uuid(recipient.into_uuid()),
+            ordinal: CanonicalU64::new(*message_ordinal),
+            delivery_sequence: CanonicalU64::new(*delivery_sequence),
+            content: content.clone(),
+        },
+    }
+}
+
+const fn wire_delegation_policy(policy: DispatchedDelegationPolicy) -> WireDelegationPolicy {
+    match policy {
+        DispatchedDelegationPolicy::Background => WireDelegationPolicy::Background {},
+        DispatchedDelegationPolicy::Bound {
+            on_parent_stopped,
+            on_parent_cancelled,
+        } => WireDelegationPolicy::Bound {
+            on_parent_stopped: wire_bound_child_action(on_parent_stopped),
+            on_parent_cancelled: wire_bound_child_action(on_parent_cancelled),
+        },
+    }
+}
+
+const fn wire_bound_child_action(action: DispatchedBoundChildAction) -> WireBoundChildAction {
+    match action {
+        DispatchedBoundChildAction::KeepRunning => WireBoundChildAction::KeepRunning,
+        DispatchedBoundChildAction::Stop => WireBoundChildAction::Stop,
+        DispatchedBoundChildAction::Cancel => WireBoundChildAction::Cancel,
+    }
+}
+
+const fn wire_delegation_outcome(outcome: DispatchedDelegationOutcome) -> WireDelegationOutcome {
+    match outcome {
+        DispatchedDelegationOutcome::ResultReturned => WireDelegationOutcome::Returned,
+        DispatchedDelegationOutcome::ChildFailed => WireDelegationOutcome::Failed,
+        DispatchedDelegationOutcome::ChildStopped => WireDelegationOutcome::Stopped,
+        DispatchedDelegationOutcome::ChildCancelled => WireDelegationOutcome::Cancelled,
+        DispatchedDelegationOutcome::ContinueRunning => WireDelegationOutcome::ContinueRunning,
+        DispatchedDelegationOutcome::AlreadyTerminal => WireDelegationOutcome::AlreadyTerminal,
+    }
+}
+
+const fn wire_delegation_reason(reason: DispatchedDelegationReason) -> WireDelegationReason {
+    match reason {
+        DispatchedDelegationReason::ChildCompleted => WireDelegationReason::ChildCompleted,
+        DispatchedDelegationReason::ChildExecutionFailed => {
+            WireDelegationReason::ChildExecutionFailed
+        }
+        DispatchedDelegationReason::ChildResultUnavailable => {
+            WireDelegationReason::ChildResultUnavailable
+        }
+        DispatchedDelegationReason::ChildCancelled => WireDelegationReason::ChildCancelled,
+        DispatchedDelegationReason::ParentStoppedWithDescendants => {
+            WireDelegationReason::ParentStopped
+        }
+        DispatchedDelegationReason::ParentCancelledWithDescendants => {
+            WireDelegationReason::ParentCancelled
+        }
+    }
+}
+
+fn wire_delegation_provenance(
+    provenance: DispatchedDelegationProvenance,
+) -> WireDelegationProvenance {
+    match provenance {
+        DispatchedDelegationProvenance::ChildTurn { session, turn } => {
+            WireDelegationProvenance::ChildTurn {
+                child_session_id: wire_uuid(session.into_uuid()),
+                child_turn_id: wire_uuid(turn.into_uuid()),
+            }
+        }
+        DispatchedDelegationProvenance::ParentTurnCommand {
+            session,
+            turn,
+            command,
+        } => WireDelegationProvenance::ParentTurnCommand {
+            parent_session_id: wire_uuid(session.into_uuid()),
+            parent_turn_id: wire_uuid(turn.into_uuid()),
+            command_id: wire_uuid(command.into_uuid()),
+            descendant_scope: WireDescendantTerminationScope::ParentAndDescendants,
+        },
+        DispatchedDelegationProvenance::ParentGoalCommand {
+            session,
+            goal_generation,
+            command,
+        } => WireDelegationProvenance::ParentGoalCommand {
+            parent_session_id: wire_uuid(session.into_uuid()),
+            goal_generation: CanonicalU64::new(goal_generation),
+            command_id: wire_uuid(command.into_uuid()),
+            descendant_scope: WireDescendantTerminationScope::ParentAndDescendants,
+        },
     }
 }
 
@@ -12528,7 +12965,10 @@ mod tests {
         thread,
     };
 
-    use signalbox_application::{ImportConversationError, ImportedConversationConverter};
+    use signalbox_application::{
+        EligibilityNudge, EligibilityNudgeOutcome, ImportConversationError,
+        ImportedConversationConverter,
+    };
     use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConversionFailure;
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
     use signalbox_domain::{
@@ -12543,8 +12983,8 @@ mod tests {
         ReviewRunRef, ReviewRunState, ReviewTargetId, ReviewWorkflowKind,
         SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion, SessionId,
         SessionInputPosition, SessionModelSettingsChanged, SettingOverlay,
-        SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, TurnAttemptId, TurnId,
-        TurnModelSettingsResolved, ValidatedModelSettings,
+        SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, ToolRequestId,
+        TurnAttemptId, TurnId, TurnModelSettingsResolved, ValidatedModelSettings,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
@@ -12582,7 +13022,7 @@ mod tests {
         handle_append_conversation_import, handle_begin_conversation_import,
         handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
-        internal_protocol_error, map_rejection, observe_outbox_metrics_once,
+        internal_protocol_error, map_rejection, nudge_delegation_wake, observe_outbox_metrics_once,
         operational_import_error, read_frame_line,
         retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
@@ -12650,6 +13090,37 @@ mod tests {
             ProcessReconciliationOperation, ProcessTranscriptEntry, ProcessTurnState,
         },
     };
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingEligibilityNudge {
+        sessions: Arc<Mutex<Vec<SessionId>>>,
+    }
+
+    impl EligibilityNudge for RecordingEligibilityNudge {
+        fn nudge(&self, session: SessionId) -> EligibilityNudgeOutcome {
+            self.sessions
+                .lock()
+                .expect("recording nudge lock remains available")
+                .push(session);
+            EligibilityNudgeOutcome::Enqueued
+        }
+    }
+
+    #[test]
+    fn s19_descendant_scope_decode_is_exact() {
+        assert_eq!(
+            super::decode_descendant_scope(
+                signalbox_process_protocol::DescendantTerminationScope::ParentAlone,
+            ),
+            signalbox_domain::DescendantTerminationScope::ParentAlone
+        );
+        assert_eq!(
+            super::decode_descendant_scope(
+                signalbox_process_protocol::DescendantTerminationScope::ParentAndDescendants,
+            ),
+            signalbox_domain::DescendantTerminationScope::ParentAndDescendants
+        );
+    }
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
 
     #[test]
@@ -14823,7 +15294,9 @@ mod tests {
     #[test]
     fn goal_turn_retirement_projects_to_the_exact_wire_identity() {
         let turn = TurnId::from_uuid(Uuid::from_u128(7));
-        let update = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::GoalTurnRetired { turn });
+        let update =
+            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::GoalTurnRetired { turn })
+                .expect("a client-visible event projects to one update");
 
         assert_eq!(
             update.wire().expect("the fixture event is representable"),
@@ -14882,9 +15355,10 @@ mod tests {
             Vec::new(),
         )
         .expect("the fixture changes direct model selection");
-        let changed_update = ProcessUpdateEvent::from(
+        let changed_update = ProcessUpdateEvent::from_outbox(
             &DispatchedOutboxEventKind::SessionModelSettingsChanged(changed),
-        );
+        )
+        .expect("the fixture event projects onto an update");
 
         assert_eq!(
             changed_update
@@ -15004,9 +15478,10 @@ mod tests {
             }],
         )
         .expect("provider-default settings are valid for the fixture selection");
-        let resolved_update = ProcessUpdateEvent::from(
+        let resolved_update = ProcessUpdateEvent::from_outbox(
             &DispatchedOutboxEventKind::TurnModelSettingsResolved(resolved),
-        );
+        )
+        .expect("the fixture event projects onto an update");
 
         assert_eq!(
             resolved_update
@@ -15059,6 +15534,67 @@ mod tests {
     }
 
     #[test]
+    fn delegation_updates_project_but_internal_wakes_do_not_follow() {
+        let spawning_request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(8));
+        let child = SessionId::from_uuid(Uuid::from_u128(9));
+        let update = ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::DelegationUpdate(
+            signalbox_persistence::outbox::DispatchedDelegationUpdate::ChildSpawned {
+                spawning_request,
+                child,
+                policy: signalbox_persistence::outbox::DispatchedDelegationPolicy::Background,
+            },
+        ))
+        .expect("a delegation update is client-visible");
+
+        assert_eq!(
+            update.wire().expect("the fixture event is representable"),
+            SessionEvent::ChildSpawned {
+                spawning_request_id: CanonicalUuid::from_uuid(spawning_request.into_uuid()),
+                child_session_id: CanonicalUuid::from_uuid(child.into_uuid()),
+                relationship: signalbox_process_protocol::DelegationPolicy::Background {},
+            }
+        );
+        assert!(
+            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::DelegationWake(
+                signalbox_persistence::outbox::DispatchedDelegationWake::Result {
+                    spawning_request,
+                    awaiting_request: None,
+                },
+            ))
+            .is_none()
+        );
+    }
+
+    /// S17 / INV-032: committing an internal delivery wake makes the exact
+    /// recipient eligible without projecting the wake onto follow streams.
+    #[test]
+    fn s17_inv032_internal_delegation_wake_nudges_exact_recipient() {
+        let recipient = SessionId::from_uuid(Uuid::from_u128(10));
+        let spawning_request = ToolRequestId::from_uuid(Uuid::from_u128(11));
+        let nudge = RecordingEligibilityNudge::default();
+        let recorded = Arc::clone(&nudge.sessions);
+
+        nudge_delegation_wake(
+            &nudge,
+            recipient,
+            &DispatchedOutboxEventKind::DelegationWake(
+                signalbox_persistence::outbox::DispatchedDelegationWake::Result {
+                    spawning_request,
+                    awaiting_request: None,
+                },
+            ),
+        );
+
+        assert_eq!(
+            recorded
+                .lock()
+                .expect("recorded nudge lock remains available")
+                .as_slice(),
+            &[recipient]
+        );
+    }
+
+    #[test]
     fn cancellation_and_reconciliation_project_to_exact_wire_shapes() {
         let turn = TurnId::from_uuid(Uuid::from_u128(1));
         let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(2));
@@ -15091,11 +15627,13 @@ mod tests {
             }
         );
 
-        let cancelled = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::TurnCancelled {
-            turn,
-            cancellation_entry: entry,
-            terminal_frontier: frontier,
-        });
+        let cancelled =
+            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::TurnCancelled {
+                turn,
+                cancellation_entry: entry,
+                terminal_frontier: frontier,
+            })
+            .expect("a client-visible event projects to one update");
         assert_eq!(
             cancelled
                 .wire()
@@ -15106,12 +15644,14 @@ mod tests {
                 terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
             }
         );
-        let reconciliation =
-            ProcessUpdateEvent::from(&DispatchedOutboxEventKind::TurnReconciliationRequired {
+        let reconciliation = ProcessUpdateEvent::from_outbox(
+            &DispatchedOutboxEventKind::TurnReconciliationRequired {
                 turn,
                 operation: DispatchedReconciliationOperation::ModelCall(call),
                 terminal_frontier: frontier,
-            });
+            },
+        )
+        .expect("a client-visible event projects to one update");
         assert_eq!(
             reconciliation
                 .wire()
@@ -15123,13 +15663,15 @@ mod tests {
             }
         );
         let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(6));
-        let recovery = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::ToolBatchTransition {
-            turn,
-            producing_call: call,
-            state: DispatchedToolBatchState::RecoveryRequired {
-                attempt: tool_attempt,
-            },
-        });
+        let recovery =
+            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::ToolBatchTransition {
+                turn,
+                producing_call: call,
+                state: DispatchedToolBatchState::RecoveryRequired {
+                    attempt: tool_attempt,
+                },
+            })
+            .expect("a client-visible event projects to one update");
         assert_eq!(
             recovery.wire().expect("the fixture event is representable"),
             SessionEvent::ToolBatchTransition {

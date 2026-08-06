@@ -1,28 +1,40 @@
 //! Atomic PostgreSQL activation of the earliest eligible accepted-input turn.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, num::NonZeroU64};
 
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StartEligibleTurnOutcome,
     StartEligibleTurnTransaction,
 };
 use signalbox_domain::{
-    AcceptedInputEligibilityFailure, AcceptedInputStartingLineage,
-    AcceptedInputTurnActivationIdentities, ActiveTurnPhase, CurrentTurnAttemptState, ModelCallId,
-    PreparedAcceptedInputTurnActivation,
-    SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
+    AcceptedInputEligibilityFailure, AcceptedInputSchedulingProjection,
+    AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities, ActivatedTurn,
+    ActiveTurnPhase, CurrentTurnAttemptState, DelegatedTurnActivationInput,
+    DelegatedWakeTurnActivationInput, DelegationContent, ModelCallId,
+    PreparedAcceptedInputTurnActivation, PreparedDelegatedTurnActivation, PreparedTurnActivation,
+    SemanticTranscriptEntryId,
+    SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, SessionId,
+    ToolRequestId, TurnId,
 };
-use sqlx::{PgConnection, PgPool, types::Uuid};
+use sqlx::{
+    PgConnection, PgPool, Row,
+    types::{Decimal, Uuid},
+};
 
 use crate::{
     commit_failure_is_ambiguous,
     mapping::{
-        defaults_version_to_numeric, input_position_to_numeric, session_id_to_uuid, turn_id_to_uuid,
+        defaults_version_to_numeric, input_position_to_numeric, positive_u64_from_numeric,
+        session_id_to_uuid, turn_id_to_uuid,
     },
     model_execution::{SnapshotAppend, SnapshotAppendError, insert_snapshot_append},
     outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
-    submit_input::{SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection},
+    submit_input::{
+        SubmitInputCorruption, SubmitInputRepositoryError, decode_goal_origin_configuration,
+        load_scheduling_projection,
+    },
 };
 
 /// Which fresh activation identity collided with an existing durable identity.
@@ -217,12 +229,12 @@ impl ClassifyOperatorFailure for CommitActivationPreviewError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedActivationPreview {
     identities: AcceptedInputTurnActivationIdentities,
-    prepared: PreparedAcceptedInputTurnActivation,
+    prepared: PreparedTurnActivation,
 }
 
 impl PreparedActivationPreview {
     /// Borrows the exact checked candidate used for prospective model rendering.
-    pub const fn prepared(&self) -> &PreparedAcceptedInputTurnActivation {
+    pub const fn prepared(&self) -> &PreparedTurnActivation {
         &self.prepared
     }
 }
@@ -231,7 +243,7 @@ impl PreparedActivationPreview {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommitActivationPreviewOutcome {
     /// The exact preview still matched and was atomically activated.
-    Activated(Box<signalbox_domain::ActivatedAcceptedInputTurn>),
+    Activated(Box<ActivatedTurn>),
     /// Authoritative state changed after preview; the caller must restart the pass.
     Stale,
 }
@@ -420,7 +432,7 @@ async fn prepare_preview(
     connection: &mut PgConnection,
     requested_session: SessionId,
     identities: AcceptedInputTurnActivationIdentities,
-) -> Result<Option<PreparedAcceptedInputTurnActivation>, StartEligibleTurnRepositoryError> {
+) -> Result<Option<PreparedTurnActivation>, StartEligibleTurnRepositoryError> {
     let session = match load_session_from_connection(connection, requested_session).await {
         Ok(Some(session)) => session,
         Ok(None) => return Ok(None),
@@ -429,11 +441,22 @@ async fn prepare_preview(
             return Err(StartEligibleTurnCorruption::CurrentSession(error).into());
         }
     };
+    if let Some(prepared) =
+        prepare_delegated_preview(connection, requested_session, identities).await?
+    {
+        return Ok(Some(prepared.into()));
+    }
     let scheduling = load_scheduling_projection(connection, session)
         .await
         .map_err(map_scheduling_error)?;
+    if let Some(prepared) =
+        prepare_delegated_wake_preview(connection, requested_session, identities, &scheduling)
+            .await?
+    {
+        return Ok(Some(prepared.into()));
+    }
     match scheduling.prepare_earliest_queued_activation(identities) {
-        Ok(prepared) => Ok(Some(prepared)),
+        Ok(prepared) => Ok(Some(prepared.into())),
         Err(error) => match error.failure() {
             AcceptedInputEligibilityFailure::ActiveTurnPresent { .. }
             | AcceptedInputEligibilityFailure::ContextCompactionInProgress { .. }
@@ -471,6 +494,279 @@ async fn prepare_preview(
             ),
         },
     }
+}
+
+async fn prepare_delegated_preview(
+    connection: &mut PgConnection,
+    session: SessionId,
+    identities: AcceptedInputTurnActivationIdentities,
+) -> Result<Option<PreparedDelegatedTurnActivation>, StartEligibleTurnRepositoryError> {
+    let row = sqlx::query(
+        "SELECT
+            task.spawning_tool_request_id,
+            task.turn_id,
+            task.semantic_entry_id,
+            task.task_content,
+            relation.parent_session_id,
+            relation.parent_turn_id,
+            defaults.session_id AS goal_defaults_session_id,
+            task.defaults_version AS queued_defaults_version,
+            defaults.version AS goal_defaults_version,
+            defaults.model_selection_kind AS goal_defaults_model_kind,
+            defaults.direct_model_selection_id AS goal_defaults_direct_id,
+            defaults.model_alias_id AS goal_defaults_alias_id,
+            defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
+            defaults.model_settings AS goal_defaults_model_settings,
+            task.requested_model_kind,
+            task.requested_direct_model_selection_id,
+            task.requested_model_alias_id,
+            task.frozen_model_kind,
+            task.frozen_direct_model_selection_id,
+            task.frozen_model_alias_id,
+            task.frozen_alias_selected_direct_id
+         FROM session_delegation_initial_task AS task
+         JOIN session_delegation AS relation
+           ON relation.spawning_tool_request_id = task.spawning_tool_request_id
+          AND relation.child_session_id = task.child_session_id
+         JOIN turn_lifecycle AS lifecycle
+           ON lifecycle.turn_id = task.turn_id
+          AND lifecycle.session_id = task.child_session_id
+          AND lifecycle.acceptance_position = task.admission_position
+          AND lifecycle.origin_kind = 'delegation'
+          AND lifecycle.state_kind = 'queued'
+         JOIN session_defaults_version AS defaults
+           ON defaults.session_id = task.child_session_id
+          AND defaults.version = task.defaults_version
+        WHERE task.child_session_id = $1
+          AND accepted_input_turn_is_first_nonterminal(
+                task.child_session_id, task.turn_id
+          )
+          AND NOT EXISTS (
+                SELECT 1 FROM turn_lifecycle AS active
+                 WHERE active.session_id = task.child_session_id
+                   AND active.state_kind = 'active'
+                   AND NOT active.delegation_runtime_terminal
+          )
+          AND NOT EXISTS (
+                SELECT 1 FROM context_compaction_model_call AS compaction
+                 WHERE compaction.session_id = task.child_session_id
+                   AND compaction.state_kind <> 'terminal'
+          )",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let starting_frontier = identities.starting_frontier();
+    let initial_attempt = identities.initial_attempt();
+    let collisions = sqlx::query_as::<_, (bool, bool)>(
+        "SELECT
+            EXISTS (
+                SELECT 1 FROM context_frontier
+                 WHERE owning_session_id = $1 AND context_frontier_id = $2
+            ),
+            EXISTS (
+                SELECT 1 FROM turn_attempt WHERE turn_attempt_id = $3
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(starting_frontier.into_uuid())
+    .bind(initial_attempt.into_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
+    if collisions.0 {
+        return Err(StartEligibleTurnRepositoryError::IdentityCollision(
+            StartEligibleTurnIdentityCollision::StartingFrontier,
+        ));
+    }
+    if collisions.1 {
+        return Err(StartEligibleTurnRepositoryError::IdentityCollision(
+            StartEligibleTurnIdentityCollision::InitialAttempt,
+        ));
+    }
+    let spawning_request = ToolRequestId::from_uuid(row.try_get("spawning_tool_request_id")?);
+    let task = DelegationContent::try_new(row.try_get("task_content")?)
+        .map_err(|_| StartEligibleTurnCorruption::Inconsistent("delegated task content"))?;
+    let configuration =
+        decode_goal_origin_configuration(&row, session).map_err(map_scheduling_error)?;
+    let task_entry = SemanticTranscriptEntryReconstitutionInput::new(
+        SemanticTranscriptEntryId::from_uuid(row.try_get("semantic_entry_id")?),
+        session,
+        InitialSemanticTranscriptEntryPayload::DelegatedTask {
+            spawning_request,
+            parent_session: SessionId::from_uuid(row.try_get("parent_session_id")?),
+            parent_turn: TurnId::from_uuid(row.try_get("parent_turn_id")?),
+            content: task.clone(),
+        },
+    );
+    PreparedDelegatedTurnActivation::prepare(DelegatedTurnActivationInput {
+        session,
+        turn: TurnId::from_uuid(row.try_get("turn_id")?),
+        spawning_request,
+        task,
+        task_entry,
+        configuration,
+        starting_frontier,
+        initial_attempt,
+    })
+    .map(Some)
+    .ok_or_else(|| {
+        StartEligibleTurnCorruption::Inconsistent("delegated activation projection").into()
+    })
+}
+
+async fn prepare_delegated_wake_preview(
+    connection: &mut PgConnection,
+    session: SessionId,
+    identities: AcceptedInputTurnActivationIdentities,
+    scheduling: &AcceptedInputSchedulingProjection,
+) -> Result<Option<PreparedDelegatedTurnActivation>, StartEligibleTurnRepositoryError> {
+    let row = sqlx::query(
+        "SELECT
+            wake.turn_id,
+            wake.first_delivery_sequence,
+            wake.through_delivery_sequence,
+            predecessor.turn_id AS predecessor_turn_id,
+            turn_lifecycle_effective_terminal_frontier(
+                predecessor.session_id, predecessor.turn_id
+            ) AS predecessor_frontier_id,
+            defaults.session_id AS goal_defaults_session_id,
+            wake.defaults_version AS queued_defaults_version,
+            defaults.version AS goal_defaults_version,
+            defaults.model_selection_kind AS goal_defaults_model_kind,
+            defaults.direct_model_selection_id AS goal_defaults_direct_id,
+            defaults.model_alias_id AS goal_defaults_alias_id,
+            defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
+            defaults.model_settings AS goal_defaults_model_settings,
+            wake.requested_model_kind,
+            wake.requested_direct_model_selection_id,
+            wake.requested_model_alias_id,
+            wake.frozen_model_kind,
+            wake.frozen_direct_model_selection_id,
+            wake.frozen_model_alias_id,
+            wake.frozen_alias_selected_direct_id
+         FROM session_delegation_wake_turn_origin AS wake
+         JOIN turn_lifecycle AS lifecycle
+           ON lifecycle.turn_id = wake.turn_id
+          AND lifecycle.session_id = wake.recipient_session_id
+          AND lifecycle.acceptance_position = wake.admission_position
+          AND lifecycle.origin_kind = 'delegation'
+          AND lifecycle.state_kind = 'queued'
+         JOIN turn_lifecycle AS predecessor
+           ON predecessor.turn_id = accepted_input_turn_queue_predecessor(
+                wake.recipient_session_id, wake.turn_id
+           )
+          AND predecessor.session_id = wake.recipient_session_id
+          AND (
+                predecessor.delegation_runtime_terminal
+                OR (
+                    predecessor.state_kind = 'terminal'
+                    AND predecessor.terminal_disposition_kind IN (
+                        'failed', 'completed', 'refused', 'cancelled',
+                        'reconciliation_required'
+                    )
+                )
+          )
+         JOIN session_defaults_version AS defaults
+           ON defaults.session_id = wake.recipient_session_id
+          AND defaults.version = wake.defaults_version
+        WHERE wake.recipient_session_id = $1
+          AND accepted_input_turn_is_first_nonterminal(
+                wake.recipient_session_id, wake.turn_id
+          )
+          AND NOT EXISTS (
+                SELECT 1 FROM turn_lifecycle AS active
+                 WHERE active.session_id = wake.recipient_session_id
+                   AND active.state_kind = 'active'
+                   AND NOT active.delegation_runtime_terminal
+          )
+          AND NOT EXISTS (
+                SELECT 1 FROM context_compaction_model_call AS compaction
+                 WHERE compaction.session_id = wake.recipient_session_id
+                   AND compaction.state_kind <> 'terminal'
+          )",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let first_numeric: Decimal = row.try_get("first_delivery_sequence")?;
+    let through_numeric: Decimal = row.try_get("through_delivery_sequence")?;
+    let first = NonZeroU64::new(
+        positive_u64_from_numeric(first_numeric)
+            .map_err(|_| StartEligibleTurnCorruption::Inconsistent("wake delivery range"))?,
+    )
+    .ok_or(StartEligibleTurnCorruption::Inconsistent(
+        "wake delivery range",
+    ))?;
+    let through = NonZeroU64::new(
+        positive_u64_from_numeric(through_numeric)
+            .map_err(|_| StartEligibleTurnCorruption::Inconsistent("wake delivery range"))?,
+    )
+    .ok_or(StartEligibleTurnCorruption::Inconsistent(
+        "wake delivery range",
+    ))?;
+    let delivery_rows = sqlx::query_as::<_, (Decimal, Uuid)>(
+        "SELECT pending.delivery_sequence,
+                delegation_delivery_semantic_entry(
+                    pending.recipient_session_id, pending.delivery_sequence
+                )
+           FROM session_pending_delivery AS pending
+          WHERE pending.recipient_session_id = $1
+            AND pending.delivery_sequence BETWEEN $2 AND $3
+          ORDER BY pending.delivery_sequence",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(first_numeric)
+    .bind(through_numeric)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut deliveries = Vec::with_capacity(delivery_rows.len());
+    for (_, entry) in delivery_rows {
+        let reference = SemanticTranscriptEntryRef::from_source(
+            session,
+            SemanticTranscriptEntryId::from_uuid(entry),
+        );
+        let semantic = scheduling
+            .semantic_entry(reference)
+            .ok_or(StartEligibleTurnCorruption::Missing("wake semantic entry"))?;
+        deliveries.push(SemanticTranscriptEntryReconstitutionInput::new(
+            semantic.identity(),
+            semantic.source_session(),
+            semantic.payload().clone(),
+        ));
+    }
+    let predecessor = TurnId::from_uuid(row.try_get("predecessor_turn_id")?);
+    let predecessor_frontier =
+        signalbox_domain::ContextFrontierId::from_uuid(row.try_get("predecessor_frontier_id")?);
+    let predecessor_snapshot = scheduling
+        .resolved_snapshot(predecessor_frontier)
+        .cloned()
+        .ok_or(StartEligibleTurnCorruption::Missing(
+            "wake predecessor snapshot",
+        ))?;
+    let configuration =
+        decode_goal_origin_configuration(&row, session).map_err(map_scheduling_error)?;
+    PreparedDelegatedTurnActivation::prepare_wake(DelegatedWakeTurnActivationInput {
+        session,
+        turn: TurnId::from_uuid(row.try_get("turn_id")?),
+        first_delivery_sequence: first,
+        through_delivery_sequence: through,
+        deliveries,
+        predecessor,
+        predecessor_snapshot,
+        configuration,
+        starting_frontier: identities.starting_frontier(),
+        initial_attempt: identities.initial_attempt(),
+    })
+    .map(Some)
+    .ok_or_else(|| {
+        StartEligibleTurnCorruption::Inconsistent("delegated wake activation projection").into()
+    })
 }
 
 async fn handle_in_transaction(
@@ -517,9 +813,26 @@ async fn handle_in_transaction(
             return Err(StartEligibleTurnCorruption::CurrentSession(error).into());
         }
     };
+    if let Some(prepared) =
+        prepare_delegated_preview(connection, requested_session, identities).await?
+    {
+        let activated = insert_prepared_activation(connection, prepared.into()).await?;
+        return Ok(TransactionDecision::Commit(
+            StartEligibleTurnOutcome::Activated(Box::new(activated)),
+        ));
+    }
     let scheduling = load_scheduling_projection(connection, session)
         .await
         .map_err(map_scheduling_error)?;
+    if let Some(prepared) =
+        prepare_delegated_wake_preview(connection, requested_session, identities, &scheduling)
+            .await?
+    {
+        let activated = insert_prepared_activation(connection, prepared.into()).await?;
+        return Ok(TransactionDecision::Commit(
+            StartEligibleTurnOutcome::Activated(Box::new(activated)),
+        ));
+    }
 
     let prepared = match scheduling.prepare_earliest_queued_activation(identities) {
         Ok(prepared) => prepared,
@@ -569,13 +882,31 @@ async fn handle_in_transaction(
         }
     };
 
-    let activated = insert_prepared_activation(connection, prepared).await?;
+    let activated = insert_prepared_activation(connection, prepared.into()).await?;
     Ok(TransactionDecision::Commit(
         StartEligibleTurnOutcome::Activated(Box::new(activated)),
     ))
 }
 
 async fn insert_prepared_activation(
+    connection: &mut PgConnection,
+    prepared: PreparedTurnActivation,
+) -> Result<ActivatedTurn, StartEligibleTurnRepositoryError> {
+    match prepared {
+        PreparedTurnActivation::Accepted(prepared) => {
+            insert_prepared_accepted_activation(connection, *prepared)
+                .await
+                .map(Into::into)
+        }
+        PreparedTurnActivation::Delegated(prepared) => {
+            insert_prepared_delegated_activation(connection, *prepared)
+                .await
+                .map(Into::into)
+        }
+    }
+}
+
+async fn insert_prepared_accepted_activation(
     connection: &mut PgConnection,
     prepared: PreparedAcceptedInputTurnActivation,
 ) -> Result<signalbox_domain::ActivatedAcceptedInputTurn, StartEligibleTurnRepositoryError> {
@@ -590,6 +921,9 @@ async fn insert_prepared_activation(
             *accepted_input
         }
         InitialSemanticTranscriptEntryPayload::Imported { .. }
+        | InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
+        | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
+        | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
         | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
         | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
         | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
@@ -670,6 +1004,9 @@ async fn insert_prepared_activation(
                 })?;
             }
             InitialSemanticTranscriptEntryPayload::Imported { .. }
+            | InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
             | InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
             | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
@@ -730,6 +1067,7 @@ async fn insert_prepared_activation(
         }
         ActiveTurnPhase::Running { .. }
         | ActiveTurnPhase::AwaitingApproval { .. }
+        | ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
                 "prepared initial active phase",
@@ -776,6 +1114,7 @@ async fn insert_prepared_activation(
                   FROM turn_lifecycle AS active
                  WHERE active.session_id = candidate.session_id
                    AND active.state_kind = 'active'
+                   AND NOT active.delegation_runtime_terminal
             )
             AND accepted_input_turn_is_first_nonterminal(
                 candidate.session_id,
@@ -802,7 +1141,10 @@ async fn insert_prepared_activation(
                           FROM turn_lifecycle AS predecessor
                          WHERE predecessor.turn_id = $2::uuid
                            AND predecessor.session_id = candidate.session_id
-                           AND predecessor.state_kind = 'terminal'
+                           AND (
+                                predecessor.state_kind = 'terminal'
+                                OR predecessor.delegation_runtime_terminal
+                           )
                     )
                 )
             )",
@@ -841,6 +1183,240 @@ async fn insert_prepared_activation(
             "guarded activation cardinality",
         )),
     }
+}
+
+async fn insert_prepared_delegated_activation(
+    connection: &mut PgConnection,
+    prepared: PreparedDelegatedTurnActivation,
+) -> Result<signalbox_domain::ActivatedDelegatedTurn, StartEligibleTurnRepositoryError> {
+    let (activated, starting_entries, starting_snapshot) = prepared.into_parts();
+    let session = activated.session();
+    if starting_entries
+        .iter()
+        .any(|entry| entry.source_session() != session)
+        || starting_snapshot.frontier().owning_session() != session
+    {
+        return Err(StartEligibleTurnRepositoryError::HubInvariant(
+            "prepared delegated activation ownership",
+        ));
+    }
+    if let Some(spawning_request) = activated.spawning_request() {
+        let [task_entry] = starting_entries.as_slice() else {
+            return Err(StartEligibleTurnRepositoryError::HubInvariant(
+                "prepared delegated task entries",
+            ));
+        };
+        let task_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM semantic_transcript_entry AS entry
+                  JOIN session_delegation_initial_task AS task
+                    ON task.child_session_id = entry.source_session_id
+                   AND task.semantic_entry_id = entry.semantic_entry_id
+                   AND task.spawning_tool_request_id =
+                        entry.delegated_task_spawning_tool_request_id
+                 WHERE entry.source_session_id = $1
+                   AND entry.semantic_entry_id = $2
+                   AND entry.payload_kind = 'delegated_task'
+                   AND task.turn_id = $3
+                   AND task.spawning_tool_request_id = $4
+            )",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(task_entry.identity().into_uuid())
+        .bind(turn_id_to_uuid(activated.turn()))
+        .bind(spawning_request.into_uuid())
+        .fetch_one(&mut *connection)
+        .await?;
+        if !task_exists {
+            return Err(
+                StartEligibleTurnCorruption::Missing("delegated task semantic entry").into(),
+            );
+        }
+    }
+
+    let member_count = u64::try_from(starting_snapshot.entry_count()).map_err(|_| {
+        StartEligibleTurnRepositoryError::HubInvariant("delegated starting member count")
+    })?;
+    let prefix = starting_snapshot.immediate_semantic_prefix();
+    let prefix_member_count = prefix.map_or(0, |_| {
+        starting_snapshot
+            .entry_count()
+            .saturating_sub(starting_snapshot.appended_entries().len())
+    });
+    let prefix_member_count = u64::try_from(prefix_member_count).map_err(|_| {
+        StartEligibleTurnRepositoryError::HubInvariant("delegated prefix member count")
+    })?;
+    insert_snapshot_append(
+        connection,
+        SnapshotAppend {
+            owning_session: session,
+            frontier: starting_snapshot.frontier().snapshot(),
+            prefix: prefix.map(|frontier| frontier.snapshot()),
+            member_count,
+            prefix_member_count,
+            appended_entries: starting_snapshot.appended_entries(),
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        SnapshotAppendError::FrontierInsert(error) | SnapshotAppendError::MemberInsert(error) => {
+            error.into()
+        }
+        SnapshotAppendError::MemberPositionOverflow => {
+            StartEligibleTurnRepositoryError::HubInvariant(
+                "delegated starting frontier member position",
+            )
+        }
+    })?;
+
+    let initial_attempt = match activated.phase() {
+        ActiveTurnPhase::Running { current_attempt }
+            if current_attempt.state() == &CurrentTurnAttemptState::Prepared =>
+        {
+            current_attempt.id()
+        }
+        ActiveTurnPhase::Running { .. }
+        | ActiveTurnPhase::AwaitingApproval { .. }
+        | ActiveTurnPhase::AwaitingChild { .. }
+        | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
+            return Err(StartEligibleTurnRepositoryError::HubInvariant(
+                "prepared delegated initial phase",
+            ));
+        }
+    };
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+    )
+    .bind(initial_attempt.into_uuid())
+    .bind(turn_id_to_uuid(activated.turn()))
+    .bind(session_id_to_uuid(session))
+    .execute(&mut *connection)
+    .await?;
+
+    let updated = match (
+        activated.spawning_request(),
+        activated.delivery_range(),
+        activated.start().lineage(),
+    ) {
+        (Some(spawning_request), None, AcceptedInputStartingLineage::FirstInSession) => {
+            sqlx::query(
+                "UPDATE turn_lifecycle AS candidate
+                SET state_kind = 'active',
+                    start_lineage_kind = 'first_in_session',
+                    immediate_predecessor_turn_id = NULL,
+                    starting_frontier_id = $1,
+                    active_phase_kind = 'running',
+                    current_attempt_id = $2
+              WHERE candidate.turn_id = $3
+                AND candidate.session_id = $4
+                AND candidate.origin_kind = 'delegation'
+                AND candidate.origin_accepted_input_id IS NULL
+                AND candidate.acceptance_position = 1
+                AND candidate.state_kind = 'queued'
+                AND accepted_input_turn_is_first_nonterminal(
+                    candidate.session_id, candidate.turn_id
+                )
+                AND accepted_input_turn_queue_predecessor(
+                    candidate.session_id, candidate.turn_id
+                ) IS NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM turn_lifecycle AS active
+                     WHERE active.session_id = candidate.session_id
+                       AND active.state_kind = 'active'
+                       AND NOT active.delegation_runtime_terminal
+                )
+                AND EXISTS (
+                    SELECT 1 FROM session_delegation_initial_task AS task
+                     WHERE task.turn_id = candidate.turn_id
+                       AND task.child_session_id = candidate.session_id
+                       AND task.spawning_tool_request_id = $5
+                )",
+            )
+            .bind(starting_snapshot.frontier().snapshot().into_uuid())
+            .bind(initial_attempt.into_uuid())
+            .bind(turn_id_to_uuid(activated.turn()))
+            .bind(session_id_to_uuid(session))
+            .bind(spawning_request.into_uuid())
+            .execute(&mut *connection)
+            .await?
+            .rows_affected()
+        }
+        (
+            None,
+            Some((first, through)),
+            AcceptedInputStartingLineage::After {
+                immediate_predecessor,
+            },
+        ) => sqlx::query(
+            "UPDATE turn_lifecycle AS candidate
+                SET state_kind = 'active',
+                    start_lineage_kind = 'after',
+                    immediate_predecessor_turn_id = $5,
+                    starting_frontier_id = $1,
+                    active_phase_kind = 'running',
+                    current_attempt_id = $2
+              WHERE candidate.turn_id = $3
+                AND candidate.session_id = $4
+                AND candidate.origin_kind = 'delegation'
+                AND candidate.origin_accepted_input_id IS NULL
+                AND candidate.state_kind = 'queued'
+                AND accepted_input_turn_is_first_nonterminal(
+                    candidate.session_id, candidate.turn_id
+                )
+                AND accepted_input_turn_queue_predecessor(
+                    candidate.session_id, candidate.turn_id
+                ) = $5
+                AND NOT EXISTS (
+                    SELECT 1 FROM turn_lifecycle AS active
+                     WHERE active.session_id = candidate.session_id
+                       AND active.state_kind = 'active'
+                       AND NOT active.delegation_runtime_terminal
+                )
+                AND EXISTS (
+                    SELECT 1 FROM session_delegation_wake_turn_origin AS wake
+                     WHERE wake.turn_id = candidate.turn_id
+                       AND wake.recipient_session_id = candidate.session_id
+                       AND wake.admission_position = candidate.acceptance_position
+                       AND wake.first_delivery_sequence = $6
+                       AND wake.through_delivery_sequence = $7
+                )",
+        )
+        .bind(starting_snapshot.frontier().snapshot().into_uuid())
+        .bind(initial_attempt.into_uuid())
+        .bind(turn_id_to_uuid(activated.turn()))
+        .bind(session_id_to_uuid(session))
+        .bind(immediate_predecessor.into_uuid())
+        .bind(Decimal::from(first.get()))
+        .bind(Decimal::from(through.get()))
+        .execute(&mut *connection)
+        .await?
+        .rows_affected(),
+        _ => {
+            return Err(StartEligibleTurnRepositoryError::HubInvariant(
+                "prepared delegated origin lineage",
+            ));
+        }
+    };
+    if updated != 1 {
+        return Err(StartEligibleTurnCorruption::Inconsistent(
+            "guarded delegated activation cardinality",
+        )
+        .into());
+    }
+    outbox::append(
+        connection,
+        OutboxEvent::TurnActivated {
+            session,
+            turn: activated.turn(),
+            current_attempt: initial_attempt,
+        },
+    )
+    .await?;
+    Ok(activated)
 }
 
 fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartEligibleTurnRepositoryError {

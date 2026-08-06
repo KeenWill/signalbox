@@ -4,8 +4,11 @@
 //! remains sealed behind aggregate transitions and checked reconstitution
 //! boundaries that validate the referenced facts.
 
+use std::num::NonZeroU64;
+
 use crate::{
-    AcceptedInputId, ContextCompactionRange, DirectModelSelection, ImportedSourceAttestation,
+    AcceptedInputId, ContextCompactionRange, DelegationContent, DelegationMessageId,
+    DelegationOutcome, DelegationWaitMode, DirectModelSelection, ImportedSourceAttestation,
     ImportedSpeaker, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelCallId,
     NonEmptyUnicodeText, NonEmptyUnicodeTextError, SemanticTranscriptEntryId,
     SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId, ToolRequestId,
@@ -60,6 +63,31 @@ pub enum SemanticTranscriptEntryPayload {
         accepted_input: AcceptedInputId,
         /// The exact active turn the input was accepted to steer.
         source_turn: TurnId,
+    },
+    /// The checked model-authored task that starts one delegated child.
+    DelegatedTask {
+        spawning_request: ToolRequestId,
+        parent_session: SessionId,
+        parent_turn: TurnId,
+        content: DelegationContent,
+    },
+    /// One immutable peer message delivered into this recipient's frontier.
+    DelegationMessage {
+        spawning_request: ToolRequestId,
+        message: DelegationMessageId,
+        sender: SessionId,
+        recipient: SessionId,
+        delivery_sequence: NonZeroU64,
+        content: DelegationContent,
+    },
+    /// One exact foreground or background child-result delivery.
+    DelegationResult {
+        awaiting_request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+        mode: DelegationWaitMode,
+        delivery_sequence: Option<NonZeroU64>,
+        outcome: Box<DelegationOutcome>,
     },
     /// An injected boundary informing a turn of its newly selected model.
     ModelIdentityChanged {

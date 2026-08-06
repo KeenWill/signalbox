@@ -12,7 +12,7 @@
 //! under the domain's fixed version-1 projection. The remaining fixtures drive
 //! their public edge converters directly.
 
-use std::{fmt::Write, str};
+use std::{fmt::Write, fs, path::Path, str};
 
 use expect_test::expect_file;
 use signalbox_application::ImportedConversationConverter;
@@ -33,6 +33,26 @@ use signalbox_domain::{
     SessionConfigurationDefaults, SessionId, TranscriptAncestry,
 };
 use sqlx::types::Uuid;
+
+/// Absolute path to one golden under this crate's fixture directory.
+///
+/// A relative `expect_file!` path is joined onto a workspace root expect-test
+/// derives at run time, which follows Cargo's configuration discovery and so
+/// depends on the directory the run was launched from rather than on the tree
+/// that was compiled. `CARGO_MANIFEST_DIR` is substituted at compile time by
+/// the checkout doing the compiling, so an absolute path built from it names
+/// that checkout's goldens under every launch, and expect-test takes an
+/// absolute path verbatim for both the comparison and the `UPDATE_EXPECT=1`
+/// rewrite.
+macro_rules! golden {
+    ($name:literal) => {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/importer-conformance/golden/",
+            $name
+        )
+    };
+}
 
 const CLAUDE_V1_TOOL_ROUND: &[u8] =
     include_bytes!("fixtures/importer-conformance/claude-code-v1-tool-round.jsonl");
@@ -545,7 +565,7 @@ fn s28_inv038_stored_claude_code_v1_tool_round_matches_golden() {
         imported.entries()[5].content(),
         ImportedTranscriptContent::SourceMessageBlock { .. }
     ));
-    expect_file!["fixtures/importer-conformance/golden/claude-code-v1-tool-round.txt"]
+    expect_file![golden!("claude-code-v1-tool-round.txt")]
         .assert_eq(&render_conversation(&imported));
 }
 
@@ -574,7 +594,7 @@ fn s28_inv038_claude_code_v2_boundary_losses_match_golden() {
             signalbox_domain::ImportedMessageContentAbsence::ContentAttestedAbsent
         )
     );
-    expect_file!["fixtures/importer-conformance/golden/claude-code-v2-boundary-losses.txt"]
+    expect_file![golden!("claude-code-v2-boundary-losses.txt")]
         .assert_eq(&render_conversation(&imported));
 }
 
@@ -600,7 +620,7 @@ fn s28_inv038_codex_rollout_v1_tool_round_matches_golden() {
         imported.entries()[7].content(),
         ImportedTranscriptContent::Text(_)
     ));
-    expect_file!["fixtures/importer-conformance/golden/codex-rollout-v1-tool-round.txt"]
+    expect_file![golden!("codex-rollout-v1-tool-round.txt")]
         .assert_eq(&render_conversation(&imported));
 }
 
@@ -746,7 +766,7 @@ fn s28_inv038_codex_rollout_v1_structured_tools_match_golden() {
             is_error: ImportedSourceAttestation::NotAttested,
         },
     );
-    expect_file!["fixtures/importer-conformance/golden/codex-rollout-v1-structured-tools.txt"]
+    expect_file![golden!("codex-rollout-v1-structured-tools.txt")]
         .assert_eq(&render_conversation(&imported));
 }
 
@@ -760,7 +780,7 @@ fn s28_inv038_claude_code_v2_depth_128_matches_golden() {
         imported.entries()[0].content(),
         ImportedTranscriptContent::SourceEvent { .. }
     ));
-    expect_file!["fixtures/importer-conformance/golden/claude-code-v2-depth-128.txt"]
+    expect_file![golden!("claude-code-v2-depth-128.txt")]
         .assert_eq(&render_conversation(&imported));
 }
 
@@ -783,8 +803,7 @@ fn s28_inv038_claude_code_v2_depth_129_rejection_matches_golden() {
         ClaudeCodeJsonlConversionFailure::JsonDepthExceeded { line: 1 }
     );
     assert_eq!(identity_calls, 0);
-    expect_file!["fixtures/importer-conformance/golden/claude-code-v2-depth-129-error.txt"]
-        .assert_eq(&rendered);
+    expect_file![golden!("claude-code-v2-depth-129-error.txt")].assert_eq(&rendered);
 }
 
 #[test]
@@ -810,10 +829,7 @@ fn s28_inv038_claude_code_undecodable_fragment_rejection_matches_golden() {
         ClaudeCodeJsonlConversionFailure::InvalidJson { line: 2 }
     );
     assert_eq!(identity_calls, 0);
-    expect_file![
-        "fixtures/importer-conformance/golden/claude-code-v2-undecodable-fragment-error.txt"
-    ]
-    .assert_eq(&rendered);
+    expect_file![golden!("claude-code-v2-undecodable-fragment-error.txt")].assert_eq(&rendered);
 }
 
 #[test]
@@ -835,10 +851,7 @@ fn s28_inv038_codex_truncated_fragment_rejection_matches_golden() {
         CodexRolloutJsonlConversionFailure::InvalidJson { line: 2 }
     );
     assert_eq!(identity_calls, 0);
-    expect_file![
-        "fixtures/importer-conformance/golden/codex-rollout-v1-truncated-fragment-error.txt"
-    ]
-    .assert_eq(&rendered);
+    expect_file![golden!("codex-rollout-v1-truncated-fragment-error.txt")].assert_eq(&rendered);
 }
 
 #[test]
@@ -958,5 +971,47 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
             relationship: ImportedSessionRelationship::Fork,
         }
     );
-    expect_file!["fixtures/importer-conformance/golden/adoption-modes.txt"].assert_eq(&rendered);
+    expect_file![golden!("adoption-modes.txt")].assert_eq(&rendered);
+}
+
+/// Root of the checkout this test was compiled from.
+///
+/// `CARGO_MANIFEST_DIR` is `<root>/crates/persistence`, so the root is two
+/// levels above it. Taking it from the compile-time value rather than the
+/// process environment keeps it independent of where a run was launched.
+fn checkout_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("this crate sits two levels below the checkout root")
+}
+
+/// Guards the pin that keeps `UPDATE_EXPECT=1` rewriting inline `expect![...]`
+/// literals in the checkout being compiled.
+///
+/// The goldens above no longer depend on it: [`golden!`] hands expect-test an
+/// absolute path. Inline literals cannot be anchored that way — expect-test
+/// locates the source file to rewrite by joining `file!()` onto a workspace
+/// root it derives at run time, from `CARGO_WORKSPACE_DIR` or, without it, the
+/// topmost ancestor of `CARGO_MANIFEST_DIR` holding a `Cargo.toml`. That
+/// ancestor walk leaves a linked worktree whose path lies inside another
+/// checkout, and rewrites land in the outer tree's sources. Every crate using
+/// inline expectations depends on `.cargo/config.toml` pinning the variable
+/// per checkout, so this asserts the checked-in pin itself: Cargo loads that
+/// file from the working directory's ancestors rather than the manifest's, so
+/// a guard watching the loaded value would report how a run was launched
+/// instead of whether the mechanism is still there.
+#[test]
+fn s28_inline_expectations_are_pinned_to_the_compiled_checkout() {
+    let configuration = fs::read_to_string(checkout_root().join(".cargo/config.toml"))
+        .expect("the checkout's Cargo configuration is committed");
+    let configuration: toml::Table = configuration
+        .parse()
+        .expect("the checkout's Cargo configuration is TOML");
+
+    let pin = &configuration["env"]["CARGO_WORKSPACE_DIR"];
+
+    assert_eq!(pin["value"].as_str(), Some(""));
+    assert_eq!(pin["relative"].as_bool(), Some(true));
+    assert_eq!(pin["force"].as_bool(), Some(true));
 }

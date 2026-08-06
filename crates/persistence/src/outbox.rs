@@ -10,11 +10,12 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_domain::{
-    AcceptedInputId, ContextCompactionId, ContextFrontierId, DirectModelSelection,
-    FrozenAliasDefinition, FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallId,
-    ModelSelectionRequest, SemanticTranscriptEntryId, SessionId, SessionInputPosition,
-    SessionModelSettingsChanged, ToolApprovalResolution, ToolAttemptId, ToolRequestId,
-    TurnAttemptId, TurnId, TurnModelSettingsResolved,
+    AcceptedInputId, ContextCompactionId, ContextFrontierId, DelegationMessageId,
+    DirectModelSelection, DurableCommandId, FrozenAliasDefinition, FrozenModelSelection,
+    ModelAlias, ModelCallDisposition, ModelCallId, ModelSelectionRequest,
+    SemanticTranscriptEntryId, SessionId, SessionInputPosition, SessionModelSettingsChanged,
+    ToolApprovalResolution, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+    TurnModelSettingsResolved,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -44,6 +45,8 @@ const TURN_COMPLETED: &str = "turn_completed";
 const TURN_REFUSED: &str = "turn_refused";
 const TURN_CANCELLED: &str = "turn_cancelled";
 const TURN_RECONCILIATION_REQUIRED: &str = "turn_reconciliation_required";
+const DELEGATION_UPDATE: &str = "delegation_update";
+const DELEGATION_WAKE: &str = "delegation_wake";
 const STORAGE_VERSION: i16 = 1;
 
 type OutboxSlotRow = (
@@ -210,6 +213,199 @@ pub enum DispatchedOutboxEventKind {
         /// Exact terminal frontier.
         terminal_frontier: ContextFrontierId,
     },
+    /// One typed relationship update committed for a parent or message recipient.
+    DelegationUpdate(DispatchedDelegationUpdate),
+    /// One committed result or message can wake its exact recipient.
+    DelegationWake(DispatchedDelegationWake),
+}
+
+/// Closed relationship updates admitted by delegation outbox storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DispatchedDelegationUpdate {
+    /// A parent committed one child relationship and its spawn policy.
+    ChildSpawned {
+        /// Exact spawning tool request and relationship identity.
+        spawning_request: ToolRequestId,
+        /// Spawned child session.
+        child: SessionId,
+        /// Parent-chosen relationship lifecycle policy.
+        policy: DispatchedDelegationPolicy,
+    },
+    /// A parent registered one foreground or background wait.
+    ChildWaiting {
+        /// Relationship identity.
+        spawning_request: ToolRequestId,
+        /// Child being awaited.
+        child: SessionId,
+        /// Exact await tool request.
+        awaiting_request: ToolRequestId,
+        /// Wait delivery mode.
+        mode: DispatchedDelegationWaitMode,
+    },
+    /// Parent termination evaluated one relationship edge.
+    ChildLifecycleDisposition {
+        /// Relationship identity.
+        spawning_request: ToolRequestId,
+        /// Evaluated child.
+        child: SessionId,
+        /// Relationship-local event ordinal.
+        event_ordinal: u64,
+        /// Typed relationship outcome.
+        outcome: DispatchedDelegationOutcome,
+        /// Typed reason for evaluating this relationship edge.
+        reason: DispatchedDelegationReason,
+        /// Exact parent command provenance.
+        provenance: DispatchedDelegationProvenance,
+    },
+    /// A terminal child result became durable for its parent.
+    ChildResult {
+        /// Relationship identity.
+        spawning_request: ToolRequestId,
+        /// Terminal child.
+        child: SessionId,
+        /// Typed terminal result outcome.
+        outcome: DispatchedDelegationOutcome,
+        /// Typed reason for the terminal result.
+        reason: DispatchedDelegationReason,
+        /// Exact child-turn or parent-command provenance.
+        provenance: DispatchedDelegationProvenance,
+        /// Delivered content for a successful result only.
+        content: Option<String>,
+    },
+    /// One bidirectional relationship message became durable for its recipient.
+    SessionMessage {
+        /// Relationship identity.
+        spawning_request: ToolRequestId,
+        /// Message identity.
+        message: DelegationMessageId,
+        /// Sending session.
+        sender: SessionId,
+        /// Receiving session.
+        recipient: SessionId,
+        /// Relationship-local message ordinal.
+        message_ordinal: u64,
+        /// Recipient-wide delivery sequence.
+        delivery_sequence: u64,
+        /// Exact delivered content.
+        content: String,
+    },
+}
+
+/// Parent-chosen relationship policy carried by a spawn update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedDelegationPolicy {
+    /// The child outlives parent state changes.
+    Background,
+    /// The child follows the two explicit parent-state actions.
+    Bound {
+        /// Action when the parent stops.
+        on_parent_stopped: DispatchedBoundChildAction,
+        /// Action when the parent is cancelled.
+        on_parent_cancelled: DispatchedBoundChildAction,
+    },
+}
+
+/// Closed action applied to one bound child relationship.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedBoundChildAction {
+    /// Leave the child running.
+    KeepRunning,
+    /// Stop the child through typed parent-policy evidence.
+    Stop,
+    /// Cancel the child through typed parent-policy evidence.
+    Cancel,
+}
+
+/// Delivery behavior chosen by one await request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedDelegationWaitMode {
+    /// Keep the current parent turn open.
+    Foreground,
+    /// Return registration immediately and deliver through a later wake.
+    Background,
+}
+
+/// Closed relationship outcome carried by update dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedDelegationOutcome {
+    /// Child content is available.
+    ResultReturned,
+    /// Child execution failed or returned unusable content.
+    ChildFailed,
+    /// Parent policy stopped the child.
+    ChildStopped,
+    /// Child or parent policy cancelled the child.
+    ChildCancelled,
+    /// Relationship policy left the child running.
+    ContinueRunning,
+    /// Parent policy reached an already-terminal child.
+    AlreadyTerminal,
+}
+
+/// Exact reason carried alongside a relationship outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedDelegationReason {
+    /// Child completed with delivered content.
+    ChildCompleted,
+    /// Child execution failed.
+    ChildExecutionFailed,
+    /// Completed child content could not form a result.
+    ChildResultUnavailable,
+    /// Child cancelled independently.
+    ChildCancelled,
+    /// A parent stop selected descendants.
+    ParentStoppedWithDescendants,
+    /// A parent cancellation selected descendants.
+    ParentCancelledWithDescendants,
+}
+
+/// Proof source retained by one lifecycle or result update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedDelegationProvenance {
+    /// Exact terminal child turn.
+    ChildTurn {
+        /// Child session.
+        session: SessionId,
+        /// Terminal delegated turn.
+        turn: TurnId,
+    },
+    /// Exact parent turn command.
+    ParentTurnCommand {
+        /// Parent session.
+        session: SessionId,
+        /// Parent turn named by the command.
+        turn: TurnId,
+        /// Durable stop or interrupt command.
+        command: DurableCommandId,
+    },
+    /// Exact parent goal-generation command.
+    ParentGoalCommand {
+        /// Parent session.
+        session: SessionId,
+        /// One-based goal generation.
+        goal_generation: u64,
+        /// Durable goal stop command.
+        command: DurableCommandId,
+    },
+}
+
+/// Committed content that can wake an exact delegation recipient.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedDelegationWake {
+    /// A child result is available; a late foreground wait may be named.
+    Result {
+        /// Relationship/result identity.
+        spawning_request: ToolRequestId,
+        /// Optional late foreground await request.
+        awaiting_request: Option<ToolRequestId>,
+    },
+    /// One message is available to the event's recipient session.
+    Message {
+        /// Relationship identity.
+        spawning_request: ToolRequestId,
+        /// Message identity.
+        message: DelegationMessageId,
+    },
 }
 
 /// Durable tool-batch boundary carried by one dispatched transition.
@@ -326,6 +522,8 @@ pub enum OutboxCorruption {
     InvalidTerminalEventCorrelation,
     /// A model-call transition had an inconsistent or unknown state shape.
     InvalidModelCallState,
+    /// A delegation update or wake had an inconsistent or unknown typed shape.
+    InvalidDelegationEvent,
     /// A settings event disagreed with its immutable referenced records.
     InvalidModelSettingsEvent,
 }
@@ -355,6 +553,7 @@ impl fmt::Display for OutboxCorruption {
                 "outbox terminal event correlations are invalid"
             }
             Self::InvalidModelCallState => "outbox model-call state is invalid",
+            Self::InvalidDelegationEvent => "outbox delegation event is invalid",
             Self::InvalidModelSettingsEvent => "outbox model-settings event is invalid",
         })
     }
@@ -505,13 +704,23 @@ async fn load_event(
                 SELECT 1
                   FROM outbox_event AS unallocated
                  WHERE unallocated.event_sequence > allocator.last_sequence
+                UNION ALL
+                SELECT 1
+                  FROM delegation_outbox_event AS unallocated
+                 WHERE unallocated.event_sequence > allocator.last_sequence
             ),
             event.event_sequence,
             event.event_kind,
             event.storage_version,
             event.session_id
            FROM outbox_sequence_state AS allocator
-           LEFT JOIN outbox_event AS event
+           LEFT JOIN (
+                SELECT event_sequence, event_kind, storage_version, session_id
+                  FROM outbox_event
+                UNION ALL
+                SELECT event_sequence, event_kind, storage_version, session_id
+                  FROM delegation_outbox_event
+           ) AS event
              ON event.event_sequence = $1
           WHERE allocator.singleton",
     )
@@ -1173,7 +1382,8 @@ async fn load_event(
                                            AND result.payload_kind IN (
                                                 'tool_execution_result',
                                                 'tool_denied',
-                                                'tool_closed_by_turn_end'
+                                                'tool_closed_by_turn_end',
+                                                'delegation_result'
                                            )
                                            AND (
                                                 result.tool_result_request_id =
@@ -1702,6 +1912,12 @@ async fn load_event(
                 terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
             }
         }
+        DELEGATION_UPDATE => DispatchedOutboxEventKind::DelegationUpdate(
+            load_delegation_update(transaction, expected_sequence, stored_session).await?,
+        ),
+        DELEGATION_WAKE => DispatchedOutboxEventKind::DelegationWake(
+            load_delegation_wake(transaction, expected_sequence, stored_session).await?,
+        ),
         _ => return Err(OutboxCorruption::UnsupportedEventKind.into()),
     };
 
@@ -1714,6 +1930,280 @@ async fn load_event(
             kind,
         }),
     ))
+}
+
+async fn load_delegation_update(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+    stored_session: Uuid,
+) -> Result<DispatchedDelegationUpdate, OutboxDispatchError> {
+    let row = sqlx::query(
+        "SELECT event.update_kind, event.spawning_tool_request_id,
+                event.child_session_id, event.policy_kind,
+                event.on_parent_stopped, event.on_parent_cancelled,
+                event.awaiting_tool_request_id, event.wait_mode,
+                event.delegation_event_ordinal, event.outcome_kind,
+                event.reason_kind, event.provenance_kind,
+                event.provenance_session_id, event.provenance_turn_id,
+                event.provenance_goal_generation, event.provenance_command_id,
+                event.message_id, event.sender_session_id,
+                event.recipient_session_id, event.message_ordinal,
+                event.content_text, delivery.delivery_sequence
+           FROM delegation_update_outbox_event AS event
+           LEFT JOIN session_message_delivery AS delivery
+             ON delivery.message_id = event.message_id
+            AND delivery.spawning_tool_request_id =
+                event.spawning_tool_request_id
+          WHERE event.event_sequence = $1
+            AND event.session_id = $2",
+    )
+    .bind(Decimal::from(expected_sequence))
+    .bind(stored_session)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    let spawning_request = ToolRequestId::from_uuid(row.try_get("spawning_tool_request_id")?);
+    let update_kind: String = row.try_get("update_kind")?;
+    match update_kind.as_str() {
+        "child_spawned" => {
+            let child = required_session(&row, "child_session_id")?;
+            let policy_kind: Option<String> = row.try_get("policy_kind")?;
+            let stopped: Option<String> = row.try_get("on_parent_stopped")?;
+            let cancelled: Option<String> = row.try_get("on_parent_cancelled")?;
+            let policy = match (policy_kind.as_deref(), stopped, cancelled) {
+                (Some("background"), None, None) => DispatchedDelegationPolicy::Background,
+                (Some("bound"), Some(stopped), Some(cancelled)) => {
+                    DispatchedDelegationPolicy::Bound {
+                        on_parent_stopped: decode_bound_action(&stopped)?,
+                        on_parent_cancelled: decode_bound_action(&cancelled)?,
+                    }
+                }
+                _ => return Err(OutboxCorruption::InvalidDelegationEvent.into()),
+            };
+            Ok(DispatchedDelegationUpdate::ChildSpawned {
+                spawning_request,
+                child,
+                policy,
+            })
+        }
+        "child_waiting" => Ok(DispatchedDelegationUpdate::ChildWaiting {
+            spawning_request,
+            child: required_session(&row, "child_session_id")?,
+            awaiting_request: ToolRequestId::from_uuid(required_uuid(
+                &row,
+                "awaiting_tool_request_id",
+            )?),
+            mode: decode_wait_mode(
+                row.try_get::<Option<String>, _>("wait_mode")?
+                    .as_deref()
+                    .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+            )?,
+        }),
+        "child_lifecycle_disposition" => {
+            Ok(DispatchedDelegationUpdate::ChildLifecycleDisposition {
+                spawning_request,
+                child: required_session(&row, "child_session_id")?,
+                event_ordinal: required_positive_sequence(&row, "delegation_event_ordinal")?,
+                outcome: decode_delegation_outcome(
+                    row.try_get::<Option<String>, _>("outcome_kind")?
+                        .as_deref()
+                        .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+                )?,
+                reason: decode_delegation_reason(
+                    row.try_get::<Option<String>, _>("reason_kind")?
+                        .as_deref()
+                        .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+                )?,
+                provenance: decode_delegation_provenance(&row)?,
+            })
+        }
+        "child_result" => Ok(DispatchedDelegationUpdate::ChildResult {
+            spawning_request,
+            child: required_session(&row, "child_session_id")?,
+            outcome: decode_delegation_outcome(
+                row.try_get::<Option<String>, _>("outcome_kind")?
+                    .as_deref()
+                    .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+            )?,
+            reason: decode_delegation_reason(
+                row.try_get::<Option<String>, _>("reason_kind")?
+                    .as_deref()
+                    .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+            )?,
+            provenance: decode_delegation_provenance(&row)?,
+            content: row.try_get("content_text")?,
+        }),
+        "session_message" => Ok(DispatchedDelegationUpdate::SessionMessage {
+            spawning_request,
+            message: DelegationMessageId::from_uuid(required_uuid(&row, "message_id")?),
+            sender: required_session(&row, "sender_session_id")?,
+            recipient: required_session(&row, "recipient_session_id")?,
+            message_ordinal: required_positive_sequence(&row, "message_ordinal")?,
+            delivery_sequence: required_positive_sequence(&row, "delivery_sequence")?,
+            content: row
+                .try_get::<Option<String>, _>("content_text")?
+                .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+        }),
+        _ => Err(OutboxCorruption::InvalidDelegationEvent.into()),
+    }
+}
+
+async fn load_delegation_wake(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+    stored_session: Uuid,
+) -> Result<DispatchedDelegationWake, OutboxDispatchError> {
+    let row = sqlx::query(
+        "SELECT subject_kind, spawning_tool_request_id,
+                result_spawning_request_id, awaiting_tool_request_id,
+                message_id
+           FROM delegation_wake_outbox_event
+          WHERE event_sequence = $1
+            AND session_id = $2",
+    )
+    .bind(Decimal::from(expected_sequence))
+    .bind(stored_session)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(OutboxCorruption::MissingTypedRecord)?;
+    let spawning_uuid: Uuid = row.try_get("spawning_tool_request_id")?;
+    let spawning_request = ToolRequestId::from_uuid(spawning_uuid);
+    let subject: String = row.try_get("subject_kind")?;
+    match subject.as_str() {
+        "result"
+            if row.try_get::<Option<Uuid>, _>("result_spawning_request_id")?
+                == Some(spawning_uuid) =>
+        {
+            Ok(DispatchedDelegationWake::Result {
+                spawning_request,
+                awaiting_request: row
+                    .try_get::<Option<Uuid>, _>("awaiting_tool_request_id")?
+                    .map(ToolRequestId::from_uuid),
+            })
+        }
+        "message" => Ok(DispatchedDelegationWake::Message {
+            spawning_request,
+            message: DelegationMessageId::from_uuid(required_uuid(&row, "message_id")?),
+        }),
+        _ => Err(OutboxCorruption::InvalidDelegationEvent.into()),
+    }
+}
+
+fn required_uuid(row: &sqlx::postgres::PgRow, column: &str) -> Result<Uuid, OutboxCorruption> {
+    row.try_get::<Option<Uuid>, _>(column)
+        .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?
+        .ok_or(OutboxCorruption::InvalidDelegationEvent)
+}
+
+fn required_session(
+    row: &sqlx::postgres::PgRow,
+    column: &str,
+) -> Result<SessionId, OutboxCorruption> {
+    required_uuid(row, column).map(session_id_from_uuid)
+}
+
+fn required_positive_sequence(
+    row: &sqlx::postgres::PgRow,
+    column: &str,
+) -> Result<u64, OutboxCorruption> {
+    let value = row
+        .try_get::<Option<Decimal>, _>(column)
+        .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?
+        .ok_or(OutboxCorruption::InvalidDelegationEvent)?;
+    decode_positive_sequence(value).map_err(|_| OutboxCorruption::InvalidDelegationEvent)
+}
+
+fn decode_bound_action(value: &str) -> Result<DispatchedBoundChildAction, OutboxCorruption> {
+    match value {
+        "keep_running" => Ok(DispatchedBoundChildAction::KeepRunning),
+        "stop" => Ok(DispatchedBoundChildAction::Stop),
+        "cancel" => Ok(DispatchedBoundChildAction::Cancel),
+        _ => Err(OutboxCorruption::InvalidDelegationEvent),
+    }
+}
+
+pub(crate) fn decode_wait_mode(
+    value: &str,
+) -> Result<DispatchedDelegationWaitMode, OutboxCorruption> {
+    match value {
+        "foreground" => Ok(DispatchedDelegationWaitMode::Foreground),
+        "background" => Ok(DispatchedDelegationWaitMode::Background),
+        _ => Err(OutboxCorruption::InvalidDelegationEvent),
+    }
+}
+
+pub(crate) fn decode_delegation_outcome(
+    value: &str,
+) -> Result<DispatchedDelegationOutcome, OutboxCorruption> {
+    match value {
+        "result_returned" => Ok(DispatchedDelegationOutcome::ResultReturned),
+        "child_failed" => Ok(DispatchedDelegationOutcome::ChildFailed),
+        "child_stopped" => Ok(DispatchedDelegationOutcome::ChildStopped),
+        "child_cancelled" => Ok(DispatchedDelegationOutcome::ChildCancelled),
+        "continue_running" => Ok(DispatchedDelegationOutcome::ContinueRunning),
+        "already_terminal" => Ok(DispatchedDelegationOutcome::AlreadyTerminal),
+        _ => Err(OutboxCorruption::InvalidDelegationEvent),
+    }
+}
+
+pub(crate) fn decode_delegation_reason(
+    value: &str,
+) -> Result<DispatchedDelegationReason, OutboxCorruption> {
+    match value {
+        "child_completed" => Ok(DispatchedDelegationReason::ChildCompleted),
+        "child_execution_failed" => Ok(DispatchedDelegationReason::ChildExecutionFailed),
+        "child_result_unavailable" => Ok(DispatchedDelegationReason::ChildResultUnavailable),
+        "child_cancelled" => Ok(DispatchedDelegationReason::ChildCancelled),
+        "parent_stopped_parent_and_descendants" => {
+            Ok(DispatchedDelegationReason::ParentStoppedWithDescendants)
+        }
+        "parent_cancelled_parent_and_descendants" => {
+            Ok(DispatchedDelegationReason::ParentCancelledWithDescendants)
+        }
+        _ => Err(OutboxCorruption::InvalidDelegationEvent),
+    }
+}
+
+pub(crate) fn decode_delegation_provenance(
+    row: &sqlx::postgres::PgRow,
+) -> Result<DispatchedDelegationProvenance, OutboxCorruption> {
+    let kind: Option<String> = row
+        .try_get("provenance_kind")
+        .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?;
+    let session = required_session(row, "provenance_session_id")?;
+    let turn: Option<Uuid> = row
+        .try_get("provenance_turn_id")
+        .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?;
+    let goal: Option<Decimal> = row
+        .try_get("provenance_goal_generation")
+        .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?;
+    let command: Option<Uuid> = row
+        .try_get("provenance_command_id")
+        .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?;
+    match (kind.as_deref(), turn, goal, command) {
+        (Some("child_turn"), Some(turn), None, None) => {
+            Ok(DispatchedDelegationProvenance::ChildTurn {
+                session,
+                turn: TurnId::from_uuid(turn),
+            })
+        }
+        (Some("parent_turn_command"), Some(turn), None, Some(command)) => {
+            Ok(DispatchedDelegationProvenance::ParentTurnCommand {
+                session,
+                turn: TurnId::from_uuid(turn),
+                command: DurableCommandId::from_uuid(command),
+            })
+        }
+        (Some("parent_goal_command"), None, Some(goal), Some(command)) => {
+            Ok(DispatchedDelegationProvenance::ParentGoalCommand {
+                session,
+                goal_generation: decode_positive_sequence(goal)
+                    .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?,
+                command: DurableCommandId::from_uuid(command),
+            })
+        }
+        _ => Err(OutboxCorruption::InvalidDelegationEvent),
+    }
 }
 
 async fn require_typed_record(

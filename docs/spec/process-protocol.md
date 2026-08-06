@@ -9,6 +9,9 @@ aggregation are verified against PR #389 (`agent/cost-accounting`).
 The goal-mode process and terminal surface was re-verified through PR #384
 (`agent/goal-mode-runtime`).
 
+The descendant-termination command scope was re-verified through this PR
+(`agent/delegation-command-scope`).
+
 The model/session-settings wire vocabulary was verified through PR #439
 (`agent/model-settings-protocol`), and its transcript-turn settings snapshot was
 verified through this PR (`agent/model-settings-persistence`).
@@ -20,11 +23,14 @@ Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
 surface in PR #349 (`agent/review-orchestrator-wiring`), and the conversation
-import transport in PR #401 (`agent/import-chunks-protocol`). This page is the
-normative boundary between a local client process and `signalboxd`; domain
-values, PostgreSQL records, and wire messages remain distinct representations.
-The path-scoped session-placement wire and terminal-client surface were verified
-through PR #400 (`agent/scoped-visibility-wiring`).
+import transport in PR #401 (`agent/import-chunks-protocol`), and the typed
+delegation session-follow events, queued task-origin projection, and delivered
+delegation transcript entries and typed parent-terminated turn projection
+against this PR (`agent/delegation`). This page is the normative boundary
+between a local client process and `signalboxd`; domain values, PostgreSQL
+records, and wire messages remain distinct representations. The path-scoped
+session-placement wire and terminal-client surface were verified through PR #400
+(`agent/scoped-visibility-wiring`).
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
@@ -1394,10 +1400,26 @@ exact reservation is owned by this contract.
 Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 
 - `queued { accepted_input_id, content }`;
+- `queued_delegated { spawning_request_id, parent_session_id, parent_turn_id, content }`,
+  whose identifiers bind the checked delegated-task origin rather than
+  fabricating an accepted input;
+- `queued_delegation_wake { first_delivery_sequence, through_delivery_sequence }`,
+  whose positive ordered recipient-wide range identifies the delivered
+  delegation content that will wake an otherwise idle session;
+- `delegation_terminated { spawning_request_id, outcome, reason, provenance }`,
+  whose outcome is exactly `stopped` or `cancelled` naming the bound-child
+  action, whose reason is exactly `parent_stopped` or `parent_cancelled` naming
+  independently whether the parent stopped or was cancelled — both cross-action
+  combinations are valid — and whose parent turn- or goal-command provenance
+  carries `parent_and_descendants`; this delivered logical state exposes no
+  child transcript and does not erase retained physical execution evidence;
 - `active_running { current_attempt_id, current_model_call }`, where
   `current_model_call` is null before preparation or `{ model_call_id, state }`
   with state exactly `prepared`, `in_flight`, or `cancellation_requested`;
 - `active_awaiting_model_call_recovery { ended_attempt_id, recovery_model_call_id }`;
+- `active_awaiting_child { await_request_id, spawning_request_id, child_session_id }`,
+  which names the exact foreground wait and delegated relationship retaining the
+  parent turn's progressing slot;
 - `failed { terminal_frontier_id, terminal_attempt_id, terminal_model_call }`,
   where `terminal_attempt_id` is null only for an evidence-free recovery
   failure, and `terminal_model_call` is null when that failure or physical
@@ -1524,7 +1546,7 @@ imported content and verbatim raw source remain authoritative only in the
 immutable imported-conversation aggregate; the wire snapshot neither fabricates
 native evidence nor replaces that authority.
 
-**Session-delegation foundation proposal.** The delegation stack adds three
+**Session-delegation transcript entries.** The process surface emits three
 non-text `transcript_entry` arms:
 
 - `delegated_task { spawning_request_id, parent_session_id, parent_turn_id, content }`;
@@ -1574,14 +1596,17 @@ the process protocol explicitly maps them.
 
 ## Session-delegation process surface
 
-This section is the foundation proposal at the bottom of the delegation stack.
-The model-facing tool names and arguments are owned by
-[tool-loop](tool-loop.md#session-delegation-tool-family). The process surface
-admits their exact already-issued work for terminal operation and recovery; it
-does not let a client fabricate model provenance. `spawn_session`,
-`await_session`, and `send_session_message` therefore each carry the invoking
-session, turn, and `tool_request_id`, which must reconstitute one matching
-logical request before any mutation occurs.
+The session-follow event shapes and internal-wake exclusion in this section are
+implemented. The mutation request and receipt shapes are committed unimplemented
+functionality: no current `ClientRequest`, daemon handler, or client verb
+provides them. Their fixed compatibility constraint is that the future process
+surface admits only exact already-issued model work for terminal operation and
+recovery; it must not let a client fabricate model provenance. The model-facing
+tool names and arguments are owned by
+[tool-loop](tool-loop.md#session-delegation-tool-family). Future
+`spawn_session`, `await_session`, and `send_session_message` requests therefore
+each carry the invoking session, turn, and `tool_request_id`, which must
+reconstitute one matching logical request before any mutation occurs.
 
 Logical-request reconstitution alone is not execution authority. Before a first
 mutation, the daemon must also reconstitute the exact authorized, executable
@@ -1675,9 +1700,20 @@ unchanged. No event embeds or links the child transcript.
 `descendant_scope` is required on both `stop_goal` and `stop_turn`. The terminal
 client spells omission as `parent_alone` and `--descendants` as
 `parent_and_descendants`; it never guesses from the relationship policy. A
-successful cascade receipt includes the selected scope and the exact count of
-recorded descendant dispositions, so a zero-child choice and an unperformed
-cascade cannot be confused.
+successful command records the selected scope as durable intent.
+
+The scope is part of the durable command intent, not receipt-only metadata.
+Domain `GoalUserAction::Stop { descendant_scope }` and
+`DeliveryRequest::Interrupt { descendant_scope, .. }` retain it; command
+storage, comparison, and reconstitution carry the same closed value. Reusing
+either durable command identity with another scope is `conflicting_reuse`.
+
+Committed unimplemented functionality: no present process or client receipt
+surface reports cascade metadata. A future successful cascade receipt must
+include the selected scope and the exact count of recorded descendant
+dispositions, so a zero-child choice and an unperformed cascade cannot be
+confused. An equal durable-command retry must return those stored values without
+reevaluating the cascade.
 
 ## Durable update dispatch
 
@@ -1769,7 +1805,7 @@ closed `event` object. The protocol admits these event shapes:
 | `child_waiting`                  | `await_request_id`, `spawning_request_id`, `child_session_id`, and `mode`                                                                                                                                        |
 | `child_lifecycle_disposition`    | `spawning_request_id`, `child_session_id`, `outcome`, `reason`, and `provenance`                                                                                                                                 |
 | `child_result`                   | `spawning_request_id`, `child_session_id`, `outcome`, `content`, `reason`, and `provenance`                                                                                                                      |
-| `session_message`                | `spawning_request_id`, `message_id`, `sender_session_id`, `recipient_session_id`, `ordinal`, and `content`                                                                                                       |
+| `session_message`                | `spawning_request_id`, `message_id`, `sender_session_id`, `recipient_session_id`, `ordinal`, `delivery_sequence`, and `content`                                                                                  |
 
 A `goal_turn_retired` event clears only the exact queued turn it names; an
 unmatched or already-active identity leaves local turn controls unchanged. A
@@ -1895,6 +1931,10 @@ nonterminal wait that `send` keeps waiting through; `decide_tool_request` is its
 resolving writer, issued from a second connection while the waiting client's
 transcript names the pending request and its proposing tool. A client disconnect
 never cancels model or tool work.
+
+An `active_awaiting_child` turn is likewise a nonterminal wait. Its three
+identifiers are required together, and clients keep waiting until the delivered
+foreground delegation result resumes or terminalizes that exact parent turn.
 
 The client rereads after each `tool_batch_transition { proposed }` and
 `tool_batch_transition { results_projected }`; the client rereads after every
