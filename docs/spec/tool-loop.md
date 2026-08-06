@@ -28,12 +28,12 @@ verified through PR #348 (`agent/repository-read-tools`) at implementation ref
 at this foundation proposal extends the same laws to the runner locus. The
 non-overridable explicit-approval posture is verified through PR #366
 (`agent/exec-tools`). The daemon family inventory and the implemented Git and
-execution names were re-verified against implementation ref
-`c8f881f585b49fb11ae5718cd923029ed0218b5d`; their daemon composition is the
-implementing stack rooted at `agent/daemon-wiring`. This page owns logical tool
-requests, approval policy and decisions, physical tool attempts, result
-admission, intra-turn continuation, crash classification, the compiled registry,
-and the daemon-local catalog. Turn and attempt lifecycle law lives in
+execution names were re-verified through this PR (`agent/daemon-wiring`) against
+implementation ref `c8f881f585b49fb11ae5718cd923029ed0218b5d`; its child stack
+implements their daemon composition. This page owns logical tool requests,
+approval policy and decisions, physical tool attempts, result admission,
+intra-turn continuation, crash classification, the compiled registry, and the
+daemon-local catalog. Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entry vocabulary in [sessions-and-transcript](sessions-and-transcript.md);
 model-call staging and provider translation in
@@ -278,10 +278,10 @@ classes, bounds, and execution results; this cross-crate contract owns only
 their composition into one daemon catalog and name-directed executor. Mapped
 families are absent when their complete deployment configuration is absent.
 Local Git and execution tools bind the same configured workspace root used by
-the workspace families. The mapped composition admits the local Git family only
-with an explicit Git identity and a root that is a direct main repository
-worktree; otherwise startup fails closed rather than advertising a partial
-family. The mapping-free base composition remains available without local Git or
+the workspace families. The exact required inputs and fail-closed startup
+validation are owned by
+[configuration and credentials](configuration-and-credentials.md#daemon-tool-mapping-registry).
+The mapping-free base composition remains available without local Git or
 execution tools.
 
 The implemented `git_push_configured` declaration is not part of the daemon
@@ -291,14 +291,12 @@ tools perform no remote operation. The transport design and any later
 registration remain undecided under
 [Daemon Git push transport](../open-questions.md#scheduling-and-runners).
 
-Runner-side remote tool execution is future and unimplemented. No present
-surface dispatches the daemon registry, the local Git family, or the execution
-family to a runner, and this page defines no runner-side workstation registry,
-exact tool inventory, tool names, or per-tool runner deadline. The generic
-runner foundation's existing committed unimplemented contracts do not select
-that registry, and this change adds no runner execution behavior. The
-workstation registry and executor remain undecided under
-[Scheduling and runners](../open-questions.md#scheduling-and-runners).
+This daemon-local registry supplies no runner execution path. The
+[runner executable boundary](runner-protocol.md#version-one-executable-boundary)
+owns the present implementation status and committed compatibility constraints;
+the
+[runner workstation open question](../open-questions.md#scheduling-and-runners)
+owns the remaining undecided registry work.
 
 Each provider operation carries the exact session-executable definition and
 locus snapshot prepared under

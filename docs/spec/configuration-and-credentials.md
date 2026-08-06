@@ -493,6 +493,8 @@ request must match one configured canonical origin before dispatch, so automatic
 approval cannot silently egress to an arbitrary host. Paths and queries remain
 unrestricted request data at an admitted origin.
 
+<a id="daemon-tool-mapping-registry"></a>
+
 Production signalboxd composition requires exactly one mapping for each of the
 four deployment-mapped tool families in the same closed-table style as
 `[[adapter_mappings]]`:
