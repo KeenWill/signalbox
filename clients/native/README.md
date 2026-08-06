@@ -81,10 +81,17 @@ space-separated `xcodebuild` test identifiers and select which suites
 `Tests/SignalboxAppTests/LiveScreenSnapshotTests.swift` renders the screens
 `RootView` reaches and compares each against a committed golden under
 `Tests/SignalboxAppTests/__Snapshots__`. Rendering is in process — one screen
-hosted in one window, at a fixed canvas size and a pinned display scale — so it
-sees no scene lifecycle, no window chrome, and no sheet presentation; sheet
+hosted in one window, at a fixed canvas size, display scale, and safe area — so
+it sees no scene lifecycle, no window chrome, and no sheet presentation; sheet
 content is snapshotted as its own screen. `ScreenshotScenario` selects the
 fixtures, the same seam the golden capture scripts below use.
+
+Run these against the simulator CI pins, which is what `scripts/test-xcode.sh`
+resolves by default. Nine of the ten goldens are byte-identical across iPhone
+simulators, but the regular-layout canvas is wider than a phone screen, so the
+window's corner mask and the glass materials composite against the device: that
+one golden can fail on a destination other than CI's, and re-recording it there
+would commit a rendering the pinned simulator then rejects.
 
 The suite runs as a report-only step in CI, which uploads the reference, the
 failed rendering, and their difference as an artifact when a comparison fails.
