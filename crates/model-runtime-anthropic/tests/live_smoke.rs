@@ -184,9 +184,12 @@ struct DecodedResponse {
 /// genuine provider-error class) fails this gate.
 ///
 /// `AnthropicRuntime::execute` never returns a raw `TerminalEvidence::Refused`
-/// to its caller: a fully buffered request exposes no independent proof that
-/// the response arrived only after the complete upload, so `execute`
-/// unconditionally downgrades a decoded refusal into
+/// to its caller. That downgrade is unconditional, so it covers this smoke's
+/// streamed exchange too; the specification's refusal-downgrade rule states
+/// why it is unconditional (a fully buffered HTTP request exposes no
+/// independent proof that the response arrived only after the complete
+/// upload, and the adapter fails toward known failure rather than inventing
+/// evidence). `execute` therefore rewrites a decoded refusal into
 /// `ProviderError { kind: Unrecognized, native: { error_token: Some("refusal"), .. }, .. }`
 /// from the same HTTP 200 exchange before returning (`without_unproven_refusal`,
 /// runtime.rs:716,729-742; the "Refusal downgrade" rule in
