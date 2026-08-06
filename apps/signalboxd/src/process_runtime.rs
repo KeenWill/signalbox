@@ -2398,6 +2398,9 @@ fn process_delegation_rejection(
     peer_session_id: CanonicalUuid,
 ) -> ProtocolError {
     let detail = match rejection {
+        ProcessDelegationRequestRejection::SessionNotFound => {
+            RejectionDetail::SessionNotFound { session_id }
+        }
         ProcessDelegationRequestRejection::ToolRequestNotFound => {
             RejectionDetail::ToolRequestNotFound { tool_request_id }
         }
@@ -2439,6 +2442,9 @@ fn process_delegation_rejection(
                     WireDelegationToolRequestState::AwaitingApproval
                 }
                 DelegationRequestExecutionState::Denied => WireDelegationToolRequestState::Denied,
+                DelegationRequestExecutionState::Prepared => {
+                    WireDelegationToolRequestState::Prepared
+                }
                 DelegationRequestExecutionState::Closed => WireDelegationToolRequestState::Closed,
                 DelegationRequestExecutionState::AttemptEnded => {
                     WireDelegationToolRequestState::AttemptEnded
@@ -16233,7 +16239,7 @@ mod tests {
     }
 
     #[test]
-    fn delegated_process_rejections_use_closed_wire_details() {
+    fn delegated_process_rejections_use_typed_wire_details() {
         let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(13));
         let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(14));
         let request_id = CanonicalUuid::from_uuid(Uuid::from_u128(15));
@@ -16242,6 +16248,13 @@ mod tests {
             ProcessDelegationRequestRejection::Operation(
                 DelegationOperationRejection::RelationshipNotFound,
             ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let session_not_found = process_delegation_rejection(
+            ProcessDelegationRequestRejection::SessionNotFound,
             session_id,
             turn_id,
             request_id,
@@ -16283,6 +16296,17 @@ mod tests {
             request_id,
             peer_id,
         );
+        let prepared = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::Prepared,
+                },
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
         let closed = process_delegation_rejection(
             ProcessDelegationRequestRejection::Operation(
                 DelegationOperationRejection::StaleDispatch {
@@ -16306,6 +16330,10 @@ mod tests {
             peer_id,
         );
 
+        assert_eq!(
+            session_not_found.detail,
+            ErrorDetail::rejected(RejectionDetail::SessionNotFound { session_id })
+        );
         assert_eq!(
             relationship.detail,
             ErrorDetail::rejected(RejectionDetail::DelegationRelationNotFound {
@@ -16337,6 +16365,13 @@ mod tests {
             ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
                 tool_request_id: request_id,
                 state: WireDelegationToolRequestState::Denied,
+            })
+        );
+        assert_eq!(
+            prepared.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id: request_id,
+                state: WireDelegationToolRequestState::Prepared,
             })
         );
         assert_eq!(

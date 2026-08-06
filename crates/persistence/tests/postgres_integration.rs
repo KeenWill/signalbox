@@ -223,6 +223,7 @@ const DELEGATION_REVERSE_INSERT_FIXTURE_SEED: u128 = 0xd7a0;
 const DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED: u128 = 0xd7b0;
 const DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED: u128 = 0xd7c0;
 const DELEGATION_REPOSITORY_MESSAGE_SEED: u128 = 0xd7d0;
+const DELEGATION_REPOSITORY_PREPARED_WAIT_SEED: u128 = 0xd7e0;
 const DELEGATION_OUTBOX_COMMAND_ID: u128 = 0xdc00;
 const DELEGATION_LIFECYCLE_COMMAND_ID: u128 = 0xdd10;
 const DELEGATION_CASCADE_ROOT_COMMAND_ID: u128 = 0xe640;
@@ -911,6 +912,22 @@ async fn repository_wait_dispatch(
     fixture: RawDelegationFixture,
     seed: u128,
 ) -> Result<ToolDispatchAuthority, Box<dyn Error>> {
+    prepare_repository_wait_attempt(pool, fixture, seed).await?;
+    PostgresToolLoopRepository::new(pool.clone())
+        .authorize_attempt(
+            fixture.parent,
+            fixture.parent_turn,
+            ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x301)),
+        )
+        .await
+        .map_err(Into::into)
+}
+
+async fn prepare_repository_wait_attempt(
+    pool: &PgPool,
+    fixture: RawDelegationFixture,
+    seed: u128,
+) -> Result<(), Box<dyn Error>> {
     let message_attempt = Uuid::from_u128(seed + 0x302);
     let wait_attempt = Uuid::from_u128(seed + 0x301);
     let mut transaction = pool.begin().await?;
@@ -936,14 +953,7 @@ async fn repository_wait_dispatch(
         )
         .await?
         .expect("the wait fixture prepares its next attempt");
-    repository
-        .authorize_attempt(
-            fixture.parent,
-            fixture.parent_turn,
-            ToolAttemptId::from_uuid(wait_attempt),
-        )
-        .await
-        .map_err(Into::into)
+    Ok(())
 }
 
 async fn repository_message_dispatch(
@@ -1105,6 +1115,80 @@ async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
             "child_session_id": fixture.child.as_uuid().to_string(),
             "mode": "background",
         })
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-010: a reconstituted process request observes a prepared
+/// physical attempt as nonterminal rather than claiming terminal evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_process_wait_reports_prepared_attempt_without_ending_it()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_PREPARED_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    prepare_repository_wait_attempt(&pool, fixture, seed).await?;
+    let outcome = SessionDelegationRepository::new(pool.clone())
+        .record_process_wait(
+            fixture.parent,
+            fixture.parent_turn,
+            fixture.awaiting_request,
+            fixture.child,
+            DelegationWaitMode::Background,
+        )
+        .await?;
+
+    assert_eq!(
+        outcome,
+        ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::StaleDispatch {
+                state: DelegationRequestExecutionState::Prepared,
+            },
+        ))
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-010: process delegation validates the named session before the
+/// request identity for both await and message operations.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_process_delegation_rejects_absent_session_first() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    let session = SessionId::from_uuid(Uuid::from_u128(0xd7f1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xd7f2));
+    let request = ToolRequestId::from_uuid(Uuid::from_u128(0xd7f3));
+    let peer = SessionId::from_uuid(Uuid::from_u128(0xd7f4));
+    let await_outcome = repository
+        .record_process_wait(session, turn, request, peer, DelegationWaitMode::Background)
+        .await?;
+    let message_outcome = repository
+        .record_process_message(
+            session,
+            turn,
+            request,
+            peer,
+            String::from("message"),
+            DelegationMessageId::from_uuid(Uuid::from_u128(0xd7f5)),
+        )
+        .await?;
+
+    assert_eq!(
+        await_outcome,
+        ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::SessionNotFound)
+    );
+    assert_eq!(
+        message_outcome,
+        ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::SessionNotFound)
     );
 
     pool.close().await;

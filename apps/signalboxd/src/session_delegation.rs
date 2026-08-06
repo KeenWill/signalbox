@@ -61,14 +61,18 @@ impl PostgresSessionDelegationPort {
             DelegationWaitMode::Background => AwaitSessionReceipt::from_wait(request, wait)
                 .map(AwaitSessionPortOutcome::BackgroundRegistered)
                 .ok_or(PostgresSessionDelegationPortError::Contract),
-            DelegationWaitMode::Foreground => {
-                self.load_foreground_delivery(wait).await.map(|delivered| {
-                    delivered.map_or(
-                        AwaitSessionPortOutcome::ForegroundPending(wait),
-                        AwaitSessionPortOutcome::Delivered,
-                    )
-                })
-            }
+            DelegationWaitMode::Foreground => Ok(
+                match recover_foreground_delivery_after_commit(
+                    self.load_foreground_delivery(wait).await,
+                ) {
+                    ForegroundDeliveryProjection::Delivered(delivered) => {
+                        AwaitSessionPortOutcome::Delivered(delivered)
+                    }
+                    ForegroundDeliveryProjection::Pending => {
+                        AwaitSessionPortOutcome::ForegroundPending(wait)
+                    }
+                },
+            ),
         }
     }
 
@@ -152,6 +156,27 @@ impl PostgresSessionDelegationPort {
                     .map_err(|_| PostgresSessionDelegationPortError::Contract)
             })
             .transpose()
+    }
+}
+
+enum ForegroundDeliveryProjection<T> {
+    Delivered(T),
+    Pending,
+}
+
+#[cfg(test)]
+impl<T> ForegroundDeliveryProjection<T> {
+    const fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
+fn recover_foreground_delivery_after_commit<T, E>(
+    delivered: Result<Option<T>, E>,
+) -> ForegroundDeliveryProjection<T> {
+    match delivered {
+        Ok(Some(delivered)) => ForegroundDeliveryProjection::Delivered(delivered),
+        Ok(None) | Err(_) => ForegroundDeliveryProjection::Pending,
     }
 }
 
@@ -367,5 +392,10 @@ mod tests {
         .expect("the decided result is preserved");
 
         assert_eq!(decided, 11);
+    }
+
+    #[test]
+    fn committed_foreground_wait_survives_follow_up_read_failure() {
+        assert!(recover_foreground_delivery_after_commit::<u8, ()>(Err(())).is_pending());
     }
 }

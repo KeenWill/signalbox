@@ -122,6 +122,7 @@ pub enum DelegationOperationRejection {
 pub enum DelegationRequestExecutionState {
     AwaitingApproval,
     Denied,
+    Prepared,
     Closed,
     AttemptEnded,
 }
@@ -129,6 +130,7 @@ pub enum DelegationRequestExecutionState {
 /// Typed precondition or durable-state rejection for one process request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessDelegationRequestRejection {
+    SessionNotFound,
     ToolRequestNotFound,
     ToolRequestNotInSession,
     RequestNotInTurn,
@@ -391,7 +393,17 @@ impl SessionDelegationRepository {
     ) -> Result<RecordDelegationMessageOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_tool_session(&mut transaction, request.request().session()).await?;
+            if !session_exists(&mut transaction, request.peer()).await? {
+                return Ok(RecordDelegationMessageOutcome::Rejected(
+                    DelegationOperationRejection::RelationshipNotFound,
+                ));
+            }
+            lock_message_sessions(
+                &mut transaction,
+                request.request().session(),
+                request.peer(),
+            )
+            .await?;
             if let Some(receipt) = load_message_replay(&mut transaction, &request).await? {
                 return Ok(RecordDelegationMessageOutcome::Recorded(Box::new(receipt)));
             }
@@ -504,6 +516,11 @@ impl SessionDelegationRepository {
         SessionDelegationRepositoryError,
     > {
         let mut connection = self.pool.acquire().await?;
+        if !session_exists(&mut connection, session).await? {
+            return Ok(ProcessDelegationOutcome::Rejected(
+                ProcessDelegationRequestRejection::SessionNotFound,
+            ));
+        }
         let Some(stored) = load_request_by_id(&mut connection, request).await? else {
             return Ok(ProcessDelegationOutcome::Rejected(
                 ProcessDelegationRequestRejection::ToolRequestNotFound,
@@ -560,6 +577,11 @@ impl SessionDelegationRepository {
         SessionDelegationRepositoryError,
     > {
         let mut connection = self.pool.acquire().await?;
+        if !session_exists(&mut connection, session).await? {
+            return Ok(ProcessDelegationOutcome::Rejected(
+                ProcessDelegationRequestRejection::SessionNotFound,
+            ));
+        }
         let Some(stored) = load_request_by_id(&mut connection, request).await? else {
             return Ok(ProcessDelegationOutcome::Rejected(
                 ProcessDelegationRequestRejection::ToolRequestNotFound,
@@ -716,8 +738,11 @@ async fn delegation_request_execution_state(
         {
             return Ok(DelegationRequestExecutionState::Denied);
         }
-        if batch.attempt(request.id()).is_some() {
-            return Ok(DelegationRequestExecutionState::AttemptEnded);
+        if let Some(attempt) = batch.attempt(request.id()) {
+            return Ok(match attempt {
+                ReconstitutedToolAttempt::Current(_) => DelegationRequestExecutionState::Prepared,
+                ReconstitutedToolAttempt::Ended(_) => DelegationRequestExecutionState::AttemptEnded,
+            });
         }
     }
     let (denied, closed, attempted): (bool, bool, bool) = sqlx::query_as(
@@ -745,6 +770,38 @@ async fn delegation_request_execution_state(
     } else {
         DelegationRequestExecutionState::Closed
     })
+}
+
+async fn session_exists(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, SessionDelegationRepositoryError> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)")
+        .bind(session_id_to_uuid(session))
+        .fetch_one(connection)
+        .await
+        .map_err(Into::into)
+}
+
+async fn lock_message_sessions(
+    connection: &mut PgConnection,
+    sender: SessionId,
+    peer: SessionId,
+) -> Result<(), SessionDelegationRepositoryError> {
+    let (first, second) = ordered_message_sessions(sender, peer);
+    lock_tool_session(connection, first).await?;
+    if second != first {
+        lock_tool_session(connection, second).await?;
+    }
+    Ok(())
+}
+
+const fn ordered_message_sessions(sender: SessionId, peer: SessionId) -> (SessionId, SessionId) {
+    if sender.as_uuid().as_u128() <= peer.as_uuid().as_u128() {
+        (sender, peer)
+    } else {
+        (peer, sender)
+    }
 }
 
 fn complete_attempt(
@@ -1663,5 +1720,20 @@ fn require_single(
         Ok(())
     } else {
         Err(SessionDelegationCorruption::Inconsistent(relationship).into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S18 / INV-010: either message direction locks the same endpoint order.
+    #[test]
+    fn s18_inv010_opposite_message_directions_share_canonical_lock_order() {
+        let lower = SessionId::from_uuid(Uuid::from_u128(1));
+        let higher = SessionId::from_uuid(Uuid::from_u128(2));
+
+        assert_eq!(ordered_message_sessions(lower, higher), (lower, higher));
+        assert_eq!(ordered_message_sessions(higher, lower), (lower, higher));
     }
 }
