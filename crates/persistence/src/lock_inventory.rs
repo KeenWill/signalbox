@@ -30,6 +30,7 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
                   FROM turn_lifecycle
                  WHERE session_id = $1
                    AND state_kind = 'active'
+                   AND NOT delegation_runtime_terminal
             )";
 
 pub(crate) const CONTEXT_COMPACTION_SCHEDULER: &str = "SELECT

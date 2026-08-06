@@ -100,6 +100,7 @@ impl PostgresEligibilitySweep {
                          FROM turn_lifecycle AS active
                         WHERE active.session_id = queued.session_id
                           AND active.state_kind = 'active'
+                          AND NOT active.delegation_runtime_terminal
                  )
                  GROUP BY queued.session_id
                 UNION
