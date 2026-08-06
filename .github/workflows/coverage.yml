@@ -1,0 +1,320 @@
+name: Coverage
+
+# Coverage is a measurement here, never a gate. No step in this file compares a
+# percentage against a threshold, no job is meant to become a required check,
+# and every job carries `continue-on-error` so a coverage failure can never
+# block a merge — the same report-only shape rust.yml's instruction counts and
+# tool-smokes.yml's live smokes already use. What this produces is a job
+# summary, a downloadable HTML and LCOV report, and one pull-request comment.
+#
+# The report is deliberately honest about what it does not measure; the
+# "Report the numbers" step below states every exclusion alongside the number,
+# because a coverage percentage whose denominator is unstated is not a
+# measurement.
+
+on:
+  pull_request:
+    paths:
+      - "apps/**"
+      - "crates/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "tooling/summarize_coverage.py"
+      - "tooling/test_summarize_coverage.py"
+      - ".github/workflows/coverage.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "crates/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "tooling/summarize_coverage.py"
+      - "tooling/test_summarize_coverage.py"
+      - ".github/workflows/coverage.yml"
+  workflow_dispatch:
+
+# Superseded pull-request runs release their slots against the public
+# concurrency cap. Every other event takes a group of its own: sharing one
+# group would let a third run cancel a second still pending behind the first,
+# which `cancel-in-progress: false` does not prevent.
+concurrency:
+  group: >-
+    coverage-${{ github.event_name == 'pull_request'
+    && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  rust-coverage:
+    name: Rust coverage (report only)
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    # The instrumented build compiles the workspace once more and then runs
+    # both the workspace suite and the three dockerized PostgreSQL suites in
+    # one job. They cannot be split across runners: a report needs the
+    # profiling data and the instrumented binaries that produced it in the same
+    # workspace, and shipping the instrumented binaries between jobs would cost
+    # more than the serial minutes do. This is the slowest job in the
+    # repository by design, and it gates nothing.
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Cheap and first: the summarizer's own regression tests run before the
+      # hour-long instrumented build, so a broken report renderer fails in
+      # seconds rather than at the end.
+      - name: Test the coverage summarizer
+        run: python3 tooling/test_summarize_coverage.py
+      # Mirrors workspace-tests in rust.yml: without Bubblewrap the sandboxed
+      # execution suite skips, and the measured surface would silently differ
+      # from the surface CI actually tests.
+      - name: Install Bubblewrap
+        run: sudo apt-get install --yes bubblewrap
+      - name: Enable unprivileged user namespaces for Bubblewrap
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          key: rust-coverage
+      # Exact version pin, as cargo-deny is pinned in deny.yml: an instrumented
+      # build and its report must come from one known tool build.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      # Each measured suite runs under `--no-report`, which accumulates
+      # profiling data across invocations; the report is generated once from
+      # all of them below. Each suite continues on error and its outcome is
+      # reported, so one failing suite yields a smaller number that says so
+      # rather than no number at all.
+      # One test is skipped, and only here. The production exec runner launches
+      # its target through the workspace's own `signalbox-exec-supervisor`,
+      # which this job instruments; LLVM's profiling runtime sets
+      # `__LLVM_PROFILE_RT_INIT_ONCE` in that supervisor's environment, and the
+      # variable survives the exec into the target. A test asserting that a
+      # cleared environment holds exactly the one variable it was given
+      # therefore observes two. Both the assertion and the code under test are
+      # right; only the instrumented supervisor differs from the binary
+      # rust.yml runs. Skipping the one test it perturbs is honest — the
+      # exclusion is stated in the report — where leaving a permanently failed
+      # suite row would teach a reader to ignore that column.
+      - name: Measure the workspace suite
+        id: workspace
+        continue-on-error: true
+        run: >-
+          cargo llvm-cov --no-report --no-fail-fast
+          --workspace --all-targets --all-features
+          -- --skip production_runner_clears_ambient_environment_when_requested
+      - name: Measure the persistence PostgreSQL suite
+        id: persistence
+        continue-on-error: true
+        run: >-
+          cargo llvm-cov --no-report --no-fail-fast
+          -p signalbox-persistence --features postgres-integration --tests
+          -- --ignored --test-threads=4
+      # `--skip` keeps the whole-daemon live smoke out of this run. It is
+      # already inert without GITHUB_TOKEN, which this job never sets, but a
+      # measurement job spends no real HTTP requests by construction rather
+      # than by an absent credential.
+      - name: Measure the signalboxd PostgreSQL suite
+        id: signalboxd
+        continue-on-error: true
+        run: >-
+          cargo llvm-cov --no-report --no-fail-fast
+          -p signalboxd --tests
+          -- --ignored --test-threads=4
+          --skip live_daemon_executes_every_tool_family_and_denies_every_gate
+      - name: Measure the terminal-client PostgreSQL suite
+        id: terminal_client
+        continue-on-error: true
+        run: >-
+          cargo llvm-cov --no-report --no-fail-fast
+          -p signalbox-client --tests
+          -- --ignored --test-threads=4
+          --skip terminal_client_completes_the_real_anthropic_path
+      - name: Report the numbers
+        if: ${{ always() }}
+        env:
+          # `github.sha` is the commit this job actually checked out. On a
+          # pull_request event that is the synthetic merge of the head into the
+          # base, which is the tree rust.yml gates on too — measuring anything
+          # else would make this number describe a different tree than
+          # `validate` does. The head is reported beside it rather than instead
+          # of it, because the merge commit is the one that was measured and
+          # the head is the one a reader recognises.
+          MEASURED_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          WORKSPACE_OUTCOME: ${{ steps.workspace.outcome }}
+          PERSISTENCE_OUTCOME: ${{ steps.persistence.outcome }}
+          SIGNALBOXD_OUTCOME: ${{ steps.signalboxd.outcome }}
+          TERMINAL_CLIENT_OUTCOME: ${{ steps.terminal_client.outcome }}
+        run: |
+          report_dir="$RUNNER_TEMP/coverage"
+          mkdir -p "$report_dir"
+          cargo llvm-cov report --lcov --output-path "$report_dir/lcov.info"
+          cargo llvm-cov report --html --output-dir "$report_dir"
+          # `--summary-only` drops the per-region detail the summarizer never
+          # reads, which is the difference between a 140 KiB document and a
+          # 70 MiB one.
+          cargo llvm-cov report --json --summary-only \
+            --output-path "$report_dir/summary.json"
+
+          {
+            echo '| Measured suite | Outcome |'
+            echo '| --- | --- |'
+            echo "| workspace (\`--all-targets --all-features\`) | $WORKSPACE_OUTCOME |"
+            echo "| persistence PostgreSQL (\`--ignored\`) | $PERSISTENCE_OUTCOME |"
+            echo "| signalboxd PostgreSQL (\`--ignored\`) | $SIGNALBOXD_OUTCOME |"
+            echo "| terminal-client PostgreSQL (\`--ignored\`) | $TERMINAL_CLIENT_OUTCOME |"
+            echo
+            echo '<details><summary>What this number does not measure</summary>'
+            echo
+            echo '- Doctests. `cargo llvm-cov --doctests` needs a nightly'
+            echo '  toolchain; this workspace pins stable, so the compile-fail'
+            echo '  sealing proofs and every other doctest are outside the'
+            echo '  denominator.'
+            echo '- Live smokes, which spend real network requests or'
+            echo '  credentials and are never run here: the tools-github and'
+            echo '  tools-web smokes stay `--ignored`, and the whole-daemon and'
+            echo '  real-provider terminal smokes are skipped by name above.'
+            echo '- The Swift native client, which Xcode measures separately.'
+            echo '- One environment-clearing test in `signalbox-tools-exec`,'
+            echo '  which instrumenting its supervisor process perturbs. The'
+            echo '  workflow comment on the workspace step states why; rust.yml'
+            echo '  runs that test uninstrumented and gates on it.'
+            echo '- Dedicated test files. cargo-llvm-cov excludes `tests/`'
+            echo '  and `benches/` targets and `*tests.rs` modules from the'
+            echo '  report by default, so that test code is counted neither'
+            echo '  covered nor uncovered here. Inline `#[cfg(test)]` modules'
+            echo '  inside a source file are the exception: they are'
+            echo '  instrumented, and they land on both sides. A test body'
+            echo '  that ran counts as covered, which makes every percentage'
+            echo '  below optimistic; the body of an `#[ignore]`d test no'
+            echo '  measured suite runs counts as uncovered, which puts test'
+            echo '  lines into the file ranking. Read both tables as close,'
+            echo '  not exact.'
+            echo
+            echo '</details>'
+          } > "$report_dir/preamble.md"
+
+          python3 tooling/summarize_coverage.py "$report_dir/summary.json" \
+            --preamble "$report_dir/preamble.md" \
+            --top-uncovered 25 > "$report_dir/report.md"
+
+          cat "$report_dir/report.md" >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            printf '%s\n\n' '<!-- signalbox-rust-coverage -->'
+            cat "$report_dir/report.md"
+            printf '\nMeasured at `%s`' "$MEASURED_SHA"
+            if [ -n "$HEAD_SHA" ]; then
+              printf ', the merge commit this pull request builds, whose head is `%s`' \
+                "$HEAD_SHA"
+            fi
+            printf ', by [run %s](%s/%s/actions/runs/%s), which uploads the HTML report and LCOV as an artifact.\n' \
+              "$GITHUB_RUN_ID" \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+          } > "$report_dir/comment.md"
+      - name: Upload the coverage report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-coverage
+          path: ${{ runner.temp }}/coverage
+          if-no-files-found: error
+          retention-days: 14
+
+  # Holds the only write token in this workflow and never builds or executes
+  # anything, mirroring the token separation devenv-lock.yml already uses: the
+  # instrumented test run above cannot reach a token that can write to a pull
+  # request.
+  #
+  # A pull request from a fork is skipped rather than attempted. GitHub issues
+  # such a run a read-only token no matter what `permissions` requests, so the
+  # comment would fail; the job summary and the uploaded report are unaffected
+  # and remain the whole report for a fork contributor.
+  #
+  # It runs whenever the coverage job reached an end, not only when that job
+  # produced a report: a run that measured nothing must replace the previous
+  # run's numbers rather than leave them standing as the current readout. A
+  # cancelled run is the one exception, since a superseded run has a successor
+  # already on its way to overwrite the comment.
+  publish-comment:
+    name: Comment the coverage report
+    needs: rust-coverage
+    if: >-
+      always()
+      && needs.rust-coverage.result != 'cancelled'
+      && github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # `actions: read` lets the download step read this run's artifact; a
+      # job-level permissions block sets every scope it omits to none.
+      actions: read
+      pull-requests: write
+    steps:
+      # Continues on error so a run that uploaded no report still reaches the
+      # step below, which replaces the stale comment instead of leaving it.
+      - name: Download the coverage report
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rust-coverage
+          path: ${{ runner.temp }}/coverage
+      # One comment per pull request, rewritten in place on every push: a
+      # coverage report is a current-state readout, and a thread of superseded
+      # readouts would bury the review conversation.
+      - name: Post or update the coverage comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          body="$RUNNER_TEMP/coverage/comment.md"
+          payload="$RUNNER_TEMP/payload.json"
+
+          # No report means the run measured nothing. Saying so under the same
+          # marker retires the previous run's numbers, which would otherwise
+          # keep reading as this head's, and names the head that has none.
+          if [ ! -f "$body" ]; then
+            mkdir -p "$RUNNER_TEMP/coverage"
+            {
+              printf '%s\n\n' '<!-- signalbox-rust-coverage -->'
+              printf '## Rust coverage (report only)\n\n'
+              printf 'The coverage run for `%s` produced no report; see ' "$HEAD_SHA"
+              printf '[run %s](%s/%s/actions/runs/%s).\n\n' \
+                "$GITHUB_RUN_ID" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" \
+                "$GITHUB_RUN_ID"
+              printf 'Nothing is gated on this. The measurement is missing, '
+              printf 'not failing, and no merge waits on it.\n'
+            } > "$body"
+          fi
+          jq -n --rawfile body "$body" '{body: $body}' > "$payload"
+
+          # Paginated: a long-running pull request can hold more comments than
+          # one page, and the marker comment is the oldest of them.
+          existing="$(gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            --jq '.[] | select(.body | startswith("<!-- signalbox-rust-coverage -->")) | .id')"
+          first="${existing%%$'\n'*}"
+
+          if [ -n "$first" ]; then
+            gh api -X PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$first" \
+              --input "$payload" --silent
+          else
+            gh api -X POST \
+              "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              --input "$payload" --silent
+          fi
