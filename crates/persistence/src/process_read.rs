@@ -1606,6 +1606,7 @@ impl ProcessReadRepository {
                        FROM turn_lifecycle
                       WHERE session_id = session.session_id
                         AND state_kind = 'active'
+                        AND NOT delegation_runtime_terminal
                         AND active_phase_kind = 'awaiting_model_call_recovery')
                FROM session
               WHERE session_id = $1",
@@ -2476,6 +2477,8 @@ async fn load_next_transcript_turn(
             active_tool_round.boundary_frontier_id AS active_tool_round_frontier_id,
             logical_terminal.spawning_tool_request_id
                 AS logical_terminal_spawning_request_id,
+            logical_terminal.terminal_frontier_id
+                AS logical_terminal_frontier_id,
             logical_terminal_event.outcome_kind
                 AS logical_terminal_outcome_kind,
             logical_terminal_event.reason_kind
@@ -3620,6 +3623,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
 #[derive(Clone, Copy)]
 struct LogicalDelegationTerminalProjection {
     spawning_request: ToolRequestId,
+    terminal_frontier: ContextFrontierId,
     outcome: DispatchedDelegationOutcome,
     reason: DispatchedDelegationReason,
     provenance: DispatchedDelegationProvenance,
@@ -3629,11 +3633,15 @@ fn decode_logical_delegation_terminal(
     row: &PgRow,
 ) -> Result<Option<LogicalDelegationTerminalProjection>, ProcessReadError> {
     let spawning_request: Option<Uuid> = row.try_get("logical_terminal_spawning_request_id")?;
+    let terminal_frontier: Option<Uuid> = row.try_get("logical_terminal_frontier_id")?;
     let outcome: Option<String> = row.try_get("logical_terminal_outcome_kind")?;
     let reason: Option<String> = row.try_get("logical_terminal_reason_kind")?;
     match (spawning_request, outcome.as_deref(), reason.as_deref()) {
         (None, None, None) => Ok(None),
         (Some(spawning_request), Some(outcome), Some(reason)) => {
+            let terminal_frontier = terminal_frontier.ok_or(
+                ProcessReadCorruption::Inconsistent("logical delegation terminal frontier"),
+            )?;
             let outcome = decode_delegation_outcome(outcome).map_err(|_| {
                 ProcessReadCorruption::Inconsistent("logical delegation terminal outcome")
             })?;
@@ -3670,6 +3678,7 @@ fn decode_logical_delegation_terminal(
             }
             Ok(Some(LogicalDelegationTerminalProjection {
                 spawning_request: ToolRequestId::from_uuid(spawning_request),
+                terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
                 outcome,
                 reason,
                 provenance,
@@ -3692,6 +3701,16 @@ fn project_logical_delegation_terminal(
             reason: logical_terminal.reason,
             provenance: logical_terminal.provenance,
         };
+        // The physical decode observed a mid-execution boundary, but the
+        // cascade froze this turn at the logical terminal's frontier and every
+        // successor chains from it. Rendering the physical frontier would show
+        // execution evidence no successor model call ever saw, and would vanish
+        // from the same transcript as soon as a successor activates. A turn
+        // terminalized while still queued started no execution lineage at all,
+        // so it keeps the absent frontier its start lineage pairs with.
+        if decoded.start_lineage.is_some() {
+            decoded.latest_frontier = Some(logical_terminal.terminal_frontier);
+        }
     }
     Ok(decoded)
 }
