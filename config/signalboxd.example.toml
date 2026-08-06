@@ -104,6 +104,23 @@ allowed_origins = [
 # repository = "namespace/project"
 # poll_interval_seconds = 60
 # credential_file = "/run/credentials/repository-watch-namespace-project"
+#
+# [[repository_watch.rules]]
+# id = "merge-forward-on-conflict"
+# version = 1
+# singleton_per = "pull_request"
+# cooldown_seconds = 0
+#
+# [repository_watch.rules.matcher]
+# event_kinds = ["mergeable_state_changed"]
+# repo = "namespace/project"
+#
+# [repository_watch.rules.matcher.mergeable_state]
+# any_of = ["conflicting"]
+#
+# [[repository_watch.rules.actions]]
+# kind = "dispatch_session"
+# template = "merge-forward"
 
 # Tool dependencies use the same closed mapping-table pattern as model
 # adapters. The two GitHub-backed families share one non-secret profile; the

@@ -169,10 +169,11 @@ pub use repo_watch::{
     RepoWatchDispatchContextShape, RepoWatchEvent, RepoWatchEventConstructionError,
     RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher,
     RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleValidationError,
-    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
-    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepoWatchWorkflowRunAttempt,
-    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId,
+    RepoWatchRuleValidationError, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchTemplateContextDeclaration, RepoWatchTemplateContextDeclarationError,
+    RepoWatchTextError, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
+    WorkflowName,
 };
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,

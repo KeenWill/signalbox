@@ -38,7 +38,8 @@ use signalbox_model_runtime_anthropic::{
 };
 use signalbox_persistence::{
     conversation_import::backfill_imported_conversation_display_titles, migrate,
-    model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
+    model_execution::PostgresModelCallRepository,
+    repo_watch_dispatch::PostgresRepoWatchDispatchStore, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
 use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
@@ -1064,6 +1065,24 @@ async fn run_hub(
             SanitizedStartupCause::TemplateConfiguration(&error),
         )
     })?;
+    if let Some(repository_watch) = model_configuration.repository_watch() {
+        let declarations = template_configuration
+            .repo_watch_context_declarations()
+            .map_err(|error| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::TemplateConfiguration(&error),
+                )
+            })?;
+        repository_watch
+            .validate_template_contexts(&declarations)
+            .map_err(|error| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::ModelConfiguration(&error),
+                )
+            })?;
+    }
     let anthropic_api_key_file = configuration
         .anthropic_api_key_file(model_configuration.uses_anthropic_adapter())
         .map_err(|error| {
@@ -1265,21 +1284,6 @@ async fn run_hub(
         return Err(error);
     }
 
-    let repository_watch_runtime = match model_configuration.repository_watch() {
-        Some(configuration) => match RepositoryWatchRuntime::try_new(pool.clone(), configuration) {
-            Ok(runtime) => Some(runtime),
-            Err(_) => {
-                let failure = erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static("repository_watch_transport_construction_failed"),
-                );
-                let _ = database.close().await;
-                return Err(failure);
-            }
-        },
-        None => None,
-    };
-
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
         Ok(service) => service,
         Err(_) => {
@@ -1330,12 +1334,62 @@ async fn run_hub(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
     );
-    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
-
+    let configured_repositories =
+        model_configuration
+            .repository_watch()
+            .map_or_else(Vec::new, |configuration| {
+                configuration
+                    .repositories()
+                    .iter()
+                    .map(|repository| repository.repository().clone())
+                    .collect()
+            });
+    let repository_watch_store = PostgresRepoWatchDispatchStore::new(
+        pool.clone(),
+        model_configuration.session_credential_pin(),
+    );
+    if repository_watch_store
+        .deactivate_unconfigured_repositories(&configured_repositories)
+        .await
+        .is_err()
+    {
+        let failure = erase_startup_cause(
+            RuntimePhase::StartupScan,
+            SanitizedStartupCause::Static("repository_watch_configuration_reconciliation_failed"),
+        );
+        let _ = listener.cleanup();
+        let _ = runner_listener.cleanup();
+        let _ = database.close().await;
+        return Err(failure);
+    }
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
+    let repository_watch_runtime = match model_configuration.repository_watch() {
+        Some(configuration) => match RepositoryWatchRuntime::try_new(
+            pool.clone(),
+            configuration,
+            template_configuration.clone(),
+            model_configuration.clone(),
+            model_configuration.session_credential_pin(),
+            eligibility_nudge.clone(),
+        ) {
+            Ok(runtime) => Some(runtime),
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("repository_watch_transport_construction_failed"),
+                );
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        },
+        None => None,
+    };
+    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
         scheduler_pool.clone(),

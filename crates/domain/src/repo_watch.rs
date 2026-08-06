@@ -11,6 +11,7 @@ use std::{
 };
 
 use regex::Regex;
+use sha2::{Digest, Sha256};
 
 use crate::{RepoWatchEventId, SessionTemplateName};
 
@@ -150,7 +151,10 @@ fn valid_repository_segment(value: &str) -> bool {
 pub struct BranchName(String);
 
 impl BranchName {
-    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError> {
+    pub fn try_new(mut value: String) -> Result<Self, RepoWatchTextError> {
+        if let Some(name) = value.strip_prefix("refs/heads/") {
+            value = name.to_owned();
+        }
         validate_text(&value, MAX_BRANCH_BYTES)?;
         let invalid_component = value.split('/').any(|component| {
             component.is_empty() || component.starts_with('.') || component.ends_with(".lock")
@@ -985,6 +989,103 @@ impl RepoWatchMatcherV1 {
     pub fn conclusion(&self) -> &[CheckConclusion] {
         &self.conclusion
     }
+
+    /// Reports whether one closed durable fact satisfies every configured field.
+    pub fn matches(&self, event: &RepoWatchEvent) -> bool {
+        if !self.event_kinds.is_empty() && !self.event_kinds.contains(&event.kind().name()) {
+            return false;
+        }
+        if self
+            .repository
+            .as_ref()
+            .is_some_and(|repository| repository != event.repository())
+        {
+            return false;
+        }
+        if !self.mergeable_state_matches(event.kind()) || !self.conclusion_matches(event.kind()) {
+            return false;
+        }
+        match event.target() {
+            RepoWatchEventTarget::PullRequest(context) => self.pull_request_fields_match(context),
+            RepoWatchEventTarget::Branch => self.has_no_pull_request_fields(),
+        }
+    }
+
+    fn has_no_pull_request_fields(&self) -> bool {
+        self.base_branch.is_none()
+            && self.head_branch.is_none()
+            && self.title.is_none()
+            && self.body.is_none()
+            && self.labels.any_of.is_empty()
+            && self.labels.all_of.is_empty()
+            && self.labels.none_of.is_empty()
+            && self.draft.is_none()
+            && self.author.is_none()
+            && self.mergeable_state.is_empty()
+    }
+
+    fn pull_request_fields_match(&self, context: &PullRequestEventContext) -> bool {
+        self.base_branch
+            .as_ref()
+            .is_none_or(|branch| branch == context.base_branch())
+            && self
+                .head_branch
+                .as_ref()
+                .is_none_or(|pattern| pattern.is_match(context.head_branch().as_str()))
+            && self
+                .title
+                .as_ref()
+                .is_none_or(|pattern| pattern.is_match(context.title().as_str()))
+            && self
+                .body
+                .as_ref()
+                .is_none_or(|pattern| pattern.is_match(context.body().as_str()))
+            && (self.labels.any_of.is_empty()
+                || self
+                    .labels
+                    .any_of
+                    .iter()
+                    .any(|label| context.labels().contains(label)))
+            && self
+                .labels
+                .all_of
+                .iter()
+                .all(|label| context.labels().contains(label))
+            && self
+                .labels
+                .none_of
+                .iter()
+                .all(|label| !context.labels().contains(label))
+            && self.draft.is_none_or(|draft| draft == context.draft())
+            && self
+                .author
+                .as_ref()
+                .is_none_or(|author| context.author() == Some(author))
+    }
+
+    fn mergeable_state_matches(&self, kind: &RepoWatchEventKindV1) -> bool {
+        if self.mergeable_state.is_empty() {
+            return true;
+        }
+        matches!(
+            kind,
+            RepoWatchEventKindV1::MergeableStateChanged { current }
+                if self.mergeable_state.contains(current)
+        )
+    }
+
+    fn conclusion_matches(&self, kind: &RepoWatchEventKindV1) -> bool {
+        if self.conclusion.is_empty() {
+            return true;
+        }
+        let conclusion = match kind {
+            RepoWatchEventKindV1::ChecksCompleted { outcome } => (*outcome).into(),
+            RepoWatchEventKindV1::CheckRunCompleted { conclusion, .. }
+            | RepoWatchEventKindV1::BranchWorkflowRunCompleted { conclusion, .. } => *conclusion,
+            _ => return false,
+        };
+        self.conclusion.contains(&conclusion)
+    }
 }
 
 /// Durable singleton key selected independently by each rule.
@@ -1260,6 +1361,22 @@ pub enum RepoWatchActionV1 {
     DispatchSession(DispatchSessionAction),
 }
 
+/// Domain-separated digest of one rule's complete versioned semantics.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub struct RepoWatchRuleContentDigest([u8; 32]);
+
+impl RepoWatchRuleContentDigest {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RepoWatchRuleContentDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RepoWatchRuleContentDigest([digest])")
+    }
+}
+
 /// One complete versioned repository-watch rule.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchRule {
@@ -1275,6 +1392,7 @@ pub struct RepoWatchRule {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchRuleValidationError {
     NoActions,
+    SubsecondCooldown,
     BranchEventWithPullRequestSingleton {
         scope: RepoWatchSingletonScope,
     },
@@ -1291,6 +1409,9 @@ impl fmt::Display for RepoWatchRuleValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoActions => formatter.write_str("repository-watch rule has no actions"),
+            Self::SubsecondCooldown => {
+                formatter.write_str("repository-watch cooldown must use whole seconds")
+            }
             Self::BranchEventWithPullRequestSingleton { scope } => write!(
                 formatter,
                 "repository-watch branch event cannot use `{}` singleton scope",
@@ -1322,6 +1443,9 @@ impl RepoWatchRule {
     ) -> Result<Self, RepoWatchRuleValidationError> {
         if actions.is_empty() {
             return Err(RepoWatchRuleValidationError::NoActions);
+        }
+        if cooldown.subsec_nanos() != 0 {
+            return Err(RepoWatchRuleValidationError::SubsecondCooldown);
         }
         if matcher.produces_branch_context() {
             match singleton_per {
@@ -1364,6 +1488,119 @@ impl RepoWatchRule {
         self.cooldown
     }
 
+    /// Derives the stable identity of every matcher, action, and admission field.
+    pub fn content_digest(&self) -> RepoWatchRuleContentDigest {
+        let mut digest = Sha256::new();
+        update_rule_digest_frame(&mut digest, b"signalbox/repo-watch/rule-content-digest/v1");
+        update_rule_digest_frame(&mut digest, &self.version.get().to_be_bytes());
+        update_rule_digest_set(
+            &mut digest,
+            b"event_kinds",
+            self.matcher
+                .event_kinds
+                .iter()
+                .map(|kind| repo_watch_event_kind_name(*kind)),
+        );
+        update_rule_digest_option(
+            &mut digest,
+            b"repository",
+            self.matcher.repository.as_ref().map(RepositorySlug::as_str),
+        );
+        update_rule_digest_option(
+            &mut digest,
+            b"base_branch",
+            self.matcher.base_branch.as_ref().map(BranchName::as_str),
+        );
+        update_rule_digest_option(
+            &mut digest,
+            b"head_branch",
+            self.matcher
+                .head_branch
+                .as_ref()
+                .map(RepoWatchPattern::as_str),
+        );
+        update_rule_digest_option(
+            &mut digest,
+            b"title",
+            self.matcher.title.as_ref().map(RepoWatchPattern::as_str),
+        );
+        update_rule_digest_option(
+            &mut digest,
+            b"body",
+            self.matcher.body.as_ref().map(RepoWatchPattern::as_str),
+        );
+        update_rule_digest_set(
+            &mut digest,
+            b"labels_any_of",
+            self.matcher.labels.any_of.iter().map(LabelName::as_str),
+        );
+        update_rule_digest_set(
+            &mut digest,
+            b"labels_all_of",
+            self.matcher.labels.all_of.iter().map(LabelName::as_str),
+        );
+        update_rule_digest_set(
+            &mut digest,
+            b"labels_none_of",
+            self.matcher.labels.none_of.iter().map(LabelName::as_str),
+        );
+        update_rule_digest_frame(&mut digest, b"draft");
+        update_rule_digest_frame(
+            &mut digest,
+            match self.matcher.draft {
+                Some(true) => &b"true"[..],
+                Some(false) => &b"false"[..],
+                None => &b"none"[..],
+            },
+        );
+        update_rule_digest_option(
+            &mut digest,
+            b"author",
+            self.matcher
+                .author
+                .as_ref()
+                .map(RepoWatchAuthorLogin::as_str),
+        );
+        update_rule_digest_set(
+            &mut digest,
+            b"mergeable_state",
+            self.matcher
+                .mergeable_state
+                .iter()
+                .map(|state| mergeable_state_name(*state)),
+        );
+        update_rule_digest_set(
+            &mut digest,
+            b"conclusion",
+            self.matcher
+                .conclusion
+                .iter()
+                .map(|conclusion| check_conclusion_name(*conclusion)),
+        );
+        update_rule_digest_frame(&mut digest, b"actions");
+        update_rule_digest_frame(
+            &mut digest,
+            &u64::try_from(self.actions.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for action in &self.actions {
+            match action {
+                RepoWatchRuleActionV1::DispatchSession { template } => {
+                    update_rule_digest_frame(&mut digest, b"dispatch_session");
+                    update_rule_digest_frame(&mut digest, template.as_str().as_bytes());
+                }
+            }
+        }
+        update_rule_digest_frame(&mut digest, b"singleton_per");
+        update_rule_digest_frame(&mut digest, self.singleton_per.as_str().as_bytes());
+        update_rule_digest_frame(&mut digest, b"cooldown_seconds");
+        update_rule_digest_frame(&mut digest, &self.cooldown.as_secs().to_be_bytes());
+        update_rule_digest_frame(&mut digest, b"cooldown_nanoseconds");
+        update_rule_digest_frame(&mut digest, &self.cooldown.subsec_nanos().to_be_bytes());
+        RepoWatchRuleContentDigest(digest.finalize().into())
+    }
+
     pub fn required_context_shapes(&self) -> Vec<RepoWatchDispatchContextShape> {
         let branch = self.matcher.produces_branch_context();
         let pull_request = self.matcher.produces_pull_request_context();
@@ -1402,6 +1639,106 @@ impl RepoWatchRule {
         }
         Ok(())
     }
+
+    /// Derives the complete ordered action list for one matching durable fact.
+    pub fn actions_for_event(
+        &self,
+        event: &RepoWatchEvent,
+    ) -> Result<Vec<RepoWatchActionV1>, RepoWatchDispatchContextError> {
+        if !self.matcher.matches(event) {
+            return Ok(Vec::new());
+        }
+        let params = DispatchSessionParameters::try_from_event(event.clone())?;
+        Ok(self
+            .actions
+            .iter()
+            .map(|action| match action {
+                RepoWatchRuleActionV1::DispatchSession { template } => {
+                    RepoWatchActionV1::DispatchSession(DispatchSessionAction::new(
+                        template.clone(),
+                        params.clone(),
+                    ))
+                }
+            })
+            .collect())
+    }
+}
+
+fn update_rule_digest_frame(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
+}
+
+fn update_rule_digest_option(digest: &mut Sha256, field: &[u8], value: Option<&str>) {
+    update_rule_digest_frame(digest, field);
+    match value {
+        Some(value) => {
+            update_rule_digest_frame(digest, b"some");
+            update_rule_digest_frame(digest, value.as_bytes());
+        }
+        None => update_rule_digest_frame(digest, b"none"),
+    }
+}
+
+fn update_rule_digest_set<'value>(
+    digest: &mut Sha256,
+    field: &[u8],
+    values: impl Iterator<Item = &'value str>,
+) {
+    let mut values = values.collect::<Vec<_>>();
+    values.sort_unstable();
+    update_rule_digest_frame(digest, field);
+    update_rule_digest_frame(
+        digest,
+        &u64::try_from(values.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for value in values {
+        update_rule_digest_frame(digest, value.as_bytes());
+    }
+}
+
+const fn repo_watch_event_kind_name(kind: RepoWatchEventKindNameV1) -> &'static str {
+    match kind {
+        RepoWatchEventKindNameV1::PullRequestOpened => "pull_request_opened",
+        RepoWatchEventKindNameV1::PullRequestClosed => "pull_request_closed",
+        RepoWatchEventKindNameV1::PullRequestMerged => "pull_request_merged",
+        RepoWatchEventKindNameV1::HeadChanged => "head_changed",
+        RepoWatchEventKindNameV1::MergeableStateChanged => "mergeable_state_changed",
+        RepoWatchEventKindNameV1::ChecksCompleted => "checks_completed",
+        RepoWatchEventKindNameV1::CheckRunCompleted => "check_run_completed",
+        RepoWatchEventKindNameV1::BranchWorkflowRunCompleted => "branch_workflow_run_completed",
+        RepoWatchEventKindNameV1::ReviewSubmitted => "review_submitted",
+        RepoWatchEventKindNameV1::ThreadOpened => "thread_opened",
+        RepoWatchEventKindNameV1::ThreadResolved => "thread_resolved",
+        RepoWatchEventKindNameV1::Labeled => "labeled",
+        RepoWatchEventKindNameV1::Unlabeled => "unlabeled",
+        RepoWatchEventKindNameV1::BaseAdvanced => "base_advanced",
+        RepoWatchEventKindNameV1::ReactionChanged => "reaction_changed",
+    }
+}
+
+const fn mergeable_state_name(state: MergeableState) -> &'static str {
+    match state {
+        MergeableState::Mergeable => "mergeable",
+        MergeableState::Conflicting => "conflicting",
+        MergeableState::Unknown => "unknown",
+    }
+}
+
+const fn check_conclusion_name(conclusion: CheckConclusion) -> &'static str {
+    match conclusion {
+        CheckConclusion::Success => "success",
+        CheckConclusion::Failure => "failure",
+        CheckConclusion::Neutral => "neutral",
+        CheckConclusion::Cancelled => "cancelled",
+        CheckConclusion::Skipped => "skipped",
+        CheckConclusion::TimedOut => "timed_out",
+        CheckConclusion::ActionRequired => "action_required",
+        CheckConclusion::Stale => "stale",
+        CheckConclusion::StartupFailure => "startup_failure",
+    }
 }
 
 #[cfg(test)]
@@ -1415,7 +1752,7 @@ mod tests {
     use super::{
         BranchName, CheckConclusion, CommitSha, LabelName, MergeableState, PullRequestBody,
         PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
-        RepoWatchAuthorLogin, RepoWatchDispatchContextShape, RepoWatchEvent,
+        RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextShape, RepoWatchEvent,
         RepoWatchEventConstructionError, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
         RepoWatchLabelMatcher, RepoWatchLabelMatcherInput, RepoWatchMatcherV1,
         RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
@@ -1427,6 +1764,8 @@ mod tests {
     const CONTEXT_HEAD_SHA: &str = "1111111111111111111111111111111111111111";
     const EVENT_HEAD_SHA: &str = "2222222222222222222222222222222222222222";
     const PREVIOUS_HEAD_SHA: &str = "3333333333333333333333333333333333333333";
+    const MAIN_BRANCH: &str = "main";
+    const MAIN_BRANCH_FULL_REF: &str = "refs/heads/main";
     const VALID_MULTIBYTE_LABEL: &str = "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀";
     const TOO_MANY_LABEL_CHARACTERS: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -1448,6 +1787,27 @@ mod tests {
             draft: false,
             author: Some(RepoWatchAuthorLogin::try_new(String::from("maintainer"))?),
         }))
+    }
+
+    fn digest_rule(
+        matcher: RepoWatchMatcherV1,
+        actions: Vec<RepoWatchRuleActionV1>,
+        singleton_per: RepoWatchSingletonScope,
+        cooldown: Duration,
+    ) -> Result<RepoWatchRule, Box<dyn Error>> {
+        Ok(RepoWatchRule::try_new(
+            RepoWatchRuleId::try_new(String::from("digest-rule"))?,
+            matcher,
+            actions,
+            singleton_per,
+            cooldown,
+        )?)
+    }
+
+    fn dispatch_rule_action(template: &str) -> Result<RepoWatchRuleActionV1, Box<dyn Error>> {
+        Ok(RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(template.to_owned())?,
+        })
     }
 
     #[test]
@@ -1473,6 +1833,14 @@ mod tests {
             RepositorySlug::try_new(String::from("../repo")),
             Err(RepoWatchTextError::Malformed)
         );
+    }
+
+    #[test]
+    fn branch_name_canonicalizes_a_full_head_ref() -> Result<(), RepoWatchTextError> {
+        let branch = BranchName::try_new(String::from(MAIN_BRANCH_FULL_REF))?;
+
+        assert_eq!(branch.as_str(), MAIN_BRANCH);
+        Ok(())
     }
 
     #[test]
@@ -1849,6 +2217,71 @@ mod tests {
     }
 
     #[test]
+    fn rule_rejects_a_subsecond_cooldown() -> Result<(), Box<dyn Error>> {
+        let result = RepoWatchRule::try_new(
+            RepoWatchRuleId::try_new(String::from("subsecond-cooldown"))?,
+            RepoWatchMatcherV1::default(),
+            vec![dispatch_rule_action("handler")?],
+            RepoWatchSingletonScope::PullRequest,
+            Duration::from_nanos(1),
+        );
+
+        assert_eq!(result, Err(RepoWatchRuleValidationError::SubsecondCooldown));
+        Ok(())
+    }
+
+    #[test]
+    fn rule_content_digest_covers_every_semantic_field_group() -> Result<(), Box<dyn Error>> {
+        let matcher = RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::PullRequestOpened],
+            ..RepoWatchMatcherV1Input::default()
+        });
+        let actions = vec![
+            dispatch_rule_action("first-handler")?,
+            dispatch_rule_action("second-handler")?,
+        ];
+        let base = digest_rule(
+            matcher.clone(),
+            actions.clone(),
+            RepoWatchSingletonScope::PullRequest,
+            Duration::ZERO,
+        )?;
+        let changed_matcher = digest_rule(
+            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+                event_kinds: vec![RepoWatchEventKindNameV1::PullRequestClosed],
+                ..RepoWatchMatcherV1Input::default()
+            }),
+            actions.clone(),
+            RepoWatchSingletonScope::PullRequest,
+            Duration::ZERO,
+        )?;
+        let changed_actions = digest_rule(
+            matcher.clone(),
+            vec![actions[1].clone(), actions[0].clone()],
+            RepoWatchSingletonScope::PullRequest,
+            Duration::ZERO,
+        )?;
+        let changed_scope = digest_rule(
+            matcher.clone(),
+            actions.clone(),
+            RepoWatchSingletonScope::Rule,
+            Duration::ZERO,
+        )?;
+        let changed_cooldown = digest_rule(
+            matcher,
+            actions,
+            RepoWatchSingletonScope::PullRequest,
+            Duration::from_secs(1),
+        )?;
+
+        assert_ne!(base.content_digest(), changed_matcher.content_digest());
+        assert_ne!(base.content_digest(), changed_actions.content_digest());
+        assert_ne!(base.content_digest(), changed_scope.content_digest());
+        assert_ne!(base.content_digest(), changed_cooldown.content_digest());
+        Ok(())
+    }
+
+    #[test]
     fn branch_event_rejects_pull_request_singleton_scope() -> Result<(), Box<dyn Error>> {
         let template = SessionTemplateName::try_new(String::from("branch-handler"))?;
         let result = RepoWatchRule::try_new(
@@ -2049,6 +2482,119 @@ mod tests {
         assert!(missing_declaration.contains(template.as_str()));
         assert!(rejected_context.contains(template.as_str()));
         assert!(rejected_context.contains(&RepoWatchDispatchContextShape::Branch.to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn conflict_qualifier_matches_only_the_conflicting_payload() -> Result<(), Box<dyn Error>> {
+        let matcher = RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
+            mergeable_state: vec![MergeableState::Conflicting],
+            ..RepoWatchMatcherV1Input::default()
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(Uuid::from_u128(30)),
+            RepositorySlug::try_new(String::from("namespace/repo"))?,
+            pull_request_context(
+                CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?,
+                BranchName::try_new(String::from("main"))?,
+                Vec::new(),
+            )?,
+            RepoWatchEventKindV1::MergeableStateChanged {
+                current: MergeableState::Conflicting,
+            },
+        )?;
+
+        assert!(matcher.matches(&event));
+        Ok(())
+    }
+
+    #[test]
+    fn conflict_qualifier_rejects_the_mergeable_payload() -> Result<(), Box<dyn Error>> {
+        let matcher = RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
+            mergeable_state: vec![MergeableState::Conflicting],
+            ..RepoWatchMatcherV1Input::default()
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(Uuid::from_u128(31)),
+            RepositorySlug::try_new(String::from("namespace/repo"))?,
+            pull_request_context(
+                CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?,
+                BranchName::try_new(String::from("main"))?,
+                Vec::new(),
+            )?,
+            RepoWatchEventKindV1::MergeableStateChanged {
+                current: MergeableState::Mergeable,
+            },
+        )?;
+
+        assert!(!matcher.matches(&event));
+        Ok(())
+    }
+
+    #[test]
+    fn branch_conclusion_qualifier_matches_without_pull_request_fields()
+    -> Result<(), Box<dyn Error>> {
+        let matcher = RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
+            conclusion: vec![CheckConclusion::Failure],
+            ..RepoWatchMatcherV1Input::default()
+        });
+        let event = RepoWatchEvent::branch_workflow(
+            RepoWatchEventId::from_uuid(Uuid::from_u128(32)),
+            RepositorySlug::try_new(String::from("namespace/repo"))?,
+            BranchName::try_new(String::from("main"))?,
+            super::WorkflowName::try_new(String::from("ci"))?,
+            CheckConclusion::Failure,
+        );
+
+        assert!(matcher.matches(&event));
+        Ok(())
+    }
+
+    #[test]
+    fn matching_rule_emits_every_dispatch_action_in_order() -> Result<(), Box<dyn Error>> {
+        let first_template = SessionTemplateName::try_new(String::from("merge-forward"))?;
+        let second_template = SessionTemplateName::try_new(String::from("notify-user"))?;
+        let rule = RepoWatchRule::try_new(
+            RepoWatchRuleId::try_new(String::from("conflict"))?,
+            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+                event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
+                mergeable_state: vec![MergeableState::Conflicting],
+                ..RepoWatchMatcherV1Input::default()
+            }),
+            vec![
+                RepoWatchRuleActionV1::DispatchSession {
+                    template: first_template.clone(),
+                },
+                RepoWatchRuleActionV1::DispatchSession {
+                    template: second_template.clone(),
+                },
+            ],
+            RepoWatchSingletonScope::PullRequest,
+            Duration::ZERO,
+        )?;
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(Uuid::from_u128(33)),
+            RepositorySlug::try_new(String::from("namespace/repo"))?,
+            pull_request_context(
+                CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?,
+                BranchName::try_new(String::from("main"))?,
+                Vec::new(),
+            )?,
+            RepoWatchEventKindV1::MergeableStateChanged {
+                current: MergeableState::Conflicting,
+            },
+        )?;
+
+        let actions = rule.actions_for_event(&event)?;
+        let RepoWatchActionV1::DispatchSession(first) = &actions[0];
+        let RepoWatchActionV1::DispatchSession(second) = &actions[1];
+        assert_eq!(first.template(), &first_template);
+        assert_eq!(second.template(), &second_template);
+        assert_eq!(first.params().event(), &event);
+        assert_eq!(second.params().event(), &event);
         Ok(())
     }
 }

@@ -12,13 +12,17 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AnthropicServiceTier, CodexCliServiceTier, DirectModelSelection, FastMode, FastModeOverlay,
-    FastModeSupport, FrozenAliasDefinition, ModelAlias, ModelCapabilities, ModelCapabilityCatalog,
-    ModelCapabilityDefinition, ModelSelectionRequest, ModelSettingsOverlay,
-    ModelSettingsPrecedence, ModelTargetCatalog, ModelTargetDefinition, OpenAiServiceTier,
-    ProviderModelIdentity, ReasoningLevel, RepoWatchAuthorLogin, RepositorySlug,
-    ResolvedProviderTarget, ServiceTier, SettingOverlay, ToolApprovalPosture, ToolName,
-    UnsupportedModelSetting, ValidatedModelSettings,
+    AnthropicServiceTier, BranchName, CheckConclusion, CodexCliServiceTier, DirectModelSelection,
+    FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, LabelName, MergeableState,
+    ModelAlias, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
+    ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence, ModelTargetCatalog,
+    ModelTargetDefinition, OpenAiServiceTier, ProviderModelIdentity, ReasoningLevel,
+    RepoWatchAuthorLogin, RepoWatchEventKindNameV1, RepoWatchLabelMatcher,
+    RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope,
+    RepoWatchTemplateContextDeclaration, RepositorySlug, ResolvedProviderTarget, ServiceTier,
+    SessionTemplateName, SettingOverlay, ToolApprovalPosture, ToolName, UnsupportedModelSetting,
+    ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -56,6 +60,8 @@ pub const ANTHROPIC_CREDENTIAL_REFERENCE: &str = "anthropic-primary";
 pub const CODEX_CLI_CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
+const MAX_REPOSITORY_WATCH_RULES: usize = 128;
+const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
 
 /// Adapter implementations this daemon build can construct.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -310,6 +316,7 @@ impl fmt::Debug for WatchedRepositoryConfiguration {
 pub struct RepositoryWatchConfiguration {
     signal_reviewers: Box<[RepoWatchAuthorLogin]>,
     repositories: Box<[WatchedRepositoryConfiguration]>,
+    rules: Box<[RepoWatchRule]>,
 }
 
 impl RepositoryWatchConfiguration {
@@ -321,6 +328,28 @@ impl RepositoryWatchConfiguration {
     /// Returns every independently credentialed repository task.
     pub fn repositories(&self) -> &[WatchedRepositoryConfiguration] {
         &self.repositories
+    }
+
+    /// Returns the validated structured rules in declaration order.
+    pub fn rules(&self) -> &[RepoWatchRule] {
+        &self.rules
+    }
+
+    /// Validates every rule against the immutable session-template catalog.
+    pub fn validate_template_contexts(
+        &self,
+        declarations: &[RepoWatchTemplateContextDeclaration],
+    ) -> Result<(), HubModelConfigurationError> {
+        for rule in &self.rules {
+            rule.validate_template_contexts(declarations)
+                .map_err(
+                    |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
+                        rule: rule.id().as_str().to_owned(),
+                        reason: error.to_string(),
+                    },
+                )?;
+        }
+        Ok(())
     }
 }
 
@@ -1163,8 +1192,11 @@ fn parse_repository_watch_configuration(
     let table = item
         .as_table()
         .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
-    reject_unknown_fields(table, &["version", "signal_reviewers", "repositories"])
-        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    reject_unknown_fields(
+        table,
+        &["version", "signal_reviewers", "repositories", "rules"],
+    )
+    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
     if table.get("version").and_then(Item::as_integer) != Some(1) {
         return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
     }
@@ -1250,10 +1282,324 @@ fn parse_repository_watch_configuration(
         });
     }
     repositories.sort_by(|left, right| left.repository.cmp(&right.repository));
+    let rules = parse_repository_watch_rules(table)?;
     Ok(RepositoryWatchConfiguration {
         signal_reviewers: signal_reviewers.into_boxed_slice(),
         repositories: repositories.into_boxed_slice(),
+        rules: rules.into_boxed_slice(),
     })
+}
+
+fn parse_repository_watch_rules(
+    table: &Table,
+) -> Result<Vec<RepoWatchRule>, HubModelConfigurationError> {
+    let Some(item) = table.get("rules") else {
+        return Ok(Vec::new());
+    };
+    let tables = item
+        .as_array_of_tables()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    if tables.len() > MAX_REPOSITORY_WATCH_RULES {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    let mut rules = Vec::with_capacity(tables.len());
+    let mut identities = HashSet::with_capacity(tables.len());
+    for table in tables {
+        reject_unknown_fields(
+            table,
+            &[
+                "id",
+                "version",
+                "matcher",
+                "actions",
+                "singleton_per",
+                "cooldown_seconds",
+            ],
+        )
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        if table.get("version").and_then(Item::as_integer) != Some(1) {
+            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+        }
+        let id = RepoWatchRuleId::try_new(
+            required_string(table, "id")
+                .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
+                .to_owned(),
+        )
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        if !identities.insert(id.clone()) {
+            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+        }
+        let matcher = table
+            .get("matcher")
+            .and_then(Item::as_table)
+            .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            .and_then(parse_repository_watch_matcher)?;
+        let actions = parse_repository_watch_actions(table)?;
+        let singleton_per = match table.get("singleton_per").and_then(Item::as_str) {
+            None | Some("pull_request") => RepoWatchSingletonScope::PullRequest,
+            Some("stack") => RepoWatchSingletonScope::Stack,
+            Some("rule") => RepoWatchSingletonScope::Rule,
+            Some("repo") => RepoWatchSingletonScope::Repository,
+            Some(_) => return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration),
+        };
+        let cooldown = table
+            .get("cooldown_seconds")
+            .map(|item| {
+                item.as_integer()
+                    .and_then(|value| u64::try_from(value).ok())
+                    .filter(|value| *value <= i64::MAX as u64)
+                    .map(Duration::from_secs)
+                    .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            })
+            .transpose()?
+            .unwrap_or(Duration::ZERO);
+        let rule = RepoWatchRule::try_new(id.clone(), matcher, actions, singleton_per, cooldown)
+            .map_err(
+                |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
+                    rule: id.as_str().to_owned(),
+                    reason: error.to_string(),
+                },
+            )?;
+        rules.push(rule);
+    }
+    Ok(rules)
+}
+
+fn parse_repository_watch_matcher(
+    table: &Table,
+) -> Result<RepoWatchMatcherV1, HubModelConfigurationError> {
+    reject_unknown_fields(
+        table,
+        &[
+            "event_kinds",
+            "repo",
+            "base_branch",
+            "head_branch_regex",
+            "title_regex",
+            "body_regex",
+            "labels",
+            "draft",
+            "author",
+            "mergeable_state",
+            "conclusion",
+        ],
+    )
+    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    Ok(RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+        event_kinds: parse_event_kind_list(table.get("event_kinds"))?,
+        repository: optional_repo_watch_string(table, "repo", RepositorySlug::try_new)?,
+        base_branch: optional_repo_watch_string(table, "base_branch", BranchName::try_new)?,
+        head_branch: optional_repo_watch_string(
+            table,
+            "head_branch_regex",
+            RepoWatchPattern::try_new,
+        )?,
+        title: optional_repo_watch_string(table, "title_regex", RepoWatchPattern::try_new)?,
+        body: optional_repo_watch_string(table, "body_regex", RepoWatchPattern::try_new)?,
+        labels: parse_label_matcher(table.get("labels"))?,
+        draft: table
+            .get("draft")
+            .map(|item| {
+                item.as_bool()
+                    .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            })
+            .transpose()?,
+        author: optional_repo_watch_string(table, "author", RepoWatchAuthorLogin::try_new)?,
+        mergeable_state: parse_mergeable_state_list(table.get("mergeable_state"))?,
+        conclusion: parse_conclusion_list(table.get("conclusion"))?,
+    }))
+}
+
+fn optional_repo_watch_string<T>(
+    table: &Table,
+    key: &str,
+    constructor: impl FnOnce(String) -> Result<T, signalbox_domain::RepoWatchTextError>,
+) -> Result<Option<T>, HubModelConfigurationError> {
+    table
+        .get(key)
+        .map(|item| {
+            item.as_str()
+                .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+                .and_then(|value| {
+                    constructor(value.to_owned()).map_err(|_| {
+                        HubModelConfigurationError::InvalidRepositoryWatchConfiguration
+                    })
+                })
+        })
+        .transpose()
+}
+
+fn parse_repo_watch_any_of(
+    item: Option<&Item>,
+) -> Result<Option<&toml_edit::Array>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    reject_unknown_fields(table, &["any_of"])
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    table
+        .get("any_of")
+        .and_then(Item::as_array)
+        .map(Some)
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+}
+
+fn parse_event_kind_list(
+    item: Option<&Item>,
+) -> Result<Vec<RepoWatchEventKindNameV1>, HubModelConfigurationError> {
+    parse_repo_watch_string_array(item, |value| match value {
+        "pull_request_opened" => Some(RepoWatchEventKindNameV1::PullRequestOpened),
+        "pull_request_closed" => Some(RepoWatchEventKindNameV1::PullRequestClosed),
+        "pull_request_merged" => Some(RepoWatchEventKindNameV1::PullRequestMerged),
+        "head_changed" => Some(RepoWatchEventKindNameV1::HeadChanged),
+        "mergeable_state_changed" => Some(RepoWatchEventKindNameV1::MergeableStateChanged),
+        "checks_completed" => Some(RepoWatchEventKindNameV1::ChecksCompleted),
+        "check_run_completed" => Some(RepoWatchEventKindNameV1::CheckRunCompleted),
+        "branch_workflow_run_completed" => {
+            Some(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
+        }
+        "review_submitted" => Some(RepoWatchEventKindNameV1::ReviewSubmitted),
+        "thread_opened" => Some(RepoWatchEventKindNameV1::ThreadOpened),
+        "thread_resolved" => Some(RepoWatchEventKindNameV1::ThreadResolved),
+        "labeled" => Some(RepoWatchEventKindNameV1::Labeled),
+        "unlabeled" => Some(RepoWatchEventKindNameV1::Unlabeled),
+        "base_advanced" => Some(RepoWatchEventKindNameV1::BaseAdvanced),
+        "reaction_changed" => Some(RepoWatchEventKindNameV1::ReactionChanged),
+        _ => None,
+    })
+}
+
+fn parse_label_matcher(
+    item: Option<&Item>,
+) -> Result<RepoWatchLabelMatcher, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(RepoWatchLabelMatcher::default());
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    reject_unknown_fields(table, &["any_of", "all_of", "none_of"])
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    Ok(RepoWatchLabelMatcher::new(RepoWatchLabelMatcherInput {
+        any_of: parse_repo_watch_text_array(table.get("any_of"), LabelName::try_new)?,
+        all_of: parse_repo_watch_text_array(table.get("all_of"), LabelName::try_new)?,
+        none_of: parse_repo_watch_text_array(table.get("none_of"), LabelName::try_new)?,
+    }))
+}
+
+fn parse_mergeable_state_list(
+    item: Option<&Item>,
+) -> Result<Vec<MergeableState>, HubModelConfigurationError> {
+    let array = parse_repo_watch_any_of(item)?;
+    parse_repo_watch_array_values(array, |value| match value {
+        "mergeable" => Some(MergeableState::Mergeable),
+        "conflicting" => Some(MergeableState::Conflicting),
+        "unknown" => Some(MergeableState::Unknown),
+        _ => None,
+    })
+}
+
+fn parse_conclusion_list(
+    item: Option<&Item>,
+) -> Result<Vec<CheckConclusion>, HubModelConfigurationError> {
+    let array = parse_repo_watch_any_of(item)?;
+    parse_repo_watch_array_values(array, |value| match value {
+        "success" => Some(CheckConclusion::Success),
+        "failure" => Some(CheckConclusion::Failure),
+        "neutral" => Some(CheckConclusion::Neutral),
+        "cancelled" => Some(CheckConclusion::Cancelled),
+        "skipped" => Some(CheckConclusion::Skipped),
+        "timed_out" => Some(CheckConclusion::TimedOut),
+        "action_required" => Some(CheckConclusion::ActionRequired),
+        "stale" => Some(CheckConclusion::Stale),
+        "startup_failure" => Some(CheckConclusion::StartupFailure),
+        _ => None,
+    })
+}
+
+fn parse_repo_watch_text_array<T>(
+    item: Option<&Item>,
+    constructor: impl Fn(String) -> Result<T, signalbox_domain::RepoWatchTextError>,
+) -> Result<Vec<T>, HubModelConfigurationError>
+where
+    T: Eq,
+{
+    parse_repo_watch_string_array(item, |value| constructor(value.to_owned()).ok())
+}
+
+fn parse_repo_watch_string_array<T>(
+    item: Option<&Item>,
+    parser: impl Fn(&str) -> Option<T>,
+) -> Result<Vec<T>, HubModelConfigurationError>
+where
+    T: Eq,
+{
+    let Some(item) = item else {
+        return Ok(Vec::new());
+    };
+    let array = item
+        .as_array()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    parse_repo_watch_array_values(Some(array), parser)
+}
+
+fn parse_repo_watch_array_values<T>(
+    array: Option<&toml_edit::Array>,
+    parser: impl Fn(&str) -> Option<T>,
+) -> Result<Vec<T>, HubModelConfigurationError>
+where
+    T: Eq,
+{
+    let Some(array) = array else {
+        return Ok(Vec::new());
+    };
+    let mut parsed = Vec::with_capacity(array.len());
+    for value in array {
+        let value = value
+            .as_str()
+            .and_then(&parser)
+            .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        if parsed.contains(&value) {
+            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+        }
+        parsed.push(value);
+    }
+    Ok(parsed)
+}
+
+fn parse_repository_watch_actions(
+    table: &Table,
+) -> Result<Vec<RepoWatchRuleActionV1>, HubModelConfigurationError> {
+    let actions = table
+        .get("actions")
+        .and_then(Item::as_array_of_tables)
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    if actions.is_empty() || actions.len() > MAX_REPOSITORY_WATCH_ACTIONS {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    actions
+        .iter()
+        .map(|action| {
+            reject_unknown_fields(action, &["kind", "template"])
+                .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+            if required_string(action, "kind")
+                .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
+                != "dispatch_session"
+            {
+                return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+            }
+            let template = SessionTemplateName::try_new(
+                required_string(action, "template")
+                    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
+                    .to_owned(),
+            )
+            .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+            Ok(RepoWatchRuleActionV1::DispatchSession { template })
+        })
+        .collect()
 }
 
 fn credential_file_references_conflict(left: &Path, right: &Path) -> bool {
@@ -2065,6 +2411,13 @@ pub enum HubModelConfigurationError {
     InvalidWebFetchPolicy,
     /// The optional version-one repository-watch section was malformed.
     InvalidRepositoryWatchConfiguration,
+    /// One structured repository-watch rule failed closed validation.
+    InvalidRepositoryWatchRule {
+        /// Stable operator-assigned rule identity.
+        rule: String,
+        /// Safe domain or template-validation diagnostic.
+        reason: String,
+    },
     /// Two repository-watch entries normalized to the same repository.
     DuplicateWatchedRepository,
     /// Two signal-reviewer spellings normalized to the same login.
@@ -2093,6 +2446,12 @@ pub enum HubModelConfigurationError {
 
 impl fmt::Display for HubModelConfigurationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::InvalidRepositoryWatchRule { rule, reason } = self {
+            return write!(
+                formatter,
+                "model configuration contains invalid repository-watch rule `{rule}`: {reason}"
+            );
+        }
         formatter.write_str(match self {
             Self::Read => "model configuration file could not be read",
             Self::InvalidDocument => "model configuration is not valid TOML",
@@ -2166,6 +2525,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidRepositoryWatchConfiguration => {
                 "model configuration contains invalid repository-watch settings"
+            }
+            Self::InvalidRepositoryWatchRule { .. } => {
+                "model configuration contains an invalid repository-watch rule"
             }
             Self::DuplicateWatchedRepository => "model configuration repeats a watched repository",
             Self::DuplicateSignalReviewer => {
@@ -2338,9 +2700,11 @@ mod tests {
 
     use rust_decimal::Decimal;
     use signalbox_domain::{
-        AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, ModelAlias,
-        ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay, ReasoningLevel,
-        ServiceTier, SettingOverlay, ToolApprovalPosture,
+        AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, MergeableState,
+        ModelAlias, ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay,
+        ReasoningLevel, RepoWatchDispatchContextShape, RepoWatchEventKindNameV1,
+        RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration, ServiceTier,
+        SessionTemplateName, SettingOverlay, ToolApprovalPosture,
     };
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
     use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
@@ -2375,6 +2739,8 @@ mod tests {
     const DUPLICATE_PROVIDER_WATCH_REPOSITORY: &str = "NAMESPACE/PROJECT";
     const DUPLICATE_PROVIDER_SIGNAL_REVIEWER: &str = "SIGNAL-REVIEWER";
     const RELATIVE_WATCH_CREDENTIAL_FILE: &str = "relative/watch-token";
+    const WATCH_RULE_ID: &str = "merge-forward-on-conflict";
+    const WATCH_TEMPLATE: &str = "merge-forward";
     const CONFIGURATION: &str = r#"
 version = 1
 
@@ -2518,6 +2884,45 @@ repository = "{PROVIDER_SECOND_WATCH_REPOSITORY}"
 poll_interval_seconds = {SECOND_WATCH_INTERVAL_SECONDS}
 credential_file = "{SECOND_WATCH_CREDENTIAL_FILE}"
 "#,
+        )
+    }
+
+    fn configuration_with_repository_watch_rule() -> String {
+        format!(
+            r#"{}
+
+[[repository_watch.rules]]
+id = "{WATCH_RULE_ID}"
+version = 1
+singleton_per = "pull_request"
+cooldown_seconds = 30
+
+[repository_watch.rules.matcher]
+event_kinds = ["mergeable_state_changed"]
+repo = "{PROVIDER_WATCH_REPOSITORY}"
+base_branch = "main"
+head_branch_regex = "^stack/.+$"
+title_regex = "^.*$"
+body_regex = "^.*$"
+draft = false
+author = "{PROVIDER_SIGNAL_REVIEWER}"
+
+[repository_watch.rules.matcher.labels]
+any_of = ["stack"]
+all_of = ["owned"]
+none_of = ["hold"]
+
+[repository_watch.rules.matcher.mergeable_state]
+any_of = ["conflicting"]
+
+[repository_watch.rules.matcher.conclusion]
+any_of = []
+
+[[repository_watch.rules.actions]]
+kind = "dispatch_session"
+template = "{WATCH_TEMPLATE}"
+"#,
+            configuration_with_repository_watch()
         )
     }
 
@@ -2696,6 +3101,72 @@ selection_id = "10000000-0000-4000-8000-000000000001"
 
         assert!(!debug.contains(WATCH_CREDENTIAL_FILE));
         assert!(debug.contains("[REDACTED REFERENCE]"));
+    }
+
+    #[test]
+    fn repository_watch_parses_the_conflict_only_live_rule() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
+            .expect("repository-watch rule fixture is valid");
+        let rule = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .rules()[0];
+
+        assert_eq!(rule.id().as_str(), WATCH_RULE_ID);
+        assert_eq!(rule.version().get(), 1);
+        assert_eq!(rule.singleton_per(), RepoWatchSingletonScope::PullRequest);
+        assert_eq!(rule.cooldown(), Duration::from_secs(30));
+        assert_eq!(
+            rule.matcher().event_kinds(),
+            [RepoWatchEventKindNameV1::MergeableStateChanged]
+        );
+        assert_eq!(
+            rule.matcher().mergeable_state(),
+            [MergeableState::Conflicting]
+        );
+        assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
+    }
+
+    #[test]
+    fn repository_watch_rule_accepts_its_declared_template_context() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
+            .expect("repository-watch rule fixture is valid");
+        let template = SessionTemplateName::try_new(String::from(WATCH_TEMPLATE))
+            .expect("template fixture name is valid");
+        let declaration = RepoWatchTemplateContextDeclaration::try_new(
+            template,
+            vec![RepoWatchDispatchContextShape::PullRequest],
+        )
+        .expect("template declaration is nonempty");
+
+        assert_eq!(
+            configured
+                .repository_watch()
+                .expect("fixture configures repository watch")
+                .validate_template_contexts(&[declaration]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn repository_watch_rule_rejects_a_template_context_mismatch() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
+            .expect("repository-watch rule fixture is valid");
+        let template = SessionTemplateName::try_new(String::from(WATCH_TEMPLATE))
+            .expect("template fixture name is valid");
+        let declaration = RepoWatchTemplateContextDeclaration::try_new(
+            template,
+            vec![RepoWatchDispatchContextShape::Branch],
+        )
+        .expect("template declaration is nonempty");
+        let error = configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .validate_template_contexts(&[declaration])
+            .expect_err("pull-request rule cannot target branch-only template");
+
+        assert!(error.to_string().contains(WATCH_RULE_ID));
+        assert!(error.to_string().contains(WATCH_TEMPLATE));
     }
 
     #[test]

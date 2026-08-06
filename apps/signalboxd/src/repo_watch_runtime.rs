@@ -19,29 +19,39 @@ use reqwest::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use signalbox_application::{
-    RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchObservation, RepoWatchPullRequestLifecycle,
-    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
-    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
-    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
+    EligibilityNudge, InProcessEligibilityNudge, RepoWatchBranchHead,
+    RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
+    RepoWatchCheckSuiteObservation, RepoWatchDispatchService, RepoWatchDispatchTransaction,
+    RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
+    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
+    RepoWatchRuleEvaluationOutcome, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
     UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
-    MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
-    PullRequestNumber, PullRequestTitle, ReactionContent, ReactionSubject, RepoWatchAuthorLogin,
-    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
+    MergeableState, ModelAlias, PullRequestBody, PullRequestEventContext,
+    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionChange,
+    ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventKindV1,
+    RepoWatchEventTarget, RepoWatchRule, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState,
+    ReviewThreadId, UserContent, WorkflowName,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
     PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
     RepoWatchCursorCandidate,
 };
+use signalbox_persistence::repo_watch_dispatch::{
+    PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
+};
 use sqlx::PgPool;
 use tokio::{select, sync::watch, task::JoinSet, time::sleep};
 
+use crate::SessionTemplateConfiguration;
 use crate::configuration::{
-    FileCredentialAccess, RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
+    FileCredentialAccess, HubModelConfiguration, RepositoryWatchConfiguration,
+    WatchedRepositoryConfiguration,
 };
 
 const REST_BASE_URL: &str = "https://api.github.com/";
@@ -114,13 +124,24 @@ impl RepositoryWatchRuntime {
     pub fn try_new(
         pool: PgPool,
         configuration: &RepositoryWatchConfiguration,
+        templates: SessionTemplateConfiguration,
+        models: HubModelConfiguration,
+        credential_pin: signalbox_persistence::SessionCredentialPin,
+        eligibility_nudge: InProcessEligibilityNudge,
     ) -> Result<Self, RepositoryWatchRuntimeConstructionError> {
         let mut tasks = Vec::with_capacity(configuration.repositories().len());
         for repository in configuration.repositories() {
             tasks.push(RepositoryWatchTask::try_new(
-                pool.clone(),
                 repository,
-                configuration.signal_reviewers().to_vec(),
+                RepositoryWatchTaskContext {
+                    pool: pool.clone(),
+                    signal_reviewers: configuration.signal_reviewers().to_vec(),
+                    rules: configuration.rules().to_vec(),
+                    templates: templates.clone(),
+                    models: models.clone(),
+                    credential_pin: credential_pin.clone(),
+                    eligibility_nudge: eligibility_nudge.clone(),
+                },
             )?);
         }
         Ok(Self { tasks })
@@ -131,6 +152,9 @@ impl RepositoryWatchRuntime {
         self,
         shutdown: watch::Receiver<bool>,
     ) -> Result<(), RepositoryWatchRuntimeError> {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
         let mut tasks = JoinSet::new();
         for task in self.tasks {
             tasks.spawn(task.run(shutdown.clone()));
@@ -182,20 +206,45 @@ struct RepositoryWatchTask {
     interval: Duration,
     poller: GitHubRepositoryPoller,
     store: PostgresRepoWatchStore,
+    dispatch_store: PostgresRepoWatchDispatchStore,
+    rules: Vec<RepoWatchRule>,
+    templates: SessionTemplateConfiguration,
+    models: HubModelConfiguration,
+    eligibility_nudge: InProcessEligibilityNudge,
+    rules_activated: bool,
+}
+
+struct RepositoryWatchTaskContext {
+    pool: PgPool,
+    signal_reviewers: Vec<RepoWatchAuthorLogin>,
+    rules: Vec<RepoWatchRule>,
+    templates: SessionTemplateConfiguration,
+    models: HubModelConfiguration,
+    credential_pin: signalbox_persistence::SessionCredentialPin,
+    eligibility_nudge: InProcessEligibilityNudge,
 }
 
 impl RepositoryWatchTask {
     fn try_new(
-        pool: PgPool,
         configuration: &WatchedRepositoryConfiguration,
-        signal_reviewers: Vec<RepoWatchAuthorLogin>,
+        context: RepositoryWatchTaskContext,
     ) -> Result<Self, RepositoryWatchRuntimeConstructionError> {
+        let RepositoryWatchTaskContext {
+            pool,
+            signal_reviewers,
+            rules,
+            templates,
+            models,
+            credential_pin,
+            eligibility_nudge,
+        } = context;
         let credential_reference = configuration.credential_reference();
         let credentials = FileCredentialAccess::new_bounded(
             configuration.credential_file().to_path_buf(),
             credential_reference.clone(),
             MAX_CREDENTIAL_BYTES,
         );
+        let store = PostgresRepoWatchStore::new(pool.clone());
         Ok(Self {
             repository: configuration.repository().clone(),
             interval: configuration.poll_interval(),
@@ -205,7 +254,13 @@ impl RepositoryWatchTask {
                 credentials,
                 credential_reference,
             )?,
-            store: PostgresRepoWatchStore::new(pool),
+            store,
+            dispatch_store: PostgresRepoWatchDispatchStore::new(pool, credential_pin),
+            rules,
+            templates,
+            models,
+            eligibility_nudge,
+            rules_activated: false,
         })
     }
 
@@ -215,7 +270,7 @@ impl RepositoryWatchTask {
                 return;
             }
             select! {
-                result = self.poll_and_commit() => {
+                result = self.run_attempt() => {
                     match result {
                         Ok(()) => tracing::debug!(
                             repository = %self.repository.as_str(),
@@ -226,6 +281,9 @@ impl RepositoryWatchTask {
                             cause_code = error.cause_code(),
                             "repository-watch polling attempt failed closed"
                         ),
+                    }
+                    if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
+                        return;
                     }
                 }
                 changed = shutdown.changed() => {
@@ -242,6 +300,77 @@ impl RepositoryWatchTask {
                     }
                 }
             }
+        }
+    }
+
+    async fn run_attempt(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+        if !self.rules_activated {
+            self.activate_rules().await?;
+            self.rules_activated = true;
+        }
+        self.process_dispatches().await?;
+        self.poll_and_commit().await?;
+        self.process_dispatches().await
+    }
+
+    async fn activate_rules(&self) -> Result<(), RepositoryWatchAttemptError> {
+        self.dispatch_store
+            .reconcile_rules(&self.repository, &self.rules)
+            .await
+            .map_err(rule_activation_error)
+    }
+
+    async fn process_dispatches(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+        for rule in &self.rules {
+            while let Some(event) = self
+                .dispatch_store
+                .load_next_event(&self.repository, rule.id(), rule.version())
+                .await
+                .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+            {
+                let cursor = self
+                    .store
+                    .load_cursor(&self.repository)
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+                    .ok_or(RepositoryWatchAttemptError::Persistence)?;
+                let content = UserContent::try_text(dispatch_context_json(&event))
+                    .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
+                let mut service = RepoWatchDispatchService::new(
+                    UuidV7RepoWatchDispatchIdGenerator,
+                    RepoWatchDispatchPersistence {
+                        store: self.dispatch_store.clone(),
+                        models: &self.models,
+                    },
+                );
+                let outcome = service
+                    .evaluate(
+                        event,
+                        rule,
+                        cursor.candidate().observation(),
+                        &self.templates,
+                        content,
+                    )
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
+                self.nudge_dispatched_sessions(&outcome);
+            }
+        }
+        Ok(())
+    }
+
+    fn nudge_dispatched_sessions(&self, outcome: &RepoWatchRuleEvaluationOutcome) {
+        match outcome {
+            RepoWatchRuleEvaluationOutcome::Dispatched { sessions, .. }
+            | RepoWatchRuleEvaluationOutcome::Replayed { sessions, .. } => {
+                for session in sessions {
+                    let _ = self.eligibility_nudge.nudge(*session);
+                }
+            }
+            RepoWatchRuleEvaluationOutcome::NotMatched
+            | RepoWatchRuleEvaluationOutcome::Inactive
+            | RepoWatchRuleEvaluationOutcome::Occupied
+            | RepoWatchRuleEvaluationOutcome::Cooldown => {}
         }
     }
 
@@ -285,6 +414,220 @@ impl RepositoryWatchTask {
     }
 }
 
+struct RepoWatchDispatchPersistence<'configuration> {
+    store: PostgresRepoWatchDispatchStore,
+    models: &'configuration HubModelConfiguration,
+}
+
+impl RepoWatchDispatchTransaction for RepoWatchDispatchPersistence<'_> {
+    type Error = RepoWatchDispatchRepositoryError;
+
+    async fn handle_repo_watch_evaluation(
+        &mut self,
+        evaluation: RepoWatchRuleEvaluation,
+    ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error> {
+        self.store
+            .handle_repo_watch_evaluation_with_alias_resolver(evaluation, |alias: ModelAlias| {
+                self.models.resolve_alias(alias)
+            })
+            .await
+    }
+}
+
+fn dispatch_context_json(event: &RepoWatchEvent) -> String {
+    let event_value = serde_json::json!({
+        "version": 1,
+        "id": event.id().as_uuid().to_string(),
+        "repo": event.repository().as_str(),
+        "target": event_target_json(event.target()),
+        "kind": event_kind_name(event.kind()),
+        "payload": event_payload_json(event.kind()),
+    });
+    match event.target() {
+        RepoWatchEventTarget::PullRequest(context) => serde_json::json!({
+            "type": "pull_request",
+            "repo": event.repository().as_str(),
+            "number": context.number().get(),
+            "head_sha": context.head_sha().as_str(),
+            "event": event_value,
+        })
+        .to_string(),
+        RepoWatchEventTarget::Branch => {
+            let RepoWatchEventKindV1::BranchWorkflowRunCompleted {
+                branch,
+                workflow,
+                conclusion,
+            } = event.kind()
+            else {
+                return event_value.to_string();
+            };
+            serde_json::json!({
+                "type": "branch",
+                "repo": event.repository().as_str(),
+                "branch": branch.as_str(),
+                "workflow": workflow.as_str(),
+                "conclusion": check_conclusion_name(*conclusion),
+                "event": event_value,
+            })
+            .to_string()
+        }
+    }
+}
+
+fn event_target_json(target: &RepoWatchEventTarget) -> serde_json::Value {
+    match target {
+        RepoWatchEventTarget::PullRequest(context) => serde_json::json!({
+            "type": "pull_request",
+            "number": context.number().get(),
+            "head_sha": context.head_sha().as_str(),
+            "head_repo": context.head_repository().as_str(),
+            "base_branch": context.base_branch().as_str(),
+            "head_branch": context.head_branch().as_str(),
+            "title": context.title().as_str(),
+            "body": context.body().as_str(),
+            "labels": context.labels().iter().map(LabelName::as_str).collect::<Vec<_>>(),
+            "draft": context.draft(),
+            "author": context.author().map(RepoWatchAuthorLogin::as_str),
+        }),
+        RepoWatchEventTarget::Branch => serde_json::json!({ "type": "branch" }),
+    }
+}
+
+const fn event_kind_name(kind: &RepoWatchEventKindV1) -> &'static str {
+    match kind {
+        RepoWatchEventKindV1::PullRequestOpened => "PullRequestOpened",
+        RepoWatchEventKindV1::PullRequestClosed => "PullRequestClosed",
+        RepoWatchEventKindV1::PullRequestMerged => "PullRequestMerged",
+        RepoWatchEventKindV1::HeadChanged { .. } => "HeadChanged",
+        RepoWatchEventKindV1::MergeableStateChanged { .. } => "MergeableStateChanged",
+        RepoWatchEventKindV1::ChecksCompleted { .. } => "ChecksCompleted",
+        RepoWatchEventKindV1::CheckRunCompleted { .. } => "CheckRunCompleted",
+        RepoWatchEventKindV1::BranchWorkflowRunCompleted { .. } => "BranchWorkflowRunCompleted",
+        RepoWatchEventKindV1::ReviewSubmitted { .. } => "ReviewSubmitted",
+        RepoWatchEventKindV1::ThreadOpened { .. } => "ThreadOpened",
+        RepoWatchEventKindV1::ThreadResolved { .. } => "ThreadResolved",
+        RepoWatchEventKindV1::Labeled { .. } => "Labeled",
+        RepoWatchEventKindV1::Unlabeled { .. } => "Unlabeled",
+        RepoWatchEventKindV1::BaseAdvanced { .. } => "BaseAdvanced",
+        RepoWatchEventKindV1::ReactionChanged { .. } => "ReactionChanged",
+    }
+}
+
+fn event_payload_json(kind: &RepoWatchEventKindV1) -> serde_json::Value {
+    match kind {
+        RepoWatchEventKindV1::PullRequestOpened
+        | RepoWatchEventKindV1::PullRequestClosed
+        | RepoWatchEventKindV1::PullRequestMerged => serde_json::json!({}),
+        RepoWatchEventKindV1::HeadChanged { previous, current } => serde_json::json!({
+            "previous": previous.as_str(), "current": current.as_str()
+        }),
+        RepoWatchEventKindV1::MergeableStateChanged { current } => {
+            serde_json::json!({ "current": mergeable_state_name(*current) })
+        }
+        RepoWatchEventKindV1::ChecksCompleted { outcome } => {
+            serde_json::json!({ "outcome": checks_outcome_name(*outcome) })
+        }
+        RepoWatchEventKindV1::CheckRunCompleted { name, conclusion } => serde_json::json!({
+            "name": name.as_str(), "conclusion": check_conclusion_name(*conclusion)
+        }),
+        RepoWatchEventKindV1::BranchWorkflowRunCompleted {
+            branch,
+            workflow,
+            conclusion,
+        } => serde_json::json!({
+            "branch": branch.as_str(),
+            "workflow": workflow.as_str(),
+            "conclusion": check_conclusion_name(*conclusion),
+        }),
+        RepoWatchEventKindV1::ReviewSubmitted {
+            reviewer,
+            state,
+            commit,
+        } => serde_json::json!({
+            "reviewer": reviewer.as_str(),
+            "state": review_state_name(*state),
+            "commit": commit.as_str(),
+        }),
+        RepoWatchEventKindV1::ThreadOpened { thread }
+        | RepoWatchEventKindV1::ThreadResolved { thread } => {
+            serde_json::json!({ "thread": thread.as_str() })
+        }
+        RepoWatchEventKindV1::Labeled { label } | RepoWatchEventKindV1::Unlabeled { label } => {
+            serde_json::json!({ "label": label.as_str() })
+        }
+        RepoWatchEventKindV1::BaseAdvanced { branch } => {
+            serde_json::json!({ "branch": branch.as_str() })
+        }
+        RepoWatchEventKindV1::ReactionChanged {
+            subject,
+            reactor,
+            content,
+            change,
+        } => serde_json::json!({
+            "subject": reaction_subject_json(*subject),
+            "reactor": reactor.as_str(),
+            "content": content.as_str(),
+            "change": reaction_change_name(*change),
+        }),
+    }
+}
+
+fn reaction_subject_json(subject: ReactionSubject) -> serde_json::Value {
+    match subject {
+        ReactionSubject::PullRequestBody => serde_json::json!({ "type": "pull_request_body" }),
+        ReactionSubject::IssueComment { id } => {
+            serde_json::json!({ "type": "issue_comment", "id": id.get() })
+        }
+        ReactionSubject::ReviewComment { id } => {
+            serde_json::json!({ "type": "review_comment", "id": id.get() })
+        }
+    }
+}
+
+const fn checks_outcome_name(value: ChecksOutcome) -> &'static str {
+    match value {
+        ChecksOutcome::Success => "success",
+        ChecksOutcome::Failure => "failure",
+    }
+}
+
+const fn check_conclusion_name(value: CheckConclusion) -> &'static str {
+    match value {
+        CheckConclusion::Success => "success",
+        CheckConclusion::Failure => "failure",
+        CheckConclusion::Neutral => "neutral",
+        CheckConclusion::Cancelled => "cancelled",
+        CheckConclusion::Skipped => "skipped",
+        CheckConclusion::TimedOut => "timed_out",
+        CheckConclusion::ActionRequired => "action_required",
+        CheckConclusion::Stale => "stale",
+        CheckConclusion::StartupFailure => "startup_failure",
+    }
+}
+
+const fn mergeable_state_name(value: MergeableState) -> &'static str {
+    match value {
+        MergeableState::Mergeable => "mergeable",
+        MergeableState::Conflicting => "conflicting",
+        MergeableState::Unknown => "unknown",
+    }
+}
+
+const fn review_state_name(value: ReviewState) -> &'static str {
+    match value {
+        ReviewState::Approved => "approved",
+        ReviewState::ChangesRequested => "changes_requested",
+        ReviewState::Commented => "commented",
+    }
+}
+
+const fn reaction_change_name(value: ReactionChange) -> &'static str {
+    match value {
+        ReactionChange::Added => "added",
+        ReactionChange::Removed => "removed",
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RepositoryWatchAttemptError {
     Credential,
@@ -297,7 +640,10 @@ enum RepositoryWatchAttemptError {
     ResourceLimit,
     Normalization,
     Differ,
+    Dispatch,
     Persistence,
+    RetiredRuleIdentity,
+    ChangedRuleIdentity,
 }
 
 impl RepositoryWatchAttemptError {
@@ -313,8 +659,27 @@ impl RepositoryWatchAttemptError {
             Self::ResourceLimit => "repository_resource_limit_exceeded",
             Self::Normalization => "repository_state_invalid",
             Self::Differ => "repository_differ_failed",
+            Self::Dispatch => "repository_dispatch_failed",
             Self::Persistence => "repository_watch_persistence_failed",
+            Self::RetiredRuleIdentity => "repository_watch_rule_identity_retired",
+            Self::ChangedRuleIdentity => "repository_watch_rule_identity_changed",
         }
+    }
+
+    const fn is_permanent(self) -> bool {
+        matches!(self, Self::RetiredRuleIdentity | Self::ChangedRuleIdentity)
+    }
+}
+
+fn rule_activation_error(error: RepoWatchDispatchRepositoryError) -> RepositoryWatchAttemptError {
+    match error {
+        RepoWatchDispatchRepositoryError::ReusedRuleIdentity { .. } => {
+            RepositoryWatchAttemptError::RetiredRuleIdentity
+        }
+        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { .. } => {
+            RepositoryWatchAttemptError::ChangedRuleIdentity
+        }
+        _ => RepositoryWatchAttemptError::Persistence,
     }
 }
 
@@ -1014,17 +1379,7 @@ impl GitHubRepositoryPoller {
                 if head_repository != self.repository {
                     continue;
                 }
-                pending_branches.remove(branch.as_str());
                 if run.status != "completed" {
-                    observations.extend(
-                        previous
-                            .iter()
-                            .find(|prior| {
-                                prior.branch() == &branch
-                                    && prior.workflow_id() == workflow_identity
-                            })
-                            .cloned(),
-                    );
                     continue;
                 }
                 let run_id = object_id(run.id)?;
@@ -1032,16 +1387,43 @@ impl GitHubRepositoryPoller {
                     NonZeroU64::new(run.run_attempt)
                         .ok_or(RepositoryWatchAttemptError::Normalization)?,
                 );
-                observations.push(RepoWatchWorkflowRunObservation::new(
+                let candidate = RepoWatchWorkflowRunObservation::new(
                     run_id,
                     workflow_identity,
                     run_attempt,
-                    branch,
+                    branch.clone(),
                     workflow_name.clone(),
                     normalize_conclusion(run.conclusion.as_deref())?,
-                ));
+                );
+                let latest = previous
+                    .iter()
+                    .find(|prior| {
+                        prior.branch() == &branch && prior.workflow_id() == workflow_identity
+                    })
+                    .filter(|prior| {
+                        (prior.id().get(), prior.attempt().get())
+                            > (candidate.id().get(), candidate.attempt().get())
+                    })
+                    .cloned()
+                    .unwrap_or(candidate);
+                observations.push(latest);
+                pending_branches.remove(branch.as_str());
             }
-            if pending_branches.is_empty() || !has_next {
+            if pending_branches.is_empty() {
+                return Ok(observations);
+            }
+            if !has_next {
+                for branch in pending_branches.values() {
+                    observations.extend(
+                        previous
+                            .iter()
+                            .find(|prior| {
+                                prior.branch() == *branch
+                                    && prior.workflow_id() == workflow_identity
+                            })
+                            .cloned(),
+                    );
+                }
                 return Ok(observations);
             }
             page = next_page(page)?;
@@ -1834,11 +2216,18 @@ mod tests {
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        ResourceKey, ReviewState, Url, WorkflowName, WorkflowResponse, normalize_checks_outcome,
-        normalize_pull_request_context, object_id, supervise_repository_tasks,
+        ResourceKey, ReviewState, Url, WorkflowName, WorkflowResponse, dispatch_context_json,
+        normalize_checks_outcome, normalize_pull_request_context, object_id, rule_activation_error,
+        supervise_repository_tasks,
     };
-    use signalbox_domain::{BranchName, CommitSha, ReactionSubject};
+    use signalbox_domain::{
+        BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
+        PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionSubject,
+        RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindV1, RepoWatchRuleId,
+        RepoWatchRuleVersion,
+    };
     use signalbox_model_runtime::CredentialReference;
+    use signalbox_persistence::repo_watch_dispatch::RepoWatchDispatchRepositoryError;
 
     const WATCHED_REPOSITORY: &str = "namespace/project";
     const CREDENTIAL_REFERENCE: &str = "repository-watch:namespace/project";
@@ -2275,6 +2664,21 @@ mod tests {
         )
     }
 
+    fn older_main_workflow_run() -> RepoWatchWorkflowRunObservation {
+        RepoWatchWorkflowRunObservation::new(
+            object_id(WORKFLOW_RUN_IDS[0] - 1).expect("fixture workflow-run identity is positive"),
+            object_id(WORKFLOW_ID).expect("fixture workflow identity is positive"),
+            RepoWatchWorkflowRunAttempt::new(
+                NonZeroU64::new(WORKFLOW_RUN_ATTEMPT)
+                    .expect("fixture workflow-run attempt is positive"),
+            ),
+            BranchName::try_new(String::from(BASE_BRANCH)).expect("fixture branch is valid"),
+            WorkflowName::try_new(String::from(WORKFLOW_NAME))
+                .expect("fixture workflow name is valid"),
+            EXPECTED_MAIN_WORKFLOW_CONCLUSION,
+        )
+    }
+
     fn full_workflow_page() -> String {
         let workflows = (1..=PAGE_SIZE)
             .map(|identity| {
@@ -2562,6 +2966,32 @@ mod tests {
         assert_eq!(result, Ok(()));
     }
 
+    #[test]
+    fn retired_rule_identity_terminates_repository_attempts() {
+        let rule_id = RepoWatchRuleId::try_new(String::from("retired-rule"))
+            .expect("fixture rule ID is valid");
+        let error = rule_activation_error(RepoWatchDispatchRepositoryError::ReusedRuleIdentity {
+            rule_id,
+            rule_version: RepoWatchRuleVersion::V1,
+        });
+
+        assert_eq!(error, RepositoryWatchAttemptError::RetiredRuleIdentity);
+        assert!(error.is_permanent());
+    }
+
+    #[test]
+    fn changed_rule_identity_terminates_repository_attempts() {
+        let rule_id = RepoWatchRuleId::try_new(String::from("changed-rule"))
+            .expect("fixture rule ID is valid");
+        let error = rule_activation_error(RepoWatchDispatchRepositoryError::ChangedRuleIdentity {
+            rule_id,
+            rule_version: RepoWatchRuleVersion::V1,
+        });
+
+        assert_eq!(error, RepositoryWatchAttemptError::ChangedRuleIdentity);
+        assert!(error.is_permanent());
+    }
+
     #[tokio::test]
     async fn resource_level_not_modified_reuses_only_its_typed_accepted_state() {
         let server = ScriptedServer::start(
@@ -2726,6 +3156,35 @@ mod tests {
         server.finish().await;
 
         assert_eq!(run, previous);
+    }
+
+    #[tokio::test]
+    async fn active_run_does_not_hide_a_newer_completed_workflow_baseline() {
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            MAIN_WORKFLOW_TARGET,
+            active_rerun_then_stale_workflow_run(),
+        )])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let branch = base_branch_head();
+        let workflow = workflow_response();
+        let previous = older_main_workflow_run();
+
+        let run = fixture
+            .poller
+            .fetch_workflow_runs(
+                std::slice::from_ref(&branch),
+                &workflow,
+                std::slice::from_ref(&previous),
+            )
+            .await
+            .expect("unfiltered workflow-run response is valid")
+            .into_iter()
+            .next()
+            .expect("newer completed run for the watched branch becomes visible");
+        server.finish().await;
+
+        assert_eq!(run.id().get(), WORKFLOW_RUN_IDS[0]);
     }
 
     #[tokio::test]
@@ -3242,5 +3701,51 @@ mod tests {
         assert!(key.0.starts_with(CACHE_KEY_KIND));
         assert!(!key.0.contains(CACHE_KEY_QUERY_VALUE));
         assert!(!key.0.contains(WATCHED_REPOSITORY));
+    }
+
+    #[test]
+    fn pull_request_dispatch_context_serializes_the_complete_triggering_fact() {
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())
+            .expect("fixture repository is valid");
+        let context = PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(
+                PULL_NUMBER
+                    .try_into()
+                    .expect("fixture pull-request number is positive"),
+            ),
+            head_sha: CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture SHA is valid"),
+            head_repository: repository.clone(),
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())
+                .expect("fixture base branch is valid"),
+            head_branch: BranchName::try_new(HEAD_BRANCH.to_owned())
+                .expect("fixture head branch is valid"),
+            title: PullRequestTitle::try_new("Repository watch".to_owned())
+                .expect("fixture title is valid"),
+            body: PullRequestBody::try_new("Conflict detected.".to_owned())
+                .expect("fixture body is valid"),
+            labels: Vec::new(),
+            draft: false,
+            author: None,
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(uuid::Uuid::from_u128(71)),
+            repository,
+            context,
+            RepoWatchEventKindV1::MergeableStateChanged {
+                current: MergeableState::Conflicting,
+            },
+        )
+        .expect("fixture event is coherent");
+        let encoded: serde_json::Value =
+            serde_json::from_str(&dispatch_context_json(&event)).expect("dispatch context is JSON");
+
+        assert_eq!(encoded["type"], "pull_request");
+        assert_eq!(encoded["repo"], WATCHED_REPOSITORY);
+        assert_eq!(encoded["number"], PULL_NUMBER);
+        assert_eq!(encoded["head_sha"], HEAD_SHA);
+        assert_eq!(encoded["event"]["target"]["base_branch"], BASE_BRANCH);
+        assert_eq!(encoded["event"]["target"]["head_branch"], HEAD_BRANCH);
+        assert_eq!(encoded["event"]["kind"], "MergeableStateChanged");
+        assert_eq!(encoded["event"]["payload"]["current"], "conflicting");
     }
 }
