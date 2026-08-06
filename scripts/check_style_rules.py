@@ -71,6 +71,16 @@ RUST_SOURCE_GLOBS = ("crates/*/src/*.rs", "apps/*/src/*.rs")
 # API, which a test target does not have, and a rule about how long a test body
 # runs would be `docs/agents/testing-style.md` restated.
 RUST_TEST_TARGET_GLOBS = ("crates/*/tests/*.rs", "apps/*/tests/*.rs")
+# The rest of the tracked Rust outside `src`. A build script and a benchmark
+# are modules the rule's "every Rust module" covers, and a build script is the
+# one that most needs to say what it owns: nothing calls it, so its reason for
+# existing is legible only from the file itself.
+RUST_OTHER_TARGET_GLOBS = (
+    "crates/*/build.rs",
+    "apps/*/build.rs",
+    "crates/*/benches/*.rs",
+    "apps/*/benches/*.rs",
+)
 RUST_ALL_GLOBS = ("crates/*.rs", "apps/*.rs")
 SWIFT_SOURCE_GLOBS = ("clients/native/Sources/*.swift",)
 # Production code under `apps/` only. Whether the rule also binds the daemon's
@@ -269,7 +279,8 @@ class Repository:
 
 def check_file_doc_comments(repository: Repository) -> Iterator[Finding]:
     """A file states what it owns before it states anything else."""
-    for source in repository.sources((*RUST_SOURCE_GLOBS, *RUST_TEST_TARGET_GLOBS)):
+    inventory = (*RUST_SOURCE_GLOBS, *RUST_TEST_TARGET_GLOBS, *RUST_OTHER_TARGET_GLOBS)
+    for source in repository.sources(inventory):
         if not _opens_with(source.lines, "//!", skippable=("#![", "//")):
             yield Finding(
                 "SR-1", source.path, 1, "Rust module has no `//!` file doc comment"
@@ -432,20 +443,38 @@ def check_failure_type_rendering(repository: Repository) -> Iterator[Finding]:
     for sources in by_crate.values():
         displays: set[str] = set()
         errors: set[str] = set()
+        by_file: dict[str, tuple[set[str], set[str]]] = {}
+        declaring_files: dict[str, set[str]] = {}
         for source in sources:
-            displays.update(
+            in_file_displays = {
                 match.group(1) for match in DISPLAY_IMPL.finditer(source.code)
-            )
-            errors.update(
+            }
+            in_file_errors = {
                 match.group(1) for match in ERROR_IMPL.finditer(source.code)
-            )
+            }
+            by_file[source.path] = (in_file_displays, in_file_errors)
+            displays.update(in_file_displays)
+            errors.update(in_file_errors)
+            for match in FAILURE_DECLARATION.finditer(source.code):
+                declaring_files.setdefault(match.group(1), set()).add(source.path)
         for source in sources:
+            in_file_displays, in_file_errors = by_file[source.path]
             for match in FAILURE_DECLARATION.finditer(source.code):
                 name = match.group(1)
+                # Sibling modules may declare distinct types under one name, so
+                # an implementation elsewhere in the crate counts only while the
+                # name is unambiguous there. Once two modules declare it, each
+                # declaration is answered by its own file — otherwise the
+                # compliant one would vouch for the other, and a rule at zero
+                # would be hiding a type it never saw.
+                resolvable = len(declaring_files[name]) == 1
                 missing = [
                     label
-                    for label, known in (("Display", displays), ("Error", errors))
-                    if name not in known
+                    for label, here, anywhere in (
+                        ("Display", in_file_displays, displays),
+                        ("Error", in_file_errors, errors),
+                    )
+                    if name not in here and not (resolvable and name in anywhere)
                 ]
                 if missing:
                     yield Finding(
@@ -823,12 +852,33 @@ def check_adjacent_parameter_types(repository: Repository) -> Iterator[Finding]:
 # --- SR-11: function bodies stay readable -----------------------------------
 
 FUNCTION_DECLARATION = re.compile(r"\bfn\s+([A-Za-z0-9_]+)\s*[<(]")
+CFG_TEST_MODULE = re.compile(r"#\[cfg\(test\)\]\s*(?:pub\s+)?mod\s+[A-Za-z0-9_]+\s*\{")
+
+
+def _inline_test_spans(code: str) -> list[tuple[int, int]]:
+    """The spans of the `#[cfg(test)]` modules in a file's code view.
+
+    How long a test body may run is `docs/agents/testing-style.md`'s to decide,
+    which is why this rule does not read `tests/`. An inline test module is the
+    same body in a different file, so counting it there and not there would
+    make the rule turn on where a test was written rather than on what it is.
+    """
+    spans: list[tuple[int, int]] = []
+    for match in CFG_TEST_MODULE.finditer(code):
+        opening = code.rindex("{", match.start(), match.end())
+        closing = _matching_brace(code, opening)
+        if closing is not None:
+            spans.append((match.start(), closing))
+    return spans
 
 
 def check_function_body_length(repository: Repository) -> Iterator[Finding]:
     """A body past the ceiling has shared mutable state no name describes."""
     for source in repository.sources(RUST_SOURCE_GLOBS):
+        test_spans = _inline_test_spans(source.code)
         for match in FUNCTION_DECLARATION.finditer(source.code):
+            if any(start <= match.start() < end for start, end in test_spans):
+                continue
             opening = _body_start(source.code, match.end())
             if opening is None:
                 continue
@@ -854,7 +904,11 @@ def _body_start(text: str, after: int) -> int | None:
         if char in "([<":
             depth += 1
         elif char in ")]>":
-            depth -= 1
+            # Clamped, because the declaration pattern consumes the opening
+            # bracket: the scan starts inside a nesting at depth zero, and an
+            # unclamped close would drive it negative and read the `;` of a
+            # return type like `[u8; 32]` as the end of a declaration.
+            depth = max(depth - 1, 0)
         elif char == ";" and depth <= 0:
             return None
         elif char == "{" and depth <= 0:

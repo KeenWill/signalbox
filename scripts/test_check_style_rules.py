@@ -96,6 +96,23 @@ class FileDocCommentTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
 
 
+    def test_build_script_without_a_doc_comment_reports(self) -> None:
+        files = {MODULE: "//! Owned.\n", "crates/example/build.rs": "fn main() {}\n"}
+
+        result = check("SR-1", files)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("crates/example/build.rs", result.stdout)
+
+    def test_benchmark_without_a_doc_comment_reports(self) -> None:
+        files = {MODULE: "//! Owned.\n", "crates/example/benches/wall_clock.rs": "fn main() {}\n"}
+
+        result = check("SR-1", files)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("benches/wall_clock.rs", result.stdout)
+
+
 class CommentProvenanceTests(unittest.TestCase):
     def test_comment_citing_a_process_document_reports(self) -> None:
         source = "//! Owned.\n/// Derived per `docs/agents/testing-style.md`.\npub fn run() {}\n"
@@ -240,6 +257,45 @@ class FailureTypeRenderingTests(unittest.TestCase):
         result = check(
             "SR-4",
             {MODULE: declaration, "crates/example/src/render.rs": implementation},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+
+    def test_a_sibling_module_implementation_does_not_vouch_for_a_second_type(self) -> None:
+        compliant = (
+            "//! Owned.\n"
+            "pub struct LoadError;\n"
+            "impl std::fmt::Display for LoadError {}\n"
+            "impl std::error::Error for LoadError {}\n"
+        )
+        bare = "//! Owned.\npub struct LoadError;\n"
+
+        result = check(
+            "SR-4",
+            {
+                "crates/example/src/first.rs": compliant,
+                "crates/example/src/second.rs": bare,
+            },
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("crates/example/src/second.rs", result.stdout)
+
+    def test_an_implementation_in_another_file_of_the_crate_still_counts(self) -> None:
+        declaration = "//! Owned.\npub struct LoadError;\n"
+        implementation = (
+            "//! Owned.\n"
+            "impl std::fmt::Display for LoadError {}\n"
+            "impl std::error::Error for LoadError {}\n"
+        )
+
+        result = check(
+            "SR-4",
+            {
+                "crates/example/src/first.rs": declaration,
+                "crates/example/src/display.rs": implementation,
+            },
         )
 
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -617,6 +673,31 @@ class FunctionBodyLengthTests(unittest.TestCase):
     def test_a_brace_inside_a_string_does_not_extend_a_body(self) -> None:
         body = "    let value = 1;\n" * 50
         source = f'//! Owned.\npub fn render() {{\n    let text = "{{";\n{body}}}\n'
+
+        result = check("SR-11", {MODULE: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+
+    def test_a_long_body_behind_an_array_return_type_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub fn digest() -> [u8; 32] {\n" + "    let _ = 1;\n" * 401 + "    [0; 32]\n}\n"
+        )
+
+        result = check("SR-11", {MODULE: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("digest", result.stdout)
+
+    def test_an_inline_test_body_is_the_testing_guide_s_to_measure(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    #[test]\n"
+            "    fn covers_everything() {\n" + "        let _ = 1;\n" * 401 + "    }\n}\n"
+        )
 
         result = check("SR-11", {MODULE: source})
 
