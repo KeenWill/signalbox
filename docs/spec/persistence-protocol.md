@@ -38,12 +38,12 @@ head, and creation transaction were verified through PR #415
 scopes, delegated transcript origins, foreground-result closure, pre-outbox
 cascade locks, typed delegation wake origins, and exact delegation update and
 wake obligations were verified through this PR
-(`agent/delegation-persistence-schema`); the delegated await and peer-message
-transaction locks were verified through this PR
-(`agent/delegation-runtime-persistence-v2`); the model-settings command fields,
-immutable evidence, snapshot projection, and typed outbox records were verified
-through this PR (`agent/model-settings-persistence`); the defaults-replacement
-pointer-lock admission is verified through this PR
+(`agent/delegation-persistence-schema`); the delegated await, peer-message,
+terminal-observation locks, and wait-replay satellites were verified through
+this PR (`agent/delegation-runtime-persistence-v2`); the model-settings command
+fields, immutable evidence, snapshot projection, and typed outbox records were
+verified through this PR (`agent/model-settings-persistence`); the
+defaults-replacement pointer-lock admission is verified through this PR
 (`agent/model-settings-execution`). This page covers the Postgres representation
 in `crates/persistence` (source and migrations), migration discipline, durable
 command storage and replay equality, the fail-closed reconstitution boundary,
@@ -647,6 +647,17 @@ Locks per transaction, in acquisition order:
   additional explicit lock. The shared scheduler-first prefix prevents
   approval-judge, tool-loop, and lifecycle-transition transactions from holding
   these rows in reverse order.
+
+- **Delegated terminal-observation transactions**: after nonlocking reads of the
+  call's turn and delegation identity, observation commit and authoritative
+  reread lock both endpoint session rows `FOR NO KEY UPDATE` in ascending
+  session-identity order, then both endpoint `session_scheduler` rows
+  `FOR UPDATE` in that same order, and only then the exact `session_delegation`
+  row `FOR UPDATE`. They revalidate the immutable relationship after taking that
+  prefix. A nondelegated observation retains the ordinary scheduler-only model-
+  execution order. Sharing the delegated prefix with peer-message transactions
+  prevents either side from holding an endpoint session while waiting for a
+  scheduler held by the other.
 
 - **Delegated await transactions**: await first locks its issuing delivery
   session row `FOR NO KEY UPDATE`, then that session's `session_scheduler` row
