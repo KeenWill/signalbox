@@ -42,11 +42,15 @@ templates, and orchestration template digests are verified through PR #349
 verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
 export contract is verified through PR #347 (`agent/telemetry-export`). The
 static model-to-adapter mapping and append-only session credential history are
-verified through PR #373 (`agent/adapter-wiring`). The composed code-host,
-pull-request, workspace, and conversation tool families are verified through PR
-#377 (`agent/tools-daemon-wiring`). Placement-scoped native conversation reads
-are verified through PR #400 (`agent/scoped-visibility-wiring`). Invariant law
-lives in [docs/invariants.md](../invariants.md), cited here by tag. The runner
+verified through PR #373 (`agent/adapter-wiring`); the `claude_cli` mapping, its
+process paths, and its ambient-login profile rule are verified against this PR
+(`agent/wire-claude-cli-adapter`), and the `openai` mapping with its pinned
+profile and conditional key path against this PR (`agent/wire-openai-adapter`).
+The composed code-host, pull-request, workspace, and conversation tool families
+are verified through PR #377 (`agent/tools-daemon-wiring`). Placement-scoped
+native conversation reads are verified through PR #400
+(`agent/scoped-visibility-wiring`). Invariant law lives in
+[docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are verified through PR #376 (`agent/runner-daemon`).
 Runner credential use during provisioning or execution remains committed
@@ -55,8 +59,8 @@ unimplemented functionality as labeled below.
 ## Process configuration
 
 `signalboxd` reads six unconditionally required deployment values, the optional
-runner-socket override, and the conditionally required Anthropic key path from
-the process environment at startup, and also consults `HOME`:
+runner-socket override, and the two conditionally required provider key paths
+from the process environment at startup, and also consults `HOME`:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -73,6 +77,9 @@ the process environment at startup, and also consults `HOME`:
 - `ANTHROPIC_API_KEY_FILE` — path to the file holding the current Anthropic API
   key value. It is required only when at least one static model mapping selects
   the Anthropic adapter; a Codex-only configuration does not consult it.
+- `OPENAI_API_KEY_FILE` — path to the file holding the current OpenAI API key
+  value, on the same conditional terms: required only when at least one static
+  model mapping selects the OpenAI adapter, and never consulted otherwise.
 - `BRAVE_API_KEY_FILE` — path to the file holding the current Brave Search API
   key value used by the daemon-composed `web_search` tool.
 - `GITHUB_TOKEN_FILE` — path to the file holding the current token shared by the
@@ -121,12 +128,12 @@ local cluster, so the refusals above are what stand between a production cluster
 and ambient configuration, not that path's name.
 
 A missing or empty required value, an unreadable or invalid model or template
-catalog, an invalid or unreadable referenced prompt file, or a failed Anthropic
-or GitHub transport construction fails startup at the `Configuration` phase,
-before any database contact. A present invalid static tool mapping fails during
-that same pre-database configuration pass. After the database connects, an
-invalid workspace root or any failed tool-suite construction also fails at the
-`Configuration` phase. All tool dependencies are supplied by parsed
+catalog, an invalid or unreadable referenced prompt file, or a failed Anthropic,
+OpenAI, or GitHub transport construction fails startup at the `Configuration`
+phase, before any database contact. A present invalid static tool mapping fails
+during that same pre-database configuration pass. After the database connects,
+an invalid workspace root or any failed tool-suite construction also fails at
+the `Configuration` phase. All tool dependencies are supplied by parsed
 configuration, the already-constructed database pool, or explicit credential and
 transport values; no tool family discovers ambient authority. Startup and
 shutdown logs carry the phase, an operator failure class, and small typed fields
@@ -136,13 +143,13 @@ not survive to the log: `run_hub` collapses every catalog-parse and
 adapter-construction variant (and likewise connection and migration errors) into
 a generic `Infrastructure` class carrying only its phase, so an operator cannot
 distinguish an unreadable catalog from an unknown field, bad version, or invalid
-limit (see Open edges). The seven deployment paths are accepted without I/O at
+limit (see Open edges). The eight deployment paths are accepted without I/O at
 environment parsing time; both catalogs and every template prompt file are read
 during startup. No credential file is read at startup (see credential lifecycle
 below).
 
-The deployed daemon supplies no Anthropic endpoint or timeout knob; it
-constructs the adapter with its defaults. The
+The deployed daemon supplies no Anthropic or OpenAI endpoint or timeout knob; it
+constructs each adapter with its defaults. The
 [runtime-substrate](runtime-substrate.md) page owns those transport defaults,
 positive caller-level exchange-timeout overrides, and the whole-exchange bound.
 Startup ordering, recovery scanning, and shutdown policy are
@@ -591,16 +598,37 @@ Each `[[models]]` entry defines one direct selection:
   configuration error; omitting all five is valid and yields no dollar figure
   for that model.
 
-This build provides exactly `anthropic` and `codex_cli`. Anthropic mappings use
-the declared `anthropic-primary` profile. Codex mappings may select any declared
+This build provides exactly `anthropic`, `openai`, `claude_cli`, and
+`codex_cli`. Anthropic mappings use the declared `anthropic-primary` profile,
+and OpenAI mappings likewise use the declared `openai-primary` profile: each
+direct HTTP adapter has one deployment key file bound to that exact non-secret
+reference, so a mapping naming any other profile is a typed startup failure.
+OpenAI admits the reasoning levels `none` through `max` — `ultra` is the Codex
+effort value and is rejected — and the provider-tagged tiers `auto`, `default`,
+`flex`, `scale`, `priority`, and `fast`. Codex mappings may select any declared
 profile, but every Codex family in one daemon configuration must select the same
 one because the composed CLI runtime has one ambient authentication context. A
 Codex mapping also requires `[codex_cli]` with an absolute executable path
 naming an existing regular file and an absolute, existing `working_directory`;
 construction validates that shape and platform support without invoking Codex or
 inspecting login state. The Codex CLI owns its external login exactly as the
-adapter contract specifies. OpenAI HTTP and Claude CLI mappings are not provided
-by this build.
+adapter contract specifies.
+
+Claude Code mappings follow that same CLI shape. They may select any declared
+profile under the same one-ambient-login rule — every `claude_cli` family in one
+daemon configuration must select the same profile — and the checked-in example
+names `claude-subscription-primary`. A Claude mapping requires `[claude_cli]`
+with three deployment-named absolute paths: `executable` and
+`mcp_bridge_executable` must each name an existing regular file, and
+`working_directory` must name an existing directory. The bridge is the separate
+`signalbox-claude-mcp-bridge` program the adapter spawns as Claude Code's only
+tool server; the deployment names it exactly the way it names the CLI, so the
+daemon derives no executable path from its own image. Construction validates
+that shape and platform support without invoking Claude Code or inspecting login
+state, and Claude Code owns its external login exactly as its adapter contract
+specifies. Because Claude Code exposes no service tier, any `service_tiers`
+entry on a Claude model is a typed startup failure, while its reasoning set and
+either fast-mode form are admitted.
 
 Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling
@@ -852,25 +880,25 @@ deployment-side rules that code cannot enforce are stated in
   safe in configuration, errors, logs, and durable records; values are safe only
   at the adapter boundary. Why: value rotation preserves the stable name so no
   record or log ever needs the secret (INV-035). The composition constants are
-  `anthropic-primary`, `codex-subscription-primary`, `brave-search-primary`, and
-  `github-primary`; model configuration may declare additional non-secret
-  profiles.
+  `anthropic-primary`, `openai-primary`, `codex-subscription-primary`,
+  `claude-subscription-primary`, `brave-search-primary`, and `github-primary`;
+  model configuration may declare additional non-secret profiles.
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
-  the Anthropic, Brave Search, and GitHub references to their corresponding
-  deployment paths and reads the file for every Anthropic model call, web
-  search, code-host operation, or pull-request tool operation preparation;
-  nothing is cached. Why: atomic file replacement rotates any credential without
-  restarting signalboxd, and an in-flight operation keeps the value it
-  authenticated with. Resolution is reference-scoped: a foreign reference fails
-  typed `Unmapped`; a missing file is `Unavailable`; an unreadable file is
-  `Unreadable` — all reference-only errors.
-- **External Codex login.** A Codex mapping's profile names the
-  operator-selected ambient Codex CLI login. The default example uses
-  `codex-subscription-primary`. The daemon and adapter neither locate nor read
-  its credential store and invent no credential-value shape; the fresh CLI
-  process resolves login state under the adapter's existing environment
-  contract. The profile's configured billing kind labels derived cost; adapter
-  kind does not.
+  the Anthropic, OpenAI, Brave Search, and GitHub references to their
+  corresponding deployment paths and reads the file for every Anthropic or
+  OpenAI model call, web search, code-host operation, or pull-request tool
+  operation preparation; nothing is cached. Why: atomic file replacement rotates
+  any credential without restarting signalboxd, and an in-flight operation keeps
+  the value it authenticated with. Resolution is reference-scoped: a foreign
+  reference fails typed `Unmapped`; a missing file is `Unavailable`; an
+  unreadable file is `Unreadable` — all reference-only errors.
+- **External CLI logins.** A Codex or Claude mapping's profile names the
+  operator-selected ambient login of that CLI. The default examples use
+  `codex-subscription-primary` and `claude-subscription-primary`. The daemon and
+  adapter neither locate nor read either credential store and invent no
+  credential-value shape; the fresh CLI process resolves login state under the
+  adapter's existing environment contract. The profile's configured billing kind
+  labels derived cost; adapter kind does not.
 - **The value is the file's bytes less trailing line termination.** The read
   drops trailing `\n` and `\r` bytes and retains every other byte exactly,
   including leading and interior whitespace. Why: the tools that write a
@@ -901,13 +929,13 @@ deployment-side rules that code cannot enforce are stated in
   legacy entry for a differently named configured family; Codex routes never
   may. A later explicit credential event ends this migration-only aliasing
   because resolution then uses only that complete latest snapshot.
-- **Resolution timing.** The Anthropic adapter resolves the durably pinned
+- **Resolution timing.** Each direct HTTP adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
   before send authorization — and scopes the resulting value to that request
-  (INV-002 boundary type). Codex validates that the operation carries its pinned
-  external-login reference and then prepares the process capability without
-  reading a credential value. The shared cancellation contract for preparation
-  and execution is owned by
+  (INV-002 boundary type). Each CLI adapter validates that the operation carries
+  its pinned external-login reference and then prepares the process capability
+  without reading a credential value. The shared cancellation contract for
+  preparation and execution is owned by
   [model-call-execution](model-call-execution.md#staged-execution). A code-host
   tool resolves its fixed `github-primary` reference only after the durable tool
   attempt is authorized `InFlight` and immediately before its typed transport

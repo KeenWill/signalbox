@@ -5,7 +5,7 @@ use std::{ffi::OsStr, fs, os::unix::fs::MetadataExt};
 use rustix::fs::{AtFlags, CWD, Mode, OFlags, openat};
 
 use crate::descriptor::{
-    QuarantineDirectory, file_identity, remove_entry_if_identity,
+    QuarantineDirectory, file_identity, permission_bits, remove_entry_if_identity,
     remove_entry_if_identity_with_test_hook,
 };
 use crate::failure::LocalGitFailure;
@@ -97,7 +97,7 @@ fn created_reference_directory_receives_the_intended_mode() {
             .expect("created directory metadata reads")
             .mode()
             & 0o2777,
-        intended_mode.bits()
+        permission_bits(intended_mode)
     );
 }
 
