@@ -750,12 +750,8 @@ impl PostgresModelCallRepository {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
-            if model_call_is_delegation_logically_terminal(
-                &mut transaction,
-                session,
-                observation.call(),
-            )
-            .await?
+            if locked_delegation_logical_terminal(&mut transaction, session, observation.call())
+                .await?
             {
                 return Ok(None);
             }
@@ -1122,12 +1118,8 @@ impl PostgresModelCallRepository {
                     "retained observation correlation changed",
                 ));
             }
-            if model_call_is_delegation_logically_terminal(
-                &mut transaction,
-                session,
-                observation.call(),
-            )
-            .await?
+            if locked_delegation_logical_terminal(&mut transaction, session, observation.call())
+                .await?
             {
                 return Ok(RetainedModelCallObservationStatus::DiscardedByLogicalTerminal);
             }
@@ -1536,6 +1528,39 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
     ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
         self.reread_capability_failure(session, call).await
     }
+}
+
+/// Locks the delegated relationship owning this call's turn, then reports
+/// whether a cascade already delivered that turn's logical terminal.
+///
+/// The cascade and a terminal-observation transaction share no lock until the
+/// relationship lock this takes, so reading the logical terminal before taking
+/// it decides on a snapshot the cascade can invalidate a moment later: the
+/// observation would then terminalize a turn whose stop was already delivered,
+/// replacing the relationship result the cascade recorded. Taking the lock
+/// first makes the answer authoritative for the rest of the transaction, for
+/// every terminal outcome kind — including the tool-round arm, which takes no
+/// relationship lock of its own.
+async fn locked_delegation_logical_terminal(
+    connection: &mut PgConnection,
+    session: SessionId,
+    call: ModelCallId,
+) -> Result<bool, ModelCallRepositoryError> {
+    let turn: Option<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id
+           FROM model_call
+          WHERE session_id = $1
+            AND model_call_id = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(call.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(turn) = turn else {
+        return Ok(false);
+    };
+    lock_delegated_child_result_frontier(connection, session, TurnId::from_uuid(turn)).await?;
+    model_call_is_delegation_logically_terminal(connection, session, call).await
 }
 
 async fn model_call_is_delegation_logically_terminal(
@@ -5351,7 +5376,7 @@ async fn persist_reclassified_pending_steering(
          )
          SELECT model_settings_evidence_required
            FROM configuration_chain
-          WHERE source_configuration_turn_id IS NULL",
+ WHERE source_configuration_turn_id IS NULL",
     )
     .bind(turn_id_to_uuid(source_turn))
     .bind(session_id_to_uuid(session))
