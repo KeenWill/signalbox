@@ -1101,7 +1101,7 @@ mod tests {
         // `response.rs`'s
         // `ambiguous_length_finish_is_boundary_loss_even_with_partial_tool_material`;
         // the two decoders must not disagree about the same response.
-        let (terminal, _) = drive(&[
+        let (terminal, observations) = drive(&[
             first_chunk(),
             b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
               \"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
@@ -1110,6 +1110,10 @@ mod tests {
               \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
         ]);
 
+        // The positive direction of the helper the sibling case relies on for
+        // its negative claim: a non-empty argument fragment does emit the
+        // delta, so a helper hard-coded either way fails one of the two.
+        assert!(tool_argument_delta_observed(&observations));
         let loss = expect_boundary_loss(terminal);
 
         assert_eq!(
