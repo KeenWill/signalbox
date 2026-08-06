@@ -1515,26 +1515,58 @@ fn decode_outcome(row: &PgRow) -> Result<DelegationOutcome, SessionDelegationRep
         .map_err(|_| SessionDelegationCorruption::Inconsistent("child result content"))?;
     let source = session_id_from_uuid(required(row, "provenance_session_id")?);
     let provenance_kind: String = required(row, "provenance_kind")?;
+    let provenance_turn: Option<Uuid> = optional(row, "provenance_turn_id")?;
+    let provenance_goal: Option<Decimal> = optional(row, "provenance_goal_generation")?;
+    let provenance_request: Option<Uuid> = optional(row, "provenance_tool_request_id")?;
+    let provenance_command: Option<Uuid> = optional(row, "provenance_command_id")?;
     let provenance = match provenance_kind.as_str() {
-        "child_turn" => DelegationProvenanceReconstitutionInput::ChildTurn {
-            session: source,
-            turn: turn_id_from_uuid(required(row, "provenance_turn_id")?),
-        },
-        "parent_turn_command" => DelegationProvenanceReconstitutionInput::ParentTurnCommand {
-            session: source,
-            turn: turn_id_from_uuid(required(row, "provenance_turn_id")?),
-            command: decode_command(required(row, "provenance_command_id")?)?,
-        },
+        "child_turn"
+            if provenance_goal.is_none()
+                && provenance_request.is_none()
+                && provenance_command.is_none() =>
+        {
+            DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: source,
+                turn: turn_id_from_uuid(provenance_turn.ok_or(
+                    SessionDelegationCorruption::Inconsistent("outcome provenance shape"),
+                )?),
+            }
+        }
+        "parent_turn_command" if provenance_goal.is_none() && provenance_request.is_none() => {
+            DelegationProvenanceReconstitutionInput::ParentTurnCommand {
+                session: source,
+                turn: turn_id_from_uuid(provenance_turn.ok_or(
+                    SessionDelegationCorruption::Inconsistent("outcome provenance shape"),
+                )?),
+                command: decode_command(provenance_command.ok_or(
+                    SessionDelegationCorruption::Inconsistent("outcome provenance shape"),
+                )?)?,
+            }
+        }
         "parent_goal_command" => {
+            if provenance_turn.is_some() || provenance_request.is_some() {
+                return Err(
+                    SessionDelegationCorruption::Inconsistent("outcome provenance shape").into(),
+                );
+            }
             let generation = decode_positive(
-                required(row, "provenance_goal_generation")?,
+                provenance_goal.ok_or(SessionDelegationCorruption::Inconsistent(
+                    "outcome provenance shape",
+                ))?,
                 "provenance_goal_generation",
             )?;
             DelegationProvenanceReconstitutionInput::ParentGoalCommand {
                 session: source,
                 generation: GoalGeneration::new(generation),
-                command: decode_command(required(row, "provenance_command_id")?)?,
+                command: decode_command(provenance_command.ok_or(
+                    SessionDelegationCorruption::Inconsistent("outcome provenance shape"),
+                )?)?,
             }
+        }
+        "child_turn" | "parent_turn_command" => {
+            return Err(
+                SessionDelegationCorruption::Inconsistent("outcome provenance shape").into(),
+            );
         }
         value => {
             return Err(SessionDelegationCorruption::Unsupported {

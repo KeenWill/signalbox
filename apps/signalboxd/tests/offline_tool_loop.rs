@@ -58,6 +58,10 @@ use signalbox_process_protocol::{
     InputDelivery, ModelSettingsOverlay, ProtocolVersion, RequestId, ServerMessage, ToolDecision,
     decode_server_line, encode_client_line,
 };
+use signalbox_tools_exec::{
+    BwrapAvailability, CaptureCompleteness, ProcessOutcome, ProcessOutput, ProcessRequest,
+    ProcessRunResult, ProcessRunner, ProcessSpawnFailure, SANDBOXED_EXEC_NAME,
+};
 use signalbox_tools_git::{GIT_STATUS_NAME, GitIdentity};
 use signalbox_tools_web::{
     WEB_FETCH_NAME, WebSearchRequest, WebSearchTransport, WebSearchTransportFailure,
@@ -111,6 +115,8 @@ const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const GIT_AUTHOR_NAME: &str = "Signalbox Daemon";
 const GIT_AUTHOR_EMAIL: &str = "signalbox@example.test";
+const OFFLINE_SANDBOX_LAUNCHER: &str = "/bin/sh";
+const OFFLINE_SANDBOX_LAUNCHER_DESCRIPTOR: i32 = 3;
 
 fn git_identity() -> GitIdentity {
     GitIdentity::try_new(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL).expect("fixture Git identity is valid")
@@ -1111,7 +1117,41 @@ type OfflineDaemonTools<Writer, HostTransport> = DaemonTools<
     LocalWorkspaceFileSystem,
     UnusedConversationPort,
     UnusedConversationPort,
+    OfflineProcessRunner,
 >;
+
+#[derive(Clone, Copy, Debug)]
+struct OfflineProcessRunner;
+
+impl ProcessRunner for OfflineProcessRunner {
+    fn sandbox_launcher_program(&self) -> &std::path::Path {
+        std::path::Path::new(OFFLINE_SANDBOX_LAUNCHER)
+    }
+
+    fn sandbox_launcher_descriptor(&self) -> Option<i32> {
+        Some(OFFLINE_SANDBOX_LAUNCHER_DESCRIPTOR)
+    }
+
+    async fn bwrap_availability(&mut self, _probe: ProcessRequest) -> BwrapAvailability {
+        BwrapAvailability::Unusable
+    }
+
+    async fn run(&mut self, _request: ProcessRequest) -> ProcessRunResult {
+        ProcessRunResult {
+            outcome: ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::Other,
+            },
+            stdout: ProcessOutput {
+                bytes: Vec::new(),
+                completeness: CaptureCompleteness::Complete,
+            },
+            stderr: ProcessOutput {
+                bytes: Vec::new(),
+                completeness: CaptureCompleteness::Complete,
+            },
+        }
+    }
+}
 fn offline_daemon_tools<Writer, HostTransport>(
     web: OfflineWebTransport,
     writer: Writer,
@@ -1140,6 +1180,7 @@ fn offline_daemon_tools<Writer, HostTransport>(
         LocalWorkspaceFileSystem,
         workspace.path(),
         git_identity(),
+        OfflineProcessRunner,
         UnusedConversationPort,
         UnusedConversationPort,
         web_fetch_egress_policy,
@@ -1219,6 +1260,7 @@ type CommissionedDaemonTools<HostTransport, GitHubTransportType> = DaemonTools<
     LocalWorkspaceFileSystem,
     PostgresConversationIntrospection,
     signalbox_persistence::plan::SessionPlanRepository,
+    OfflineProcessRunner,
 >;
 fn commissioned_daemon_tools<HostTransport, GitHubTransportType>(
     pool: &PgPool,
@@ -1248,6 +1290,7 @@ fn commissioned_daemon_tools<HostTransport, GitHubTransportType>(
         LocalWorkspaceFileSystem,
         workspace_root,
         git_identity(),
+        OfflineProcessRunner,
         PostgresConversationIntrospection::new(pool.clone()),
         signalbox_persistence::plan::SessionPlanRepository::new(pool.clone()),
         WebFetchEgressPolicy::deny_all(),
@@ -2625,6 +2668,48 @@ async fn s10_composed_local_git_status_executes_offline() -> Result<(), Box<dyn 
 
     let result = continuation_result_json(&runtime)?;
     assert_eq!(result["entries"][0]["path"], relative_path);
+    assert_commissioned_catalog(&runtime.received_operations()[0], &expected_catalog_names);
+    Ok(())
+}
+
+/// S10: the composed sandboxed executor reaches the injected process boundary
+/// and returns its typed host-refusal evidence through the daemon tool loop.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let workspace = tempdir()?;
+    let (tool_catalog, tool_executor) = commissioned_daemon_tools(
+        &fixture.pool,
+        UnusedCodeHostTransport,
+        UnusedGitHubTransport,
+        workspace.path(),
+    )?
+    .into_parts();
+    let expected_catalog_names = commissioned_catalog_names(&tool_catalog);
+    let arguments = serde_json::json!({"program": "cargo"}).to_string();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[(SANDBOXED_EXEC_NAME, arguments.as_str())]),
+            completion_script("sandbox host refusal observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+
+    let result = continuation_result_json(&runtime)?;
+    assert_eq!(
+        result["confinement"],
+        serde_json::json!({"kind": "sandbox_refused", "availability": "unusable"})
+    );
+    assert_eq!(
+        result["outcome"],
+        serde_json::json!({"kind": "spawn_failed", "reason": "sandbox_unavailable"})
+    );
     assert_commissioned_catalog(&runtime.received_operations()[0], &expected_catalog_names);
     Ok(())
 }

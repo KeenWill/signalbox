@@ -23,6 +23,11 @@ use signalbox_tools_code_host::{
 use signalbox_tools_conversations::{
     CONVERSATION_TOOL_NAMES, ConversationExecutor, ConversationIntrospectionPort, ConversationTools,
 };
+use signalbox_tools_exec::{
+    CARGO_DIAGNOSTICS_NAME, CargoDiagnosticsExecutor, CargoDiagnosticsTool, ExecExecutor,
+    ProcessRunner, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool,
+    TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
+};
 use signalbox_tools_git::{GitIdentity, LOCAL_GIT_TOOL_NAMES, LocalGitExecutor, LocalGitTools};
 use signalbox_tools_github::{
     GITHUB_TOOL_NAMES, GitHubApiTransport, GitHubEgressPolicy, GitHubExecutor, GitHubTools,
@@ -144,6 +149,7 @@ struct ComposedToolFamilies<
     FileSystem: WorkspaceMutationFileSystem,
     ConversationPort,
     PlanPort,
+    ExecRunner: ProcessRunner,
 > {
     web_fetch: WebFetchTool<Transport>,
     web_search: WebSearchTool<Credentials, SearchTransport>,
@@ -153,6 +159,9 @@ struct ComposedToolFamilies<
     workspace_read: Option<WorkspaceReadTools<FileSystem>>,
     workspace_mutation: Option<WorkspaceMutationTools<FileSystem>>,
     local_git: Option<LocalGitTools<FileSystem>>,
+    sandboxed_exec: Option<SandboxedExecTool<ExecRunner>>,
+    unsandboxed_exec: Option<UnsandboxedExecTool<ExecRunner>>,
+    cargo_diagnostics: Option<CargoDiagnosticsTool<ExecRunner>>,
     conversations: Option<ConversationTools<ConversationPort>>,
     plan: PlanTools<PlanPort>,
     delegation: SessionDelegationTools<DaemonSessionDelegationPort>,
@@ -189,6 +198,7 @@ pub struct DaemonTools<
     FileSystem: WorkspaceMutationFileSystem,
     ConversationPort,
     PlanPort,
+    ExecRunner: ProcessRunner = TokioProcessRunner,
 > {
     catalog: DaemonToolCatalog,
     executor: DaemonToolExecutor<
@@ -202,6 +212,7 @@ pub struct DaemonTools<
         FileSystem,
         ConversationPort,
         PlanPort,
+        ExecRunner,
     >,
 }
 
@@ -229,6 +240,7 @@ impl<Clock>
         github_egress_policy: GitHubEgressPolicy,
         workspace_root: &Path,
         git_identity: GitIdentity,
+        exec_supervisor_executable: &Path,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let MappedDaemonCredentialInputs {
@@ -257,6 +269,14 @@ impl<Clock>
             .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
         let local_git = LocalGitTools::try_new(workspace, workspace_root, git_identity)
             .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
+        let exec_runner = TokioProcessRunner::try_new(exec_supervisor_executable)
+            .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let sandboxed_exec = SandboxedExecTool::try_new(exec_runner.clone(), workspace_root)
+            .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let unsandboxed_exec = UnsandboxedExecTool::try_new(exec_runner.clone(), workspace_root)
+            .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let cargo_diagnostics = CargoDiagnosticsTool::try_new(exec_runner, workspace_root)
+            .map_err(|_| DaemonToolsConstructionError::Exec)?;
         let conversations =
             ConversationTools::try_new(PostgresConversationIntrospection::new(pool.clone()))
                 .map_err(|_| DaemonToolsConstructionError::Conversations)?;
@@ -278,6 +298,9 @@ impl<Clock>
                 workspace_read: Some(workspace_read),
                 workspace_mutation: Some(workspace_mutation),
                 local_git: Some(local_git),
+                sandboxed_exec: Some(sandboxed_exec),
+                unsandboxed_exec: Some(unsandboxed_exec),
+                cargo_diagnostics: Some(cargo_diagnostics),
                 conversations: Some(conversations),
                 plan,
                 delegation,
@@ -328,6 +351,9 @@ impl<Clock>
                 workspace_read: None,
                 workspace_mutation: None,
                 local_git: None,
+                sandboxed_exec: None,
+                unsandboxed_exec: None,
+                cargo_diagnostics: None,
                 conversations: None,
                 plan,
                 delegation,
@@ -348,6 +374,7 @@ impl<
     FileSystem,
     ConversationPort,
     PlanPort,
+    ExecRunner,
 >
     DaemonTools<
         Clock,
@@ -360,9 +387,11 @@ impl<
         FileSystem,
         ConversationPort,
         PlanPort,
+        ExecRunner,
     >
 where
     FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem,
+    ExecRunner: ProcessRunner,
 {
     /// Composes every family around injected test or production boundaries.
     #[allow(clippy::too_many_arguments)]
@@ -378,6 +407,7 @@ where
         filesystem: FileSystem,
         workspace_root: &Path,
         git_identity: GitIdentity,
+        exec_runner: ExecRunner,
         conversation_port: ConversationPort,
         plan_port: PlanPort,
         web_fetch_egress_policy: WebFetchEgressPolicy,
@@ -408,6 +438,12 @@ where
                 .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
         let local_git = LocalGitTools::try_new(filesystem, workspace_root, git_identity)
             .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
+        let sandboxed_exec = SandboxedExecTool::try_new(exec_runner.clone(), workspace_root)
+            .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let unsandboxed_exec = UnsandboxedExecTool::try_new(exec_runner.clone(), workspace_root)
+            .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let cargo_diagnostics = CargoDiagnosticsTool::try_new(exec_runner, workspace_root)
+            .map_err(|_| DaemonToolsConstructionError::Exec)?;
         let conversations = ConversationTools::try_new(conversation_port)
             .map_err(|_| DaemonToolsConstructionError::Conversations)?;
         let plan = PlanTools::try_new(plan_port).map_err(|_| DaemonToolsConstructionError::Plan)?;
@@ -425,6 +461,9 @@ where
                 workspace_read: Some(workspace_read),
                 workspace_mutation: Some(workspace_mutation),
                 local_git: Some(local_git),
+                sandboxed_exec: Some(sandboxed_exec),
+                unsandboxed_exec: Some(unsandboxed_exec),
+                cargo_diagnostics: Some(cargo_diagnostics),
                 conversations: Some(conversations),
                 plan,
                 delegation,
@@ -445,6 +484,7 @@ where
             FileSystem,
             ConversationPort,
             PlanPort,
+            ExecRunner,
         >,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let ComposedToolFamilies {
@@ -456,6 +496,9 @@ where
             workspace_read,
             workspace_mutation,
             local_git,
+            sandboxed_exec,
+            unsandboxed_exec,
+            cargo_diagnostics,
             conversations,
             plan,
             delegation,
@@ -475,6 +518,9 @@ where
         let workspace_read = workspace_read.map(WorkspaceReadTools::into_parts);
         let workspace_mutation = workspace_mutation.map(WorkspaceMutationTools::into_parts);
         let local_git = local_git.map(LocalGitTools::into_parts);
+        let sandboxed_exec = sandboxed_exec.map(SandboxedExecTool::into_parts);
+        let unsandboxed_exec = unsandboxed_exec.map(UnsandboxedExecTool::into_parts);
+        let cargo_diagnostics = cargo_diagnostics.map(CargoDiagnosticsTool::into_parts);
         let conversations = conversations.map(ConversationTools::into_parts);
         let (plan_catalog, plan) = plan.into_parts();
         let (delegation_catalog, delegation) = delegation.into_parts();
@@ -497,6 +543,17 @@ where
                 .map(|(catalog, _)| catalog.clone()),
         );
         catalogs.extend(local_git.as_ref().map(|(catalog, _)| catalog.clone()));
+        catalogs.extend(sandboxed_exec.as_ref().map(|(catalog, _)| catalog.clone()));
+        catalogs.extend(
+            unsandboxed_exec
+                .as_ref()
+                .map(|(catalog, _)| catalog.clone()),
+        );
+        catalogs.extend(
+            cargo_diagnostics
+                .as_ref()
+                .map(|(catalog, _)| catalog.clone()),
+        );
         catalogs.extend(conversations.as_ref().map(|(catalog, _)| catalog.clone()));
         catalogs.extend(goal.as_ref().map(|(catalog, _)| catalog.clone()));
         let catalog = DaemonToolCatalog::try_new(catalogs)
@@ -515,6 +572,9 @@ where
                 workspace_mutation: workspace_mutation
                     .map(|(_, executor)| SharedToolExecutor::new(executor)),
                 local_git: local_git.map(|(_, executor)| SharedToolExecutor::new(executor)),
+                sandboxed_exec: sandboxed_exec.map(|(_, executor)| executor),
+                unsandboxed_exec: unsandboxed_exec.map(|(_, executor)| executor),
+                cargo_diagnostics: cargo_diagnostics.map(|(_, executor)| executor),
                 conversations: conversations.map(|(_, executor)| executor),
                 plan,
                 delegation,
@@ -540,6 +600,7 @@ where
             FileSystem,
             ConversationPort,
             PlanPort,
+            ExecRunner,
         >,
     ) {
         (self.catalog, self.executor)
@@ -570,6 +631,9 @@ pub enum DaemonToolsConstructionError {
     WorkspaceMutation,
     /// The local Git catalog, repository root, or identity was invalid.
     LocalGit,
+    /// The execution catalogs, workspace root, or supervisor program were
+    /// invalid.
+    Exec,
     /// The conversation declarations or introspection port were invalid.
     Conversations,
     /// The plan declarations or session plan port were invalid.
@@ -595,6 +659,7 @@ impl fmt::Display for DaemonToolsConstructionError {
             Self::WorkspaceRead => "workspace read tool suite construction failed",
             Self::WorkspaceMutation => "workspace mutation tool suite construction failed",
             Self::LocalGit => "local Git tool suite construction failed",
+            Self::Exec => "exec tool suite construction failed",
             Self::Conversations => "conversation tool suite construction failed",
             Self::Plan => "plan tool suite construction failed",
             Self::SessionDelegation => "session-delegation tool suite construction failed",
@@ -690,6 +755,10 @@ fn configured_composition_contains(name: &ToolName, composition: DaemonToolCompo
                 || WORKSPACE_READ_TOOL_NAMES.contains(&name)
                 || WORKSPACE_MUTATION_TOOL_NAMES.contains(&name)
                 || LOCAL_GIT_TOOL_NAMES.contains(&name)
+                || matches!(
+                    name,
+                    SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
+                )
                 || CONVERSATION_TOOL_NAMES.contains(&name)
         }
     };
@@ -814,6 +883,7 @@ pub struct DaemonToolExecutor<
     FileSystem: WorkspaceMutationFileSystem,
     ConversationPort,
     PlanPort,
+    ExecRunner: ProcessRunner,
 > {
     current_time: CurrentTimeExecutor<Clock>,
     echo: EchoExecutor,
@@ -825,6 +895,9 @@ pub struct DaemonToolExecutor<
     workspace_read: Option<WorkspaceReadExecutor<FileSystem>>,
     workspace_mutation: Option<SharedToolExecutor<WorkspaceMutationExecutor<FileSystem>>>,
     local_git: Option<SharedToolExecutor<LocalGitExecutor<FileSystem>>>,
+    sandboxed_exec: Option<ExecExecutor<SandboxedCommandRunner<ExecRunner>>>,
+    unsandboxed_exec: Option<ExecExecutor<UnsandboxedCommandRunner<ExecRunner>>>,
+    cargo_diagnostics: Option<CargoDiagnosticsExecutor<ExecRunner>>,
     conversations: Option<ConversationExecutor<ConversationPort>>,
     plan: PlanExecutor<PlanPort>,
     delegation: SessionDelegationExecutor<DaemonSessionDelegationPort>,
@@ -876,6 +949,7 @@ impl<
     FileSystem,
     ConversationPort,
     PlanPort,
+    ExecRunner,
 > ToolExecutor
     for DaemonToolExecutor<
         Clock,
@@ -888,6 +962,7 @@ impl<
         FileSystem,
         ConversationPort,
         PlanPort,
+        ExecRunner,
     >
 where
     Clock: CurrentTimeClock,
@@ -900,6 +975,7 @@ where
     FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem,
     ConversationPort: ConversationIntrospectionPort,
     PlanPort: SessionPlanPort,
+    ExecRunner: ProcessRunner,
 {
     type Error = DaemonToolExecutorError;
 
@@ -961,6 +1037,27 @@ where
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             name if LOCAL_GIT_TOOL_NAMES.contains(&name) => self
                 .local_git
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            SANDBOXED_EXEC_NAME => self
+                .sandboxed_exec
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            UNSANDBOXED_EXEC_NAME => self
+                .unsandboxed_exec
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            CARGO_DIAGNOSTICS_NAME => self
+                .cargo_diagnostics
                 .as_mut()
                 .ok_or_else(DaemonToolExecutorError::unknown_tool)?
                 .execute(invocation)
@@ -1252,9 +1349,7 @@ mod tests {
     /// into user-approved requests while their declarations stay fail-closed.
     #[test]
     fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
-        let configuration_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/signalboxd.example.toml");
-        let configuration = crate::HubModelConfiguration::read(&configuration_path)
+        let configuration = crate::configuration::checked_in_example_configuration()
             .expect("checked-in configuration is valid");
         let (web_fetch_catalog, _executor) =
             WebFetchTool::try_new(OfflineTransport, WebFetchEgressPolicy::deny_all())
@@ -1465,6 +1560,9 @@ mod tests {
                 workspace_read: None::<WorkspaceReadTools<LocalWorkspaceFileSystem>>,
                 workspace_mutation: None::<WorkspaceMutationTools<LocalWorkspaceFileSystem>>,
                 local_git: None::<LocalGitTools<LocalWorkspaceFileSystem>>,
+                sandboxed_exec: None::<SandboxedExecTool<TokioProcessRunner>>,
+                unsandboxed_exec: None::<UnsandboxedExecTool<TokioProcessRunner>>,
+                cargo_diagnostics: None::<CargoDiagnosticsTool<TokioProcessRunner>>,
                 conversations: None::<ConversationTools<OfflineConversationPort>>,
                 plan: PlanTools::try_new(OfflineConversationPort)
                     .expect("offline plan tools compile"),
@@ -1536,6 +1634,10 @@ mod tests {
             LocalWorkspaceFileSystem,
             workspace.path(),
             git_identity(),
+            TokioProcessRunner::try_new(
+                std::env::current_exe().expect("test executable path is available"),
+            )
+            .expect("test executable can stand in for the unused supervisor"),
             OfflineConversationPort,
             OfflineConversationPort,
             WebFetchEgressPolicy::deny_all(),
@@ -1551,6 +1653,7 @@ mod tests {
             [
                 APPLY_PATCH_NAME,
                 signalbox_tools_sessions::AWAIT_SESSION_NAME,
+                CARGO_DIAGNOSTICS_NAME,
                 CHANGE_REQUEST_CHANGED_FILES_NAME,
                 CHANGE_REQUEST_CHECKS_STATUS_NAME,
                 CHANGE_REQUEST_CI_JOB_LOG_NAME,
@@ -1590,10 +1693,12 @@ mod tests {
                 REPOSITORY_LIST_DIRECTORY_NAME,
                 REPOSITORY_READ_FILE_NAME,
                 REVIEW_GATE_CHECK_NAME,
+                SANDBOXED_EXEC_NAME,
                 SEARCH_FILES_NAME,
                 signalbox_tools_sessions::SEND_SESSION_MESSAGE_NAME,
                 SESSION_STATUS_UPDATE_NAME,
                 signalbox_tools_sessions::SPAWN_SESSION_NAME,
+                UNSANDBOXED_EXEC_NAME,
                 WEB_FETCH_NAME,
                 WEB_SEARCH_NAME,
                 WRITE_FILE_NAME,
