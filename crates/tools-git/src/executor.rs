@@ -33,8 +33,8 @@ use crate::bounded::{
 use crate::branch::branch_create;
 use crate::commit::{RepositoryOperationState, commit, publish_symbolic_head};
 use crate::descriptor::{
-    FileIdentity, QuarantineDirectory, QuarantineSnapshot, RepositoryIdentity,
-    descriptor_entry_exists, descriptor_path, descriptor_path_from_fd,
+    QuarantineDirectory, QuarantineSnapshot, RepositoryIdentity, descriptor_entry_exists,
+    descriptor_path, descriptor_path_from_fd, stat_file_identity,
 };
 use crate::diff::diff;
 use crate::failure::LocalGitFailure;
@@ -878,10 +878,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 let source_snapshot = QuarantineSnapshot::capture(&source)?;
                 let current_status = statat(&parent, &leaf, AtFlags::SYMLINK_NOFOLLOW)
                     .map_err(|_| LocalGitFailure::Operation)?;
-                let current = FileIdentity {
-                    device: current_status.st_dev,
-                    inode: current_status.st_ino,
-                };
+                let current = stat_file_identity(&current_status);
                 if current != expected {
                     return Err(LocalGitFailure::Operation);
                 }
@@ -970,11 +967,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 .target_snapshot
                 .entry_identity(&transition.path)
                 .ok_or(LocalGitFailure::Operation)?;
-            if (FileIdentity {
-                device: target_status.st_dev,
-                inode: target_status.st_ino,
-            }) != expected_target_identity
-            {
+            if stat_file_identity(&target_status) != expected_target_identity {
                 transition.target.keep();
                 return Err(LocalGitFailure::Operation);
             }
@@ -993,11 +986,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             }
             let published_status = statat(&parent, &leaf, AtFlags::SYMLINK_NOFOLLOW)
                 .map_err(|_| LocalGitFailure::Operation)?;
-            if (FileIdentity {
-                device: published_status.st_dev,
-                inode: published_status.st_ino,
-            }) != expected_target_identity
-            {
+            if stat_file_identity(&published_status) != expected_target_identity {
                 let restoration = renameat_with(
                     &parent,
                     &leaf,

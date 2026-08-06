@@ -396,6 +396,14 @@ fn claude_reasoning_effort(
         .transpose()
 }
 
+/// Validates the complete settings combination enforced by this adapter.
+///
+/// Capability-set validation remains the caller's responsibility. This check
+/// owns cross-knob constraints that independent capability sets cannot state.
+pub fn validate_model_settings(settings: &ModelSettings) -> Result<(), PreparationFailure> {
+    claude_reasoning_effort(settings).map(|_| ())
+}
+
 struct SupportFiles {
     directory: TempDir,
     mcp_config: PathBuf,

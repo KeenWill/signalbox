@@ -14,7 +14,7 @@ use crate::bounded::{
     find_bounded_commit, find_bounded_tree, resolve_bounded_commit, validate_tree_discovery,
 };
 use crate::descriptor::{
-    FileIdentity, descriptor_path_from_fd, file_identity, file_snapshot_identity,
+    FileIdentity, descriptor_path_from_fd, file_identity, file_snapshot_identity, permission_bits,
 };
 use crate::failure::LocalGitFailure;
 use crate::layout::valid_reference_name;
@@ -150,7 +150,7 @@ where
     let lock_path = descriptor_path_from_fd(&directory).join(&lock_name);
     let expected_lock = format!("{target}\n").into_bytes();
     let outcome = (|| {
-        lock.set_permissions(fs::Permissions::from_mode(file_mode.bits()))
+        lock.set_permissions(fs::Permissions::from_mode(permission_bits(file_mode)))
             .map_err(|_| LocalGitFailure::Operation)?;
         lock.write_all(&expected_lock)
             .map_err(|_| LocalGitFailure::Operation)?;
