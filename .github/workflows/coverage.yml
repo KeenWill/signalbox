@@ -143,6 +143,7 @@ jobs:
       - name: Report the numbers
         if: ${{ always() }}
         env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           WORKSPACE_OUTCOME: ${{ steps.workspace.outcome }}
           PERSISTENCE_OUTCOME: ${{ steps.persistence.outcome }}
           SIGNALBOXD_OUTCOME: ${{ steps.signalboxd.outcome }}
@@ -151,7 +152,7 @@ jobs:
           report_dir="$RUNNER_TEMP/coverage"
           mkdir -p "$report_dir"
           cargo llvm-cov report --lcov --output-path "$report_dir/lcov.info"
-          cargo llvm-cov report --html --output-dir "$report_dir/html"
+          cargo llvm-cov report --html --output-dir "$report_dir"
           # `--summary-only` drops the per-region detail the summarizer never
           # reads, which is the difference between a 140 KiB document and a
           # 70 MiB one.
@@ -181,15 +182,17 @@ jobs:
             echo '  which instrumenting its supervisor process perturbs. The'
             echo '  workflow comment on the workspace step states why; rust.yml'
             echo '  runs that test uninstrumented and gates on it.'
-            echo '- Dedicated test files. cargo-llvm-cov excludes `tests/` and'
-            echo '  `benches/` targets and `*tests.rs` modules from the report'
-            echo '  by default, so test code is not counted as covered code.'
-            echo '  Inline `#[cfg(test)]` modules inside a source file are the'
-            echo '  exception: they are instrumented and counted, which makes'
-            echo '  every percentage below optimistic. Uncovered-line counts'
-            echo '  carry no such inflation — a test body that ran is never'
-            echo '  uncovered — so the file list is exact where the'
-            echo '  percentages are not.'
+            echo '- Dedicated test files. cargo-llvm-cov excludes `tests/`'
+            echo '  and `benches/` targets and `*tests.rs` modules from the'
+            echo '  report by default, so that test code is counted neither'
+            echo '  covered nor uncovered here. Inline `#[cfg(test)]` modules'
+            echo '  inside a source file are the exception: they are'
+            echo '  instrumented, and they land on both sides. A test body'
+            echo '  that ran counts as covered, which makes every percentage'
+            echo '  below optimistic; the body of an `#[ignore]`d test no'
+            echo '  measured suite runs counts as uncovered, which puts test'
+            echo '  lines into the file ranking. Read both tables as close,'
+            echo '  not exact.'
             echo
             echo '</details>'
           } > "$report_dir/preamble.md"
@@ -203,7 +206,8 @@ jobs:
           {
             printf '%s\n\n' '<!-- signalbox-rust-coverage -->'
             cat "$report_dir/report.md"
-            printf '\n[Full HTML report and LCOV](%s/%s/actions/runs/%s) (workflow artifact).\n' \
+            printf '\nMeasured at `%s` by [run %s](%s/%s/actions/runs/%s), which uploads the HTML report and LCOV as an artifact.\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" \
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
           } > "$report_dir/comment.md"
       - name: Upload the coverage report
@@ -224,11 +228,19 @@ jobs:
   # such a run a read-only token no matter what `permissions` requests, so the
   # comment would fail; the job summary and the uploaded report are unaffected
   # and remain the whole report for a fork contributor.
+  #
+  # It runs whenever the coverage job reached an end, not only when that job
+  # produced a report: a run that measured nothing must replace the previous
+  # run's numbers rather than leave them standing as the current readout. A
+  # cancelled run is the one exception, since a superseded run has a successor
+  # already on its way to overwrite the comment.
   publish-comment:
     name: Comment the coverage report
     needs: rust-coverage
     if: >-
-      github.event_name == 'pull_request'
+      always()
+      && needs.rust-coverage.result != 'cancelled'
+      && github.event_name == 'pull_request'
       && github.event.pull_request.head.repo.full_name == github.repository
     continue-on-error: true
     runs-on: ubuntu-latest
@@ -239,7 +251,10 @@ jobs:
       actions: read
       pull-requests: write
     steps:
+      # Continues on error so a run that uploaded no report still reaches the
+      # step below, which replaces the stale comment instead of leaving it.
       - name: Download the coverage report
+        continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: rust-coverage
@@ -251,9 +266,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           body="$RUNNER_TEMP/coverage/comment.md"
           payload="$RUNNER_TEMP/payload.json"
+
+          # No report means the run measured nothing. Saying so under the same
+          # marker retires the previous run's numbers, which would otherwise
+          # keep reading as this head's, and names the head that has none.
+          if [ ! -f "$body" ]; then
+            mkdir -p "$RUNNER_TEMP/coverage"
+            {
+              printf '%s\n\n' '<!-- signalbox-rust-coverage -->'
+              printf '## Rust coverage (report only)\n\n'
+              printf 'The coverage run for `%s` produced no report; see ' "$HEAD_SHA"
+              printf '[run %s](%s/%s/actions/runs/%s).\n\n' \
+                "$GITHUB_RUN_ID" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" \
+                "$GITHUB_RUN_ID"
+              printf 'Nothing is gated on this. The measurement is missing, '
+              printf 'not failing, and no merge waits on it.\n'
+            } > "$body"
+          fi
           jq -n --rawfile body "$body" '{body: $body}' > "$payload"
 
           # Paginated: a long-running pull request can hold more comments than
