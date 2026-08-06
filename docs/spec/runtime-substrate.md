@@ -472,14 +472,14 @@ downgraded refusal can be blocked before any completion token is produced, so
 both accepted shapes share one output usage-presence check without demanding it
 be nonzero.
 
-This smoke pins no explicit reasoning effort, and needs none. Claude's
-extended-thinking budget is opt-in per request — the adapter emits a `thinking`
-block only when `ModelSettings.reasoning_level` is set explicitly, and this
-smoke never sets it — so the exchange spends no hidden reasoning tokens against
-the output ceiling. The ceiling is therefore a pure cost cap: every token billed
-against it is visible output that the fixed one-word prompt already bounds, and
-the exchange cannot truncate into the `BoundaryLoss` a required check could not
-distinguish from a real compatibility break.
+This smoke pins no explicit reasoning effort, and needs none. Extended reasoning
+is requested per operation — the adapter emits `output_config.effort` only when
+`ModelSettings.reasoning_level` is set explicitly, and this smoke never sets it
+— so the exchange spends no hidden reasoning tokens against the output ceiling.
+The ceiling is therefore a pure cost cap: every token billed against it is
+visible output that the fixed one-word prompt already bounds, and the exchange
+cannot truncate into the `BoundaryLoss` a required check could not distinguish
+from a real compatibility break.
 
 This smoke's required aggregate is merge-gating for a pull request that changes
 the adapter crate or the workflow itself — an explicit exception to

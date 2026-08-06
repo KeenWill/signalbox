@@ -116,9 +116,10 @@ async fn the_anthropic_api_completes_one_exchange() {
         vec![ConversationMessage::user_text(PROMPT)],
         ModelSettings::new(MAX_OUTPUT_TOKENS),
     );
-    // Matches the only delivery mode production ever selects (see the module
-    // doc comment); a buffered exchange here would prove nothing about the
-    // deployed SSE decoder.
+    // The mode `RuntimeModelCallProvider` sets for ordinary model calls, so
+    // the one paid exchange lands on the decoder carrying production's main
+    // traffic. Production's buffered call sites are covered offline instead;
+    // see the module doc comment.
     operation.delivery = DeliveryMode::Streamed;
 
     let prepared = require_prepared(
@@ -272,12 +273,24 @@ fn downgraded_refusal_facts() -> NativeErrorFacts {
 /// accepting the downgraded-refusal shape, and the one signal a mid-stream
 /// native error event cannot manufacture.
 fn refusal_finish_observed(observations: &[Observation<String>]) -> bool {
-    observations.iter().any(|observation| {
-        matches!(
-            observation.fact,
-            ObservationFact::FinishReported(FinishReason::Refusal)
-        )
-    })
+    observations
+        .iter()
+        .any(|observation| match &observation.fact {
+            ObservationFact::FinishReported(FinishReason::Refusal) => true,
+            // Every variant is named rather than caught by a wildcard: this
+            // discriminator decides whether a provider error is waved through as
+            // a refusal, so a future observation class must fail to compile here
+            // and be considered, not silently default to "no refusal".
+            ObservationFact::FinishReported(_)
+            | ObservationFact::SendCommenced
+            | ObservationFact::ExchangeEstablished(_)
+            | ObservationFact::ProviderModelReported(_)
+            | ObservationFact::TextDelta { .. }
+            | ObservationFact::ThinkingDelta { .. }
+            | ObservationFact::ToolArgumentsDelta { .. }
+            | ObservationFact::ToolCallProposed(_)
+            | ObservationFact::UsageReported(_) => false,
+        })
 }
 
 /// Asserts a decoded response is well-formed under the compatibility-smoke
