@@ -213,24 +213,25 @@ impl SessionDelegationRepository {
     ) -> Result<RecordDelegationWaitOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_tool_session(&mut transaction, request.request().session()).await?;
             lock_delivery_session(&mut transaction, request.request().session()).await?;
-            if let Some(spawning_request) =
-                load_wait_replay_subject(&mut transaction, request.request().id()).await?
+            lock_tool_session(&mut transaction, request.request().session()).await?;
+            if let Some(stored) = load_wait_replay(&mut transaction, request.request().id()).await?
             {
                 if dispatch.request() != request.request() {
                     return Ok(RecordDelegationWaitOutcome::Rejected(
                         DelegationOperationRejection::StaleDispatch,
                     ));
                 }
-                let relation = load_relation(&mut transaction, spawning_request).await?;
+                let relation = load_relation(&mut transaction, stored.spawning_request).await?;
                 let wait = DelegationWait::reconstitute(&relation, &request).ok_or(
                     SessionDelegationCorruption::Inconsistent("stored wait purpose"),
                 )?;
-                if load_wait_mode(&mut transaction, request.request().id()).await? != wait.mode() {
-                    return Err(
-                        SessionDelegationCorruption::Inconsistent("stored wait mode").into(),
-                    );
+                if stored.parent != wait.parent()
+                    || stored.parent_turn != request.request().turn()
+                    || stored.child != wait.child()
+                    || stored.mode != wait.mode()
+                {
+                    return Err(SessionDelegationCorruption::Inconsistent("stored wait row").into());
                 }
                 return Ok(RecordDelegationWaitOutcome::Recorded(
                     RecordedDelegationWait { wait },
@@ -526,35 +527,40 @@ fn message_receipt(
     .map_err(|_| SessionDelegationCorruption::Inconsistent("message receipt").into())
 }
 
-async fn load_wait_replay_subject(
+struct StoredDelegationWaitReplay {
+    spawning_request: ToolRequestId,
+    parent: SessionId,
+    parent_turn: signalbox_domain::TurnId,
+    child: SessionId,
+    mode: DelegationWaitMode,
+}
+
+async fn load_wait_replay(
     connection: &mut PgConnection,
     request: ToolRequestId,
-) -> Result<Option<ToolRequestId>, SessionDelegationRepositoryError> {
-    sqlx::query_scalar::<_, Uuid>(
-        "SELECT spawning_tool_request_id
+) -> Result<Option<StoredDelegationWaitReplay>, SessionDelegationRepositoryError> {
+    let row = sqlx::query(
+        "SELECT spawning_tool_request_id, parent_session_id, parent_turn_id,
+                child_session_id, wait_mode
            FROM session_delegation_wait
           WHERE awaiting_tool_request_id = $1",
     )
     .bind(tool_request_id_to_uuid(request))
     .fetch_optional(connection)
-    .await
-    .map(|value| value.map(tool_request_id_from_uuid))
-    .map_err(Into::into)
-}
-
-async fn load_wait_mode(
-    connection: &mut PgConnection,
-    request: ToolRequestId,
-) -> Result<DelegationWaitMode, SessionDelegationRepositoryError> {
-    let row = sqlx::query(
-        "SELECT wait_mode FROM session_delegation_wait WHERE awaiting_tool_request_id = $1",
-    )
-    .bind(tool_request_id_to_uuid(request))
-    .fetch_optional(connection)
-    .await?
-    .ok_or(SessionDelegationCorruption::Missing("delegation wait"))?;
-    let value: String = required(&row, "wait_mode")?;
-    decode_wait_mode(&value)
+    .await?;
+    row.map(|row| {
+        Ok(StoredDelegationWaitReplay {
+            spawning_request: tool_request_id_from_uuid(required(
+                &row,
+                "spawning_tool_request_id",
+            )?),
+            parent: session_id_from_uuid(required(&row, "parent_session_id")?),
+            parent_turn: turn_id_from_uuid(required(&row, "parent_turn_id")?),
+            child: session_id_from_uuid(required(&row, "child_session_id")?),
+            mode: decode_wait_mode(&required::<String>(&row, "wait_mode")?)?,
+        })
+    })
+    .transpose()
 }
 
 async fn find_relation_for_wait(
@@ -1266,16 +1272,26 @@ async fn load_message_replay(
     let row = sqlx::query(
         "SELECT relation.parent_session_id, relation.child_session_id,
                 message.message_id, message.direction, message.content_text,
-                message.event_ordinal, delivery.delivery_sequence
+                message.event_ordinal,
+                delivery.recipient_session_id AS delivery_recipient_session_id,
+                delivery.delivery_sequence AS delivery_sequence,
+                delivery.delivery_kind AS delivery_kind,
+                pending.recipient_session_id AS pending_recipient_session_id,
+                pending.delivery_sequence AS pending_delivery_sequence,
+                pending.delivery_kind AS pending_delivery_kind
            FROM session_delegation_event AS event
-           JOIN session_delegation AS relation
+           LEFT JOIN session_delegation AS relation
              ON relation.spawning_tool_request_id = event.spawning_tool_request_id
-           JOIN session_message AS message
+           LEFT JOIN session_message AS message
              ON message.spawning_tool_request_id = event.spawning_tool_request_id
             AND message.event_ordinal = event.event_ordinal
-           JOIN session_message_delivery AS delivery
+           LEFT JOIN session_message_delivery AS delivery
              ON delivery.message_id = message.message_id
             AND delivery.spawning_tool_request_id = message.spawning_tool_request_id
+           LEFT JOIN session_pending_delivery AS pending
+             ON pending.recipient_session_id = delivery.recipient_session_id
+            AND pending.delivery_sequence = delivery.delivery_sequence
+            AND pending.delivery_kind = delivery.delivery_kind
           WHERE event.event_kind = 'message_delivered'
             AND event.provenance_tool_request_id = $1",
     )
@@ -1289,7 +1305,23 @@ async fn load_message_replay(
     let child = session_id_from_uuid(required(&row, "child_session_id")?);
     let direction = decode_direction(&required::<String>(&row, "direction")?)?;
     let content: String = required(&row, "content_text")?;
+    let delivery_recipient = session_id_from_uuid(required(&row, "delivery_recipient_session_id")?);
+    let delivery_sequence =
+        decode_positive(required(&row, "delivery_sequence")?, "delivery_sequence")?;
+    let pending_recipient = session_id_from_uuid(required(&row, "pending_recipient_session_id")?);
+    let pending_sequence = decode_positive(
+        required(&row, "pending_delivery_sequence")?,
+        "pending_delivery_sequence",
+    )?;
+    let delivery_kind: String = required(&row, "delivery_kind")?;
+    let pending_kind: String = required(&row, "pending_delivery_kind")?;
+    let endpoints = RelationEndpoints { parent, child };
     if content != request.content().as_str()
+        || delivery_recipient != message_recipient(direction, endpoints)
+        || pending_recipient != delivery_recipient
+        || pending_sequence != delivery_sequence
+        || delivery_kind != "message"
+        || pending_kind != delivery_kind
         || DelegationMessage::reconstitute(
             request,
             DelegationMessageId::from_uuid(required(&row, "message_id")?),
@@ -1305,10 +1337,7 @@ async fn load_message_replay(
         message: DelegationMessageId::from_uuid(required(&row, "message_id")?),
         direction,
         ordinal: decode_ordinal(required(&row, "event_ordinal")?)?,
-        delivery_sequence: decode_positive(
-            required(&row, "delivery_sequence")?,
-            "delivery_sequence",
-        )?,
+        delivery_sequence,
     }))
 }
 
