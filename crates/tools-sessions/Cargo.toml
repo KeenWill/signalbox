@@ -15,7 +15,6 @@ signalbox-application = { path = "../application" }
 signalbox-domain = { path = "../domain" }
 signalbox-model-provider-runtime = { path = "../model-provider-runtime" }
 signalbox-tool-contract = { path = "../tool-contract" }
-uuid = { version = "1.24.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 uuid = { version = "1.24.0", default-features = false, features = ["std"] }

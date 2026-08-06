@@ -882,7 +882,10 @@ fn stopped_child_result_retains_goal_command_provenance() {
         output["provenance"]["parent_session_id"],
         parent.as_uuid().to_string()
     );
-    assert_eq!(output["provenance"]["goal_generation"], json!("2"));
+    assert_eq!(
+        output["provenance"]["goal_generation"],
+        generation.get().to_string()
+    );
     assert_eq!(
         output["provenance"]["command_id"],
         command.as_uuid().to_string()
