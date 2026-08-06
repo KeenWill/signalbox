@@ -32,7 +32,7 @@ pub(super) struct ReferenceLogLock {
     backup: Option<fs::File>,
     original_permissions: Option<fs::Permissions>,
     original_snapshot: Option<ReferenceLogSnapshot>,
-    created_directories: CreatedReferenceDirectories,
+    _created_directories: CreatedReferenceDirectories,
     committed: bool,
 }
 
@@ -101,7 +101,7 @@ impl ReferenceLogLock {
             backup: None,
             original_permissions: None,
             original_snapshot: None,
-            created_directories,
+            _created_directories: created_directories,
             committed: false,
         };
         guard
