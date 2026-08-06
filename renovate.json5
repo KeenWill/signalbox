@@ -11,9 +11,13 @@
   // covers the root manifest and every workspace member under crates/ and
   // apps/, so no path configuration is needed for full workspace coverage.
   // The npm manager's default file pattern ((^|/)package\.json$) already covers
-  // tooling/codex-cli, the tree's only npm manifest. It exists solely to pin
-  // the wrapped Codex CLI executable to an exact version; see the Codex CLI
-  // provider adapter section of docs/spec/runtime-substrate.md.
+  // both npm manifests in the tree: tooling/codex-cli and
+  // crates/model-runtime-claude-cli. Neither is a Node project — each exists
+  // solely to pin one wrapped CLI executable to an exact version, and each pin
+  // bump is proven against the real CLI by that adapter's own compatibility
+  // smoke (.github/workflows/codex-smoke.yml and
+  // .github/workflows/claude-smoke.yml). See the Codex CLI and Claude Code CLI
+  // provider adapter sections of docs/spec/runtime-substrate.md.
   "packageRules": [
     {
       "matchManagers": ["cargo"],
