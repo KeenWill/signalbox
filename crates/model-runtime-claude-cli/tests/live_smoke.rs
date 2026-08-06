@@ -599,6 +599,137 @@ fn workflow_declares(workflow: &str, fragment: &str) -> bool {
         .any(|(_, content)| content.contains(fragment))
 }
 
+/// Every active line of the workflow step introduced by `name`, in file order,
+/// beginning with the step's own `- name:` marker.
+///
+/// The step runs from that marker to the first line back at its indentation,
+/// which is the next step's marker or the end of the list, so the whole body —
+/// the `env:` bindings and every line of the `run:` script — is returned
+/// together.
+fn workflow_step_lines(workflow: &str, name: &str) -> Vec<String> {
+    let lines = active_workflow_lines(workflow);
+    let marker = format!("- name: {name}");
+    let Some(start) = lines.iter().position(|(_, content)| *content == marker) else {
+        return Vec::new();
+    };
+    let Some(&(level, _)) = lines.get(start) else {
+        return Vec::new();
+    };
+    let body = lines.get(start + 1..).unwrap_or_default();
+    let extent = body
+        .iter()
+        .position(|(indent, _)| *indent <= level)
+        .unwrap_or(body.len());
+    std::iter::once(marker)
+        .chain(
+            body.get(..extent)
+                .unwrap_or_default()
+                .iter()
+                .map(|(_, content)| (*content).to_owned()),
+        )
+        .collect()
+}
+
+/// The one step that carries the credential's value.
+const CREDENTIALED_STEP: &str = "Run one live exchange through the adapter";
+
+/// Every line that step executes, in file order.
+///
+/// Pinned whole, because naming the credential is not the only way to read it.
+/// A command such as `env`, `export -p`, or `set` writes the whole environment
+/// — the key with it — without the variable appearing on its line, so an
+/// inventory keyed on the name cannot see it. Nothing else in this workflow
+/// holds the value: it is bound in this step alone, so pinning this step closes
+/// the indirect route completely. The name-keyed inventory above stays as the
+/// complement, catching a binding that puts the credential into some *other*
+/// step, which this assertion would not see.
+const CREDENTIALED_STEP_LINES: &[&str] = &[
+    "- name: Run one live exchange through the adapter",
+    "env:",
+    "ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}",
+    "SIGNALBOX_CLAUDE_SMOKE_MODEL: ${{ vars.CLAUDE_SMOKE_MODEL }}",
+    "run: |",
+    "set -euo pipefail",
+    "test -n \"${ANTHROPIC_API_KEY}\" \\",
+    "|| { echo \"the claude-smoke environment provides no API key\"; exit 1; }",
+    "test_name=the_pinned_claude_cli_completes_one_exchange",
+    "result=\"${RUNNER_TEMP}/claude-smoke-live-result\"",
+    "cargo test --color never --no-fail-fast \\",
+    "-p signalbox-model-runtime-claude-cli --test live_smoke -- \\",
+    "--ignored --exact \"${test_name}\" 2>&1 | tee \"${result}\"",
+    "passed_count=$(sed -n \\",
+    "'s/^test result: ok\\. \\([0-9][0-9]*\\) passed;.*/\\1/p' \\",
+    "\"${result}\")",
+    "if [[ \"${passed_count}\" != \"1\" ]]; then",
+    "echo \"::error::Expected exactly one live smoke test to execute; libtest reported '${passed_count:-no passed count}'.\"",
+    "exit 1",
+    "fi",
+];
+
+/// Any line added to, removed from, or changed in the credentialed step fails
+/// here and must be reviewed for what it does with the key in scope.
+#[test]
+fn the_credentialed_step_is_pinned_in_full() {
+    assert_eq!(
+        workflow_step_lines(CLAUDE_SMOKE_WORKFLOW, CREDENTIALED_STEP),
+        CREDENTIALED_STEP_LINES,
+        "the step that carries {SMOKE_CREDENTIAL_VARIABLE} changed; every line that runs \
+         with the key in scope must be reviewed before it is permitted"
+    );
+}
+
+/// The workflow text the step fixtures extend, so each differs from the pinned
+/// step by exactly the one line under test.
+fn credentialed_step_workflow() -> String {
+    CREDENTIALED_STEP_LINES.join("\n        ")
+}
+
+#[test]
+fn credentialed_step_scan_accepts_the_pinned_step() {
+    assert_eq!(
+        workflow_step_lines(&credentialed_step_workflow(), CREDENTIALED_STEP),
+        CREDENTIALED_STEP_LINES
+    );
+}
+
+/// The read the name-keyed inventory cannot see: `env` writes the credential to
+/// the job log without the variable appearing on its line.
+#[test]
+fn credentialed_step_scan_detects_an_environment_dump() {
+    let workflow = format!("{}\n        env", credentialed_step_workflow());
+
+    assert_eq!(
+        credential_reading_lines(&workflow),
+        PERMITTED_CREDENTIAL_SITES
+    );
+    assert_ne!(
+        workflow_step_lines(&workflow, CREDENTIALED_STEP),
+        CREDENTIALED_STEP_LINES
+    );
+}
+
+/// `export -p` and `set` dump the environment just as `env` does, and name the
+/// credential no more than it does.
+#[test]
+fn credentialed_step_scan_detects_an_export_dump() {
+    let workflow = format!("{}\n        export -p", credentialed_step_workflow());
+
+    assert_ne!(
+        workflow_step_lines(&workflow, CREDENTIALED_STEP),
+        CREDENTIALED_STEP_LINES
+    );
+}
+
+/// A step whose marker is absent yields nothing, so a renamed or deleted step
+/// fails the pin rather than matching an empty expectation.
+#[test]
+fn credentialed_step_scan_is_empty_for_a_missing_step() {
+    assert_eq!(
+        workflow_step_lines(SCOPING_FIXTURE_WORKFLOW, CREDENTIALED_STEP),
+        Vec::<String>::new()
+    );
+}
+
 /// Every line that reaches the credential's value, trimmed and in file order.
 ///
 /// A line qualifies when it names the credential anywhere outside a comment.
@@ -1800,37 +1931,79 @@ fn executable_resolution_finds_a_bare_command_on_the_search_path() {
     assert_eq!(resolved, on_path);
 }
 
-/// A file whose only execute bit belongs to "other" is not executable by
-/// its owner, so it cannot shadow the runnable executable in a later
-/// directory, exactly as normal PATH lookup skips it.
+/// Whether the running process's effective uid is the one the kernel exempts
+/// from the discretionary execute check.
+///
+/// `executable_file` asks `accessat` with `EACCESS`, so the answer is the
+/// effective uid's. Root is exempt in a specific way that matters here: it may
+/// execute a regular file when *any* execute bit is set, so the owner-vs-other
+/// distinction below does not exist for it.
 #[cfg(unix)]
-#[test]
-fn executable_resolution_skips_an_other_only_execute_bit() {
-    verify_other_only_execute_bit_is_skipped();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EffectivePrivilege {
+    Root,
+    Unprivileged,
 }
 
-/// Body of the other-only-execute-bit case. The effective-uid gate lives here
-/// rather than in the `#[test]` function so that body stays straight-line: an
-/// effective root uid may execute a regular file for any execute bit, so the
-/// owner-vs-other distinction the case relies on does not hold and the check
-/// returns early, keeping the workspace validation portable in root
-/// containers.
 #[cfg(unix)]
-fn verify_other_only_execute_bit_is_skipped() {
+impl EffectivePrivilege {
+    fn observe() -> Self {
+        match rustix::process::geteuid().is_root() {
+            true => Self::Root,
+            false => Self::Unprivileged,
+        }
+    }
+
+    /// Which file a `PATH` search must return when its first candidate carries
+    /// only the "other" execute bit.
+    ///
+    /// Unprivileged, the owner holds no execute permission, so the search skips
+    /// the shadow and finds the runnable file in the later directory. As root
+    /// the shadow is genuinely executable, so returning it is correct rather
+    /// than a defect — the case has a real answer in both environments, which
+    /// is why the test asserts one instead of returning early. It previously
+    /// returned early under root and reported success without creating a
+    /// fixture or running an assertion at all.
+    fn other_only_resolution(
+        self,
+        shadow: std::path::PathBuf,
+        on_path: std::path::PathBuf,
+    ) -> std::path::PathBuf {
+        match self {
+            Self::Root => shadow,
+            Self::Unprivileged => on_path,
+        }
+    }
+}
+
+/// Writes a fixture file whose only permission bits belong to "other", so its
+/// owner may read it but not execute it.
+#[cfg(unix)]
+fn other_only_fixture(directory: &std::path::Path, name: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
-    if rustix::process::geteuid().is_root() {
-        return;
-    }
-    let shadowing = tempfile::tempdir().expect("resolution fixture directory is created");
-    let populated = tempfile::tempdir().expect("resolution fixture directory is created");
-    let shadow = shadowing.path().join("claude-other-only");
-    std::fs::write(&shadow, "#!/bin/sh\n").expect("the other-only shadow file is written");
-    let mut permissions = std::fs::metadata(&shadow)
+    let path = directory.join(name);
+    std::fs::write(&path, "#!/bin/sh\n").expect("the other-only shadow file is written");
+    let mut permissions = std::fs::metadata(&path)
         .expect("the other-only shadow file has metadata")
         .permissions();
     permissions.set_mode(0o004 | 0o001);
-    std::fs::set_permissions(&shadow, permissions).expect("the shadow keeps only the other bits");
+    std::fs::set_permissions(&path, permissions).expect("the shadow keeps only the other bits");
+    path
+}
+
+/// A file whose only execute bit belongs to "other" is not executable by its
+/// owner, so it cannot shadow the runnable executable in a later directory,
+/// exactly as normal PATH lookup skips it — and under an effective root uid,
+/// which may execute a file carrying any execute bit, it legitimately does
+/// shadow it. Both outcomes are asserted, so neither environment reports a pass
+/// without having checked anything.
+#[cfg(unix)]
+#[test]
+fn executable_resolution_skips_an_other_only_execute_bit() {
+    let shadowing = tempfile::tempdir().expect("resolution fixture directory is created");
+    let populated = tempfile::tempdir().expect("resolution fixture directory is created");
+    let shadow = other_only_fixture(shadowing.path(), "claude-other-only");
     let on_path = executable_fixture(populated.path(), "claude-other-only");
     let search = std::env::join_paths([shadowing.path(), populated.path()])
         .expect("the fixture search path joins");
@@ -1841,7 +2014,38 @@ fn verify_other_only_execute_bit_is_skipped() {
         Some(&search),
     );
 
-    assert_eq!(resolved, on_path);
+    assert_eq!(
+        resolved,
+        EffectivePrivilege::observe().other_only_resolution(shadow, on_path)
+    );
+}
+
+/// The unprivileged expectation, stated directly so the arm the local run does
+/// not take is still covered.
+#[cfg(unix)]
+#[test]
+fn unprivileged_resolution_skips_the_other_only_shadow() {
+    let shadow = std::path::PathBuf::from("/fixture/shadow");
+    let on_path = std::path::PathBuf::from("/fixture/on-path");
+
+    assert_eq!(
+        EffectivePrivilege::Unprivileged.other_only_resolution(shadow, on_path.clone()),
+        on_path
+    );
+}
+
+/// The root expectation, likewise — an execute bit anywhere makes the shadow
+/// runnable, so it wins the search.
+#[cfg(unix)]
+#[test]
+fn root_resolution_takes_the_other_only_shadow() {
+    let shadow = std::path::PathBuf::from("/fixture/shadow");
+    let on_path = std::path::PathBuf::from("/fixture/on-path");
+
+    assert_eq!(
+        EffectivePrivilege::Root.other_only_resolution(shadow.clone(), on_path),
+        shadow
+    );
 }
 
 /// A match in a `PATH` directory whose name is not valid UTF-8 is returned as
