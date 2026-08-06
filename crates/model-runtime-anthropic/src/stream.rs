@@ -1363,11 +1363,13 @@ mod tests {
         let Some(TerminalEvidence::ProviderError(error)) = terminal else {
             panic!("a classified error event outranks the reported stop reason");
         };
+        // Classification is the whole subject here: it is what decides
+        // precedence over the reported stop reason. Native-token propagation
+        // is a separate fact, already covered by
+        // `mid_stream_error_event_is_definitive_provider_error_evidence`, so
+        // re-asserting the fixture's token spelling would only couple this
+        // case to a literal it does not care about.
         assert_eq!(error.kind, ProviderErrorKind::Overloaded);
-        assert_eq!(
-            error.native.error_token,
-            Some("overloaded_error".to_string())
-        );
     }
 
     #[test]
