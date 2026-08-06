@@ -15,7 +15,7 @@
 # Owner decision, also required. The adapter clears the child environment and
 # forwards only an allowlist (`CLAUDE_ENVIRONMENT` in src/runtime.rs), which
 # deliberately excludes direct credential values and carries a unit test
-# asserting `ANTHROPIC_API_KEY` never reaches the child (INV-035). The step
+# asserting `ANTHROPIC_API_KEY` never reaches the child. The step
 # below therefore places the key in the *test process* environment, and the
 # adapter drops it before spawning the CLI, so the exchange runs
 # unauthenticated. Closing that gap means deciding how the credential should

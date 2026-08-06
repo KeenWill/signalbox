@@ -520,17 +520,20 @@ const PERMITTED_CREDENTIAL_SITES: &[&str] = &[
 
 /// Every line that reaches the credential's value, trimmed and in file order.
 ///
-/// A line qualifies when it names the credential *and* expands something: that
-/// covers the GitHub expression form (`${{ secrets.… }}`), a braced shell
-/// expansion (`${…}`), and a bare one (`$…`) alike, while leaving the prose
-/// mentions in the header comment — which name the variable without reading it
-/// — out of the inventory. Factored out of the assertion so synthetic
-/// workflows can prove the scan actually catches each form.
-fn credential_reference_lines(workflow: &str) -> Vec<&str> {
+/// A line qualifies when it names the credential anywhere outside a comment.
+/// Keying on the name rather than on an expansion sigil is deliberate: `$`
+/// covers the GitHub expression form, a braced shell expansion, and a bare
+/// one, but not a read that never expands anything — `printenv
+/// ANTHROPIC_API_KEY` writes the value to the job log without a `$` in sight.
+/// Only the comment prefix is excluded, because prose that names the variable
+/// reads nothing; every executable mention is inventoried whether it expands
+/// or not. Factored out of the assertion so synthetic workflows can prove the
+/// scan catches each form.
+fn credential_reading_lines(workflow: &str) -> Vec<&str> {
     workflow
         .lines()
         .map(str::trim)
-        .filter(|line| line.contains(SMOKE_CREDENTIAL_VARIABLE) && line.contains('$'))
+        .filter(|line| !line.starts_with('#') && line.contains(SMOKE_CREDENTIAL_VARIABLE))
         .collect()
 }
 
@@ -543,7 +546,7 @@ fn credential_reference_lines(workflow: &str) -> Vec<&str> {
 #[test]
 fn the_smoke_workflow_reaches_the_credential_only_where_permitted() {
     assert_eq!(
-        credential_reference_lines(CLAUDE_SMOKE_WORKFLOW),
+        credential_reading_lines(CLAUDE_SMOKE_WORKFLOW),
         PERMITTED_CREDENTIAL_SITES,
         "the smoke workflow's credential references changed; every site that reads \
          {SMOKE_CREDENTIAL_VARIABLE} must be reviewed before it is permitted"
@@ -559,7 +562,7 @@ fn permitted_credential_workflow() -> String {
 #[test]
 fn credential_scan_accepts_the_permitted_inventory() {
     assert_eq!(
-        credential_reference_lines(&permitted_credential_workflow()),
+        credential_reading_lines(&permitted_credential_workflow()),
         PERMITTED_CREDENTIAL_SITES
     );
 }
@@ -574,7 +577,7 @@ fn credential_scan_detects_a_braced_shell_expansion() {
     );
 
     assert_ne!(
-        credential_reference_lines(&workflow),
+        credential_reading_lines(&workflow),
         PERMITTED_CREDENTIAL_SITES
     );
 }
@@ -588,7 +591,7 @@ fn credential_scan_detects_a_bare_shell_expansion() {
     );
 
     assert_ne!(
-        credential_reference_lines(&workflow),
+        credential_reading_lines(&workflow),
         PERMITTED_CREDENTIAL_SITES
     );
 }
@@ -603,7 +606,7 @@ fn credential_scan_detects_an_argv_expansion() {
     );
 
     assert_ne!(
-        credential_reference_lines(&workflow),
+        credential_reading_lines(&workflow),
         PERMITTED_CREDENTIAL_SITES
     );
 }
@@ -619,7 +622,22 @@ fn credential_scan_detects_a_second_environment_binding() {
     );
 
     assert_ne!(
-        credential_reference_lines(&workflow),
+        credential_reading_lines(&workflow),
+        PERMITTED_CREDENTIAL_SITES
+    );
+}
+
+/// A read that never expands anything still writes the value to the job log,
+/// so keying the scan on a `$` sigil would have missed it entirely.
+#[test]
+fn credential_scan_detects_a_read_without_expansion() {
+    let workflow = format!(
+        "{}\nprintenv {SMOKE_CREDENTIAL_VARIABLE}",
+        permitted_credential_workflow()
+    );
+
+    assert_ne!(
+        credential_reading_lines(&workflow),
         PERMITTED_CREDENTIAL_SITES
     );
 }
@@ -635,7 +653,7 @@ fn credential_scan_ignores_a_prose_mention() {
     );
 
     assert_eq!(
-        credential_reference_lines(&workflow),
+        credential_reading_lines(&workflow),
         PERMITTED_CREDENTIAL_SITES
     );
 }
@@ -686,19 +704,33 @@ fn the_smoke_workflow_runs_a_twice_daily_drift_canary() {
     );
 }
 
-/// A change to the workflow is a change to the gate itself, so it must trigger
-/// its own run. Without the self-path in both the push filter and the gate's
-/// changed-path check, an edit to this file would be proven only by whatever
-/// adapter change happened to follow it.
+/// A change to the workflow is a change to the gate itself, so a push to
+/// `main` touching only this file must run it. Asserted as the path-list entry
+/// specifically: an occurrence count would stay satisfied if this trigger were
+/// deleted while the same path appeared twice somewhere else.
 #[test]
-fn the_smoke_workflow_triggers_on_its_own_definition() {
-    let self_path = "\".github/workflows/claude-smoke.yml\"";
-    let references = CLAUDE_SMOKE_WORKFLOW.matches(self_path).count();
-
+fn the_smoke_workflow_push_trigger_names_its_own_definition() {
     assert!(
-        references >= 2,
-        "the smoke workflow names its own path {references} times; it belongs in \
-         both the push path filter and the gate's changed-path check"
+        CLAUDE_SMOKE_WORKFLOW
+            .lines()
+            .map(str::trim)
+            .any(|line| line == "- \".github/workflows/claude-smoke.yml\""),
+        "the smoke workflow's push path filter no longer lists its own definition, \
+         so a push that changes only this file would not run it"
+    );
+}
+
+/// The pull-request side is gated by the eligibility job rather than a `paths`
+/// filter, so the same self-change parity has to be asserted in that predicate
+/// too — and separately from the push trigger above, since either can be
+/// dropped without changing the other.
+#[test]
+fn the_smoke_gate_predicate_names_the_workflow_definition() {
+    assert!(
+        CLAUDE_SMOKE_WORKFLOW
+            .contains("|| \"${path}\" == \".github/workflows/claude-smoke.yml\" ]]; then"),
+        "the eligibility gate's changed-path predicate no longer names this workflow, \
+         so a pull request that changes only this file would report not-applicable"
     );
 }
 
