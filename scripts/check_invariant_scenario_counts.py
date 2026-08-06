@@ -20,7 +20,11 @@ added or removed without also touching the sentence that quoted the old
 total — the same staleness class `check_domain_spine.py` guards against for
 the domain crates' exported-type counts. This script scans every tracked
 Markdown file for a stated count next to the word "invariant" or "scenario"
-and fails when it disagrees with the catalog.
+and fails when it disagrees with the catalog. The scan reads each document
+whole, not line by line, so a statement the required mdformat pass wrapped
+between its number and its noun still reads as one statement; fenced code is
+excluded through `check_docs_consistency.mask_fenced_code`, which already
+knows this repository's `~~~`, long, and container-nested fences.
 
 This mechanizes check class (2), "stale-count checks", of the
 invariant-citation review work commissioned for this checker. The other two
@@ -66,11 +70,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+from check_docs_consistency import mask_fenced_code
+
 INVARIANTS = Path("docs/invariants.md")
 SCENARIOS = Path("docs/scenarios.md")
 
 INVARIANT_ROW = re.compile(r"^\|\s*(INV-[0-9]{3})\s*\|", re.MULTILINE)
 SCENARIO_HEADING = re.compile(r"^##\s+(S[0-9]+)\b", re.MULTILINE)
+
+# The whitespace between the words of one statement, which may fall across a
+# wrapped line: prose here is hard-wrapped and the required mdformat pass
+# rewraps it, so "the catalog defines 50\ninvariants" is a single claim and has
+# to read as one. At most one newline — a blank line ends the paragraph, and a
+# number in one paragraph states nothing about a noun in the next — and a
+# block-quote marker may lead the continuation, the way `CARRIER_GAP` in
+# `check_docs_consistency.py` already allows for its own wrapped carriers.
+WRAPPED_GAP = r"(?:[ \t]+|[ \t]*\r?\n[ \t]*(?:>[ \t]*)?)"
 
 # A number sitting directly before the noun: "50 invariants", "1 scenario".
 # The lookbehind refuses a digit run glued to a preceding word or decimal
@@ -78,14 +93,15 @@ SCENARIO_HEADING = re.compile(r"^##\s+(S[0-9]+)\b", re.MULTILINE)
 # lookahead refuses one glued to a following word or hyphen (so `INV-050`
 # and `50-invariant` don't qualify either).
 NUMBER_BEFORE_NOUN = re.compile(
-    r"(?<![\w.])([0-9]{1,4})[ \t]+(invariants?|scenarios?)(?![\w-])",
+    rf"(?<![\w.])([0-9]{{1,4}}){WRAPPED_GAP}(invariants?|scenarios?)(?![\w-])",
     re.IGNORECASE,
 )
 # The noun stated as an explicit count: "invariant count: 50", "scenario
 # count is 37". The connector before the digits is optional so bare
 # "invariant count 50" still matches.
 NOUN_COUNT_PHRASE = re.compile(
-    r"\b(invariant|scenario)s?[ \t]+count[ \t]*(?:is|of|:|=)?[ \t]*([0-9]{1,4})\b",
+    rf"\b(invariant|scenario)s?{WRAPPED_GAP}count{WRAPPED_GAP}?"
+    rf"(?:is|of|:|=)?{WRAPPED_GAP}?([0-9]{{1,4}})\b",
     re.IGNORECASE,
 )
 
@@ -137,36 +153,50 @@ def actual_scenario_count() -> int:
     return len(tags)
 
 
-def strip_fenced_code(text: str) -> str:
-    """Blank fenced code blocks while preserving line numbers.
+def line_number_at(text: str, offset: int) -> int:
+    """Return the 1-based line the offset falls on."""
+    return text.count("\n", 0, offset) + 1
 
-    A code example that happens to say "50 invariants" is not a claim about
-    the catalog, so fenced content is excluded from the scan the same way
-    `mask_fenced_code` excludes it in `scripts/check_docs_consistency.py`.
-    """
-    lines = text.split("\n")
-    in_fence = False
-    kept: list[str] = []
-    for line in lines:
-        if line.strip().startswith("```"):
-            in_fence = not in_fence
-            kept.append("")
-            continue
-        kept.append("" if in_fence else line)
-    return "\n".join(kept)
+
+def as_one_phrase(matched: str) -> str:
+    """Collapse a match that spans a wrapped line into one reportable phrase."""
+    return " ".join(matched.split())
 
 
 def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
-    """Return (line, noun, stated count, matched text) for one Markdown file."""
-    text = strip_fenced_code(path.read_text(encoding="utf-8", errors="replace"))
+    """Return (line, noun, stated count, matched text) for one Markdown file.
+
+    The whole document is scanned at once rather than line by line, because a
+    statement wrapped between its number and its noun is still that statement.
+    `mask_fenced_code` blanks fenced content in place — same length, same line
+    breaks — so offsets still name the right line, and it is reused rather than
+    re-approximated: it already handles `~~~` fences, fences longer than three
+    characters, and fences nested in block quotes and list items, none of which
+    an opening-delimiter toggle gets right. A code example that happens to say
+    "50 invariants" is not a claim about the catalog.
+    """
+    text = mask_fenced_code(path.read_text(encoding="utf-8", errors="replace"))
     found: list[tuple[int, str, int, str]] = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        for match in NUMBER_BEFORE_NOUN.finditer(line):
-            noun = "invariant" if match.group(2).lower().startswith("invariant") else "scenario"
-            found.append((line_number, noun, int(match.group(1)), match.group(0)))
-        for match in NOUN_COUNT_PHRASE.finditer(line):
-            noun = "invariant" if match.group(1).lower() == "invariant" else "scenario"
-            found.append((line_number, noun, int(match.group(2)), match.group(0)))
+    for match in NUMBER_BEFORE_NOUN.finditer(text):
+        noun = "invariant" if match.group(2).lower().startswith("invariant") else "scenario"
+        found.append(
+            (
+                line_number_at(text, match.start()),
+                noun,
+                int(match.group(1)),
+                as_one_phrase(match.group(0)),
+            )
+        )
+    for match in NOUN_COUNT_PHRASE.finditer(text):
+        noun = "invariant" if match.group(1).lower() == "invariant" else "scenario"
+        found.append(
+            (
+                line_number_at(text, match.start()),
+                noun,
+                int(match.group(2)),
+                as_one_phrase(match.group(0)),
+            )
+        )
     return found
 
 
