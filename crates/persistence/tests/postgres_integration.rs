@@ -4053,9 +4053,6 @@ async fn approval_judge_terminal_authorization_recheck_returns_no_send()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_judge_repository_atomically_applies_provenanced_approval()
 -> Result<(), Box<dyn Error>> {
-    const JUDGE_INPUT_TOKENS: u64 = 13;
-    const JUDGE_OUTPUT_TOKENS: u64 = 7;
-
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7ee0;
     let (fixture, model_repository, _, requests) = checkpoint_tool_batch_with_approval(
@@ -4082,9 +4079,7 @@ async fn approval_judge_repository_atomically_applies_provenanced_approval()
             &prepared,
             DelegateApprovalRecommendation::Approve,
             rationale,
-            ProviderReportedTokenUsage::unreported()
-                .with_input_tokens(Some(JUDGE_INPUT_TOKENS))
-                .with_output_tokens(Some(JUDGE_OUTPUT_TOKENS)),
+            ProviderReportedTokenUsage::unreported().with_input_tokens(Some(13)),
             TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
         )
         .await?;
@@ -4134,18 +4129,76 @@ async fn approval_judge_repository_atomically_applies_provenanced_approval()
         approval.rationale().map(ToolDecisionRationale::as_str),
         Some(APPROVAL_JUDGE_RATIONALE)
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The judge arm of the transcript projection's `UNION ALL` reaches process
+/// readers: a terminal delegate judge call's reported tokens join the producing
+/// model call's own row in `ProcessTranscriptSnapshot::model_call_usage`, which
+/// carries exactly those two calls.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_approval_judge_usage_joins_the_transcript_usage_projection()
+-> Result<(), Box<dyn Error>> {
+    const JUDGE_INPUT_TOKENS: u64 = 13;
+    const JUDGE_OUTPUT_TOKENS: u64 = 7;
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7f40;
+    let (fixture, model_repository, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let repository = model_repository.approval_judge_repository();
+    let judge_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0));
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(fixture.session, fixture.turn, judge_call, None)
+            .await?,
+    );
+    let rationale = ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
+
+    repository.authorize(&prepared).await?;
+    repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            rationale,
+            ProviderReportedTokenUsage::unreported()
+                .with_input_tokens(Some(JUDGE_INPUT_TOKENS))
+                .with_output_tokens(Some(JUDGE_OUTPUT_TOKENS)),
+            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+        )
+        .await?;
     let snapshot = ProcessReadRepository::new(pool.clone())
         .read_transcript(fixture.session)
         .await?
         .expect("the delegated fixture session stays process-readable");
-    let judge_usage = snapshot
-        .model_call_usage()
-        .iter()
-        .find(|usage| usage.call() == judge_call)
-        .expect("the terminal judge call joins the transcript's model-call history")
-        .usage();
-    assert_eq!(judge_usage.input_tokens(), Some(JUDGE_INPUT_TOKENS));
-    assert_eq!(judge_usage.output_tokens(), Some(JUDGE_OUTPUT_TOKENS));
+    let usage = snapshot.model_call_usage();
+
+    assert_eq!(usage.len(), 2);
+    assert_eq!(usage[0].turn(), fixture.turn);
+    assert_eq!(usage[0].call(), fixture.call);
+    assert_eq!(usage[0].usage().input_tokens(), None);
+    assert_eq!(usage[0].usage().output_tokens(), None);
+    assert_eq!(usage[0].usage().cache_creation_input_tokens(), None);
+    assert_eq!(usage[0].usage().cache_read_input_tokens(), None);
+    assert_eq!(usage[1].turn(), fixture.turn);
+    assert_eq!(usage[1].call(), judge_call);
+    assert_eq!(
+        usage[1].provenance(),
+        ProcessModelCallUsageProvenance::Reported
+    );
+    assert_eq!(usage[1].usage().input_tokens(), Some(JUDGE_INPUT_TOKENS));
+    assert_eq!(usage[1].usage().output_tokens(), Some(JUDGE_OUTPUT_TOKENS));
+    assert_eq!(usage[1].usage().cache_creation_input_tokens(), None);
+    assert_eq!(usage[1].usage().cache_read_input_tokens(), None);
 
     pool.close().await;
     drop(container);
