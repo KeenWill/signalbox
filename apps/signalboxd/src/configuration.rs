@@ -302,6 +302,7 @@ struct AdapterMapping {
 pub struct DaemonToolConfiguration {
     workspace_root: PathBuf,
     git_identity: GitIdentity,
+    exec_supervisor_executable: PathBuf,
 }
 
 impl DaemonToolConfiguration {
@@ -313,6 +314,11 @@ impl DaemonToolConfiguration {
     /// Explicit author and committer identity for daemon-local Git commits.
     pub const fn git_identity(&self) -> &GitIdentity {
         &self.git_identity
+    }
+
+    /// Absolute existing path of the separately packaged exec supervisor.
+    pub fn exec_supervisor_executable(&self) -> &Path {
+        &self.exec_supervisor_executable
     }
 
     /// Fixed public-GitHub-only egress policy selected by the tool registry.
@@ -482,6 +488,7 @@ impl HubModelConfiguration {
                 "conversation_import",
                 "web_fetch",
                 "tool_mappings",
+                "daemon_tools",
                 "git_identity",
                 "tool_approval_postures",
                 "approval_judge",
@@ -556,7 +563,12 @@ impl HubModelConfiguration {
             .transpose()?
             .unwrap_or_default();
         let git_identity = parse_git_identity(document.get("git_identity"))?;
-        let daemon_tools = parse_tool_mappings(document.get("tool_mappings"), git_identity)?;
+        let exec_supervisor_executable = parse_daemon_tool_settings(document.get("daemon_tools"))?;
+        let daemon_tools = parse_tool_mappings(
+            document.get("tool_mappings"),
+            git_identity,
+            exec_supervisor_executable,
+        )?;
         let profile_tables = document
             .get("credential_profiles")
             .and_then(|item| item.as_array_of_tables())
@@ -1355,6 +1367,19 @@ impl HubModelConfiguration {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn checked_in_example_configuration()
+-> Result<HubModelConfiguration, HubModelConfigurationError> {
+    const EXAMPLE_EXEC_SUPERVISOR: &str = "/usr/local/bin/signalbox-exec-supervisor";
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/signalboxd.example.toml");
+    let content = fs::read_to_string(path).map_err(|_| HubModelConfigurationError::Read)?;
+    let executable = std::env::current_exe().map_err(|_| HubModelConfigurationError::Read)?;
+    HubModelConfiguration::parse(&content.replace(
+        EXAMPLE_EXEC_SUPERVISOR,
+        executable.to_string_lossy().as_ref(),
+    ))
+}
+
 fn parse_repository_watch_configuration(
     item: &Item,
 ) -> Result<RepositoryWatchConfiguration, HubModelConfigurationError> {
@@ -1994,6 +2019,7 @@ fn divide_product_factor(left: &mut u128, right: &mut u128, factor: u128) -> Opt
 fn parse_tool_mappings(
     item: Option<&Item>,
     git_identity: Option<GitIdentity>,
+    exec_supervisor_executable: Option<PathBuf>,
 ) -> Result<Option<DaemonToolConfiguration>, HubModelConfigurationError> {
     let Some(item) = item else {
         return Ok(None);
@@ -2045,7 +2071,30 @@ fn parse_tool_mappings(
         workspace_root: workspace_root.ok_or(HubModelConfigurationError::InvalidToolMappings)?,
         git_identity: git_identity
             .ok_or(HubModelConfigurationError::MissingGitIdentityConfiguration)?,
+        exec_supervisor_executable: exec_supervisor_executable
+            .ok_or(HubModelConfigurationError::MissingDaemonToolSettings)?,
     }))
+}
+
+fn parse_daemon_tool_settings(
+    item: Option<&Item>,
+) -> Result<Option<PathBuf>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidDaemonToolSettings)?;
+    reject_unknown_fields(table, &["exec_supervisor_executable"])
+        .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?;
+    let executable = PathBuf::from(
+        required_string(table, "exec_supervisor_executable")
+            .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?,
+    );
+    if !executable.is_absolute() || !executable.is_file() {
+        return Err(HubModelConfigurationError::InvalidDaemonToolSettings);
+    }
+    Ok(Some(executable))
 }
 
 fn parse_git_identity(
@@ -2585,6 +2634,10 @@ pub enum HubModelConfigurationError {
     MissingGitIdentityConfiguration,
     /// The daemon Git identity table was malformed or unsafe.
     InvalidGitIdentityConfiguration,
+    /// Mapped daemon tools were configured without their process settings.
+    MissingDaemonToolSettings,
+    /// The daemon tool process-settings table was malformed or unsafe.
+    InvalidDaemonToolSettings,
     /// The per-tool approval posture table was malformed.
     InvalidToolApprovalPostures,
     /// The approval-judge selection table was malformed.
@@ -2726,6 +2779,12 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidGitIdentityConfiguration => {
                 "model configuration contains invalid Git identity settings"
+            }
+            Self::MissingDaemonToolSettings => {
+                "model configuration maps daemon tools without process settings"
+            }
+            Self::InvalidDaemonToolSettings => {
+                "model configuration contains invalid daemon tool process settings"
             }
             Self::DuplicateToolFamily => "model configuration repeats a daemon tool family",
             Self::MissingCompaction => "model configuration has no compaction settings",
@@ -2991,6 +3050,7 @@ mod tests {
     const SECOND_SIGNAL_REVIEWER: &str = "review-bot[bot]";
     const GIT_AUTHOR_NAME: &str = "Signalbox Daemon";
     const GIT_AUTHOR_EMAIL: &str = "signalbox@example.test";
+    const EXEC_SUPERVISOR_EXECUTABLE: &str = "/bin/sh";
     const PROVIDER_WATCH_REPOSITORY: &str = "Namespace/Project";
     const PROVIDER_SECOND_WATCH_REPOSITORY: &str = "Namespace/Second";
     const PROVIDER_SIGNAL_REVIEWER: &str = "Signal-Reviewer";
@@ -3042,6 +3102,9 @@ workspace_root = "/srv/signalbox/workspace"
 [[tool_mappings]]
 family = "conversations"
 adapter = "application"
+
+[daemon_tools]
+exec_supervisor_executable = "/bin/sh"
 
 [git_identity]
 author_name = "Signalbox Daemon"
@@ -3876,6 +3939,10 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert_eq!(daemon_tools.git_identity().name(), GIT_AUTHOR_NAME);
         assert_eq!(daemon_tools.git_identity().email(), GIT_AUTHOR_EMAIL);
         assert_eq!(
+            daemon_tools.exec_supervisor_executable(),
+            Path::new(EXEC_SUPERVISOR_EXECUTABLE)
+        );
+        assert_eq!(
             daemon_tools.github_egress_policy().admitted_origin(),
             "https://api.github.com"
         );
@@ -4365,6 +4432,66 @@ context_window_tokens = 200000
         assert_eq!(
             HubModelConfiguration::parse(&unknown).err(),
             Some(HubModelConfigurationError::InvalidGitIdentityConfiguration)
+        );
+    }
+
+    #[test]
+    fn tool_mapping_registry_requires_daemon_tool_process_settings() {
+        let missing = CONFIGURATION.replace(
+            &format!(
+                "[daemon_tools]\nexec_supervisor_executable = \"{EXEC_SUPERVISOR_EXECUTABLE}\"\n\n"
+            ),
+            "",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&missing).err(),
+            Some(HubModelConfigurationError::MissingDaemonToolSettings)
+        );
+    }
+
+    #[test]
+    fn daemon_tool_process_settings_reject_a_relative_supervisor() {
+        let relative = CONFIGURATION.replace(
+            &format!("exec_supervisor_executable = \"{EXEC_SUPERVISOR_EXECUTABLE}\""),
+            "exec_supervisor_executable = \"relative/signalbox-exec-supervisor\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&relative).err(),
+            Some(HubModelConfigurationError::InvalidDaemonToolSettings)
+        );
+    }
+
+    #[test]
+    fn daemon_tool_process_settings_reject_a_missing_supervisor() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let missing_supervisor = temporary.path().join("missing-supervisor");
+        let missing = CONFIGURATION.replace(
+            EXEC_SUPERVISOR_EXECUTABLE,
+            missing_supervisor
+                .to_str()
+                .expect("fixture path is UTF-8 representable"),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&missing).err(),
+            Some(HubModelConfigurationError::InvalidDaemonToolSettings)
+        );
+    }
+
+    #[test]
+    fn daemon_tool_process_settings_reject_an_unknown_field() {
+        let unknown = CONFIGURATION.replace(
+            &format!("exec_supervisor_executable = \"{EXEC_SUPERVISOR_EXECUTABLE}\""),
+            &format!(
+                "exec_supervisor_executable = \"{EXEC_SUPERVISOR_EXECUTABLE}\"\nderive_from_daemon = true"
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&unknown).err(),
+            Some(HubModelConfigurationError::InvalidDaemonToolSettings)
         );
     }
 
@@ -5199,20 +5326,15 @@ context_window_tokens = 200000
 
 #[cfg(test)]
 mod checked_in_example {
-    use std::path::{Path, PathBuf};
-
-    use super::HubModelConfiguration;
-
-    fn example_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/signalboxd.example.toml")
-    }
+    use super::checked_in_example_configuration;
 
     /// The checked-in operator example is the one configuration document a
-    /// deployment is invited to copy, so it must satisfy the same fail-closed
-    /// loader every real catalog does.
+    /// deployment is invited to copy. Its installation-specific supervisor
+    /// path is replaced by an existing fixture file before the same fail-closed
+    /// loader validates every other byte.
     #[test]
     fn the_example_catalog_parses_and_validates() {
-        HubModelConfiguration::read(&example_path())
+        checked_in_example_configuration()
             .expect("the checked-in example catalog is a valid version 1 document");
     }
 }

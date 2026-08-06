@@ -221,6 +221,9 @@ async fn run_live_smoke() -> SmokeResult {
     let github_egress_policy = daemon_configuration.github_egress_policy();
     let configured_workspace = daemon_configuration.workspace_root().to_path_buf();
     let git_identity = daemon_configuration.git_identity().clone();
+    let exec_supervisor_executable = daemon_configuration
+        .exec_supervisor_executable()
+        .to_path_buf();
     let web_fetch_egress_policy = model_configuration.web_fetch_egress_policy();
 
     let listener = LocalProcessListener::bind(&socket)?;
@@ -262,6 +265,7 @@ async fn run_live_smoke() -> SmokeResult {
         github_egress_policy,
         &configured_workspace,
         git_identity,
+        &exec_supervisor_executable,
         web_fetch_egress_policy,
     )?;
     let (tool_catalog, tool_executor) = tools.into_parts();
@@ -469,6 +473,9 @@ workspace_root = "{}"
 family = "conversations"
 adapter = "application"
 
+[daemon_tools]
+exec_supervisor_executable = "{}"
+
 [git_identity]
 author_name = "Signalbox Live Smoke"
 author_email = "signalbox-live@example.test"
@@ -492,6 +499,7 @@ selection_id = "00000000-0000-0000-0000-000000000001"
         executable.display(),
         workspace.display(),
         workspace.display(),
+        executable.display(),
     );
     Ok(HubModelConfiguration::parse(&configuration)?)
 }

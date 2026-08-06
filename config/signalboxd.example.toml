@@ -182,6 +182,11 @@ workspace_root = "/srv/signalbox/workspace"
 family = "conversations"
 adapter = "application"
 
+# The separately packaged supervisor is pinned once for the three daemon-local
+# execution tools. The daemon never guesses this path from its own executable.
+[daemon_tools]
+exec_supervisor_executable = "/usr/local/bin/signalbox-exec-supervisor"
+
 # The complete mapped composition uses this explicit identity for both author
 # and committer fields. It never consults ambient Git configuration.
 [git_identity]

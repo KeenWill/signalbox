@@ -7,6 +7,9 @@ The delegated tool-approval posture, judge selection, and daemon composition are
 verified against the implementing stack through this PR
 (`agent/approval-judge-daemon`).
 
+The daemon-local Git and execution-tool dependencies are verified against this
+stack through this PR (`agent/daemon-exec-tools`).
+
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
 
@@ -512,11 +515,11 @@ four deployment-mapped tool families in the same closed-table style as
 The `[[tool_mappings]]` array may be absent for compatibility with deployments
 that have not enabled the configured composition. In that case production
 preserves the base catalog, including the code-host suite, without constructing
-pull-request, workspace, conversation, or local Git dependencies. When the array
-is present it must already be complete: an unknown, missing, or duplicate
-family; an unknown field; any fixed value with another spelling; a relative
-workspace root; or a dependency field on the wrong family is a sanitized
-configuration failure.
+pull-request, workspace, conversation, local Git, or execution dependencies.
+When the array is present it must already be complete: an unknown, missing, or
+duplicate family; an unknown field; any fixed value with another spelling; a
+relative workspace root; or a dependency field on the wrong family is a
+sanitized configuration failure.
 
 The complete mapped composition also requires one `[git_identity]` table with
 exactly `author_name` and `author_email`. Both are nonempty, at most the Git
@@ -526,18 +529,27 @@ identity; no ambient Git configuration or process environment supplies either
 value. A missing table, unknown field, invalid value, or identity construction
 failure is a sanitized configuration failure.
 
+The complete mapped composition also requires one `[daemon_tools]` table with
+exactly `exec_supervisor_executable`. The value is an absolute path to an
+existing file naming the separately packaged `signalbox-exec-supervisor`
+program. A missing table, unknown field, relative path, or path that is not a
+file is a sanitized configuration failure. Production passes that exact path to
+the execution suite, which pins the program during construction; the daemon
+never derives it from its own executable path.
+
 The root is opened once during tool construction and its pinned authority is
 cloned into both workspace suites. The local Git suite independently binds that
 same root and requires a direct main worktree whose `.git` directory is inside
-the root. A nonexistent, non-directory, final-symlink, non-repository, linked,
-or externally administered root therefore fails startup for the complete mapped
-composition. The mapping-free base composition admits no root and constructs no
-Git suite, so existing base-only deployments remain valid. The GitHub policy
-admits exactly `https://api.github.com:443` for authenticated requests. The
-code-host `change_request_ci_job_log` operation retains the tool-loop-owned
-exception for one credential-free download from its validated, pinned, bounded
-public HTTPS redirect destination; the pull-request suite has no such exception.
-Model arguments cannot widen either admission rule.
+the root. The three execution tools bind that root and share the one pinned
+supervisor runner. A nonexistent, non-directory, final-symlink, non-repository,
+linked, or externally administered root therefore fails startup for the complete
+mapped composition. The mapping-free base composition admits no root and
+constructs no Git or execution suite, so existing base-only deployments remain
+valid. The GitHub policy admits exactly `https://api.github.com:443` for
+authenticated requests. The code-host `change_request_ci_job_log` operation
+retains the tool-loop-owned exception for one credential-free download from its
+validated, pinned, bounded public HTTPS redirect destination; the pull-request
+suite has no such exception. Model arguments cannot widen either admission rule.
 
 The optional `[tool_approval_postures]` table maps an exact composed tool name
 to one of `auto`, `delegated`, or `human`. The parser rejects non-string or
