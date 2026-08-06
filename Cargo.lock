@@ -3590,6 +3590,7 @@ dependencies = [
 name = "signalboxd"
 version = "0.0.0"
 dependencies = [
+ "git2",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -3617,6 +3618,7 @@ dependencies = [
  "signalbox-tools-basic",
  "signalbox-tools-code-host",
  "signalbox-tools-conversations",
+ "signalbox-tools-git",
  "signalbox-tools-github",
  "signalbox-tools-plan",
  "signalbox-tools-web",

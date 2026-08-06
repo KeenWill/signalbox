@@ -53,27 +53,6 @@ pub(super) fn plant_sparse_pack(root: &Path, name: &str, bytes: u64) {
         .expect("pack-budget fixture length sets");
 }
 
-pub(super) fn fill_live_object_database_to_budget(root: &Path, mut remaining: u64) {
-    let mut sequence = 0_u64;
-    while remaining > 0 {
-        let directory = root
-            .join(".git/objects")
-            .join(format!("{:02x}", sequence % 256));
-        fs::create_dir_all(&directory).expect("loose-object budget directory creates");
-        let path = directory.join(format!("{sequence:038x}"));
-        let bytes = remaining.min((MAX_OBJECT_BYTES * 2) as u64);
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .expect("loose-object budget file creates")
-            .set_len(bytes)
-            .expect("loose-object budget length sets");
-        remaining -= bytes;
-        sequence += 1;
-    }
-}
-
 pub(super) fn plant_shallow_entries(root: &Path, oid: Oid, count: usize) {
     fs::write(root.join(".git/shallow"), format!("{oid}\n").repeat(count))
         .expect("shallow-budget fixture writes");
