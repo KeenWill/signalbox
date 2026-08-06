@@ -143,7 +143,15 @@ jobs:
       - name: Report the numbers
         if: ${{ always() }}
         env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # `github.sha` is the commit this job actually checked out. On a
+          # pull_request event that is the synthetic merge of the head into the
+          # base, which is the tree rust.yml gates on too — measuring anything
+          # else would make this number describe a different tree than
+          # `validate` does. The head is reported beside it rather than instead
+          # of it, because the merge commit is the one that was measured and
+          # the head is the one a reader recognises.
+          MEASURED_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           WORKSPACE_OUTCOME: ${{ steps.workspace.outcome }}
           PERSISTENCE_OUTCOME: ${{ steps.persistence.outcome }}
           SIGNALBOXD_OUTCOME: ${{ steps.signalboxd.outcome }}
@@ -206,8 +214,13 @@ jobs:
           {
             printf '%s\n\n' '<!-- signalbox-rust-coverage -->'
             cat "$report_dir/report.md"
-            printf '\nMeasured at `%s` by [run %s](%s/%s/actions/runs/%s), which uploads the HTML report and LCOV as an artifact.\n' \
-              "$HEAD_SHA" "$GITHUB_RUN_ID" \
+            printf '\nMeasured at `%s`' "$MEASURED_SHA"
+            if [ -n "$HEAD_SHA" ]; then
+              printf ', the merge commit this pull request builds, whose head is `%s`' \
+                "$HEAD_SHA"
+            fi
+            printf ', by [run %s](%s/%s/actions/runs/%s), which uploads the HTML report and LCOV as an artifact.\n' \
+              "$GITHUB_RUN_ID" \
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
           } > "$report_dir/comment.md"
       - name: Upload the coverage report
