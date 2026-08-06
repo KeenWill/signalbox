@@ -79,12 +79,12 @@ covers:
   ambiguity, and fencing. Each real provider adapter additionally runs the same
   contract cases plus provider-specific parsing and provenance cases;
   credentialed live-provider smoke tests may exist but are never the merge gate,
-  except a specific owner-approved compatibility smoke gating only pull requests
-  touching its own adapter crate, recorded in that adapter's compatibility-smoke
+  except a specific owner-approved compatibility smoke for one adapter, whose
+  exact gated scope is recorded in that adapter's own compatibility-smoke
   section of `docs/spec/runtime-substrate.md` (currently the Codex CLI and
-  Anthropic adapters). A production isolation or containment claim for a runner
-  profile requires real containment testing of that profile; fake-runner tests
-  never substantiate an isolation label.
+  Anthropic adapters) rather than restated here. A production isolation or
+  containment claim for a runner profile requires real containment testing of
+  that profile; fake-runner tests never substantiate an isolation label.
 - **Restart and recovery:** stop the daemon at named durability boundaries
   (before acceptance; after acceptance but before scheduling; after attempt
   creation but before send; after send but before outcome persistence; during
