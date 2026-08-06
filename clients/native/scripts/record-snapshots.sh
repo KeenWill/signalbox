@@ -14,8 +14,9 @@ set -euo pipefail
 #     SIGNALBOX_NATIVE_SNAPSHOT_RECORD=missing scripts/record-snapshots.sh
 #
 # `all` (the default here) rewrites every golden; `missing` writes only the
-# ones that do not exist yet. Blessing the result is governed by rule 11 of
-# docs/agents/testing-style.md.
+# ones that do not exist yet. Read every reference this rewrites before
+# committing it: the rendering is the whole assertion, so an unread golden
+# asserts whatever it happens to contain.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
@@ -141,24 +142,49 @@ if ((test_status != 0 && test_status != 65)); then
 	exit "$test_status"
 fi
 
-# 65 also covers a suite that launched and ran nothing, so the result bundle is
-# read rather than the status alone: what makes a recording confirmed is that
-# the suite executed and that the references on disk are newer than the run.
+# 65 covers a suite that launched and ran nothing, and it covers a comparison
+# that failed rather than a reference that was written, so the result bundle is
+# read rather than the status alone. Every failure has to be a recording: a
+# mismatch under `never` or `missing`, a crashed test, or an unsatisfied
+# precondition all report 65 while writing nothing, and each of those used to
+# end with the script announcing goldens.
 summary="$(xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE_PATH" --compact)"
-python3 - "$summary" <<'PY'
+python3 - "$summary" "$SNAPSHOT_DIRECTORY" <<'PY'
 import json
 import sys
 
-summary = json.loads(sys.argv[1])
+# The sentence the library reports a written reference with. A comparison
+# failure, a crash, and a precondition failure each say something else, which is
+# what makes this the seam between "recorded" and "failed to record".
+RECORDED = "Record mode is on. Automatically recorded snapshot"
+
+summary, snapshot_directory = json.loads(sys.argv[1]), sys.argv[2]
 executed = summary.get("totalTestCount", 0)
 if executed == 0:
     print(json.dumps(summary, indent=2), file=sys.stderr)
     raise SystemExit("The recording run executed no test; nothing was recorded.")
-print(
-    f"Recording run: {executed} test(s), "
-    f"{summary.get('failedTests', 0)} recorded as failures, "
-    f"{summary.get('passedTests', 0)} passed."
-)
+
+failures = summary.get("testFailures", [])
+unexpected = [
+    failure for failure in failures if RECORDED not in (failure.get("failureText") or "")
+]
+if unexpected:
+    for failure in unexpected:
+        text = (failure.get("failureText") or "").splitlines()
+        print(f"  {failure.get('testName')}: {text[0] if text else ''}", file=sys.stderr)
+    raise SystemExit(
+        f"{len(unexpected)} of {len(failures)} failure(s) recorded nothing; "
+        "the run above did not bless these goldens."
+    )
+
+recorded = len(failures)
+if recorded:
+    print(
+        f"Recorded {recorded} of {executed} reference(s) under {snapshot_directory}; "
+        "read every one in the diff before committing it."
+    )
+else:
+    print(f"No reference needed rewriting; {executed} already matched.")
 PY
 
 # `all` rewrites every reference, so a run that wrote none did not record. The
@@ -170,7 +196,5 @@ if [[ "$RECORD_MODE" == "all" ]]; then
 		echo "The recording run wrote no reference under $SNAPSHOT_DIRECTORY." >&2
 		exit 1
 	fi
-	echo "Wrote $WRITTEN reference(s)."
+	echo "Wrote $WRITTEN reference(s) to disk."
 fi
-
-echo "Recorded goldens under $SNAPSHOT_DIRECTORY; review the diff before committing."

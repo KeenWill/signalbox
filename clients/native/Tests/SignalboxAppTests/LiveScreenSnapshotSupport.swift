@@ -44,6 +44,17 @@ enum SnapshotCanvas: String {
     /// interface style would record a different golden on a dark-mode host.
     static let userInterfaceStyle = UIUserInterfaceStyle.light
 
+    /// The canvas is the whole safe area.
+    ///
+    /// A window takes its insets from the scene's device, and navigation and
+    /// tab chrome lay out against them, so pinning the size without pinning
+    /// these pinned half the geometry: every golden here failed on an iPhone
+    /// 17e after being recorded on an iPhone 17 Pro. Zero rather than some
+    /// device's numbers, because a fixed canvas that is not a device has no
+    /// cutout and no home indicator to reserve room for — the same reason
+    /// there is no scene lifecycle or window chrome in these renderings.
+    static let safeAreaInsets = UIEdgeInsets.zero
+
     /// Overrides every remaining trait a golden's pixels depend on. Interface
     /// style decides its colors and the content-size category its text
     /// metrics; both otherwise follow whatever the host application inherited.
@@ -67,6 +78,29 @@ enum SnapshotCanvas: String {
         window.overrideUserInterfaceStyle = Self.userInterfaceStyle
     }
 
+    /// Pins the safe area the hosted content lays out against.
+    ///
+    /// A safe area is geometry rather than a trait, so no override reaches it.
+    /// `additionalSafeAreaInsets` is added to what a controller inherits, and
+    /// the window's own insets are what it inherits, so the difference between
+    /// the two is what leaves the content seeing exactly the canvas's. It is
+    /// set on the host rather than on the hosted controller because a child's
+    /// safe area derives from its parent's.
+    func pinSafeArea(of controller: UIViewController, in window: UIWindow) {
+        // Read after a layout pass: a window resolves its insets from the
+        // scene, and an unlaid window reports zero for all of them, which would
+        // silently make this a no-op on exactly the devices it exists for.
+        window.layoutIfNeeded()
+        let inherited = window.safeAreaInsets
+        controller.additionalSafeAreaInsets = UIEdgeInsets(
+            top: Self.safeAreaInsets.top - inherited.top,
+            left: Self.safeAreaInsets.left - inherited.left,
+            bottom: Self.safeAreaInsets.bottom - inherited.bottom,
+            right: Self.safeAreaInsets.right - inherited.right
+        )
+        window.layoutIfNeeded()
+    }
+
     private var horizontalSizeClass: UIUserInterfaceSizeClass {
         switch self {
         case .compact, .sheet:
@@ -84,6 +118,18 @@ enum SnapshotCanvas: String {
 /// presentation, so none of those reach a golden here. Sheet content is
 /// snapshotted as its own standalone screen rather than composited onto a
 /// parent, which is why no presentation seam appears in this file.
+///
+/// The second cost is the destination, and it is bounded rather than absent.
+/// Everything a layout resolves against is pinned below — size, scale, size
+/// class, interface style, content-size category, layout direction, and safe
+/// area — and with those pinned, nine of the ten goldens were verified
+/// byte-identical across three different iPhone simulators. The tenth is the
+/// regular canvas, which is wider than a phone screen: the window's corner mask
+/// and the glass materials composite against the device there, so that one
+/// golden still resolves differently on a different phone. CI pins its
+/// simulator, and `scripts/test-xcode.sh` resolves the newest one locally, so
+/// the suite is reproducible where it runs; a destination that is not CI's can
+/// legitimately fail that golden alone.
 @MainActor
 enum LiveScreenRenderer {
     /// The renderer re-renders on this interval while waiting for the screen
@@ -177,6 +223,9 @@ enum LiveScreenRenderer {
         host.view.frame = window.bounds
         content.view.frame = window.bounds
         content.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // After the frame, because a window's insets are resolved against the
+        // frame it actually occupies.
+        canvas.pinSafeArea(of: host, in: window)
         window.layer.speed = 0
         window.layer.timeOffset = 0
         defer {

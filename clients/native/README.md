@@ -88,8 +88,11 @@ fixtures, the same seam the golden capture scripts below use.
 
 The suite runs as a report-only step in CI, which uploads the reference, the
 failed rendering, and their difference as an artifact when a comparison fails.
-Re-record the goldens after an intended visual change; blessing them is governed
-by [testing style](../../docs/agents/testing-style.md#expect-tests), rule 11:
+Re-record the goldens after an intended visual change, and read every reference
+in the resulting diff before committing it — the rendering is the whole
+assertion, so an unread golden asserts whatever it happens to contain. The
+[testing style guide](../../docs/agents/testing-style.md#expect-tests) states
+the same discipline for every snapshot in the repository.
 
 ```bash
 scripts/record-snapshots.sh
