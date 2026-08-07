@@ -320,8 +320,16 @@ jobs:
             # strings: the summarizer stays the authority on what a reader is
             # told, including for a baseline that validates here and still
             # fails to load at render time.
+            # Every field the loader consumes is checked, not just the line
+            # total: `read_file_summaries` indexes `entry["filename"]` directly
+            # and raises `KeyError` when it is absent, so an export whose file
+            # entries carry counts but no name passes a counts-only predicate
+            # and still fails to load. The counters themselves are not required
+            # — `read_counter` defaults a missing one to empty on purpose, so
+            # the report survives a toolchain that grew a new counter.
             if ! jq -e '
                   .type == "llvm.coverage.json.export"
+                  and all(.data[]?.files[]?; has("filename"))
                   and (([.data[]?.files[]?.summary.lines.count // 0] | add) // 0) > 0
                 ' "$baseline_dir/$SUMMARY_FILE" > /dev/null 2>&1; then
               [ -n "$reason" ] || reason="the \`$SUMMARY_FILE\` from run $run_id is not a readable coverage export"

@@ -342,8 +342,12 @@ class BaselineLoadingTests(unittest.TestCase):
 
         self.assertEqual(reason, "")
         assert baseline is not None
-        self.assertEqual(baseline.executable, 200)
-        self.assertEqual(baseline.covered, 50)
+        # Read back off the product target the fixture built, not off repeated
+        # literals: the totals must track the fixture, and naming the product
+        # target here also states that the `.xctest` target above is excluded.
+        product = document["targets"][0]
+        self.assertEqual(baseline.executable, product["executableLines"])
+        self.assertEqual(baseline.covered, product["coveredLines"])
 
     def test_a_baseline_that_is_not_json_reports_a_reason(self) -> None:
         """A truncated download is the likeliest way a baseline goes wrong,

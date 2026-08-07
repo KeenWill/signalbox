@@ -409,18 +409,15 @@ class BaselineLoadingTests(unittest.TestCase):
         """The happy path is a total taken over the same file summaries the
         current report is built from, so the two numbers are comparable."""
         with tempfile.TemporaryDirectory() as directory:
-            path = written(
-                directory,
-                "summary.json",
-                json.dumps(export(coverage_file("/repo/crates/domain/src/a.rs", lines=200, covered=50))),
-            )
+            entry = coverage_file("/repo/crates/domain/src/a.rs", lines=200, covered=50)
+            path = written(directory, "summary.json", json.dumps(export(entry)))
 
             baseline, reason = load_baseline(path, BASE, "abc1234", "2026-08-01T09:00:00Z")
 
         self.assertEqual(reason, "")
         assert baseline is not None
-        self.assertEqual(baseline.total.lines.count, 200)
-        self.assertEqual(baseline.total.lines.covered, 50)
+        self.assertEqual(baseline.total.lines.count, entry["summary"]["lines"]["count"])
+        self.assertEqual(baseline.total.lines.covered, entry["summary"]["lines"]["covered"])
 
     def test_a_baseline_that_is_not_json_reports_a_reason(self) -> None:
         """A truncated download is the likeliest way a baseline goes wrong,
