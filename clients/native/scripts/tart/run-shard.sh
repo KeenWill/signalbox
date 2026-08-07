@@ -27,12 +27,10 @@ REPO_ROOT="$(resolve_repo_root)"
 
 DEFAULT_BASE_IMAGE="ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
 DEFAULT_REPO_MOUNT_NAME="mono"
-DEFAULT_SECRET_MOUNT_NAME="signalbox-native-secrets"
 
 TART_BASE_IMAGE="${TART_BASE_IMAGE:-$DEFAULT_BASE_IMAGE}"
 TART_VM_PREFIX="${TART_VM_PREFIX:-signalbox-native}"
 TART_REPO_MOUNT_NAME="${TART_REPO_MOUNT_NAME:-$DEFAULT_REPO_MOUNT_NAME}"
-TART_SECRET_MOUNT_NAME="${TART_SECRET_MOUNT_NAME:-$DEFAULT_SECRET_MOUNT_NAME}"
 TART_SSH_USERNAME="${TART_SSH_USERNAME:-admin}"
 TART_SSH_PASSWORD="${TART_SSH_PASSWORD:-admin}"
 TART_BOOT_TIMEOUT_SECONDS="${TART_BOOT_TIMEOUT_SECONDS:-420}"
@@ -48,8 +46,6 @@ SHARD=""
 VM_NAME="${TART_VM_NAME:-}"
 CREATED_VM=0
 RUN_PID=""
-SECRET_ENV_DIR=""
-SECRET_ENV_FILE=""
 
 usage() {
 	cat <<'EOF'
@@ -73,11 +69,6 @@ Environment:
   TART_VM_DISPLAY       Default: 1920x1200
   TART_EXECUTOR         guest-agent or ssh. Default: guest-agent
   TART_SERVER_URL          Server URL reachable from inside the VM for real-smoke.
-  TART_SECRET_MOUNT_NAME
-                        Default: signalbox-native-secrets
-  SIGNALBOX_NATIVE_REAL_SERVER_API_KEY
-                        Mounted into the guest through a temporary env file;
-                        never embedded in the Tart command line.
   SIGNALBOX_NATIVE_SKIP_TESTING
                         Space-separated Xcode test identifiers to skip.
   SCREENSHOT_STATE_NAMES
@@ -148,29 +139,6 @@ require_tool() {
 		echo "Missing required host tool: $tool_name" >&2
 		exit 1
 	fi
-}
-
-prepare_secret_mount_if_needed() {
-	if [[ -z "${SIGNALBOX_NATIVE_REAL_SERVER_API_KEY:-}" ]]; then
-		return 0
-	fi
-	if [[ "$SIGNALBOX_NATIVE_REAL_SERVER_API_KEY" == *$'\n'* || "$SIGNALBOX_NATIVE_REAL_SERVER_API_KEY" == *$'\r'* ]]; then
-		echo "SIGNALBOX_NATIVE_REAL_SERVER_API_KEY must be a single-line value." >&2
-		exit 1
-	fi
-
-	SECRET_ENV_DIR="$(mktemp -d "${TMPDIR:-/tmp}/signalbox-native-tart-secrets.XXXXXX")"
-	SECRET_ENV_FILE="$SECRET_ENV_DIR/env"
-	chmod 700 "$SECRET_ENV_DIR"
-	(
-		umask 077
-		printf 'SIGNALBOX_NATIVE_REAL_SERVER_API_KEY=%s\n' "$SIGNALBOX_NATIVE_REAL_SERVER_API_KEY" >"$SECRET_ENV_FILE"
-	)
-	unset SIGNALBOX_NATIVE_REAL_SERVER_API_KEY
-}
-
-secret_mount_requested() {
-	[[ -n "$SECRET_ENV_FILE" || -n "${SIGNALBOX_NATIVE_REAL_SERVER_API_KEY:-}" ]]
 }
 
 ssh_command() {
@@ -268,9 +236,6 @@ remote_guest_command() {
 	if [[ -n "${TART_SERVER_URL:-}" ]]; then
 		environment_arguments+=("TART_SERVER_URL=$TART_SERVER_URL")
 	fi
-	if secret_mount_requested; then
-		environment_arguments+=("TART_SECRET_ENV_PATH=/Volumes/My Shared Files/$TART_SECRET_MOUNT_NAME/env")
-	fi
 	if [[ -n "${SCREENSHOT_STATE_NAMES:-}" ]]; then
 		environment_arguments+=("SCREENSHOT_STATE_NAMES=$SCREENSHOT_STATE_NAMES")
 	fi
@@ -305,10 +270,6 @@ cleanup() {
 		tart delete "$VM_NAME" >/dev/null 2>&1 || true
 	fi
 
-	if [[ -n "$SECRET_ENV_DIR" ]]; then
-		rm -rf "$SECRET_ENV_DIR"
-	fi
-
 	exit "$exit_status"
 }
 
@@ -327,13 +288,6 @@ Tart shard plan
   reuse vm:     $TART_REUSE_VM
   keep vm:      $TART_KEEP_VM
   repo mount:   $TART_REPO_MOUNT_NAME:$REPO_ROOT
-  secret mount: $(
-		if secret_mount_requested; then
-			printf '%s:<temporary 0600 env file>' "$TART_SECRET_MOUNT_NAME"
-		else
-			printf 'none'
-		fi
-	)
   guest root:   /Volumes/My Shared Files/$TART_REPO_MOUNT_NAME
   guest command:
     $(remote_guest_command)
@@ -363,7 +317,6 @@ main() {
 	if [[ "$TART_EXECUTOR" == "ssh" && -z "${TART_SSH_IDENTITY_FILE:-}" ]]; then
 		require_tool sshpass
 	fi
-	prepare_secret_mount_if_needed
 
 	if [[ -z "$VM_NAME" ]]; then
 		VM_NAME="$TART_VM_PREFIX-$(slugify "$SHARD")-$(date +%Y%m%d%H%M%S)-$$"
@@ -382,9 +335,6 @@ main() {
 
 	echo "==> Starting Tart VM $VM_NAME"
 	local -a tart_run_arguments=(--dir="$TART_REPO_MOUNT_NAME:$REPO_ROOT")
-	if [[ -n "$SECRET_ENV_DIR" ]]; then
-		tart_run_arguments+=(--dir="$TART_SECRET_MOUNT_NAME:$SECRET_ENV_DIR")
-	fi
 	tart run "${tart_run_arguments[@]}" "$VM_NAME" &
 	RUN_PID="$!"
 

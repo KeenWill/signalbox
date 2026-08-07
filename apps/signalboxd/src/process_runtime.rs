@@ -864,6 +864,9 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::CompactSession { .. }
         | ClientRequest::ReadTranscript { .. }
         | ClientRequest::FollowSession { .. }
+        | ClientRequest::SpawnSession { .. }
+        | ClientRequest::AwaitSession { .. }
+        | ClientRequest::SendSessionMessage { .. }
         | ClientRequest::ListSessionMetadata { .. }
         | ClientRequest::ListConversations { .. }
         | ClientRequest::ListModelAliases {}
@@ -1986,6 +1989,11 @@ where
             )
             .await
         }
+        ClientRequest::SpawnSession { .. }
+        | ClientRequest::AwaitSession { .. }
+        | ClientRequest::SendSessionMessage { .. } => {
+            reject_uncomposed_delegation(writer, version, request_id).await
+        }
         ClientRequest::DecideToolRequest {
             command_id,
             session_id,
@@ -2006,6 +2014,23 @@ where
             .await
         }
     }
+}
+
+async fn reject_uncomposed_delegation<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    write_error(
+        writer,
+        version,
+        request_id,
+        ProtocolError::without_detail(ErrorCode::InvalidRequest),
+    )
+    .await
 }
 
 async fn handle_review_orchestration_mutation<Writer>(
