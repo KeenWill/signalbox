@@ -59,14 +59,13 @@ use signalbox_process_protocol::{
     decode_server_line, encode_client_line,
 };
 use signalbox_tools_exec::{
-    BwrapAvailability, CARGO_DIAGNOSTICS_NAME, CaptureCompleteness, ProcessOutcome, ProcessOutput,
-    ProcessRequest, ProcessRunResult, ProcessRunner, ProcessSpawnFailure, SANDBOXED_EXEC_NAME,
-    UNSANDBOXED_EXEC_NAME,
+    BwrapAvailability, CaptureCompleteness, ProcessOutcome, ProcessOutput, ProcessRequest,
+    ProcessRunResult, ProcessRunner, ProcessSpawnFailure, SANDBOXED_EXEC_NAME,
 };
 use signalbox_tools_git::{GIT_STATUS_NAME, GitIdentity};
 use signalbox_tools_web::{
-    WEB_FETCH_NAME, WEB_SEARCH_NAME, WebSearchRequest, WebSearchTransport,
-    WebSearchTransportFailure, WebSearchTransportOutcome,
+    WEB_FETCH_NAME, WebSearchRequest, WebSearchTransport, WebSearchTransportFailure,
+    WebSearchTransportOutcome,
 };
 use signalboxd::{
     ActivatedTurnExecution, CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
@@ -87,15 +86,15 @@ use signalboxd::{
     MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
     PostgresConversationIntrospection, PostgresProviderModelExecution,
     PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, ProcessRuntime, READ_FILE_NAME,
-    REPOSITORY_READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass,
-    ReviewDispositionClass, ReviewGateCheckResult, ReviewGatePurpose, ReviewThread,
-    ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
-    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult,
-    ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, SessionStatusWrite,
-    SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields, StackStateResult,
-    ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME,
-    WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse,
-    WebFetchTransport, WebFetchTransportFailure,
+    REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass, ReviewDispositionClass,
+    ReviewGateCheckResult, ReviewGatePurpose, ReviewThread, ReviewThreadComment,
+    ReviewThreadFields, ReviewThreadInventoryFields, ReviewThreadInventoryItem,
+    ReviewThreadResolution, ReviewThreadsResult, ReviewerVerdictEvidence, ReviewerVerdictFields,
+    ReviewerVerdictStatus, SessionStatusWrite, SessionStatusWriteOutcome, SessionStatusWriter,
+    StackStateFields, StackStateResult, ThreadInventoryResult, ThreadReplyResult,
+    ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME, WebFetchBodyCompleteness,
+    WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse, WebFetchTransport,
+    WebFetchTransportFailure,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use tempfile::tempdir;
@@ -795,25 +794,72 @@ fn continuation_result_json(
 }
 
 #[track_caller]
-fn assert_commissioned_catalog(operation: &ModelOperation<ModelCallId>) {
+fn assert_commissioned_catalog(operation: &ModelOperation<ModelCallId>, expected_names: &[String]) {
     let names = operation
         .tools
         .iter()
-        .map(|definition| definition.name.as_str())
+        .map(|definition| definition.name.as_str().to_owned())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 48);
-    assert!(names.contains(&REPOSITORY_READ_FILE_NAME));
-    assert!(names.contains(&PULL_REQUEST_METADATA_NAME));
-    assert!(names.contains(&PULL_REQUEST_PUBLISH_REVIEW_NAME));
-    assert!(names.contains(&READ_FILE_NAME));
-    assert!(names.contains(&WRITE_FILE_NAME));
-    assert!(names.contains(&GIT_STATUS_NAME));
-    assert!(names.contains(&SANDBOXED_EXEC_NAME));
-    assert!(names.contains(&UNSANDBOXED_EXEC_NAME));
-    assert!(names.contains(&CARGO_DIAGNOSTICS_NAME));
-    assert!(names.contains(&signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME));
-    assert!(names.contains(&WEB_FETCH_NAME));
-    assert!(names.contains(&WEB_SEARCH_NAME));
+    assert_eq!(names, expected_names);
+}
+
+fn commissioned_catalog_names() -> Vec<String> {
+    [
+        "apply_patch",
+        "await_session",
+        "cargo_diagnostics",
+        "change_request_changed_files",
+        "change_request_checks_status",
+        "change_request_ci_job_log",
+        "change_request_comment",
+        "change_request_convergence_state",
+        "change_request_file_patch",
+        "change_request_rerun_failed_jobs",
+        "change_request_review_threads",
+        "change_request_stack_state",
+        "change_request_summary",
+        "change_request_thread_inventory",
+        "change_request_thread_reply",
+        "change_request_thread_resolve",
+        "current_time",
+        "echo",
+        "edit_file",
+        "git_branch_create",
+        "git_branch_switch",
+        "git_create_commit",
+        "git_diff",
+        "git_log",
+        "git_stage",
+        "git_status",
+        "github_pull_request_diff",
+        "github_pull_request_metadata",
+        "github_pull_request_publish_review",
+        "github_pull_request_review_threads",
+        "glob_files",
+        "list_conversations",
+        "list_directory",
+        "plan_read",
+        "plan_write",
+        "read_conversation",
+        "read_file",
+        "read_imported_conversation",
+        "read_own_conversation",
+        "repository_list_directory",
+        "repository_read_file",
+        "review_gate_check",
+        "sandboxed_exec",
+        "search_files",
+        "send_session_message",
+        "session_status_update",
+        "spawn_session",
+        "unsandboxed_exec",
+        "web_fetch",
+        "web_search",
+        "write_file",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn expected_tool_call(request: ToolRequestId, name: &str, arguments_json: &str) -> MessagePart {
@@ -2583,6 +2629,7 @@ async fn s10_composed_github_read_executes_offline() -> Result<(), Box<dyn Error
         workspace.path(),
     )?
     .into_parts();
+    let expected_catalog_names = commissioned_catalog_names();
     let arguments = serde_json::json!({
         "repository": "KeenWill/signalbox",
         "number": 17
@@ -2608,7 +2655,7 @@ async fn s10_composed_github_read_executes_offline() -> Result<(), Box<dyn Error
     assert_eq!(github.credential_matches(), vec![true]);
     assert_eq!(github.policy_matches(), vec![true]);
     assert_eq!(continuation_result_json(&runtime)?, expected);
-    assert_commissioned_catalog(&runtime.received_operations()[0]);
+    assert_commissioned_catalog(&runtime.received_operations()[0], &expected_catalog_names);
     Ok(())
 }
 
@@ -2629,6 +2676,7 @@ async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Er
         workspace.path(),
     )?
     .into_parts();
+    let expected_catalog_names = commissioned_catalog_names();
     let arguments = serde_json::json!({"path": relative_path, "max_bytes": 1024}).to_string();
     let (execution, runtime) = fixture.execution(
         [
@@ -2653,7 +2701,7 @@ async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Er
             "truncated": false
         })
     );
-    assert_commissioned_catalog(&runtime.received_operations()[0]);
+    assert_commissioned_catalog(&runtime.received_operations()[0], &expected_catalog_names);
     Ok(())
 }
 
@@ -2674,6 +2722,7 @@ async fn s10_composed_local_git_status_executes_offline() -> Result<(), Box<dyn 
         workspace.path(),
     )?
     .into_parts();
+    let expected_catalog_names = commissioned_catalog_names();
     let arguments = serde_json::json!({}).to_string();
     let (execution, runtime) = fixture.execution(
         [
@@ -2690,7 +2739,7 @@ async fn s10_composed_local_git_status_executes_offline() -> Result<(), Box<dyn 
 
     let result = continuation_result_json(&runtime)?;
     assert_eq!(result["entries"][0]["path"], relative_path);
-    assert_commissioned_catalog(&runtime.received_operations()[0]);
+    assert_commissioned_catalog(&runtime.received_operations()[0], &expected_catalog_names);
     Ok(())
 }
 
@@ -2708,6 +2757,7 @@ async fn s10_composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Er
         workspace.path(),
     )?
     .into_parts();
+    let expected_catalog_names = commissioned_catalog_names();
     let arguments = serde_json::json!({"program": "cargo"}).to_string();
     let (execution, runtime) = fixture.execution(
         [
@@ -2731,7 +2781,7 @@ async fn s10_composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Er
         result["outcome"],
         serde_json::json!({"kind": "spawn_failed", "reason": "sandbox_unavailable"})
     );
-    assert_commissioned_catalog(&runtime.received_operations()[0]);
+    assert_commissioned_catalog(&runtime.received_operations()[0], &expected_catalog_names);
     Ok(())
 }
 
@@ -2749,6 +2799,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
         workspace.path(),
     )?
     .into_parts();
+    let expected_catalog_names = commissioned_catalog_names();
     let arguments = serde_json::json!({
         "after_position": null,
         "max_entries": 100,
@@ -2793,7 +2844,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
             "truncated": false
         })
     );
-    assert_commissioned_catalog(&runtime.received_operations()[0]);
+    assert_commissioned_catalog(&runtime.received_operations()[0], &expected_catalog_names);
     Ok(())
 }
 
