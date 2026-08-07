@@ -56,12 +56,31 @@ NOT reimplemented here:
   `AGENTS.md` — a strict superset of "invariant index <-> spec page" links,
   since `docs/invariants.md` and `docs/spec/*.md` are both inside `docs/`.
 
-Known limitation: the count-statement scan is a heuristic prose pattern, not
-a parser — a coincidental "<number> invariants"/"<number> scenarios"
-adjacency that is not actually stating a total would false-positive (e.g. "5
-invariants changed in the last 2 scenarios" reads as a claim of 5 total
-invariants). None exists in the tree today; broaden `NUMBER_BEFORE_NOUN` /
-`NOUN_COUNT_PHRASE`, or add a reviewed exclusion, if one legitimately arises.
+Known limitation, and the scope this checker is written to: the count-statement
+scan is a heuristic over Markdown source, not a CommonMark renderer, and it is
+best-effort by design in both directions.
+
+It can miss a stale count wearing a Markdown shape the patterns do not model —
+emphasis nested around a link around the number, a construct split across a
+container prefix, an inline HTML element — and it can read a count out of
+source that renders as nothing, if that source is a form the masking helpers do
+not cover. Both are accepted costs, not oversights. The value here is catching
+the ordinary restatement, which is how a stale total actually gets written; the
+alternative is a full renderer, which is a dependency and a parser this
+repository has deliberately not taken on for a report-only staleness check.
+
+So a newly-discovered shape is not automatically a defect to fix. Widen the
+patterns or the masking when a shape is one this repository's documentation
+actually writes; leave it when the shape is only reachable in principle. What
+must stay true is that no *supported* shape reports a wrong number: a
+miscounted total that agrees with the catalog is the only failure this file
+treats as unconditional, because nothing downstream would ever surface it.
+
+A coincidental "<number> invariants"/"<number> scenarios" adjacency that is not
+stating a total would also false-positive (e.g. "5 invariants changed in the
+last 2 scenarios" reads as a claim of 5 total invariants). None exists in the
+tree today; broaden `NUMBER_BEFORE_NOUN` / `NOUN_COUNT_PHRASE`, or add a
+reviewed exclusion, if one legitimately arises.
 
 Standalone invocation — this script is not part of
 `.github/workflows/rust.yml` or the AGENTS.md documentation bar, so nothing
