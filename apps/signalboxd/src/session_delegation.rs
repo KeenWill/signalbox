@@ -52,8 +52,11 @@ impl PostgresSessionDelegationPort {
         request: &DelegationAwaitRequest,
         outcome: RecordDelegationWaitOutcome,
     ) -> Result<AwaitSessionPortOutcome, PostgresSessionDelegationPortError> {
-        let RecordDelegationWaitOutcome::Recorded(recorded) = outcome else {
-            return Ok(AwaitSessionPortOutcome::Rejected);
+        let recorded = match outcome {
+            RecordDelegationWaitOutcome::Recorded(recorded) => recorded,
+            RecordDelegationWaitOutcome::Rejected(_) => {
+                return Ok(AwaitSessionPortOutcome::Rejected);
+            }
         };
         let wait = recorded.wait();
         match wait.mode() {
