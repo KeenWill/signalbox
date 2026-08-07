@@ -32,8 +32,9 @@ link delimiters between the number and the noun are stepped over, because
 sentence. Literal content is excluded first, through the masking helpers in
 `check_docs_consistency` — fences (including `~~~`, long, and container-nested
 ones), indented code, HTML comments, raw HTML blocks, and inline code spans.
-The fence masking is applied to the two catalogs themselves as well, so a
-fenced example of a row or a heading cannot inflate ground truth.
+The same block masking is applied to the two catalogs themselves, so an
+example row or heading — fenced, or drafted inside an HTML comment — cannot
+inflate ground truth.
 
 This mechanizes check class (2), "stale-count checks", of the
 invariant-citation review work commissioned for this checker. The other two
@@ -79,7 +80,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from check_docs_consistency import mask_block_content, mask_fenced_code, mask_inline_code
+from check_docs_consistency import mask_block_content, mask_inline_code
 from generate_invariants import has_non_authoritative_planning_banner
 
 INVARIANTS = Path("docs/invariants.md")
@@ -105,7 +106,15 @@ SCENARIO_HEADING = re.compile(r"^##\s+(S[0-9]+)\b", re.MULTILINE)
 # what decides whether a stale total is caught. Only the delimiters are
 # skipped, never the words between them, so "51 and 3 invariants" still reads
 # as two separate tokens rather than one span.
-MARKUP = r"[*_~`\[\]]*"
+#
+# A complete link around either token is markup as well: "There are
+# [51](invariants.md) invariants" links the number, so the gap has to cross the
+# entire destination rather than a lone bracket. Inline and reference forms
+# both. Each alternative starts with a two-character literal and its body
+# excludes the closing delimiter and newlines, so the repetition is anchored
+# and cannot run away across a document.
+MARKUP_CONSTRUCT = re.compile(r"\]\([^()\s]*\)|\]\[[^\]\n]*\]|[*_~`\[\]]")
+MARKUP = rf"(?:{MARKUP_CONSTRUCT.pattern})*"
 WRAPPED_GAP = rf"(?:{MARKUP}(?:[ \t]+|[ \t]*\r?\n[ \t]*(?:>[ \t]*)*){MARKUP})"
 
 # A digit run that is only part of a larger number: "37.5" and "1,000" must not
@@ -131,16 +140,16 @@ NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 # snake_case identifier written as bare prose, which this repository formats as
 # inline code — masked above before any of these patterns run.
 NUMBER_BEFORE_NOUN = re.compile(
-    rf"(?<![0-9A-Za-z.-])([0-9]{{1,4}}){NOT_PARTIAL_NUMBER}{WRAPPED_GAP}"
-    rf"(invariants?|scenarios?)(?![0-9A-Za-z-])",
+    rf"(?<![0-9A-Za-z.-])(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}{WRAPPED_GAP}"
+    rf"(?P<noun>invariants?|scenarios?)(?![0-9A-Za-z-])",
     re.IGNORECASE,
 )
 # The noun stated as an explicit count: "invariant count: 50", "scenario
 # count is 37". The connector before the digits is optional so bare
 # "invariant count 50" still matches.
 NOUN_COUNT_PHRASE = re.compile(
-    rf"\b(invariant|scenario)s?{WRAPPED_GAP}count{WRAPPED_GAP}?"
-    rf"(?:is|of|:|=)?{WRAPPED_GAP}?([0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
+    rf"\b(?P<noun>invariant|scenario)s?{WRAPPED_GAP}count{WRAPPED_GAP}?"
+    rf"(?:is|of|:|=)?{WRAPPED_GAP}?(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
     re.IGNORECASE,
 )
 # The same claim with the words the other way round: "count of scenarios: 38",
@@ -148,8 +157,8 @@ NOUN_COUNT_PHRASE = re.compile(
 # noun follows `count` rather than leading it, and the number is too far from
 # the noun for `NUMBER_BEFORE_NOUN` to bridge.
 COUNT_OF_NOUN_PHRASE = re.compile(
-    rf"\bcount{WRAPPED_GAP}of{WRAPPED_GAP}(invariant|scenario)s?"
-    rf"{WRAPPED_GAP}?(?:is|of|:|=)?{WRAPPED_GAP}?([0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
+    rf"\bcount{WRAPPED_GAP}of{WRAPPED_GAP}(?P<noun>invariant|scenario)s?"
+    rf"{WRAPPED_GAP}?(?:is|of|:|=)?{WRAPPED_GAP}?(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
     re.IGNORECASE,
 )
 
@@ -186,12 +195,13 @@ def tracked_markdown_files() -> list[Path]:
 def actual_invariant_count() -> int:
     """Return the number of distinct rows in the generated invariant index.
 
-    Fenced content is masked first, on the same grounds as `find_stated_counts`
-    below: a documented example of the row format is a sample, not a catalog
-    entry. Counting one would inflate ground truth itself and so fail every
+    Literal content is masked first, on the same grounds as `find_stated_counts`
+    below, and through the same `mask_block_content`: a documented example of
+    the row format is a sample, and a row inside an HTML comment is a draft.
+    Counting either would inflate ground truth itself and so fail every
     accurate stated count in the tree — the loudest possible failure mode.
     """
-    text = mask_fenced_code(INVARIANTS.read_text(encoding="utf-8"))
+    text = mask_block_content(INVARIANTS.read_text(encoding="utf-8"))
     tags = set(INVARIANT_ROW.findall(text))
     if not tags:
         raise CountCheckError(f"{INVARIANTS} has no parseable INV-NNN rows")
@@ -201,11 +211,12 @@ def actual_invariant_count() -> int:
 def actual_scenario_count() -> int:
     """Return the number of distinct `## S<N>` scenario headings.
 
-    Fenced content is masked for the same reason as in `actual_invariant_count`:
-    a fenced `## S99 — Example` renders as code, names no scenario, and must not
+    Literal content is masked for the same reason as in
+    `actual_invariant_count`: a `## S99 — Example` inside a fence or an HTML
+    comment renders as code or not at all, names no scenario, and must not
     enlarge the catalog it is only illustrating.
     """
-    text = mask_fenced_code(SCENARIOS.read_text(encoding="utf-8"))
+    text = mask_block_content(SCENARIOS.read_text(encoding="utf-8"))
     tags = set(SCENARIO_HEADING.findall(text))
     if not tags:
         raise CountCheckError(f"{SCENARIOS} has no parseable scenario headings")
@@ -222,16 +233,13 @@ def as_one_phrase(matched: str) -> str:
 
     Quote markers the wrap carried, and the inline markup the patterns now step
     over, are dropped: a claim written "There are **51**\ninvariants" inside a
-    nested quote reports as "51 invariants" rather than "51** > > invariants".
-    Only delimiters are stripped, so every word the document actually states is
-    still quoted back verbatim.
+    nested quote reports as "51 invariants", and a reference-linked number
+    reports as "51 invariants" rather than "51][index invariants". The same
+    constructs the gap steps over are the ones removed here, so the two cannot
+    drift; every word the document actually states is still quoted back.
     """
-    words = []
-    for word in matched.split():
-        stripped = word.strip("*_~`[]>")
-        if stripped:
-            words.append(stripped)
-    return " ".join(words)
+    without_markup = MARKUP_CONSTRUCT.sub(" ", matched)
+    return " ".join(word for word in without_markup.split() if set(word) != {">"})
 
 
 def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
@@ -262,24 +270,20 @@ def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
         return []
     text = mask_inline_code(mask_block_content(raw))
     found: list[tuple[int, str, int, str]] = []
-    # (pattern, group holding the noun, group holding the number)
-    patterns = (
-        (NUMBER_BEFORE_NOUN, 2, 1),
-        (NOUN_COUNT_PHRASE, 1, 2),
-        (COUNT_OF_NOUN_PHRASE, 1, 2),
-    )
-    for pattern, noun_group, number_group in patterns:
+    # Every pattern names its two captures `noun` and `number`, so the three
+    # can be read the same way regardless of which order the words fall in.
+    for pattern in (NUMBER_BEFORE_NOUN, NOUN_COUNT_PHRASE, COUNT_OF_NOUN_PHRASE):
         for match in pattern.finditer(text):
             noun = (
                 "invariant"
-                if match.group(noun_group).lower().startswith("invariant")
+                if match.group("noun").lower().startswith("invariant")
                 else "scenario"
             )
             found.append(
                 (
                     line_number_at(text, match.start()),
                     noun,
-                    int(match.group(number_group)),
+                    int(match.group("number")),
                     as_one_phrase(match.group(0)),
                 )
             )

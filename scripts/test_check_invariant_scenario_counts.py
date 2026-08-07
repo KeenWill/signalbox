@@ -452,26 +452,61 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("docs/agents/backlog.md", result.stdout)
 
-    def test_stale_count_split_by_inline_markup_fails(self) -> None:
-        """Rendered emphasis and links state the same sentence.
+    def assert_stale_invariant_count_caught(self, sentence: str) -> None:
+        """Plumbing only: write one document, run the checker, expect a catch.
 
-        `**51**` and `[invariants](...)` render exactly as the plain words do,
-        so formatting must not decide whether a stale total is caught.
+        The sentence stays at the call site because the sentence is what each
+        case is about; only the fixture and the invocation are hidden.
         """
-        for markup in (
-            f"There are **{STALE_INVARIANT_COUNT}** invariants.",
-            f"There are {STALE_INVARIANT_COUNT} **invariants**.",
-            f"There are _{STALE_INVARIANT_COUNT}_ invariants.",
-            f"There are {STALE_INVARIANT_COUNT} [invariants](../invariants.md).",
-        ):
-            with self.subTest(markup=markup):
-                with tempfile.TemporaryDirectory() as tmp:
-                    root = fixture_root(tmp, {"docs/spec/example.md": markup + "\n"})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(tmp, {"docs/spec/example.md": sentence + "\n"})
 
-                    result = run_checker(root)
+            result = run_checker(root)
 
-                self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertIn(f"{STALE_INVARIANT_COUNT} invariants", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(f"{STALE_INVARIANT_COUNT} invariants", result.stdout)
+
+    def assert_no_count_read_from(self, sentence: str) -> None:
+        """Plumbing only, for the cases that must state nothing at all."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(tmp, {"docs/spec/example.md": sentence + "\n"})
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_stale_count_with_a_bold_number_fails(self) -> None:
+        self.assert_stale_invariant_count_caught(
+            f"There are **{STALE_INVARIANT_COUNT}** invariants."
+        )
+
+    def test_a_stale_count_with_a_bold_noun_fails(self) -> None:
+        self.assert_stale_invariant_count_caught(
+            f"There are {STALE_INVARIANT_COUNT} **invariants**."
+        )
+
+    def test_a_stale_count_with_an_underscore_emphasised_number_fails(self) -> None:
+        """`_` is Markdown's other emphasis delimiter and a `\w` character, so
+        it hid a total that `**` did not."""
+        self.assert_stale_invariant_count_caught(
+            f"There are _{STALE_INVARIANT_COUNT}_ invariants."
+        )
+
+    def test_a_stale_count_with_a_linked_noun_fails(self) -> None:
+        self.assert_stale_invariant_count_caught(
+            f"There are {STALE_INVARIANT_COUNT} [invariants](../invariants.md)."
+        )
+
+    def test_a_stale_count_with_a_linked_number_fails(self) -> None:
+        """The gap has to cross the whole link destination, not just `]`."""
+        self.assert_stale_invariant_count_caught(
+            f"There are [{STALE_INVARIANT_COUNT}](../invariants.md) invariants."
+        )
+
+    def test_a_stale_count_with_a_reference_linked_number_fails(self) -> None:
+        self.assert_stale_invariant_count_caught(
+            f"There are [{STALE_INVARIANT_COUNT}][index] invariants."
+        )
 
     def test_count_inside_inline_code_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -518,42 +553,34 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_stale_count_of_noun_phrase_fails(self) -> None:
+    def assert_stale_scenario_count_caught(self, sentence: str) -> None:
+        """Plumbing only, for the scenario-catalog half."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(tmp, {"docs/spec/example.md": sentence + "\n"})
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(f"current scenario catalog has {SCENARIO_COUNT}", result.stdout)
+
+    def test_a_stale_count_of_noun_colon_phrase_fails(self) -> None:
         """`count of scenarios: N` states a total the other way round."""
-        for phrase in (
-            f"count of scenarios: {STALE_SCENARIO_COUNT}",
-            f"The count of scenarios is {STALE_SCENARIO_COUNT}.",
-        ):
-            with self.subTest(phrase=phrase):
-                with tempfile.TemporaryDirectory() as tmp:
-                    root = fixture_root(tmp, {"docs/spec/example.md": phrase + "\n"})
+        self.assert_stale_scenario_count_caught(
+            f"count of scenarios: {STALE_SCENARIO_COUNT}"
+        )
 
-                    result = run_checker(root)
+    def test_a_stale_count_of_noun_is_phrase_fails(self) -> None:
+        self.assert_stale_scenario_count_caught(
+            f"The count of scenarios is {STALE_SCENARIO_COUNT}."
+        )
 
-                self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertIn(
-                    f"current scenario catalog has {SCENARIO_COUNT}", result.stdout
-                )
+    def test_a_decimal_is_not_read_as_its_integer_prefix(self) -> None:
+        """`<N>.5` must not be read as N, which would silently *agree* with an
+        N-scenario catalog — the one failure mode nothing ever surfaces."""
+        self.assert_no_count_read_from(f"scenario count: {SCENARIO_COUNT}.5")
 
-    def test_a_partial_numeric_token_is_not_read_as_the_count(self) -> None:
-        """`37.5` and `1,000` must not be read as 37 and 1.
-
-        Both are rejected rather than parsed: misreporting a different number
-        as the stated total is worse than not recognising the phrase, because
-        it can silently agree with the catalog — which is exactly what
-        `scenario count: <N>.5` would do against an N-scenario catalog.
-        """
-        for phrase in (
-            f"scenario count: {SCENARIO_COUNT}.5",
-            "scenario count: 1,000",
-        ):
-            with self.subTest(phrase=phrase):
-                with tempfile.TemporaryDirectory() as tmp:
-                    root = fixture_root(tmp, {"docs/spec/example.md": phrase + "\n"})
-
-                    result = run_checker(root)
-
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    def test_a_grouped_number_is_not_read_as_its_first_digit(self) -> None:
+        self.assert_no_count_read_from("scenario count: 1,000")
 
     def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
         """A tracked path can vanish between `git ls-files` and the read.
