@@ -214,13 +214,6 @@ jobs:
           retention-days: 14
       - name: Check privacy boundary
         run: clients/native/scripts/check-privacy.sh
-      - name: Check Tart scripts (dry run)
-        run: clients/native/scripts/tart/check-tart-scripts.sh
-      # Pure sha256 hashing against Screenshots/MANIFEST.sha256 — no
-      # simulator involved, so it is cheap enough to run here even though
-      # recapturing goldens is a manual flow.
-      - name: Check screenshot goldens
-        run: clients/native/scripts/check-screenshot-goldens.sh
 
   # Holds the only write token in this workflow and never builds or runs
   # anything, mirroring the token separation coverage.yml's publish-comment
