@@ -9,13 +9,30 @@ import XCTest
 
 /// The canvas a live screen is rendered into.
 ///
-/// Fixed sizes, not device configurations: the layouts branch on the
-/// horizontal size class alone, so a device matrix would re-record every
-/// golden whenever the resolved simulator changes while testing nothing the
-/// size class does not already separate.
-enum SnapshotCanvas: String {
-    case compact
-    case regular
+/// Fixed sizes, not device configurations. Every canvas here is rendered on the
+/// one simulator `scripts/lib/snapshots.sh` pins, so a canvas is a parameter of
+/// the rendering rather than a second device to resolve: adding one costs a
+/// golden per screen and no new destination, and the cross-device caveat
+/// documented on `LiveScreenRenderer` is a property of changing the simulator,
+/// not of changing the canvas.
+///
+/// The raw value is the suffix in a golden's file name, so it says the form
+/// factor rather than the size class: a reader — or a model — browsing
+/// `__Snapshots__` sees a name ending `.ipad-landscape.png` and needs nothing
+/// else to know what it is looking at. The size class each canvas resolves to
+/// is stated in the extension below, where it is a rendering input rather than
+/// a label.
+///
+/// The geometry — this declaration and `size` — deliberately names no UIKit
+/// type, and everything that does is in the extension below it. A macOS
+/// destination can reuse this half and supply its own pinning in place of that
+/// extension; that destination is not this suite's, and the note on
+/// `LiveScreenRenderer` says what else it would need.
+enum SnapshotCanvas: String, CaseIterable {
+    case iPhonePortrait = "iphone-portrait"
+    case iPhoneLandscape = "iphone-landscape"
+    case iPadPortrait = "ipad-portrait"
+    case iPadLandscape = "ipad-landscape"
     /// A sheet is not a screen: its content declares its own minimum size, and
     /// rendering it on a phone-width canvas would record it clipped to a width
     /// no presentation gives it.
@@ -23,10 +40,14 @@ enum SnapshotCanvas: String {
 
     var size: CGSize {
         switch self {
-        case .compact:
+        case .iPhonePortrait:
             return CGSize(width: 390, height: 844)
-        case .regular:
-            return CGSize(width: 1024, height: 768)
+        case .iPhoneLandscape:
+            return CGSize(width: 844, height: 390)
+        case .iPadPortrait:
+            return CGSize(width: 1024, height: 1366)
+        case .iPadLandscape:
+            return CGSize(width: 1366, height: 1024)
         case .sheet:
             return CGSize(width: 540, height: 620)
         }
@@ -36,9 +57,18 @@ enum SnapshotCanvas: String {
     /// scale decides a golden's pixel dimensions, so an unpinned one re-records
     /// the suite whenever a 2x device replaces a 3x one. A scale of 2 shows the
     /// same layout and typography a 3x rendering would while keeping each
-    /// golden a little over half the bytes.
+    /// golden a little over half the bytes, and it is the scale every shipping
+    /// iPhone and iPad renders at, so no canvas here records hairlines or asset
+    /// variants that no device produces.
     var displayScale: CGFloat { 2 }
+}
 
+/// Everything a canvas pins that only UIKit can express.
+///
+/// Split from the declaration above so the geometry stays portable; see the
+/// note there. Nothing in this extension is reusable by an AppKit destination,
+/// and that is the whole reason for the seam.
+extension SnapshotCanvas {
     /// Stated here for the same reason the scale is: a dynamic color resolves
     /// against the trait collection of whatever it is set on, so an inherited
     /// interface style would record a different golden on a dark-mode host.
@@ -70,7 +100,7 @@ enum SnapshotCanvas: String {
     /// switched on.
     func overrideTraits(on controller: UIViewController) {
         controller.traitOverrides.horizontalSizeClass = horizontalSizeClass
-        controller.traitOverrides.verticalSizeClass = .regular
+        controller.traitOverrides.verticalSizeClass = verticalSizeClass
         controller.traitOverrides.userInterfaceStyle = Self.userInterfaceStyle
         controller.traitOverrides.displayScale = displayScale
         controller.traitOverrides.layoutDirection = .leftToRight
@@ -115,11 +145,33 @@ enum SnapshotCanvas: String {
         window.layoutIfNeeded()
     }
 
+    /// The size class each canvas resolves to, stated rather than derived from
+    /// its width. UIKit resolves a size class from the window a scene owns, and
+    /// these windows are canvas-sized rather than device-sized, so a resolved
+    /// one would follow the simulator this suite exists to be independent of.
+    ///
+    /// These are the classes the same geometry carries on a device: a phone is
+    /// horizontally compact in both orientations and vertically compact only in
+    /// landscape, and an iPad is regular in both directions either way. `RootView`
+    /// is the only view in the application that reads a size class — it is
+    /// the whole of `grep -rn horizontalSizeClass clients/native/Sources` — so
+    /// the horizontal one is what separates its tab bar from its split view,
+    /// and every other difference across these canvases is reflow at a
+    /// different width and height.
     private var horizontalSizeClass: UIUserInterfaceSizeClass {
         switch self {
-        case .compact, .sheet:
+        case .iPhonePortrait, .iPhoneLandscape, .sheet:
             return .compact
-        case .regular:
+        case .iPadPortrait, .iPadLandscape:
+            return .regular
+        }
+    }
+
+    private var verticalSizeClass: UIUserInterfaceSizeClass {
+        switch self {
+        case .iPhoneLandscape:
+            return .compact
+        case .iPhonePortrait, .iPadPortrait, .iPadLandscape, .sheet:
             return .regular
         }
     }
@@ -136,14 +188,26 @@ enum SnapshotCanvas: String {
 /// The second cost is the destination, and it is bounded rather than absent.
 /// Everything a layout resolves against is pinned below — size, scale, size
 /// class, interface style, content-size category, layout direction, and safe
-/// area — and with those pinned, ten of the twelve goldens were verified
-/// byte-identical across different iPhone simulators. The other two are the
-/// regular canvas, which is wider than a phone screen: the window's corner mask
-/// and the glass materials composite against the device there, so those two
-/// goldens still resolve differently on a different phone. CI pins its
-/// simulator, and `scripts/test-xcode.sh` resolves the newest one locally, so
-/// the suite is reproducible where it runs; a destination that is not CI's can
-/// legitimately fail those two alone.
+/// area — and with those pinned, a golden on the phone-sized canvases was
+/// verified byte-identical across different iPhone simulators. A canvas wider
+/// than the host phone's screen is the exception, and for one reason: the
+/// window's corner mask and the glass materials composite against the device,
+/// so every iPad-canvas golden here still resolves differently on a different
+/// phone. That is a property of changing the simulator and not of adding a
+/// canvas — every canvas in one run renders on the one destination
+/// `scripts/lib/snapshots.sh` pins — so the cost of the matrix is paid once, in
+/// goldens that only CI's destination reproduces. CI pins that destination and
+/// `scripts/test-snapshots.sh` resolves the same one locally, so the suite is
+/// reproducible where it runs; a destination that is not CI's can legitimately
+/// fail the iPad-canvas goldens alone.
+///
+/// The third cost is the platform, and it is refused rather than bounded. This
+/// renderer is UIKit: it hosts in a `UIWindow`, pins `UITraitCollection`
+/// overrides, and draws through `UIGraphicsImageRenderer`, none of which AppKit
+/// has. `SnapshotCanvas`'s geometry is written to be reusable by a macOS
+/// destination — the cases and their sizes name no UIKit type — but the pinning
+/// and the drawing are not, and a macOS golden needs its own renderer and its
+/// own destination. Nothing here renders `RootView`'s `macDesktopLayout`.
 ///
 /// One appearance input is refused rather than pinned, because it is not a
 /// trait and nothing can override it; see `liveScreenSnapshotUnsupportedState`.
