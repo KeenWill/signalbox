@@ -737,53 +737,63 @@ acknowledged work is configuration-independent (INV-034).
 ## Credential deliveries
 
 A profile's closed `delivery` states how its secret reaches the provider. Four
-are admitted, and an adapter admits a subset of them.
+are admitted, and an adapter admits a subset of them. Each
+`[[credential_profiles]]` entry is one flat TOML table: `delivery` is a required
+TOML string discriminant, common fields are exactly `name`, `adapter`,
+`billing_kind`, and `delivery`, and the selected variant admits only its fields
+below. A field owned by another variant is unknown and rejected.
 
-**`ambient`** is fieldless. The CLI resolves the one login already visible in
-the daemon user's process environment; the daemon supplies no credential value
-or profile-specific home. A profile declaring `ambient` therefore rejects every
-delivery-specific field. Because one CLI adapter process environment exposes
-only one such authentication context, a document may declare at most one
-`ambient` profile for `claude_cli` and at most one for `codex_cli`, regardless
-of which pools contain it. Giving that same login two profile names would not
-make two credentials and could not authorize a successor call.
+**`ambient`** is spelled `delivery = "ambient"` and is fieldless. The CLI
+resolves the one login already visible in the daemon user's process environment;
+the daemon supplies no credential value or profile-specific home. A profile
+declaring `ambient` therefore rejects every delivery-specific field. Because one
+CLI adapter process environment exposes only one such authentication context, a
+document may declare at most one `ambient` profile for `claude_cli` and at most
+one for `codex_cli`, regardless of which pools contain it. Giving that same
+login two profile names would not make two credentials and could not authorize a
+successor call.
 
-**`file`** names an absolute deployment-owned path, read per preparation and
-never cached, narrowed by the trailing-line-termination rule below. The
-`anthropic` adapter forms an HTTP header from the value; `codex_cli` supplies it
-to the fresh process under the profile's `env_key`. A direct-HTTP adapter
-rejects `env_key` because it does not use a child environment. A CLI adapter
-requires the one credential variable its adapter contract names —
-`OPENAI_API_KEY` for `codex_cli` — and rejects every other value, including
-forwarded and process-control names such as `HOME`, `CODEX_HOME`, and `PATH`.
-This is the delivery for every credential that has an external source of truth —
-provider API keys, and any long-lived bearer token a provider's own tooling
-mints for unattended use. Before comparing paths, startup lexically normalizes
-each absolute path by removing redundant separators and `.` components and
-folding each `..` component without permitting it to cross the root; that
-operation performs no filesystem lookup and follows no symlink. For one adapter,
-one normalized absolute file path may appear on only one profile in a document:
-two names for the same bytes are not independent credentials and cannot
-authorize two attempts in one successor chain.
+**`file`** is spelled `delivery = "file"` with required TOML string `file`
+naming an absolute deployment-owned path and, only for a CLI adapter, required
+TOML string `env_key`. The path is read per preparation and never cached,
+narrowed by the trailing-line-termination rule below. The `anthropic` adapter
+forms an HTTP header from the value; `codex_cli` supplies it to the fresh
+process under `env_key`. A direct-HTTP adapter rejects `env_key` because it does
+not use a child environment. A CLI adapter requires the one credential variable
+its adapter contract names — `OPENAI_API_KEY` for `codex_cli` — and rejects
+every other value, including forwarded and process-control names such as `HOME`,
+`CODEX_HOME`, and `PATH`. This is the delivery for every credential that has an
+external source of truth — provider API keys, and any long-lived bearer token a
+provider's own tooling mints for unattended use. Before comparing paths, startup
+lexically normalizes each absolute path by removing redundant separators and `.`
+components and folding each `..` component without permitting it to cross the
+root; that operation performs no filesystem lookup and follows no symlink. For
+one adapter, one normalized absolute file path may appear on only one profile in
+a document: two names for the same bytes are not independent credentials and
+cannot authorize two attempts in one successor chain.
 [Credential operations policy](#credential-operations-policy) applies to it
 unchanged.
 
-**`codex_home`** names an absolute directory holding a login store the
-provider's CLI owns, reads, and writes. The daemon supplies it as that process's
-credential home and never opens it. It exists so a deployment can point the
-daemon at a login an operator already established interactively, provisioning
-nothing. Concurrent invocations against one such profile are admitted by
-default, matching how the CLI is ordinarily used. The store has no cross-process
-file locking, but the CLI re-reads it immediately before refreshing and adopts a
-token another process wrote rather than refreshing again, so the residual race
-is two processes crossing the refresh threshold within one token-exchange round
-trip — narrow, because a process refreshes about once per access-token lifetime.
-When it does fire the authorization is invalidated and the profile quarantines;
-recovery is the ordinary re-provisioning an operator already performs, and the
-pool fails over meanwhile. A deployment preferring not to carry that risk sets
-the optional per-profile `max_concurrent_invocations`, unbounded when absent.
-The knob exists because the tradeoff is a deployment's to make and code cannot
-observe which side of it a given operator is on.
+**`codex_home`** is spelled `delivery = "codex_home"` with required TOML string
+`codex_home` naming an absolute directory holding a login store the provider's
+CLI owns, reads, and writes. Its only optional field is
+`max_concurrent_invocations`, a TOML integer from 1 through 4,294,967,295; zero,
+a negative or larger integer, and every non-integer value are rejected. The
+daemon supplies the directory as that process's credential home and never opens
+it. It exists so a deployment can point the daemon at a login an operator
+already established interactively, provisioning nothing. Concurrent invocations
+against one such profile are admitted by default, matching how the CLI is
+ordinarily used. The store has no cross-process file locking, but the CLI
+re-reads it immediately before refreshing and adopts a token another process
+wrote rather than refreshing again, so the residual race is two processes
+crossing the refresh threshold within one token-exchange round trip — narrow,
+because a process refreshes about once per access-token lifetime. When it does
+fire the authorization is invalidated and the profile quarantines; recovery is
+the ordinary re-provisioning an operator already performs, and the pool fails
+over meanwhile. A deployment preferring not to carry that risk sets the optional
+bound, which is unbounded when absent. The knob exists because the tradeoff is a
+deployment's to make and code cannot observe which side of it a given operator
+is on.
 
 Two profiles naming different directories are independent token families with
 nothing shared, so a pool holds as many as a deployment has and runs them
@@ -819,18 +829,18 @@ owned by an earlier process as lost before making their waiters eligible; no
 provider request is repeated because a contended waiter has not issued one.
 Partial, foreign, or stale reservation evidence fails reconstitution closed.
 
-**`oauth`** is a rotating authorization the daemon owns. The profile carries the
-`client_id`, `token_url`, `device_authorization_url`, and `scopes` its provider
-requires. These are configuration, never build-provided constants: which OAuth
-client a deployment presents is the operator's decision and is recorded in the
-operator's own document, not asserted by this build. `client_id` is a TOML
-string of 1 through 1,024 UTF-8 bytes with no NUL; its bytes are preserved
-exactly, including whitespace. `scopes` is a TOML array of 1 through 64 strings,
-each 1 through 256 UTF-8 bytes and NUL-free. Declared order is request order,
-exact duplicate strings are rejected, and no trimming, case folding, sorting, or
-other normalization occurs. Both endpoint values must be absolute `https` URLs;
-startup rejects every other scheme and provides no plaintext or local-host
-exception.
+**`oauth`** is spelled `delivery = "oauth"` with exactly four required fields:
+TOML strings `client_id`, `token_url`, and `device_authorization_url`, plus TOML
+array-of-strings `scopes`. It is a rotating authorization the daemon owns. These
+values are configuration, never build-provided constants: which OAuth client a
+deployment presents is the operator's decision and is recorded in the operator's
+own document, not asserted by this build. `client_id` is 1 through 1,024 UTF-8
+bytes with no NUL; its bytes are preserved exactly, including whitespace.
+`scopes` contains 1 through 64 strings, each 1 through 256 UTF-8 bytes and
+NUL-free. Declared order is request order, exact duplicate strings are rejected,
+and no trimming, case folding, sorting, or other normalization occurs. Both
+endpoint values must be absolute `https` URLs; startup rejects every other
+scheme and provides no plaintext or local-host exception.
 
 **Committed unimplemented functionality — OAuth delivery and administration.**
 No present configuration composition, runtime path, API, process message, CLI
@@ -1013,9 +1023,15 @@ creates a new revision; a later exact reversion reuses the old one. Hashes may
 accelerate lookup but never establish equality without comparing the complete
 value. Every session history entry that copied that validated revision refers to
 the same cursor, rather than creating a session-local one. When that rule must
-choose among two or more admitted equal-priority members, the transaction that
-commits the selected call's `Prepared` record also advances the cursor to the
-member after the one it selected, wrapping in declared order. A failed
+choose among two or more admitted equal-priority members, the cursor names one
+member ordinal in that priority's relative declaration order. Selection starts
+there and walks that declared order cyclically, skipping each inadmissible
+member, until it finds the first admitted member; it never renumbers or indexes
+into a filtered member list. The transaction that commits the selected call's
+`Prepared` record advances the cursor to the next declared member of that same
+priority after the selected member, wrapping even when that next member is
+currently excluded. A priority with no admitted member cannot select; selection
+continues according to the pool's contention and exhaustion rules. A failed
 preparation advances nothing; restart preserves the cursor. Stickiness and a
 sole admitted member require no tie-break and do not advance it. Stickiness
 needs no separate durable state: preparation prefers the member the session's

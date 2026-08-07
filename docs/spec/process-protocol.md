@@ -316,14 +316,22 @@ mutation carrying a user-global `command_id` and one closed `target` object:
   from an availability-successor chain.
 
 Every identity is a nonempty bounded configuration or durable identity already
-owned by the credential contract, and each `record_generation` is a positive
-canonical decimal string. The mutation atomically marks only that exact active
-generation or predecessor correlation cleared. A later active generation is
-`stale_generation`; a chain target whose predecessor does not exactly correlate
-with the named profile's active exclusion, or any target with no such record, is
-`unknown_credential_exclusion`; and ordinary authorization failure is
-`credential_administration_forbidden`. OAuth quarantine rejects this mutation
-because only re-provisioning can clear it.
+owned by the credential contract. `pool_policy_id` is the canonical lowercase,
+hyphenated UUID string of the daemon-minted immutable `PoolPolicyId`;
+persistence stores that UUID as the policy header's surrogate identity, and
+every request, receipt, snapshot, and event uses the same spelling. Each
+`record_generation` is a positive canonical decimal string. The mutation
+atomically marks only that exact active generation or predecessor correlation
+cleared. For a fresh command, the existence of any newer active generation
+returns `stale_generation` before the named older generation is considered for
+`already_cleared`; an operator can therefore never mistake clearing historical
+evidence for clearing the current exclusion. A chain target whose predecessor
+does not exactly correlate with the named profile's active exclusion, or any
+target with no such record, is `unknown_credential_exclusion`; and ordinary
+authorization failure is `credential_administration_forbidden`. Equal
+`command_id` replay still returns its stored receipt before this current-state
+precedence is evaluated. OAuth quarantine rejects this mutation because only
+re-provisioning can clear it.
 
 Success returns `credential_exclusion_cleared { target, outcome }`, where
 `outcome` is `cleared` for the winning transition or `already_cleared` when a
@@ -2497,26 +2505,31 @@ harness, not a protocol client.
 
 **Committed unimplemented functionality.** No present event or transcript state
 admits this shape. The implementing wire slice must add
-`failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, members }`
+`failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
 as a distinct `transcript_turn.state` variant and
-`turn_credential_pool_exhausted { turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id, pool_policy_id, members }`
+`turn_credential_pool_exhausted { turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id, pool_policy_id, policy_members, members }`
 as its live event. The two `members` arrays have identical nonempty content in
-frozen policy order. Each item carries `profile`, required-nullable
-`reset_at_unix_ms`, and one closed `exclusion` object:
+frozen policy order. Both shapes additionally carry `policy_members`, the
+immutable policy's complete nonempty ordered array of profile references. It has
+the same length as `members`, and each evidence item's `profile` must equal the
+same-ordinal `policy_members` value. Each evidence item carries `profile`,
+required-nullable `reset_at_unix_ms`, and one closed `exclusion` object:
 
 - `profile_quarantine { record_generation }`;
 - `membership_exclusion { record_generation }`;
 - `session_displacement { record_generation }`; or
 - `chain_exclusion { predecessor_model_call_id }`.
 
-Generations and reset instants are positive canonical decimal strings; every
-other identity uses its already-owned bounded wire spelling. The snapshot and
-event carry no credential bytes, path, provider prose, or current-configuration
-lookup. The client validates complete membership order and identity equality
-before exposing the terminal state, so reconnect and live follow project the
-same typed cause rather than a generic failed turn. Until the coordinated
-daemon-and-client slice lands, version one rejects both new variants and no
-present producer may terminalize a turn for this pre-call cause.
+Generations and reset instants are positive canonical decimal strings;
+`pool_policy_id` uses the `PoolPolicyId` UUID spelling above, and every other
+identity uses its already-owned bounded wire spelling. The snapshot and event
+carry no credential bytes, path, provider prose, or current-configuration
+lookup. The client validates the nonempty `policy_members` inventory and its
+one-to-one order and identity equality with `members` before exposing the
+terminal state, so reconnect and live follow project the same typed cause rather
+than a generic failed turn. Until the coordinated daemon-and-client slice lands,
+version one rejects both new variants and no present producer may terminalize a
+turn for this pre-call cause.
 
 **Committed unimplemented functionality — credential-availability projection.**
 No present request, event, transcript message, or closed turn-state object
