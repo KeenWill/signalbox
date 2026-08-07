@@ -40,7 +40,7 @@ use signalbox_domain::{
     PerInputConfigurationChoices, ProviderModelIdentity, ResolvedProviderTarget,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionId, SubmitInputAppliedResult, SubmitInputResult, ToolApprovalDecision, ToolAttemptId,
-    ToolName as DomainToolName, ToolRequestId, TurnAttemptId, TurnId, UserContent,
+    ToolBatchPhase, ToolName as DomainToolName, ToolRequestId, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -1292,38 +1292,29 @@ impl EvalDatabase {
         session: SessionId,
         turn: TurnId,
     ) -> EvalResult<bool> {
-        let pending = sqlx::query_as::<_, PendingApproval>(
-            "SELECT request.request_id, request.tool_name, request.arguments_text
-               FROM turn_lifecycle AS lifecycle
-               JOIN tool_request AS request
-                 ON request.request_id = lifecycle.approval_tool_request_id
-                AND request.session_id = lifecycle.session_id
-                AND request.turn_id = lifecycle.turn_id
-              WHERE lifecycle.session_id = $1
-                AND lifecycle.turn_id = $2
-                AND lifecycle.active_phase_kind = 'awaiting_tool_approval'",
-        )
-        .bind(session.into_uuid())
-        .bind(turn.into_uuid())
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some(pending) = pending else {
+        let repository = PostgresToolLoopRepository::new(self.pool.clone());
+        let Some(batch) = repository.load_active_batch(session, turn).await? else {
             return Ok(false);
         };
-        if !pending.is_exact_read_only_unsandboxed_request()? {
+        let ToolBatchPhase::AwaitingApproval { request } = batch.phase() else {
+            return Ok(false);
+        };
+        let pending = batch
+            .requests()
+            .iter()
+            .find(|candidate| candidate.id() == request)
+            .ok_or_else(|| io::Error::other("the pending approval request is absent"))?;
+        if !ExecEvalCase::ForcedUnsandboxed.admits(pending.name().as_str(), pending.arguments()) {
             return Ok(false);
         }
-        let mut service = DecideToolRequestService::new(
-            UuidV7ToolLoopIdGenerator,
-            PostgresToolLoopRepository::new(self.pool.clone()),
-        );
+        let mut service = DecideToolRequestService::new(UuidV7ToolLoopIdGenerator, repository);
         let prepared = service
             .execute(
                 DecideToolRequest::try_new(
                     DurableCommandId::from_uuid(Uuid::from_u128(
                         ARBITRARY_EVAL_APPROVAL_COMMAND_ID,
                     )),
-                    ToolRequestId::from_uuid(pending.request_id),
+                    request,
                     ToolApprovalDecision::Approve,
                 )
                 .map_err(|_| io::Error::other("the exact read-only exec approval is invalid"))?,
@@ -1333,22 +1324,6 @@ impl EvalDatabase {
             return Err(io::Error::other("the exact read-only exec approval was rejected").into());
         }
         Ok(true)
-    }
-}
-
-#[derive(sqlx::FromRow)]
-struct PendingApproval {
-    request_id: Uuid,
-    tool_name: String,
-    arguments_text: String,
-}
-
-impl PendingApproval {
-    fn is_exact_read_only_unsandboxed_request(&self) -> EvalResult<bool> {
-        let arguments =
-            NormalizedToolArguments::try_from_provider_text(self.arguments_text.clone())
-                .map_err(|_| io::Error::other("the pending exec arguments do not normalize"))?;
-        Ok(ExecEvalCase::ForcedUnsandboxed.admits(&self.tool_name, &arguments))
     }
 }
 
