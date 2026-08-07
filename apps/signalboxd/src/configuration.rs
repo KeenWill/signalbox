@@ -1865,8 +1865,8 @@ fn resolved_credential_file_reference(path: &Path) -> Result<PathBuf, HubModelCo
 /// component:
 ///
 /// - a bare name is looked up in `search_path`, the daemon's own `PATH`, and
-///   resolves to the first entry holding an executable regular file of that
-///   name;
+///   resolves to the first entry holding a regular file of that name this
+///   process can execute;
 /// - any other value is a path, returned verbatim for the caller's
 ///   absolute-existing-file rule to judge, so a configured path never resolves
 ///   through `PATH` to a different program.
@@ -1901,12 +1901,25 @@ fn absolute_search_entries(search_path: Option<&std::ffi::OsStr>) -> Vec<PathBuf
         .unwrap_or_default()
 }
 
+/// Whether this process could execute `path` as a program.
+///
+/// Both halves are load-bearing. The metadata check rejects anything that is
+/// not a regular file, because execute access on a directory means the right
+/// to traverse it. The access check asks the kernel about the daemon's own
+/// effective credentials rather than reading permission bits, so a file some
+/// other user may execute — mode `0o700` owned by another UID, or one an ACL
+/// denies — does not satisfy a search entry and shadow a bridge the daemon can
+/// actually run in a later one.
 #[cfg(unix)]
 fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+        && rustix::fs::accessat(
+            rustix::fs::CWD,
+            path,
+            rustix::fs::Access::EXEC_OK,
+            rustix::fs::AtFlags::EACCESS,
+        )
+        .is_ok()
 }
 
 #[cfg(not(unix))]
@@ -3240,6 +3253,21 @@ reasoning_levels = ["high"]
     /// A bridge name no installation holds, so a fixture naming it fails
     /// resolution because of the fixture and not the developer's own `PATH`.
     const ABSENT_MCP_BRIDGE_NAME: &str = "signalbox-synthetic-absent-mcp-bridge";
+
+    /// One Claude process table whose executable and working directory both
+    /// exist, so the bridge is the only value a test states.
+    ///
+    /// The returned directory is that working directory and is held by the
+    /// caller: dropping it would delete the path the document names.
+    fn configuration_varying_the_claude_bridge(
+        mcp_bridge_executable: &Path,
+    ) -> (String, tempfile::TempDir) {
+        let workspace = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration =
+            configuration_with_claude_paths(&executable, mcp_bridge_executable, workspace.path());
+        (configuration, workspace)
+    }
 
     fn synthetic_search_directory(root: &Path, name: &str) -> PathBuf {
         let directory = root.join(name);
@@ -4783,13 +4811,8 @@ context_window_tokens = 200000
     /// than as a malformed path.
     #[test]
     fn configuration_rejects_a_claude_mcp_bridge_name_no_search_entry_holds() {
-        let temporary = tempfile::tempdir().expect("fixture directory is available");
-        let executable = std::env::current_exe().expect("the test executable has a path");
-        let configuration = configuration_with_claude_paths(
-            &executable,
-            Path::new(ABSENT_MCP_BRIDGE_NAME),
-            temporary.path(),
-        );
+        let (configuration, _workspace) =
+            configuration_varying_the_claude_bridge(Path::new(ABSENT_MCP_BRIDGE_NAME));
 
         assert_eq!(
             HubModelConfiguration::parse(&configuration).err(),
@@ -4801,13 +4824,8 @@ context_window_tokens = 200000
     /// the absolute-path rule instead of being looked up as a program name.
     #[test]
     fn configuration_rejects_a_relative_claude_mcp_bridge_path() {
-        let temporary = tempfile::tempdir().expect("fixture directory is available");
-        let executable = std::env::current_exe().expect("the test executable has a path");
-        let configuration = configuration_with_claude_paths(
-            &executable,
-            Path::new("bin/signalbox-claude-mcp-bridge"),
-            temporary.path(),
-        );
+        let (configuration, _workspace) =
+            configuration_varying_the_claude_bridge(Path::new("bin/signalbox-claude-mcp-bridge"));
 
         assert_eq!(
             HubModelConfiguration::parse(&configuration).err(),
@@ -4834,7 +4852,7 @@ context_window_tokens = 200000
     }
 
     /// Resolution matches what executing the name would do: a same-named file
-    /// no one can execute shadows nothing.
+    /// this process cannot execute shadows nothing.
     #[cfg(unix)]
     #[test]
     fn mcp_bridge_name_skips_a_search_entry_whose_file_is_not_executable() {
@@ -4892,11 +4910,14 @@ context_window_tokens = 200000
     #[cfg(unix)]
     #[test]
     fn search_entries_drop_the_relative_and_empty_ones() {
-        let search_path = std::ffi::OsString::from(":relative/bin:/absolute/bin");
+        let empty_entry = Path::new("");
+        let relative_entry = Path::new("synthetic/relative/bin");
+        let absolute_entry = Path::new("/synthetic/absolute/bin");
+        let search_path = synthetic_search_path(&[empty_entry, relative_entry, absolute_entry]);
 
         assert_eq!(
             absolute_search_entries(Some(&search_path)),
-            vec![PathBuf::from("/absolute/bin")]
+            vec![absolute_entry.to_path_buf()]
         );
     }
 
