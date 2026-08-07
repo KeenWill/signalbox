@@ -31,28 +31,28 @@ final class LiveScreenRendererTests: XCTestCase {
         )
     }
 
-    /// A screen that changes *after* the floor and then pauses. Gating on total
-    /// elapsed time plus adjacent-frame equality accepts the pause: two matching
-    /// renderings one sampling interval apart, taken past the floor, which is a
-    /// transient state and not a settled one. Measuring the floor from the last
-    /// frame that differed rejects it, so this pins the transient never being
-    /// returned rather than pinning any particular timing.
-    func testRenderingRejectsATransientPauseTakenAfterTheFloor() async {
-        let pausesMidway = await LiveScreenRenderer.render(
-            TransientStateView(),
+    /// A screen still moving when total elapsed time passes the floor. Gating on
+    /// elapsed time plus adjacent-frame equality accepts it: two renderings one
+    /// sampling interval apart match anywhere inside a hold, and mid-motion is
+    /// not settled. Measuring the floor from the last frame that differed
+    /// rejects every one of those, so what this pins is that the frame returned
+    /// is the one the screen came to rest on, not a particular timing.
+    func testRenderingRejectsAFrameTakenWhileTheScreenIsStillMoving() async {
+        let stillMoving = await LiveScreenRenderer.render(
+            SteppingThenRestingView(),
             canvas: .compact,
-            timeout: .seconds(12)
+            timeout: .seconds(20)
         )
-        let settled = await LiveScreenRenderer.render(
-            DelayedContentView(before: .green, after: .green, delay: .milliseconds(1)),
+        let atRest = await LiveScreenRenderer.render(
+            RestingView(),
             canvas: .compact,
-            timeout: .seconds(12)
+            timeout: .seconds(20)
         )
 
         XCTAssertEqual(
-            pausesMidway.pngData(),
-            settled.pngData(),
-            "the renderer returned a frame the screen only held for one interval"
+            stillMoving.pngData(),
+            atRest.pngData(),
+            "the renderer returned a frame from before the screen stopped moving"
         )
     }
 
@@ -114,21 +114,44 @@ private struct ContinuouslyChangingView: View {
     }
 }
 
-/// Red, then blue well past the settle floor, then green shortly after: the
-/// blue is a state the screen holds long enough for consecutive renderings to
-/// match, and it is never the settled one. Green is what a correct gate
-/// returns.
-private struct TransientStateView: View {
-    @State private var color = Color.red
+/// Steps a bar down the canvas in holds far shorter than the settle floor, for
+/// long enough that the total elapsed time passes the floor mid-motion, then
+/// stops for good at `restingOffset`.
+///
+/// Every hold is deliberately below the floor. A hold that outlasted the floor
+/// would be a settled state, and a correct renderer returning it would fail
+/// this test for being right — which is what an earlier version of this fixture
+/// did, holding its first colour for 1.2s against a 1s floor and passing only
+/// because sampling lags wall-clock time on the machine it ran on. Each hold
+/// here is long enough to span consecutive samples, which is all the behaviour
+/// under test needs: a gate reading total elapsed time finds two matching
+/// renderings mid-motion and returns one, and a gate measuring from the last
+/// change cannot, because the bar keeps moving.
+private struct SteppingThenRestingView: View {
+    static let restingOffset = 15
+    @State private var tick = 0
 
     var body: some View {
-        color
+        Color.black
+            .frame(height: 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .offset(y: Double(tick))
             .task {
-                try? await Task.sleep(for: .milliseconds(1200))
-                color = .blue
-                try? await Task.sleep(for: .milliseconds(2000))
-                color = .green
+                while tick < Self.restingOffset {
+                    try? await Task.sleep(for: .milliseconds(200))
+                    tick += 1
+                }
             }
+    }
+}
+
+/// The same bar, already at rest where `SteppingThenRestingView` ends up.
+private struct RestingView: View {
+    var body: some View {
+        Color.black
+            .frame(height: 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .offset(y: Double(SteppingThenRestingView.restingOffset))
     }
 }
 #endif
