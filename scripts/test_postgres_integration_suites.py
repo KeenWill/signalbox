@@ -465,6 +465,42 @@ class WorkflowAgreementTests(unittest.TestCase):
 
         self.assertTrue(any("--run-ignored only" in failure for failure in failures))
 
+    def test_a_pinned_partition_numerator_is_reported(self) -> None:
+        # Expanding *a* variable is not enough: `count:1/$PARTITIONS` runs
+        # partition 1 on every shard, so 2/3 and 3/3 never execute while the
+        # aggregate check succeeds.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                'count:$PARTITION/$PARTITIONS', "count:1/$PARTITIONS"
+            )
+        )
+
+        self.assertTrue(any("--run-ignored only" in failure for failure in failures))
+
+    def test_a_pinned_partition_denominator_is_reported(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                'count:$PARTITION/$PARTITIONS', "count:$PARTITION/3"
+            )
+        )
+
+        self.assertTrue(any("--run-ignored only" in failure for failure in failures))
+
+    def test_a_literal_filterset_is_reported(self) -> None:
+        failures = self.disagreements(AGREEING_WORKFLOW.replace('-E "$FILTER"', '-E "all()"'))
+
+        self.assertTrue(any("--run-ignored only" in failure for failure in failures))
+
+    def test_an_option_reading_the_wrong_matrix_variable_is_reported(self) -> None:
+        # `$SUITE` in the partition is a variable, and the wrong one.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                'count:$PARTITION/$PARTITIONS', "count:$SUITE/$PARTITIONS"
+            )
+        )
+
+        self.assertTrue(any("--run-ignored only" in failure for failure in failures))
+
     def test_a_run_without_an_archive_is_reported(self) -> None:
         # Two distinct problems, reported separately: no archive-backed run
         # exists, and the run that does exist chooses its own packages.

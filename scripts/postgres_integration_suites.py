@@ -67,6 +67,18 @@ ENV_VALUE_OPTIONS = ("-u", "--unset", "-C", "--chdir", "-S", "--split-string")
 PACKAGE_SPEC = re.compile(r"(?:.*#)?(?P<name>[^@#/]+?)(?:@[^@]*)?$")
 MATRIX_BINDING = re.compile(r"\$\{\{[ ]*matrix\.(?P<field>[A-Za-z_][A-Za-z0-9_]*)[ ]*\}\}")
 MATRIX_FIELDS = ("suite", "partition", "partitions", "filter")
+MATRIX_ENV_BINDING = re.compile(
+    r"(?P<variable>[A-Za-z_][A-Za-z0-9_]*):[ ]*"
+    r"\$\{\{[ ]*matrix\.(?P<field>[A-Za-z_][A-Za-z0-9_]*)[ ]*\}\}"
+)
+# Which matrix field each archived-run option must resolve from. A `$` alone is
+# not enough: `--partition "count:1/$PARTITIONS"` expands a variable and still
+# pins every shard to partition 1.
+ARCHIVED_RUN_OPTIONS = {
+    "--archive-file": ("suite",),
+    "--partition": ("partition", "partitions"),
+    "-E": ("filter",),
+}
 WORKSPACE_SELECTORS = ("--workspace", "--all")
 # A path value may contain spaces inside a `${{ … }}` expression, so it runs
 # to the end of the line rather than to the first space.
@@ -429,6 +441,12 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     # reader is not running it. The modes feed different jobs: `--archive-plan`
     # the build, `--matrix` the shards, so each is asserted on its own.
     executed = [tokens for command in commands for tokens in simple_commands(command)]
+    # Which shell variable carries each matrix field, so an archived run can be
+    # required to read the right one rather than merely to expand something.
+    matrix_variables = {
+        match.group("field"): match.group("variable")
+        for match in MATRIX_ENV_BINDING.finditer(text)
+    }
     for mode in REQUIRED_MODES:
         if not any(invokes_reader(tokens, mode) for tokens in executed):
             failures.append(
@@ -479,14 +497,16 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
         # not the manifest-driven run: it chooses its own packages. Requiring
         # only that one archive-backed run exists would let a rogue one sit
         # beside it.
-        if nonconforming_ignored_nextest(tokens):
+        if nonconforming_ignored_nextest(tokens, matrix_variables):
             failures.append(
                 f"{WORKFLOW} runs ignored tests through a `cargo nextest run` "
                 f"that is not the manifest-driven archived run, outside "
                 f"{MANIFEST}: {' '.join(tokens)}"
             )
 
-    if not any(runs_archived_ignored_tests(tokens) for tokens in executed):
+    if not any(
+        runs_archived_ignored_tests(tokens, matrix_variables) for tokens in executed
+    ):
         failures.append(
             f"{WORKFLOW} runs no archive-backed `cargo nextest run` with "
             f"`--run-ignored only`, so the suites {MANIFEST} declares are "
@@ -512,9 +532,8 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
                 "aggregate check can pass without it"
             )
 
-    bound = {match.group("field") for match in MATRIX_BINDING.finditer(text)}
     for field in MATRIX_FIELDS:
-        if field not in bound:
+        if field not in matrix_variables:
             failures.append(
                 f"{WORKFLOW} binds no `matrix.{field}`, so its shards no longer "
                 f"take that value from the matrix {MANIFEST} generates"
@@ -630,7 +649,9 @@ def cargo_test_arguments(tokens: list[str]) -> list[str] | None:
     return None if arguments is None else normalized_cargo_arguments(arguments)
 
 
-def nonconforming_ignored_nextest(tokens: list[str]) -> bool:
+def nonconforming_ignored_nextest(
+    tokens: list[str], variables: dict[str, str]
+) -> bool:
     """Return whether one nextest run selects ignored tests some other way.
 
     Every ignored-test run has to be the manifest-driven one, not merely one of
@@ -644,10 +665,12 @@ def nonconforming_ignored_nextest(tokens: list[str]) -> bool:
         return False
     if "--run-ignored" not in normalized_cargo_arguments(arguments[1:]):
         return False
-    return not runs_archived_ignored_tests(tokens)
+    return not runs_archived_ignored_tests(tokens, variables)
 
 
-def runs_archived_ignored_tests(tokens: list[str]) -> bool:
+def runs_archived_ignored_tests(
+    tokens: list[str], variables: dict[str, str]
+) -> bool:
     """Return whether one command runs a nextest archive's ignored tests.
 
     The positive half of the workflow's contract. Every other assertion here is
@@ -666,15 +689,26 @@ def runs_archived_ignored_tests(tokens: list[str]) -> bool:
     selection = arguments.index("--run-ignored") + 1
     if selection >= len(arguments) or arguments[selection] != "only":
         return False
-    # Parameterised by the matrix, not merely archived. A run naming one fixed
-    # archive, or dropping the partition or the filterset, would execute a
-    # different set of tests on every shard than the manifest describes while
-    # still being an archive-backed ignored run.
-    return all(
-        option_value(arguments, option) is not None
-        and "$" in (option_value(arguments, option) or "")
-        for option in ("--archive-file", "--partition", "-E")
-    )
+    # Parameterised by the matrix, and by the right field of it. A run naming
+    # one fixed archive, dropping the filterset, or pinning a partition
+    # numerator would execute a different set of tests on every shard than the
+    # manifest describes while still being an archive-backed ignored run.
+    for option, fields in ARCHIVED_RUN_OPTIONS.items():
+        value = option_value(arguments, option)
+        if value is None:
+            return False
+        for field in fields:
+            variable = variables.get(field)
+            if variable is None or not references_variable(value, variable):
+                return False
+    return True
+
+
+def references_variable(value: str, variable: str) -> bool:
+    """Return whether one shell word expands the named variable."""
+    return re.search(
+        rf"\${{?{re.escape(variable)}}}?(?![A-Za-z0-9_])", value
+    ) is not None
 
 
 def option_value(arguments: list[str], option: str) -> str | None:
