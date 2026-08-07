@@ -1,3 +1,6 @@
+// Release builds must not ship the in-memory client stub; the mock is
+// reachable only through Debug (and therefore test) configurations.
+#if DEBUG
 #if canImport(SignalboxClient)
 import SignalboxClient
 #endif
@@ -123,3 +126,4 @@ private struct MockSignalboxFixture: Decodable {
         case artifactsBySession = "artifacts_by_session"
     }
 }
+#endif
