@@ -28,6 +28,12 @@ const MAX_HEADROOM_RESERVE_PERCENT: i64 = 99;
 /// Maximum UTF-8 byte length admitted for a credential-delivery path.
 pub(crate) const MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES: usize = 4_096;
 
+/// Maximum UTF-8 byte length admitted for a credential profile or pool name.
+pub(crate) const MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES: usize = 256;
+
+/// Maximum number of members admitted in one credential pool.
+pub(crate) const MAX_CREDENTIAL_POOL_MEMBERS: usize = 1_024;
+
 /// Every delivery spelling the grammar recognizes, whether or not this build
 /// supplies a surface for it.
 const DELIVERY_KEYS: [&str; 4] = ["ambient", "file", "codex_home", "oauth"];
@@ -523,7 +529,7 @@ pub(crate) fn parse_credential_profiles(
     let mut ambient_adapters = HashSet::new();
     let mut file_paths = HashSet::new();
     for profile in tables {
-        let name = validated_name(required_string(profile, "name")?)?;
+        let name = validated_credential_catalog_name(required_string(profile, "name")?)?;
         let adapter = ModelAdapter::parse(required_string(profile, "adapter")?)?;
         let billing_kind = BillingKind::parse(required_string(profile, "billing_kind")?)?;
         let delivery = CredentialDelivery::parse(profile, adapter)?;
@@ -572,7 +578,7 @@ pub(crate) fn parse_credential_pools(
         ];
         allowed.extend(CredentialPoolTrigger::ALL.map(CredentialPoolTrigger::key));
         reject_unknown_fields(pool, &allowed)?;
-        let name = validated_name(required_string(pool, "name")?)?;
+        let name = validated_credential_catalog_name(required_string(pool, "name")?)?;
         let members = parse_pool_members(&name, pool.get("members"), profiles)?;
         let adapter = pool_adapter(&name, &members, profiles)?;
         let parsed = CredentialPool {
@@ -620,6 +626,9 @@ fn parse_pool_members(
             credential_pool: Arc::clone(pool),
         });
     }
+    if values.len() > MAX_CREDENTIAL_POOL_MEMBERS {
+        return Err(HubModelConfigurationError::InvalidCredentialPoolPolicy);
+    }
     let mut declared = HashSet::with_capacity(values.len());
     let mut members = Vec::with_capacity(values.len());
     for value in values {
@@ -627,7 +636,7 @@ fn parse_pool_members(
             .as_inline_table()
             .ok_or(HubModelConfigurationError::InvalidField)?;
         reject_unknown_member_fields(member)?;
-        let profile = validated_name(
+        let profile = validated_credential_catalog_name(
             member
                 .get("profile")
                 .and_then(|value| value.as_str())
@@ -662,6 +671,15 @@ fn parse_pool_members(
         });
     }
     Ok(members)
+}
+
+fn validated_credential_catalog_name(value: &str) -> Result<Arc<str>, HubModelConfigurationError> {
+    let name = validated_name(value)?;
+    if name.len() > MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES {
+        Err(HubModelConfigurationError::InvalidField)
+    } else {
+        Ok(name)
+    }
 }
 
 fn reject_unknown_member_fields(member: &InlineTable) -> Result<(), HubModelConfigurationError> {

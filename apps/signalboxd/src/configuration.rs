@@ -3379,7 +3379,8 @@ mod tests {
 
     use crate::credential_pools::{
         CredentialDelivery, CredentialPoolAction, CredentialPoolExhaustion, CredentialPoolTieBreak,
-        CredentialPoolTrigger, MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES,
+        CredentialPoolTrigger, MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES,
+        MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES, MAX_CREDENTIAL_POOL_MEMBERS,
     };
 
     use super::{
@@ -5195,6 +5196,54 @@ on_credential_rejected = "quarantine""#,
         assert_eq!(
             HubModelConfiguration::parse(&without_pools).err(),
             Some(HubModelConfigurationError::MissingCredentialPools)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_oversized_credential_profile_name() {
+        let oversized_name = "p".repeat(MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES + 1);
+        let configuration = CONFIGURATION.replacen(
+            "name = \"anthropic-primary\"",
+            &format!("name = \"{oversized_name}\""),
+            1,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidField)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_oversized_credential_pool_name() {
+        let oversized_name = "p".repeat(MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES + 1);
+        let configuration = CONFIGURATION.replacen(
+            "name = \"anthropic-main\"",
+            &format!("name = \"{oversized_name}\""),
+            1,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidField)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_too_many_credential_pool_members() {
+        let repeated_member = "{ profile = \"anthropic-primary\", priority = 1 }";
+        let members = vec![repeated_member; MAX_CREDENTIAL_POOL_MEMBERS + 1].join(",\n");
+        let oversized_pool = configuration_with_anthropic_pool(&format!(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{members}]"#,
+        ));
+
+        assert_eq!(
+            HubModelConfiguration::parse(&oversized_pool).err(),
+            Some(HubModelConfigurationError::InvalidCredentialPoolPolicy)
         );
     }
 
