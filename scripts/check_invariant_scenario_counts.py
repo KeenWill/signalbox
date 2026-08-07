@@ -151,7 +151,20 @@ NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 # Each alternative is its own fixed-width lookbehind because Python requires
 # that; `and` is deliberately absent, being ordinary conjunction far more often
 # than a range terminus.
-NOT_RANGE_SUFFIX = r"(?<!\bto )(?<!\bthrough )(?<!\bthru )"
+# A range terminus immediately before a number, with whatever whitespace — or
+# hard wrap — the formatter left between them. Applied by searching the text
+# *before* a candidate match rather than as a lookbehind, because Python
+# lookbehinds must be fixed width and these are not: "5 to 37", "5 to\n37",
+# "5 – 37" and "5\u201337" are the same statement, and each one reports the upper
+# bound as a total that can agree with the catalog and pass in silence.
+#
+# The dashes live here rather than in the boundary class below for the same
+# reason. `INV-002` is still refused, since `INV-` ends in one.
+RANGE_PREFIX = re.compile(
+    r"(?:\bto|\bthrough|\bthru|[-\u2010-\u2015])"
+    r"[ \t]*(?:\r?\n[ \t]*(?:>[ \t]*)*)?[ \t]*$",
+    re.IGNORECASE,
+)
 
 # A number sitting directly before the noun: "50 invariants", "1 scenario".
 # The lookbehind refuses a digit run glued to a preceding word, decimal point,
@@ -188,7 +201,7 @@ NOT_RANGE_SUFFIX = r"(?<!\bto )(?<!\bthrough )(?<!\bthru )"
 # snake_case identifier written as bare prose, which this repository formats as
 # inline code — masked above before any of these patterns run.
 NUMBER_BEFORE_NOUN = re.compile(
-    rf"(?<![0-9A-Za-z.,\u2010-\u2015-]){NOT_RANGE_SUFFIX}"
+    rf"(?<![0-9A-Za-z.,])"
     rf"(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}{WRAPPED_GAP}"
     rf"(?P<noun>invariants?|scenarios?)(?![0-9A-Za-z-])",
     re.IGNORECASE,
@@ -387,6 +400,10 @@ def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
     # can be read the same way regardless of which order the words fall in.
     for pattern in (NUMBER_BEFORE_NOUN, NOUN_COUNT_PHRASE, COUNT_OF_NOUN_PHRASE):
         for match in pattern.finditer(text):
+            # A number that terminates a range states no total, however the
+            # range was spelled or wrapped.
+            if RANGE_PREFIX.search(text[: match.start("number")]):
+                continue
             noun = (
                 "invariant"
                 if match.group("noun").lower().startswith("invariant")

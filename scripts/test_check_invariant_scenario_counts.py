@@ -709,6 +709,19 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn(f"current scenario catalog has {SCENARIO_COUNT}", result.stdout)
 
+    def test_a_wrapped_textual_range_is_not_read_as_its_upper_bound(self) -> None:
+        """The required mdformat pass can wrap a range before its upper bound,
+        which put the terminus out of a fixed-width lookbehind's reach."""
+        self.assert_no_count_read_from(
+            f"There are 5 to\n{SCENARIO_COUNT} scenarios"
+        )
+
+    def test_a_spaced_dash_range_is_not_read_as_its_upper_bound(self) -> None:
+        self.assert_no_count_read_from(f"There are 5 \u2013 {SCENARIO_COUNT} scenarios")
+
+    def test_a_spaced_hyphen_range_is_not_read_as_its_upper_bound(self) -> None:
+        self.assert_no_count_read_from(f"There are 5 - {SCENARIO_COUNT} scenarios")
+
     def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
         """A tracked path can vanish between `git ls-files` and the read.
 
