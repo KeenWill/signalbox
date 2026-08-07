@@ -1405,6 +1405,11 @@ mod tests {
         known_targets: &'a BTreeSet<OsString>,
     }
 
+    struct RelativeConfiguredTargetDirInput<'a> {
+        configured: &'a Path,
+        invocation_directory: &'a Path,
+    }
+
     struct DefaultTargetRecognition<'a> {
         current_executable: &'a Path,
         configured_target_dir: Option<&'a Path>,
@@ -1430,7 +1435,9 @@ mod tests {
         let current = std::env::current_exe().expect("test executable path is available");
         let known_targets = rustc_target_names();
         let configured_target_dir = configured_cargo_target_dir(&current, &known_targets);
-        let default_target_dir = cargo_metadata_target_dir();
+        let default_target_dir = configured_target_dir
+            .clone()
+            .unwrap_or_else(cargo_metadata_target_dir);
         reject_unrecognized_default_target(DefaultTargetRecognition {
             current_executable: &current,
             configured_target_dir: configured_target_dir.as_deref(),
@@ -1452,12 +1459,28 @@ mod tests {
         known_targets: &BTreeSet<OsString>,
     ) -> Option<PathBuf> {
         let configured = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR")?);
+        let configured = std::env::var_os("PWD")
+            .and_then(|directory| {
+                resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
+                    configured: &configured,
+                    invocation_directory: Path::new(&directory),
+                })
+            })
+            .unwrap_or(configured);
         let configured = configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
             current_executable: current,
             configured: &configured,
             known_targets,
         });
         Some(canonicalized_target_dir(&configured))
+    }
+
+    fn resolved_relative_configured_target_dir(
+        input: RelativeConfiguredTargetDirInput<'_>,
+    ) -> Option<PathBuf> {
+        (!input.configured.is_absolute())
+            .then(|| input.invocation_directory.join(input.configured))
+            .and_then(|candidate| fs::canonicalize(candidate).ok())
     }
 
     #[track_caller]
@@ -1883,6 +1906,42 @@ mod tests {
             expected_profile: CARGO_TEST_PROFILE,
             expected_target: None,
             recognized_target: None,
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_artifact_selection_resolves_a_relative_symlink_root_before_preserving_a_target() {
+        let invocation = tempfile::tempdir().expect("fixture invocation root exists");
+        let target_dir = invocation.path().join("resolved-target");
+        let target_link = invocation.path().join("target-link");
+        fs::create_dir(&target_dir).expect("fixture target directory exists");
+        std::os::unix::fs::symlink(&target_dir, &target_link)
+            .expect("fixture target symlink exists");
+        let executable = target_dir
+            .join(SYNTHETIC_CARGO_TARGET)
+            .join("debug/deps/daemon-tools-test");
+        let resolved = resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
+            configured: Path::new("target-link"),
+            invocation_directory: invocation.path(),
+        })
+        .expect("relative target symlink resolves from the invocation root");
+        let configured_target_dir =
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: &resolved,
+                known_targets: &synthetic_known_targets(),
+            });
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: &target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: Some(SYNTHETIC_CARGO_TARGET),
+            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
         });
     }
 
@@ -2722,6 +2781,20 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn mcp_response_envelope_rejects_neither_result_nor_error() {
+        let request_id = serde_json::json!(MCP_ENVELOPE_REQUEST_ID);
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id.clone(),
+        });
+
+        assert!(!valid_mcp_response_envelope(McpResponseEnvelope {
+            response: &response,
+            request_id: &request_id,
+        }));
+    }
+
     impl Drop for McpBridgeProcess {
         fn drop(&mut self) {
             if self.child.try_wait().ok().flatten().is_none() {
@@ -2815,7 +2888,17 @@ mod tests {
         expected_tools: serde_json::Value,
         child: Child,
         input: Option<ChildStdin>,
-        output: BufReader<ChildStdout>,
+        output: Option<BufReader<ChildStdout>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[track_caller]
+    fn write_blocking_bridge_message(input: &mut ChildStdin, message: &serde_json::Value) {
+        serde_json::to_writer(&mut *input, message).expect("blocking bridge message serializes");
+        input
+            .write_all(b"\n")
+            .expect("blocking bridge message is written");
+        input.flush().expect("blocking bridge message is flushed");
     }
 
     #[cfg(target_os = "linux")]
@@ -2855,7 +2938,30 @@ mod tests {
             configure_owned_process_group(&mut command);
             let mut child = command.spawn().expect("blocking bridge starts");
             let mut input = child.stdin.take().expect("blocking bridge stdin is piped");
-            serde_json::to_writer(
+            write_blocking_bridge_message(
+                &mut input,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": MCP_INITIALIZE_REQUEST_ID,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {
+                            "name": MCP_CLIENT_NAME,
+                            "version": env!("CARGO_PKG_VERSION"),
+                        },
+                    },
+                }),
+            );
+            write_blocking_bridge_message(
+                &mut input,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                }),
+            );
+            write_blocking_bridge_message(
                 &mut input,
                 &serde_json::json!({
                     "jsonrpc": "2.0",
@@ -2863,12 +2969,7 @@ mod tests {
                     "method": "tools/list",
                     "params": {},
                 }),
-            )
-            .expect("blocking list request serializes");
-            input
-                .write_all(b"\n")
-                .expect("blocking list request is written");
-            input.flush().expect("blocking list request is flushed");
+            );
             let output = BufReader::new(
                 child
                     .stdout
@@ -2882,7 +2983,7 @@ mod tests {
                 expected_tools: catalog["tools"].clone(),
                 child,
                 input: Some(input),
-                output,
+                output: Some(output),
             }
         }
 
@@ -2915,10 +3016,41 @@ mod tests {
 
         #[track_caller]
         fn read_list_response(&mut self) -> serde_json::Value {
-            let mut response = String::new();
-            self.output
-                .read_line(&mut response)
-                .expect("blocking list response is readable");
+            let mut output = self
+                .output
+                .take()
+                .expect("blocking bridge output is present");
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let reader = thread::spawn(move || {
+                let result = (|| -> io::Result<(String, String)> {
+                    let mut initialized = String::new();
+                    output.read_line(&mut initialized)?;
+                    let mut listed = String::new();
+                    output.read_line(&mut listed)?;
+                    Ok((initialized, listed))
+                })();
+                let _ = sender.send(result);
+            });
+            let (initialized, response) = match receiver.recv_timeout(BRIDGE_RESPONSE_TIMEOUT) {
+                Ok(Ok(responses)) => responses,
+                Ok(Err(error)) => {
+                    terminate_owned_process_group(&mut self.child);
+                    reader.join().expect("bounded response reader exits");
+                    panic!("blocking bridge response read failed: {error}");
+                }
+                Err(error) => {
+                    terminate_owned_process_group(&mut self.child);
+                    reader.join().expect("bounded response reader exits");
+                    panic!("blocking bridge response exceeded its bound: {error}");
+                }
+            };
+            reader.join().expect("bounded response reader exits");
+            let initialized: serde_json::Value =
+                serde_json::from_str(&initialized).expect("blocking initialize response is JSON");
+            assert!(valid_mcp_response_envelope(McpResponseEnvelope {
+                response: &initialized,
+                request_id: &serde_json::json!(MCP_INITIALIZE_REQUEST_ID),
+            }));
             let response: serde_json::Value =
                 serde_json::from_str(&response).expect("blocking list response is JSON");
             assert!(valid_mcp_response_envelope(McpResponseEnvelope {
