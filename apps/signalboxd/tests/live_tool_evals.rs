@@ -34,8 +34,8 @@ use signalbox_application::{
     UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
-    DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, ModelCallId, ModelSelectionOverride,
+    ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult,
+    DeliveryRequest, DirectModelSelection, DurableCommandId, ModelCallId, ModelSelectionOverride,
     ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
     PerInputConfigurationChoices, ProviderModelIdentity, ResolvedProviderTarget,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
@@ -143,6 +143,7 @@ const ARBITRARY_EVAL_MODEL_CALL_ID: u128 = 0x9108;
 const ARBITRARY_EVAL_APPROVAL_COMMAND_ID: u128 = 0x9109;
 const ARBITRARY_SECOND_EVAL_REQUEST_ID: u128 = 0x910a;
 const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x910b;
+const ARBITRARY_EVAL_FRONTIER_ID: u128 = 0x910c;
 const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
 
 type EvalResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -237,8 +238,7 @@ async fn run_case(
     );
     timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
         .await
-        .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))?
-        .map_err(|_| io::Error::other("the daemon tool eval turn execution failed"))?;
+        .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
     if forced_tool == Some(UNSANDBOXED_EXEC_NAME)
         && database
             .approve_exact_read_only_unsandboxed_request(session, turn)
@@ -246,8 +246,7 @@ async fn run_case(
     {
         timeout(TURN_TIMEOUT, execution.resume_active(session))
             .await
-            .map_err(|_| io::Error::other("the daemon tool eval resume exceeded its timeout"))?
-            .map_err(|_| io::Error::other("the daemon tool eval turn resume failed"))?;
+            .map_err(|_| io::Error::other("the daemon tool eval resume exceeded its timeout"))??;
     }
     let snapshot = CaseSnapshot::read(&database.pool, session, turn).await?;
     Ok(CaseOutcome {
@@ -716,10 +715,15 @@ fn git_natural_state_passed(root: &Path, seed: Oid) -> EvalResult<bool> {
     let commit_changes_only_natural_path = changed_paths == [Path::new(GIT_NATURAL_PATH)];
     let natural_path_is_clean =
         repository.status_file(Path::new(GIT_NATURAL_PATH))? == Status::CURRENT;
+    let index = repository.index()?;
+    let index_contains_only_expected_paths = index.len() == 2
+        && index.get_path(Path::new(GIT_SEED_PATH), 0).is_some()
+        && index.get_path(Path::new(GIT_NATURAL_PATH), 0).is_some();
     Ok(message_matches
         && exactly_one_descendant_commit
         && commit_changes_only_natural_path
-        && natural_path_is_clean)
+        && natural_path_is_clean
+        && index_contains_only_expected_paths)
 }
 
 #[derive(Clone, Debug)]
@@ -1479,17 +1483,33 @@ impl CaseSnapshot {
     fn git_natural_requests_passed(&self) -> EvalResult<bool> {
         let expected_stage = normalized_arguments_text(r#"{"paths":["eval.txt"]}"#)?;
         let expected_commit = normalized_arguments_text(r#"{"message":"tool eval commit"}"#)?;
+        let mutation_requests = self
+            .requests
+            .iter()
+            .filter(|request| {
+                matches!(
+                    request.name.as_str(),
+                    GIT_BRANCH_CREATE_NAME
+                        | GIT_BRANCH_SWITCH_NAME
+                        | GIT_STAGE_NAME
+                        | GIT_CREATE_COMMIT_NAME
+                )
+            })
+            .collect::<Vec<_>>();
         let stage = self.requests.iter().position(|request| {
             request.name == GIT_STAGE_NAME && request.arguments_text == expected_stage
         });
         let commit = self.requests.iter().position(|request| {
             request.name == GIT_CREATE_COMMIT_NAME && request.arguments_text == expected_commit
         });
-        Ok(stage.zip(commit).is_some_and(|(stage, commit)| {
-            stage < commit
-                && self.requests[stage].producing_model_call_id
-                    != self.requests[commit].producing_model_call_id
-        }))
+        Ok(mutation_requests.len() == 2
+            && mutation_requests[0].name == GIT_STAGE_NAME
+            && mutation_requests[1].name == GIT_CREATE_COMMIT_NAME
+            && stage.zip(commit).is_some_and(|(stage, commit)| {
+                stage < commit
+                    && self.requests[stage].producing_model_call_id
+                        != self.requests[commit].producing_model_call_id
+            }))
     }
 
     fn web_natural_requests_passed(&self) -> EvalResult<bool> {
@@ -1551,7 +1571,7 @@ fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid
         .collect()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SnapshotTurnDisposition {
     Completed,
     Other,
@@ -1562,6 +1582,8 @@ impl SnapshotTurnDisposition {
         match state {
             ProcessTurnState::Completed { .. } => Ok(Self::Completed),
             ProcessTurnState::Refused { .. }
+            | ProcessTurnState::Failed { .. }
+            | ProcessTurnState::Cancelled { .. }
             | ProcessTurnState::ActiveAwaitingToolApproval { .. } => Ok(Self::Other),
             ProcessTurnState::Queued { .. }
             | ProcessTurnState::QueuedDelegated { .. }
@@ -1571,8 +1593,6 @@ impl SnapshotTurnDisposition {
             | ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
             | ProcessTurnState::ActiveAwaitingChild { .. }
             | ProcessTurnState::ActiveAwaitingToolRecovery { .. }
-            | ProcessTurnState::Failed { .. }
-            | ProcessTurnState::Cancelled { .. }
             | ProcessTurnState::ReconciliationRequired { .. } => Err(io::Error::other(
                 "the eval turn did not reach a reportable model outcome",
             )
@@ -1726,6 +1746,23 @@ fn turn_snapshot_rejects_ambiguous_model_recovery() {
 }
 
 #[test]
+fn turn_snapshot_reports_a_terminal_model_failure_as_a_miss() -> EvalResult {
+    let state = ProcessTurnState::Failed {
+        terminal_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(
+            ARBITRARY_EVAL_FRONTIER_ID,
+        )),
+        terminal_attempt: None,
+        terminal_model_call: None,
+    };
+
+    assert_eq!(
+        SnapshotTurnDisposition::from_process_state(&state)?,
+        SnapshotTurnDisposition::Other
+    );
+    Ok(())
+}
+
+#[test]
 fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
     let target = GIT_STATUS_NAME;
     let outcome = CaseOutcome {
@@ -1839,6 +1876,18 @@ fn git_natural_state_rejects_a_commit_with_an_unrelated_fixture() -> EvalResult 
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     stage_path(workspace.path(), GIT_STAGE_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+
+    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    Ok(())
+}
+
+#[test]
+fn git_natural_state_rejects_extra_staging_after_the_target_commit() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let seed = seed_git_repository(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    stage_path(workspace.path(), GIT_STAGE_PATH)?;
 
     assert!(!git_natural_state_passed(workspace.path(), seed)?);
     Ok(())
@@ -2201,6 +2250,40 @@ fn git_natural_state_requires_a_later_model_call_for_the_commit() -> EvalResult 
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_CREATE_COMMIT_NAME),
                 arguments_text: normalized_arguments_text(r#"{"message":"tool eval commit"}"#)?,
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!snapshot.git_natural_requests_passed()?);
+    Ok(())
+}
+
+#[test]
+fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalResult {
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(GIT_STAGE_NAME),
+                arguments_text: normalized_arguments_text(r#"{"paths":["eval.txt"]}"#)?,
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(GIT_CREATE_COMMIT_NAME),
+                arguments_text: normalized_arguments_text(r#"{"message":"tool eval commit"}"#)?,
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(GIT_STAGE_NAME),
+                arguments_text: normalized_arguments_text(r#"{"paths":["stage-me.txt"]}"#)?,
                 attempt_succeeded: true,
             },
         ],
