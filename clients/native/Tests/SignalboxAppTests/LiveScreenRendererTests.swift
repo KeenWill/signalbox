@@ -31,6 +31,31 @@ final class LiveScreenRendererTests: XCTestCase {
         )
     }
 
+    /// A screen that changes *after* the floor and then pauses. Gating on total
+    /// elapsed time plus adjacent-frame equality accepts the pause: two matching
+    /// renderings one sampling interval apart, taken past the floor, which is a
+    /// transient state and not a settled one. Measuring the floor from the last
+    /// frame that differed rejects it, so this pins the transient never being
+    /// returned rather than pinning any particular timing.
+    func testRenderingRejectsATransientPauseTakenAfterTheFloor() async {
+        let pausesMidway = await LiveScreenRenderer.render(
+            TransientStateView(),
+            canvas: .compact,
+            timeout: .seconds(12)
+        )
+        let settled = await LiveScreenRenderer.render(
+            DelayedContentView(before: .green, after: .green, delay: .milliseconds(1)),
+            canvas: .compact,
+            timeout: .seconds(12)
+        )
+
+        XCTAssertEqual(
+            pausesMidway.pngData(),
+            settled.pngData(),
+            "the renderer returned a frame the screen only held for one interval"
+        )
+    }
+
     /// The counterpart: the floor is a floor and not the whole gate. The
     /// timeout has to exceed `minimumSettle`, or no rendering is ever eligible
     /// and the failure this expects would be reported for a static screen too,
@@ -85,6 +110,24 @@ private struct ContinuouslyChangingView: View {
                     try? await Task.sleep(for: .milliseconds(20))
                     tick += 1
                 }
+            }
+    }
+}
+
+/// Red, then blue well past the settle floor, then green shortly after: the
+/// blue is a state the screen holds long enough for consecutive renderings to
+/// match, and it is never the settled one. Green is what a correct gate
+/// returns.
+private struct TransientStateView: View {
+    @State private var color = Color.red
+
+    var body: some View {
+        color
+            .task {
+                try? await Task.sleep(for: .milliseconds(1200))
+                color = .blue
+                try? await Task.sleep(for: .milliseconds(2000))
+                color = .green
             }
     }
 }

@@ -150,11 +150,12 @@ enum LiveScreenRenderer {
     /// to stop changing.
     nonisolated static let settleInterval = Duration.milliseconds(50)
 
-    /// A screen must be unchanged across two renderings taken at least this
-    /// far apart before it is accepted as settled. Screens load through the
-    /// in-memory harness after they appear, and two renderings of the same
-    /// not-yet-populated screen are identical, so an unqualified first match
-    /// would accept the frame before the first response arrives.
+    /// A screen must have rendered identically for at least this long, measured
+    /// from the last frame that differed, before it is accepted as settled.
+    /// Screens load through the in-memory harness after they appear, and two
+    /// renderings of the same not-yet-populated screen are identical, so an
+    /// unqualified first match would accept the frame before the first response
+    /// arrives.
     ///
     /// A quarter second satisfied that and was still too short. The glass bar
     /// over a scrolling list has two stable renderings — one before the list
@@ -255,11 +256,24 @@ enum LiveScreenRenderer {
 
         var previous = rendering(of: window, canvas: canvas)
         var elapsed = Duration.zero
+        // How long the rendering has been identical, reset by any change, not
+        // how long the screen has been on the air. Gating on total elapsed time
+        // and adjacent-frame equality would accept a screen that changed just
+        // past the floor and then paused for a single interval: two matching
+        // frames 50ms apart, which is a transient state, not a settled one.
+        // Measured from the last change, a frame is returned only after the
+        // screen has held it for the whole floor. A screen that never changes
+        // is unchanged from the first sample, so the floor still bounds the
+        // earliest possible return and the horizon documented on it holds.
+        var unchanged = Duration.zero
         while elapsed < timeout {
             try? await Task.sleep(for: settleInterval)
             elapsed += settleInterval
             let current = rendering(of: window, canvas: canvas)
-            if elapsed >= minimumSettle, pixels(of: current) == pixels(of: previous) {
+            unchanged = pixels(of: current) == pixels(of: previous)
+                ? unchanged + settleInterval
+                : .zero
+            if unchanged >= minimumSettle {
                 return current
             }
             previous = current
