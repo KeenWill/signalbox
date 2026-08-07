@@ -1557,12 +1557,12 @@ async fn locked_delegation_logical_terminal(
         lock_session(connection, session).await?;
         return Ok(false);
     };
-    let relation = sqlx::query_as::<_, DelegationTerminalRelationRow>(
+    let relation = load_delegation_terminal_relation(
+        connection,
         crate::lock_inventory::DELEGATION_TERMINAL_RELATION_IDENTITY,
+        session_id_to_uuid(session),
+        turn,
     )
-    .bind(session_id_to_uuid(session))
-    .bind(turn)
-    .fetch_optional(&mut *connection)
     .await?;
     let Some(relation) = relation else {
         lock_session(connection, session).await?;
@@ -1578,12 +1578,12 @@ async fn locked_delegation_logical_terminal(
     if second != first {
         lock_session(connection, second).await?;
     }
-    let locked = sqlx::query_as::<_, DelegationTerminalRelationRow>(
+    let locked = load_delegation_terminal_relation(
+        connection,
         crate::lock_inventory::DELEGATION_TERMINAL_RELATION,
+        session_id_to_uuid(session),
+        turn,
     )
-    .bind(session_id_to_uuid(session))
-    .bind(turn)
-    .fetch_optional(&mut *connection)
     .await?;
     if locked != Some(relation) {
         return Err(ModelCallCorruption::Inconsistent(
@@ -1594,10 +1594,54 @@ async fn locked_delegation_logical_terminal(
     model_call_is_delegation_logically_terminal(connection, session, call).await
 }
 
-#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Eq, PartialEq)]
 struct DelegationTerminalRelationRow {
     spawning_tool_request_id: Uuid,
     parent_session_id: Uuid,
+}
+
+async fn load_delegation_terminal_relation(
+    connection: &mut PgConnection,
+    statement: &'static str,
+    child: Uuid,
+    turn: Uuid,
+) -> Result<Option<DelegationTerminalRelationRow>, ModelCallRepositoryError> {
+    sqlx::query(statement)
+        .bind(child)
+        .bind(turn)
+        .fetch_optional(connection)
+        .await?
+        .map(|row| {
+            Ok(DelegationTerminalRelationRow {
+                spawning_tool_request_id: delegation_terminal_relation_uuid(
+                    &row,
+                    "spawning_tool_request_id",
+                )?,
+                parent_session_id: delegation_terminal_relation_uuid(&row, "parent_session_id")?,
+            })
+        })
+        .transpose()
+}
+
+fn delegation_terminal_relation_uuid(
+    row: &PgRow,
+    column: &'static str,
+) -> Result<Uuid, ModelCallRepositoryError> {
+    match row.try_get(column) {
+        Ok(value) => Ok(value),
+        Err(error @ (sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_))) => {
+            Err(delegation_terminal_relation_decode_error(error))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn delegation_terminal_relation_decode_error(error: sqlx::Error) -> ModelCallRepositoryError {
+    debug_assert!(matches!(
+        error,
+        sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_)
+    ));
+    ModelCallCorruption::Inconsistent("delegated terminal relationship identity").into()
 }
 
 async fn lock_delegation_terminal_session(
@@ -4356,12 +4400,12 @@ async fn lock_delegated_child_result_frontier(
     child: SessionId,
     turn: TurnId,
 ) -> Result<(), ModelCallRepositoryError> {
-    let relation = sqlx::query_as::<_, DelegationTerminalRelationRow>(
+    let relation = load_delegation_terminal_relation(
+        connection,
         crate::lock_inventory::DELEGATION_TERMINAL_RELATION_IDENTITY,
+        session_id_to_uuid(child),
+        turn_id_to_uuid(turn),
     )
-    .bind(session_id_to_uuid(child))
-    .bind(turn_id_to_uuid(turn))
-    .fetch_optional(&mut *connection)
     .await?;
     let Some(relation) = relation else {
         return Ok(());
@@ -4370,12 +4414,12 @@ async fn lock_delegated_child_result_frontier(
         .bind(relation.parent_session_id)
         .execute(&mut *connection)
         .await?;
-    let locked = sqlx::query_as::<_, DelegationTerminalRelationRow>(
+    let locked = load_delegation_terminal_relation(
+        connection,
         crate::lock_inventory::DELEGATION_TERMINAL_RELATION,
+        session_id_to_uuid(child),
+        turn_id_to_uuid(turn),
     )
-    .bind(session_id_to_uuid(child))
-    .bind(turn_id_to_uuid(turn))
-    .fetch_optional(&mut *connection)
     .await?;
     if locked != Some(relation) {
         return Err(ModelCallCorruption::Inconsistent(
@@ -4417,12 +4461,12 @@ async fn persist_delegated_child_result(
         }
     };
     let content = outcome.content().map(DelegationContent::as_str);
-    let relation = sqlx::query_as::<_, DelegationTerminalRelationRow>(
+    let relation = load_delegation_terminal_relation(
+        connection,
         crate::lock_inventory::DELEGATION_TERMINAL_RELATION,
+        session_id_to_uuid(child),
+        turn_id_to_uuid(turn),
     )
-    .bind(session_id_to_uuid(child))
-    .bind(turn_id_to_uuid(turn))
-    .fetch_optional(&mut *connection)
     .await?;
     let Some(relation) = relation else {
         return Ok(());
@@ -6244,11 +6288,29 @@ mod tests {
     };
 
     use super::{
-        ModelCallIdentityCollision, ModelCallRepositoryError, StoredTerminalFrontierMember,
-        cancellation_poll_interval, commit_failure_is_ambiguous,
-        completed_terminal_frontier_matches, failed_terminal_frontier_matches,
-        record_reclassified_turn_candidate,
+        ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
+        StoredTerminalFrontierMember, cancellation_poll_interval, commit_failure_is_ambiguous,
+        completed_terminal_frontier_matches, delegation_terminal_relation_decode_error,
+        failed_terminal_frontier_matches, record_reclassified_turn_candidate,
     };
+
+    #[test]
+    fn delegated_terminal_relation_decode_failure_is_corruption() {
+        let error = sqlx::Error::ColumnDecode {
+            index: String::from("parent_session_id"),
+            source: Box::new(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "fixture UUID decode failure",
+            )),
+        };
+
+        assert!(matches!(
+            delegation_terminal_relation_decode_error(error),
+            ModelCallRepositoryError::Corruption(ModelCallCorruption::Inconsistent(
+                "delegated terminal relationship identity"
+            ))
+        ));
+    }
 
     #[tokio::test]
     async fn cancellation_polling_delays_missed_ticks() {
