@@ -17,7 +17,8 @@ use arguments::{
 use connection::ProcessClient;
 use error::ClientError;
 use presentation::{
-    ConversationRow, ImportedEntryRow, Output, SessionMetadataRow, SnapshotSelection,
+    ChildResultPresentation, ConversationRow, ImportedEntryRow, Output, SessionMetadataRow,
+    SnapshotSelection,
 };
 use rustix::{
     fd::OwnedFd,
@@ -289,7 +290,7 @@ fn delegation_rejection_matches(
         RejectionDetail::DelegationSpawnConflict { tool_request_id } => {
             expected.operation.is_spawn() && tool_request_id == expected.tool_request
         }
-        RejectionDetail::DelegatedChildIdentityCollision { .. } => expected.operation.is_spawn(),
+        RejectionDetail::DelegatedChildIdentityCollision { .. } => false,
         RejectionDetail::DelegationRelationNotFound {
             session_id,
             peer_session_id,
@@ -304,9 +305,7 @@ fn delegation_rejection_matches(
         RejectionDetail::DelegationMessageConflict { tool_request_id } => {
             expected.operation.is_message() && tool_request_id == expected.tool_request
         }
-        RejectionDetail::DelegationMessageIdentityCollision { .. } => {
-            expected.operation.is_message()
-        }
+        RejectionDetail::DelegationMessageIdentityCollision { .. } => false,
         RejectionDetail::DelegationEventOrdinalExhausted { .. } => false,
         RejectionDetail::DelegationDeliverySequenceExhausted {
             recipient_session_id,
@@ -1112,7 +1111,7 @@ async fn read_delegation_content_file(path: &Path) -> Result<String, ClientError
         ));
     }
     let text = String::from_utf8(bytes)
-        .map_err(|_| ClientError::Input("delegation content must be valid UTF-8"))?;
+        .map_err(|error| ClientError::delegation_content_file_utf8(path, error))?;
     validate_delegation_content(text)
 }
 
@@ -1386,15 +1385,15 @@ async fn session_delegation(
                         && session_id != child_session_id
                         && delegation_provenance_matches(session_id, child_session_id, provenance)
                     {
-                        output.child_result(
-                            tool_request_id,
+                        output.child_result(ChildResultPresentation {
+                            await_request_id: tool_request_id,
                             spawning_request_id,
                             child_session_id,
                             outcome,
-                            content.as_ref(),
+                            content: content.as_ref(),
                             reason,
                             provenance,
-                        )?;
+                        })?;
                         Ok(())
                     } else {
                         Err(
@@ -5334,15 +5333,15 @@ mod tests {
         decode_goal_mutation_receipt, delegation_rejection_matches, descendant_scope,
         import_conversation_file, imported, model_call_recovery_transition,
         open_scanned_import_source, placement_update_receipt_matches,
-        placement_update_rejection_matches, read_goal_text_file, read_import_file, read_input,
-        read_review_json_file, read_system_prompt_file, reconcile_turn, replace_session_model,
-        replacement_receipt_settings_match, review, review_concern_state_is_coherent,
-        review_finding_event_status, review_judgment_effect_state_is_coherent,
-        review_judgment_plan_state_is_coherent, review_pass_completion_is_coherent,
-        review_publication_state_is_coherent, review_repair_state_is_coherent, run, search,
-        session_recovery_transition, socket_path, source_fits_single_shot_import, stop_turn,
-        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
-        tool_recovery_transition,
+        placement_update_rejection_matches, read_delegation_content_file, read_goal_text_file,
+        read_import_file, read_input, read_review_json_file, read_system_prompt_file,
+        reconcile_turn, replace_session_model, replacement_receipt_settings_match, review,
+        review_concern_state_is_coherent, review_finding_event_status,
+        review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
+        review_pass_completion_is_coherent, review_publication_state_is_coherent,
+        review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
+        source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{child_lifecycle_terminalization, error::ClientError, presentation::Output};
 
@@ -5392,6 +5391,18 @@ mod tests {
             Some(await_rejection),
             expected
         ));
+    }
+
+    /// INV-033: a child identity collision names only daemon-minted state and
+    /// cannot authenticate which spawn mutation produced the rejection.
+    #[test]
+    fn inv033_spawn_rejects_uncorrelated_child_identity_collision() {
+        let expected = delegation_rejection_expectation(DelegationRejectionOperation::Spawn);
+        let uncorrelated = RejectionDetail::DelegatedChildIdentityCollision {
+            child_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+        };
+
+        assert!(!delegation_rejection_matches(Some(uncorrelated), expected));
     }
 
     /// INV-033: common delegation rejection evidence repeats the exact
@@ -5576,6 +5587,20 @@ mod tests {
         let uncorrelated = RejectionDetail::DelegationEventOrdinalExhausted {
             spawning_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
             last: CanonicalU64::new(u64::MAX),
+        };
+
+        assert!(!delegation_rejection_matches(Some(uncorrelated), expected));
+    }
+
+    /// INV-033: a message identity collision names only daemon-minted state
+    /// and cannot authenticate which message mutation produced the rejection.
+    #[test]
+    fn inv033_message_rejects_uncorrelated_identity_collision() {
+        let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let expected =
+            delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
+        let uncorrelated = RejectionDetail::DelegationMessageIdentityCollision {
+            message_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
         };
 
         assert!(!delegation_rejection_matches(Some(uncorrelated), expected));
@@ -5882,6 +5907,30 @@ mod tests {
                 .and_then(|source| source.downcast_ref::<std::io::Error>())
                 .map(std::io::Error::kind),
             Some(std::io::ErrorKind::NotFound)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegation_content_file_utf8_error_retains_path_and_source()
+    -> Result<(), Box<dyn Error>> {
+        let file = tempfile::NamedTempFile::new()?;
+        fs::write(file.path(), [0xff])?;
+
+        let error = read_delegation_content_file(file.path())
+            .await
+            .expect_err("invalid UTF-8 delegation content is rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains(&file.path().display().to_string())
+        );
+        assert!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<std::string::FromUtf8Error>())
+                .is_some()
         );
         Ok(())
     }

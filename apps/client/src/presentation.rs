@@ -32,6 +32,16 @@ use crate::{
     },
 };
 
+pub(crate) struct ChildResultPresentation<'a> {
+    pub(crate) await_request_id: CanonicalUuid,
+    pub(crate) spawning_request_id: CanonicalUuid,
+    pub(crate) child_session_id: CanonicalUuid,
+    pub(crate) outcome: DelegationOutcome,
+    pub(crate) content: Option<&'a String>,
+    pub(crate) reason: DelegationReason,
+    pub(crate) provenance: DelegationProvenance,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct PresentTokenTotal {
     tokens: u128,
@@ -681,17 +691,16 @@ impl<'a> Output<'a> {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn child_result(
-        &mut self,
-        await_request_id: CanonicalUuid,
-        spawning_request_id: CanonicalUuid,
-        child_session_id: CanonicalUuid,
-        outcome: DelegationOutcome,
-        content: Option<&String>,
-        reason: DelegationReason,
-        provenance: DelegationProvenance,
-    ) -> io::Result<()> {
+    pub(crate) fn child_result(&mut self, result: ChildResultPresentation<'_>) -> io::Result<()> {
+        let ChildResultPresentation {
+            await_request_id,
+            spawning_request_id,
+            child_session_id,
+            outcome,
+            content,
+            reason,
+            provenance,
+        } = result;
         let content = content.map_or_else(
             || String::from("null"),
             |content| self.render_field(content, TextField::TrailingOnLine),
