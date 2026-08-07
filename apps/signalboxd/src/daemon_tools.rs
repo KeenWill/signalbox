@@ -1916,6 +1916,7 @@ mod tests {
             Self { child }
         }
 
+        #[track_caller]
         fn assert_waiting(&mut self) {
             assert!(
                 wait_for_child(&mut self.child, BRIDGE_CHILD_TEST_TIMEOUT)
@@ -1925,6 +1926,7 @@ mod tests {
             );
         }
 
+        #[track_caller]
         fn finish(mut self) {
             let Some(status) = wait_for_child(&mut self.child, BRIDGE_EXIT_TIMEOUT)
                 .expect("bridge readiness exit is observed")
