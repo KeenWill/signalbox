@@ -354,7 +354,32 @@ class BaselineDeltaTests(unittest.TestCase):
             baseline=baseline_of(lines=100, covered=50),
         )
 
-        self.assertIn("a baseline run that lost a suite measured less", report)
+        self.assertIn("still counts as", report)
+        self.assertIn("covering less of the", report)
+        # The hazard applies to the exact-base run too, which is the case the
+        # attribution above is strongest about.
+        self.assertIn("the base run as much as to any other", report)
+
+    def test_the_base_attribution_is_conditional_on_comparable_runs(self) -> None:
+        """The base baseline is the one the report attributes most strongly —
+        "this branch's own doing" — and a base run that lost a suite still
+        passes the successful-run filter and still uploads an artifact. The
+        attribution therefore has to carry its condition, or it is a claim the
+        report cannot support."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+
+        report = render(
+            document,
+            REPO_ROOT,
+            0,
+            "Rust coverage (report only)",
+            baseline=baseline_of(lines=100, covered=50),
+        )
+
+        self.assertIn("this branch's own doing", report)
+        self.assertIn("as far as the two", report)
+        self.assertIn("measured the same suites", report)
+        self.assertIn("cannot tell you whether", report)
 
 
 class BaselineAbsenceTests(unittest.TestCase):

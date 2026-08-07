@@ -314,16 +314,22 @@ jobs:
             # it, and "5.5" is not, because `int()` rejects it. A predicate
             # stricter than its loader would discard a usable baseline for an
             # older one, which is the same defect in the other direction.
+            #
+            # The total is summed the way `product_totals` sums it: `int()`
+            # truncates each target's value toward zero before the addition, so
+            # a plain sum can be positive where the loader's total is zero.
             if ! jq -e '
                   def okint: (type == "number")
                     or (type == "string" and test("^[+-]?[0-9]+$"));
+                  def trunc: if . < 0 then -((-.) | floor) else floor end;
                   [.targets[]?
                     | select(((.name // "") | endswith(".xctest")) | not)
                   ] as $products
                   | ($products | length) > 0
                   and all($products[];
                         (.coveredLines | okint) and (.executableLines | okint))
-                  and (([$products[].executableLines | tonumber] | add) // 0) > 0
+                  and (([$products[].executableLines | tonumber | trunc]
+                        | add) // 0) > 0
                 ' "$baseline_dir/$SUMMARY_FILE" > /dev/null 2>&1; then
               [ -n "$reason" ] || reason="the \`$SUMMARY_FILE\` from run $run_id is not a readable coverage report"
               rm -f "$baseline_dir/$SUMMARY_FILE"

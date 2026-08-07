@@ -249,8 +249,9 @@ def baseline_note(baseline: Baseline) -> list[str]:
         provenance = [
             "Compared against the base this pull request is open against:",
             measured,
-            "This run measured that base with this branch merged into it, so the",
-            "deltas below are this branch's own doing.",
+            "This run measured that base with this branch merged into it, so",
+            "the deltas below are this branch's own doing — as far as the two",
+            "runs measured the same suites, which the note below qualifies.",
         ]
     else:
         provenance = [
@@ -263,9 +264,13 @@ def baseline_note(baseline: Baseline) -> list[str]:
         "",
         "They are percentage points, over a file set that differs from the",
         "baseline's wherever a file was added or removed. Each measured suite",
-        "continues on error, so a baseline run that lost a suite measured less",
-        "of the workspace than this one did, and a delta of that size is that",
-        "and not a code change; the outcome table above is this run's alone.",
+        "continues on error, so a run that lost a suite still counts as",
+        "successful and still uploads an artifact — one covering less of the",
+        "workspace. That applies to the base run as much as to any other, so a",
+        "delta of that size is the missing suite and not a code change. The",
+        "outcome table above is this run's alone: it cannot tell you whether",
+        "the baseline run was whole, and no attribution here should be read as",
+        "claiming it was.",
     ]
 
 

@@ -335,6 +335,11 @@ jobs:
             # string of digits. `tonumber` is deliberately not the test: it
             # accepts "5.5", which `int()` rejects.
             #
+            # The total is summed the way the loader sums it: `int()` truncates
+            # each value toward zero *before* the addition, so two files each
+            # reporting 0.5 lines total zero to the loader while a plain sum
+            # would make them one. `trunc` reproduces that, per value.
+            #
             # One divergence from the loader is deliberate: it rejects only a
             # zero line total, while this rejects any total that is not
             # positive. A negative total is not something llvm-cov can emit,
@@ -343,6 +348,7 @@ jobs:
             if ! jq -e '
                   def okint: (type == "number")
                     or (type == "string" and test("^[+-]?[0-9]+$"));
+                  def trunc: if . < 0 then -((-.) | floor) else floor end;
                   def okfield($k): (has($k) | not) or (.[$k] | okint);
                   def okcounter: (type != "object")
                     or (okfield("count") and okfield("covered"));
@@ -354,7 +360,8 @@ jobs:
                           and (.lines | okcounter)
                           and (.functions | okcounter)
                           and (.regions | okcounter))
-                  and (([.data[]?.files[]?.summary.lines.count // 0 | tonumber]
+                  and (([.data[]?.files[]?.summary.lines.count // 0
+                         | tonumber | trunc]
                         | add) // 0) > 0
                 ' "$baseline_dir/$SUMMARY_FILE" > /dev/null 2>&1; then
               [ -n "$reason" ] || reason="the \`$SUMMARY_FILE\` from run $run_id is not a readable coverage export"
