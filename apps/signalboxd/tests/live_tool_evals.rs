@@ -950,8 +950,41 @@ impl CredentialAccess for EnvironmentCredential {
 
 struct EvalOpenAiRuntime {
     inner: OpenAiRuntime<EnvironmentCredential>,
-    forced: Arc<StdMutex<Option<RuntimeToolName>>>,
+    forced: ForcedToolSequence,
     tracker: OperationTracker,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ForcedToolOperation {
+    Natural,
+    Force(RuntimeToolName),
+    Continuation,
+}
+
+struct ForcedToolSequence {
+    pending: Option<StdMutex<Option<RuntimeToolName>>>,
+}
+
+impl ForcedToolSequence {
+    fn new(forced_tool: Option<&str>) -> Self {
+        Self {
+            pending: forced_tool.map(|tool| StdMutex::new(Some(RuntimeToolName::new(tool)))),
+        }
+    }
+
+    fn next(&self) -> ForcedToolOperation {
+        let Some(pending) = &self.pending else {
+            return ForcedToolOperation::Natural;
+        };
+        pending
+            .lock()
+            .expect("forced-tool lock is available")
+            .take()
+            .map_or(
+                ForcedToolOperation::Continuation,
+                ForcedToolOperation::Force,
+            )
+    }
 }
 
 impl EvalOpenAiRuntime {
@@ -960,7 +993,7 @@ impl EvalOpenAiRuntime {
         config.exchange_timeout = EXCHANGE_TIMEOUT;
         Ok(Self {
             inner: OpenAiRuntime::new(config, EnvironmentCredential)?,
-            forced: Arc::new(StdMutex::new(forced_tool.map(RuntimeToolName::new))),
+            forced: ForcedToolSequence::new(forced_tool),
             tracker,
         })
     }
@@ -975,13 +1008,13 @@ impl ModelRuntime<ModelCallId> for EvalOpenAiRuntime {
         cancellation: CancellationSignal,
     ) -> PreparationOutcome<ModelCallId, Self::Prepared> {
         self.tracker.observe(&operation);
-        if let Some(name) = self
-            .forced
-            .lock()
-            .expect("forced-tool lock is available")
-            .take()
-        {
-            operation.tool_choice = ToolChoice::Named(name);
+        match self.forced.next() {
+            ForcedToolOperation::Natural => {}
+            ForcedToolOperation::Force(name) => operation.tool_choice = ToolChoice::Named(name),
+            ForcedToolOperation::Continuation => {
+                operation.tools.clear();
+                operation.tool_choice = ToolChoice::Automatic;
+            }
         }
         self.inner.prepare(operation, cancellation).await
     }
@@ -1653,6 +1686,17 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
     };
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_tool_sequence_allows_only_one_forced_exchange() {
+    let sequence = ForcedToolSequence::new(Some(SANDBOXED_EXEC_NAME));
+
+    assert_eq!(
+        sequence.next(),
+        ForcedToolOperation::Force(RuntimeToolName::new(SANDBOXED_EXEC_NAME))
+    );
+    assert_eq!(sequence.next(), ForcedToolOperation::Continuation);
 }
 
 #[test]
