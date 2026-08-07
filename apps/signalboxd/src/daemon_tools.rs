@@ -1375,20 +1375,35 @@ mod tests {
 
     struct BridgeArtifactSelection {
         profile: OsString,
+        target: Option<OsString>,
         target_dir: PathBuf,
     }
 
     const CLAUDE_MCP_BRIDGE_BINARY: &str = "signalbox-claude-mcp-bridge";
     const CARGO_TEST_PROFILE: &str = "test";
 
-    fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
+    fn claude_mcp_bridge_artifact_selection(workspace: &Path) -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
-        claude_mcp_bridge_artifact_selection_for(&current, CARGO_TEST_PROFILE)
+        let target_dir = configured_cargo_target_dir(workspace);
+        claude_mcp_bridge_artifact_selection_for(&current, CARGO_TEST_PROFILE, &target_dir)
+    }
+
+    fn configured_cargo_target_dir(workspace: &Path) -> PathBuf {
+        let Some(configured) = std::env::var_os("CARGO_TARGET_DIR") else {
+            return workspace.join("target");
+        };
+        let configured = PathBuf::from(configured);
+        if configured.is_absolute() {
+            configured
+        } else {
+            workspace.join(configured)
+        }
     }
 
     fn claude_mcp_bridge_artifact_selection_for(
         current: &Path,
         debug_profile: &str,
+        target_dir: &Path,
     ) -> BridgeArtifactSelection {
         let profile_dir = current
             .parent()
@@ -1402,55 +1417,112 @@ mod tests {
             Some("release") => OsString::from("release"),
             _ => profile_dir_name.to_os_string(),
         };
+        let artifact_parent = profile_dir
+            .parent()
+            .expect("Cargo profile has an artifact parent");
+        let target = if artifact_parent == target_dir {
+            None
+        } else {
+            assert_eq!(
+                artifact_parent.parent(),
+                Some(target_dir),
+                "Cargo target-specific profile is directly below the target directory"
+            );
+            Some(
+                artifact_parent
+                    .file_name()
+                    .expect("Cargo target-specific profile names its target")
+                    .to_os_string(),
+            )
+        };
         BridgeArtifactSelection {
             profile,
-            target_dir: profile_dir
-                .parent()
-                .expect("Cargo profile has a target directory")
-                .to_path_buf(),
+            target,
+            target_dir: target_dir.to_path_buf(),
         }
     }
 
-    #[track_caller]
-    fn assert_bridge_artifact_selection(
-        executable: &Path,
-        debug_profile: &str,
-        expected_profile: &str,
-    ) {
-        let profile_dir = executable
-            .parent()
-            .and_then(Path::parent)
-            .expect("synthetic executable has a profile directory");
-        let selection = claude_mcp_bridge_artifact_selection_for(executable, debug_profile);
+    struct BridgeArtifactExpectation<'a> {
+        executable: &'a Path,
+        target_dir: &'a Path,
+        debug_profile: &'a str,
+        expected_profile: &'a str,
+        expected_target: Option<&'a str>,
+    }
 
-        assert_eq!(selection.profile, OsString::from(expected_profile));
-        assert_eq!(
-            selection.target_dir,
-            profile_dir
-                .parent()
-                .expect("profile has a target directory")
+    #[track_caller]
+    fn assert_bridge_artifact_selection(expectation: BridgeArtifactExpectation<'_>) {
+        let selection = claude_mcp_bridge_artifact_selection_for(
+            expectation.executable,
+            expectation.debug_profile,
+            expectation.target_dir,
         );
+
+        assert_eq!(
+            selection.profile,
+            OsString::from(expectation.expected_profile)
+        );
+        assert_eq!(
+            selection.target,
+            expectation.expected_target.map(OsString::from)
+        );
+        assert_eq!(selection.target_dir, expectation.target_dir);
     }
 
     #[test]
     fn bridge_artifact_selection_maps_debug_to_the_explicit_test_profile() {
         let executable = Path::new("synthetic-target/debug/deps/daemon-tools-test");
 
-        assert_bridge_artifact_selection(executable, CARGO_TEST_PROFILE, CARGO_TEST_PROFILE);
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable,
+            target_dir: Path::new("synthetic-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+        });
     }
 
     #[test]
     fn bridge_artifact_selection_preserves_the_release_profile() {
         let executable = Path::new("synthetic-target/release/deps/daemon-tools-test");
 
-        assert_bridge_artifact_selection(executable, CARGO_TEST_PROFILE, "release");
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable,
+            target_dir: Path::new("synthetic-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: "release",
+            expected_target: None,
+        });
     }
 
     #[test]
     fn bridge_artifact_selection_preserves_a_custom_profile() {
         let executable = Path::new("synthetic-target/ci-fast/deps/daemon-tools-test");
 
-        assert_bridge_artifact_selection(executable, CARGO_TEST_PROFILE, "ci-fast");
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable,
+            target_dir: Path::new("synthetic-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: "ci-fast",
+            expected_target: None,
+        });
+    }
+
+    const SYNTHETIC_CARGO_TARGET: &str = "x86_64-unknown-linux-musl";
+
+    #[test]
+    fn bridge_artifact_selection_preserves_a_cli_selected_target() {
+        let executable = Path::new("synthetic-target")
+            .join(SYNTHETIC_CARGO_TARGET)
+            .join("debug/deps/daemon-tools-test");
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: Path::new("synthetic-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: Some(SYNTHETIC_CARGO_TARGET),
+        });
     }
 
     const BRIDGE_BUILD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -1530,9 +1602,13 @@ mod tests {
         let _build_guard = BRIDGE_BUILD_LOCK
             .lock()
             .expect("bridge build lock is available");
-        let selection = claude_mcp_bridge_artifact_selection();
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("signalboxd manifest has a workspace root")
+            .to_path_buf();
+        let selection = claude_mcp_bridge_artifact_selection(&workspace);
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut build_command = Command::new(cargo);
         build_command
             .args([
@@ -1550,6 +1626,9 @@ mod tests {
             .arg(&selection.target_dir)
             .current_dir(workspace)
             .stdout(Stdio::piped());
+        if let Some(target) = &selection.target {
+            build_command.arg("--target").arg(target);
+        }
         configure_owned_process_group(&mut build_command);
         let mut build = build_command.spawn().expect("bridge binary build starts");
         let (messages, reader) = response_reader(BufReader::new(
