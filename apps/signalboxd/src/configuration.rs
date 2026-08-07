@@ -830,6 +830,7 @@ impl HubModelConfiguration {
         let mut routes = HashMap::with_capacity(models.len());
         let mut target_billing_rates = HashMap::with_capacity(models.len());
         let mut target_adapters = HashMap::with_capacity(models.len());
+        let mut target_credential_profiles = HashMap::with_capacity(models.len());
         let mut target_provider_models = HashMap::with_capacity(models.len());
         let mut selectable_targets = HashSet::with_capacity(models.len());
         let mut provider_model_adapters = HashMap::with_capacity(models.len());
@@ -942,6 +943,12 @@ impl HubModelConfiguration {
             {
                 return Err(HubModelConfigurationError::ConflictingTarget);
             }
+            if let Some(previous) =
+                target_credential_profiles.insert(target, Arc::clone(&mapping.credential_profile))
+                && previous != mapping.credential_profile
+            {
+                return Err(HubModelConfigurationError::ConflictingTarget);
+            }
             if let Some(previous) = target_provider_models.insert(target, provider_model.clone())
                 && previous != provider_model
             {
@@ -970,6 +977,7 @@ impl HubModelConfiguration {
             ));
             runtime_capability_projections.push(RuntimeCapabilityProjection {
                 adapter: mapping.adapter,
+                credential_profile: Arc::clone(&mapping.credential_profile),
                 provider_model: provider_model.clone(),
                 capabilities,
             });
@@ -1026,6 +1034,7 @@ impl HubModelConfiguration {
                     required_positive_u32(serving_target, "context_window_tokens")?;
                 target_provider_models.insert(target, provider_model.clone());
                 target_adapters.insert(target, mapping.adapter);
+                target_credential_profiles.insert(target, Arc::clone(&mapping.credential_profile));
                 if let Some(previous) =
                     provider_model_adapters.insert(provider_model.clone(), mapping.adapter)
                     && previous != mapping.adapter
@@ -1085,6 +1094,7 @@ impl HubModelConfiguration {
             runtime_capability_projections,
             &target_provider_models,
             &target_adapters,
+            &target_credential_profiles,
             &selectable_targets,
         )?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
@@ -2536,6 +2546,7 @@ fn parse_configured_service_tier(item: &Item) -> Result<ServiceTier, HubModelCon
 
 struct RuntimeCapabilityProjection {
     adapter: ModelAdapter,
+    credential_profile: Arc<str>,
     provider_model: String,
     capabilities: ModelCapabilities,
 }
@@ -2544,15 +2555,18 @@ fn project_runtime_model_capabilities(
     projections: Vec<RuntimeCapabilityProjection>,
     target_provider_models: &HashMap<ResolvedProviderTarget, String>,
     target_adapters: &HashMap<ResolvedProviderTarget, ModelAdapter>,
+    target_credential_profiles: &HashMap<ResolvedProviderTarget, Arc<str>>,
     selectable_targets: &HashSet<ResolvedProviderTarget>,
 ) -> Result<RuntimeModelCapabilityCatalog, HubModelConfigurationError> {
     let mut capabilities_by_provider_model = BTreeMap::new();
     for projection in projections {
         let capabilities = runtime_model_capabilities(
             projection.adapter,
+            &projection.credential_profile,
             &projection.capabilities,
             target_provider_models,
             target_adapters,
+            target_credential_profiles,
             selectable_targets,
         )?;
         if let Some(previous) =
@@ -2577,9 +2591,11 @@ fn project_runtime_model_capabilities(
 
 fn runtime_model_capabilities(
     adapter: ModelAdapter,
+    credential_profile: &str,
     capabilities: &ModelCapabilities,
     target_provider_models: &HashMap<ResolvedProviderTarget, String>,
     target_adapters: &HashMap<ResolvedProviderTarget, ModelAdapter>,
+    target_credential_profiles: &HashMap<ResolvedProviderTarget, Arc<str>>,
     selectable_targets: &HashSet<ResolvedProviderTarget>,
 ) -> Result<RuntimeModelCapabilities, HubModelConfigurationError> {
     let reasoning_levels = capabilities
@@ -2599,6 +2615,12 @@ fn runtime_model_capabilities(
                 .get(&target)
                 .ok_or(HubModelConfigurationError::InvalidModelCapabilities)?;
             if target_adapters.get(&target) != Some(&adapter) {
+                return Err(HubModelConfigurationError::InvalidModelCapabilities);
+            }
+            if target_credential_profiles
+                .get(&target)
+                .is_none_or(|profile| profile.as_ref() != credential_profile)
+            {
                 return Err(HubModelConfigurationError::InvalidModelCapabilities);
             }
             Some(RuntimeFastModeTarget::Mapped(RuntimeResolvedTarget::new(
@@ -5052,24 +5074,27 @@ context_window_tokens = 200000
 
     #[test]
     fn route_pins_the_preferred_member_of_its_pool() {
-        let configured = HubModelConfiguration::parse(&configuration_with_anthropic_pool(
+        let pool_name = "anthropic-main";
+        let preferred_profile = ANTHROPIC_CREDENTIAL_REFERENCE;
+        let pool = format!(
             r#"[[credential_pools]]
-name = "anthropic-main"
+name = "{pool_name}"
 tie_break = "first_listed"
 on_pool_exhausted = "park"
 members = [
-  { profile = "anthropic-overflow", priority = 2 },
-  { profile = "anthropic-primary", priority = 1 },
-]"#,
-        ))
-        .expect("a two-member pool is valid");
+  {{ profile = "anthropic-overflow", priority = 2 }},
+  {{ profile = "{preferred_profile}", priority = 1 }},
+]"#
+        );
+        let configured = HubModelConfiguration::parse(&configuration_with_anthropic_pool(&pool))
+            .expect("a two-member pool is valid");
 
         let route = configured
             .resolve_direct_model(configured_judge_selection_fixture())
             .expect("the configured selection resolves");
 
-        assert_eq!(route.credential_pool(), "anthropic-main");
-        assert_eq!(route.credential_profile(), "anthropic-primary");
+        assert_eq!(route.credential_pool(), pool_name);
+        assert_eq!(route.credential_profile(), preferred_profile);
     }
 
     #[test]
@@ -6605,6 +6630,41 @@ selection_id = "10000000-0000-4000-8000-000000000002"
 target_id = "20000000-0000-4000-8000-000000000002"
 model_family = "anthropic"
 provider_model = "synthetic-selectable-fast-target"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#,
+            CONFIGURATION.replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nfast_mode = \"alternate_target\"\nfast_target_id = \"20000000-0000-4000-8000-000000000002\"",
+            )
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_alternate_target_with_another_credential_profile() {
+        let configuration = format!(
+            r#"{}
+
+[[credential_pools]]
+name = "anthropic-fast"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{{ profile = "anthropic-overflow", priority = 1 }}]
+
+[[adapter_mappings]]
+model_family = "anthropic-fast"
+adapter = "anthropic"
+credential_pool = "anthropic-fast"
+
+[[serving_targets]]
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "anthropic-fast"
+provider_model = "synthetic-fast-target"
 max_output_tokens = 256
 context_window_tokens = 200000
 "#,

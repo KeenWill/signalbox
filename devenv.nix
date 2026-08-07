@@ -445,6 +445,40 @@ in
         mv -f "$seeded_daemon_config" ${shellArg daemonConfigFile}
       fi
 
+      # Existing dev instances predate credential pools and are intentionally
+      # user-editable, so do not rewrite them in place. Refuse the retired
+      # shape with an exact recovery path instead of starting a daemon that can
+      # only reject the retained catalog later.
+      ${tomlPython}/bin/python3 -c ${shellArg ''
+        import sys
+        from collections.abc import Mapping
+        from pathlib import Path
+
+        import tomlkit
+
+        config_path = Path(sys.argv[1])
+        document = tomlkit.parse(config_path.read_text())
+        profiles = document.get("credential_profiles", [])
+        mappings = document.get("adapter_mappings", [])
+        legacy_profile = any(
+            isinstance(entry, Mapping)
+            and "adapter" not in entry
+            and "delivery" not in entry
+            for entry in profiles
+        )
+        legacy_mapping = any(
+            isinstance(entry, Mapping) and "credential_profile" in entry
+            for entry in mappings
+        )
+        if legacy_profile or legacy_mapping:
+            raise SystemExit(
+                f"dev instance: {config_path} uses the retired pre-pool "
+                "credential grammar; update credential_profiles and "
+                "adapter_mappings to match config/signalboxd.example.toml, "
+                "or move the file aside so the dev instance can reseed it"
+            )
+      ''} ${shellArg daemonConfigFile}
+
       if [ ! -f ${shellArg daemonTemplateConfigFile} ]; then
         echo "dev instance: seeding" ${shellArg daemonTemplateConfigFile} \
              "from config/session-templates.example.toml"

@@ -396,6 +396,24 @@ fn required_environment(name: &'static str) -> Result<OsString, Box<dyn Error>> 
     })
 }
 
+fn required_canonical_uuid_environment(name: &'static str) -> Result<Uuid, Box<dyn Error>> {
+    let text = required_environment(name)?.into_string().map_err(|_| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("{name} must be valid UTF-8"),
+        )
+    })?;
+    let uuid = Uuid::parse_str(&text)?;
+    if uuid.hyphenated().to_string() != text {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("{name} must be canonical lowercase UUID text"),
+        )
+        .into());
+    }
+    Ok(uuid)
+}
+
 /// S35 / INV-047: the shipped client lists daemon-owned templates, creates from one
 /// resolved startup snapshot, and a catalog edit plus daemon reload changes
 /// only later sessions while both copies retain exact provenance.
@@ -2911,22 +2929,7 @@ context_window_tokens = 200000
 #[ignore = "requires PostgreSQL, a local socket, and an explicitly configured real Anthropic call"]
 async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<dyn Error>> {
     let configuration_file = PathBuf::from(required_environment("SIGNALBOX_E2E_CONFIG_FILE")?);
-    let selection_text = required_environment("SIGNALBOX_E2E_SELECTION_ID")?
-        .into_string()
-        .map_err(|_| {
-            io::Error::new(
-                ErrorKind::InvalidInput,
-                "SIGNALBOX_E2E_SELECTION_ID must be valid UTF-8",
-            )
-        })?;
-    let selection_uuid = Uuid::parse_str(&selection_text)?;
-    if selection_uuid.hyphenated().to_string() != selection_text {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "SIGNALBOX_E2E_SELECTION_ID must be canonical lowercase UUID text",
-        )
-        .into());
-    }
+    let selection_uuid = required_canonical_uuid_environment("SIGNALBOX_E2E_SELECTION_ID")?;
 
     let model_configuration = HubModelConfiguration::read(&configuration_file)?;
     let selection = DirectModelSelection::from_uuid(selection_uuid);
@@ -2993,7 +2996,7 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
             vec![
                 String::from("create"),
                 String::from("--model"),
-                selection_text,
+                selection_uuid.hyphenated().to_string(),
             ],
             None,
         ),

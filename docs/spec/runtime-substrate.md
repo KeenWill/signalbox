@@ -21,8 +21,10 @@ PR #321 (`renovate/openai-codex-0.x`). Its twice-daily schedule and
 workflow-self-change trigger were verified through PR #471
 (`agent/codex-smoke-schedule`). The `signalboxd` names this page states for the
 composition root, its telemetry, and the production `FileCredentialAccess` were
-verified through PR #258 (`agent/signalboxd-rename`); the Anthropic adapter's
-server-side `fallback`-block recognition was verified through PR #280
+were verified through PR #258 (`agent/signalboxd-rename`); the Anthropic and
+OpenAI adapter-scoped file catalogs are verified against this PR
+(`agent/credential-pools-parser`). The Anthropic adapter's server-side
+`fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The HTTP fallback-body redaction
 ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
 persistence-repository families in the operator-failure inventory were verified
@@ -1080,9 +1082,10 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   cannot hold a cancelled operation. Failures are reference-only (`Unmapped`,
   `Unavailable`, `Unreadable`) and never contain secret bytes.
 - The production implementation is signalboxd's `FileCredentialAccess`.
-  Composition supplies the complete map of every `file` profile reference to its
-  catalog path, whatever direct HTTP or Claude CLI adapter consumes it. Each
-  resolve rereads the mapped file and feeds the selected runtime.
+  Composition supplies each adapter with the complete map of every `file`
+  profile reference declared for that adapter to its catalog path. A profile
+  declared for another adapter remains unmapped. Each resolve rereads the mapped
+  file and feeds the selected runtime.
 - A direct HTTP adapter scopes the resolved value to the one prepared request as
   a sensitivity-marked HTTP header; execute performs no second lookup. Claude
   file delivery instead retains it in the one-shot capability for the private
