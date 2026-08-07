@@ -209,6 +209,15 @@ pub trait CliSession<C>: Sized {
     fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence;
     /// Produces typed boundary-loss evidence.
     fn boundary_loss(self, cause: LossCause) -> TerminalEvidence;
+    /// Records that bytes were read off the process but never delivered.
+    ///
+    /// `read_bounded_line` accumulates into a local buffer, so dropping its
+    /// future at a cancellation or deadline discards whatever prefix it had
+    /// already consumed — including, possibly, the start of an `assistant`
+    /// event carrying a tool call. The default is a no-op, correct for an
+    /// adapter that never claims a negative it did not establish; an adapter
+    /// whose partial facts do claim one must stop claiming it here.
+    fn note_undelivered_line(&mut self) {}
     /// Boundary loss for a line the runner never delivered to the decoder.
     ///
     /// The bytes were read off the process and then rejected by the line bound,
@@ -591,6 +600,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 });
             }
             ProcessStep::Cancelled => {
+                decoder.note_undelivered_line();
                 // Work-first: a leader that has already exited on its own is
                 // definitive evidence a simultaneous cancellation must not
                 // discard — even after a terminal marker, because a nonzero
@@ -630,6 +640,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             }
             ProcessStep::TimedOut => {
+                decoder.note_undelivered_line();
                 // An inherited stdout handle can outlive a leader that
                 // already exited on its own; that exit stays definitive —
                 // an observed terminal marker or the exit status — and only

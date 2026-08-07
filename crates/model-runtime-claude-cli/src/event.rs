@@ -54,6 +54,7 @@ pub(crate) struct EventDecoder<C> {
     /// for those: the rejection returns before the insert.
     opened_tool_calls: bool,
     current_event_examined: bool,
+    undelivered_line: bool,
     proposal_indexes: HashMap<String, usize>,
     result_ids: HashSet<String>,
     emitted_tool_ids: HashSet<String>,
@@ -103,6 +104,7 @@ impl<C: Clone> EventDecoder<C> {
             content: Vec::new(),
             opened_tool_calls: false,
             current_event_examined: false,
+            undelivered_line: false,
             proposal_indexes: HashMap::new(),
             result_ids: HashSet::new(),
             emitted_tool_ids: HashSet::new(),
@@ -784,6 +786,8 @@ impl<C: Clone> EventDecoder<C> {
     fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
         if self.opened_tool_calls {
             ToolCallsAtLoss::Opened
+        } else if self.undelivered_line {
+            ToolCallsAtLoss::Unobserved
         } else {
             ToolCallsAtLoss::NoneOpened
         }
@@ -804,6 +808,8 @@ impl<C: Clone> EventDecoder<C> {
     fn tool_calls_at_decode_failure(&self) -> ToolCallsAtLoss {
         if self.opened_tool_calls {
             ToolCallsAtLoss::Opened
+        } else if self.undelivered_line {
+            ToolCallsAtLoss::Unobserved
         } else if self.current_event_examined {
             ToolCallsAtLoss::NoneOpened
         } else {
@@ -965,6 +971,10 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
 
     fn boundary_loss(self, cause: LossCause) -> TerminalEvidence {
         EventDecoder::boundary_loss(self, cause)
+    }
+
+    fn note_undelivered_line(&mut self) {
+        self.undelivered_line = true;
     }
 
     fn undelivered_line_loss(mut self, cause: LossCause) -> TerminalEvidence {

@@ -255,10 +255,13 @@ call opened in what the adapter decoded, never that the provider sent none.
 `Unobserved` is the honest answer where an adapter is not positioned to know — a
 body that never parsed, a decode abandoned with content blocks unexamined, a
 streamed record or CLI event that failed its framing, JSON-bound, or typed-event
-decode, a stream whose framing ended inside an incomplete record, a loss raised
-by a layer that reads no response material, and every Codex CLI loss raised
-before the agent-message envelope parses, since that adapter's item lifecycle
-carries no tool item.
+decode, a stream whose framing ended inside an incomplete record, material the
+runner read off the transport but never delivered to a decoder — a framed record
+dropped when cancellation lands mid-chunk, a CLI line past the event bound, a
+partial line lost when a deadline drops the reader — a loss raised by a layer
+that reads no response material, and every Codex CLI loss raised before the
+agent-message envelope parses, since that adapter's item lifecycle carries no
+tool item.
 
 The dividing line is whether the adapter examined the material that could open a
 tool call, not whether it accepted that material. A record read and then

@@ -677,6 +677,39 @@ async fn a_line_rejected_by_the_event_bound_withholds_the_tool_fact() {
     assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
 }
 
+/// A deadline that fires while the bounded-line reader holds a partial event
+/// discards those bytes without ever decoding them, so the fact is withheld.
+///
+/// `read_bounded_line` accumulates into a local buffer, so dropping its future
+/// loses the prefix it consumed — the discarded suffix may have carried a
+/// `tool_use`.
+#[tokio::test]
+async fn a_deadline_dropping_a_partial_line_withholds_the_tool_fact() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let mut config = ClaudeCliConfig::new(
+        fake_cli(),
+        bridge_cli(),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+    config.exchange_timeout = Duration::from_millis(300);
+    config.interrupt_grace = Duration::from_millis(100);
+    let runtime = ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid");
+    let prepared = prepare(
+        &runtime,
+        operation("partial_assistant_then_hang", OperationShape::Text),
+    )
+    .await;
+    let report = runtime
+        .execute(prepared, &mut Vec::new(), CancellationSignal::never())
+        .await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report.evidence else {
+        panic!("an exchange deadline is boundary loss");
+    };
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+}
+
 async fn execute_scenario(scenario: &str, shape: OperationShape) -> ExecutionResult {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let runtime = runtime(temporary.path(), &fake_cli());

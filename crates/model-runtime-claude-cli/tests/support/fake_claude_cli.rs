@@ -208,6 +208,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tool_result(fixtures::CREDENTIAL_PREFIX_TOOL_ID)?;
             success("tool_use", Some(fixtures::OPAQUE_CREDENTIAL_CONTINUATION))?;
         }
+        // A prefix of an `assistant` event, then silence. The exchange deadline
+        // fires while `read_bounded_line` holds bytes it will never deliver, so
+        // the suffix that would have said whether a tool call opened is lost.
+        "partial_assistant_then_hang" => {
+            emit(b"{\"type\":\"assistant\",\"parent_tool_use_id\":null,\"message\":{")?;
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
         "generic_error_then_definitive_stderr_exit" => {
             generic_error_result()?;
             std::io::stderr().write_all(b"authentication failed for synthetic login\n")?;
