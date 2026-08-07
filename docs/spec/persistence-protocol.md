@@ -38,7 +38,12 @@ head, and creation transaction were verified through PR #415
 scopes, delegated transcript origins, foreground-result closure, pre-outbox
 cascade locks, typed delegation wake origins, and exact delegation update and
 wake obligations were verified through this PR
-(`agent/delegation-persistence-schema`); the model-settings command fields,
+(`agent/delegation-persistence-schema`); the delegated child-input, await,
+peer-message, terminal-observation, and restart-recovery locks plus wait/message
+replay satellites and headers were verified through this PR
+(`agent/delegation-runtime-persistence-v2`), and the broader child-terminal
+endpoint locks were verified through this PR
+(`agent/delegation-runtime-daemon-v2`); the model-settings command fields,
 immutable evidence, snapshot projection, and typed outbox records were verified
 through this PR (`agent/model-settings-persistence`); the defaults-replacement
 pointer-lock admission is verified through this PR
@@ -612,13 +617,17 @@ Locks per transaction, in acquisition order:
   commands commit without firing the trigger, and exact user-command replay
   takes no row lock.
 
-- **StartEligibleTurn**, **startup recovery**, and the **model-call execution
-  transactions** (prepare, authorize, observation commit, restart recovery — all
-  in `model_execution.rs`, reusing the same inventory statement): the
-  `session_scheduler` row `FOR UPDATE` is the only explicit lock (session
-  existence is checked with a bare `EXISTS`). The session row is locked only
-  `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
-  `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
+- **StartEligibleTurn** and nonterminal **model-call execution transactions**
+  (prepare and authorize): the `session_scheduler` row `FOR UPDATE` is the only
+  explicit lock (session existence is checked with a bare `EXISTS`). The session
+  row is locked only `KEY SHARE`, implicitly, by the inserts' foreign keys, and
+  the candidate `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
+  Terminal observation commit and reread, restart recovery, startup recovery,
+  and submit-input interruption first discover whether the target is a delegated
+  child. When it is, they lock the immutable parent/child session pair
+  `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
+  scheduler lock. This is the shared prefix for any path that can record a child
+  result.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -645,6 +654,66 @@ Locks per transaction, in acquisition order:
   additional explicit lock. The shared scheduler-first prefix prevents
   approval-judge, tool-loop, and lifecycle-transition transactions from holding
   these rows in reverse order.
+
+- **Delegated terminal-observation transactions**: after nonlocking reads of the
+  call's turn and delegation identity, observation commit and authoritative
+  reread lock both endpoint session rows `FOR NO KEY UPDATE` in ascending
+  session-identity order, then both endpoint `session_scheduler` rows
+  `FOR UPDATE` in that same order, and only then the exact `session_delegation`
+  row `FOR UPDATE`. They revalidate the immutable relationship after taking that
+  prefix. A nondelegated observation retains the ordinary scheduler-only model-
+  execution order. Sharing the delegated prefix with peer-message transactions
+  prevents either side from holding an endpoint session while waiting for a
+  scheduler held by the other.
+
+- **Delegated restart-recovery transactions**: a nonlocking read selects the
+  candidate active child turn. Recovery then takes the same canonical endpoint
+  sessions, endpoint schedulers, and relationship prefix as terminal observation
+  before it rechecks the active turn and classifies any model-call or
+  tool-attempt loss. If the candidate changed while the prefix was acquired, the
+  transaction rolls back for a later scheduler pass. Known tool-crash failure
+  and its typed parent result therefore commit under the same acyclic endpoint
+  order as peer messages.
+
+- **Delegated await transactions**: await first locks its issuing delivery
+  session row `FOR NO KEY UPDATE`, then that session's `session_scheduler` row
+  `FOR UPDATE`, and only then the exact `session_delegation` row `FOR UPDATE`.
+  This session-before-scheduler prefix matches input transitions that can race
+  with await registration.
+
+- **Input submitted to a delegated child**: after a nonlocking immutable
+  relationship read, submission locks both endpoint session rows
+  `FOR NO KEY UPDATE` in ascending session-identity order, then the child's
+  `session_scheduler` row `FOR UPDATE`. Nondelegated input retains its single-
+  session prefix. The endpoint prefix precedes the scheduler because processing
+  the input can terminalize the delegated turn and publish its parent result.
+
+- **Descendant-scoped stop and interrupt transactions**: after registry
+  inspection and an unseen command claim, but before the ordinary root-session
+  or scheduler locks, the repository locks the complete reachable session
+  frontier in ascending session-identity order. When the root is itself a
+  delegated child, that same ordered set includes its immutable parent endpoint,
+  so the later child-terminal prefix reacquires only rows already held. It
+  re-evaluates the descendant frontier after waits and then locks its
+  relationships in spawning-request order. The goal-stop and input-interrupt
+  writers share this prefix; parent-alone commands take no descendant locks.
+
+- **Delegated peer-message transactions**: after a nonlocking peer-existence
+  read, message recording locks both endpoint session rows `FOR NO KEY UPDATE`
+  in ascending session-identity order, then both endpoint `session_scheduler`
+  rows `FOR UPDATE` in that same order, and only then the exact
+  `session_delegation` row `FOR UPDATE`. An absent peer instead locks the
+  issuing session and scheduler before returning the typed rejection. This
+  common endpoint order is acyclic with delegated-child input and opposite-
+  direction message transactions. Child terminalization uses the same canonical
+  endpoint-session prefix before taking the child scheduler, so message,
+  completion, and input submission never hold those row classes in reverse
+  order. After locking the relationship, a fresh message reads only its
+  immutable endpoints and bounded lifecycle/event frontier; it does not
+  reconstruct prior messages. Delivery-sequence allocation runs while the
+  recipient session lock is held. Message recording claims the global
+  `message_id` before inserting the relationship event; a concurrent claim loser
+  returns the typed message-identity collision without leaving a partial event.
 
 - **ReplaceSessionDefaults**: an unseen command locks its
   `session_current_defaults` pointer row `FOR UPDATE` before loading and
@@ -891,8 +960,10 @@ public summary deliberately omits, before it constructs the summary. Load paths
 do not panic on durable data; checked interrupt application produces the exact
 cancellation-requested or reconciliation-required transition, while a projection
 that cannot support that transition fails closed as typed corruption. Startup
-recovery operates only on successfully reconstituted projections (INV-034), and
-a successful reconstitution does not waive the guarded compare-and-set when a
+recovery operates only on successfully reconstituted projections (INV-034). A
+stored active delegation-origin lifecycle whose phase is null or outside the
+closed phase vocabulary is corruption rather than retryable database failure. A
+successful reconstitution does not waive the guarded compare-and-set when a
 later transaction commits: every guarded write that matches zero rows is either
 benign staleness (reload and rederive) or, where the transaction's own premises
 made a match mandatory, corruption. Why: the dangerous corruption cases are rows
@@ -1035,7 +1106,12 @@ starts model execution from the existing delegated-task semantic entry as the
 child's one-member initial frontier. The same typed path activates an idle
 recipient's delivery-range wake after its exact terminal predecessor, appending
 the contiguous checked message or background-result entries to that predecessor
-frontier.
+frontier. Any accepted-input scheduling reread that retains delegation-origin
+semantic history supplies each referenced delegated turn's independently stored
+defaults version, selected direct model, and active, logical-terminal, or
+physical-terminal lifecycle classification. Model-identity, terminal semantic,
+and completed-call facts must match that projection; a turn identity alone is
+never sufficient reconstitution authority.
 
 `session_delegation_event` is an append-only per-relationship ordinal stream.
 Its closed kind/shape checks require every lifecycle disposition to carry one
@@ -1056,27 +1132,55 @@ reason/provenance shape does not match its kind.
 parent turn, and foreground/background mode. A foreground row correlates the
 turn's `awaiting_child` phase; a background row cannot and instead requires the
 exact completed effect-free attempt and normalized registration receipt for its
-awaiting request. `session_message` is append-only, uniquely orders messages per
-relationship, and requires exact parent/child sender and recipient plus the
-sending tool request. `session_child_result` has at most one row per spawning
-request and carries exactly one returned-text, failed, stopped, or cancelled
-shape with child turn provenance for returned, failed, result-unavailable, and
-child-originated terminal outcomes, or one of the same exclusive
-parent-turn-command and parent-goal-command provenance arms for a policy-driven
-stop or cancellation. Delivery satellites bind messages/results to their exact
-semantic entries; no transcript query supplies result content. Every pending
-message and background result delivery additionally receives one positive
-recipient-wide `delivery_sequence` under the recipient session lock. That
-sequence is unique and gap-free per recipient across both kinds; relationship
-ordinals remain relationship-local evidence and never order two different
-relationships. Foreground results stay ordered by their exact awaiting request
-and do not consume an inbox sequence. Their semantic entry repeats that awaiting
-request as the ordinary logical tool-result correlation, so the unchanged
-proposal-order and single-result checks admit it as the `await_session` result
-without admitting a second result for the same request. Tool-batch outbox
-decoding and context-compaction evidence count that foreground correlation as
-one tool result; a background result has no tool-result correlation and counts
-as neither one.
+awaiting request. Equal wait replay independently authenticates that exact
+terminal attempt: the foreground arm requires its typed child-wait evidence and
+the background arm requires its normalized receipt; both arms also authenticate
+the exact update satellite and global outbox header. A definitive process-wait
+rejection stores its closed rejection kind and transition evidence when
+applicable beside the exact known-failed attempt; exact replay returns that
+typed outcome before classifying the request as non-executable.
+`session_message` is append-only, uniquely orders messages per relationship, and
+requires exact parent/child sender and recipient plus the sending tool request
+with its complete session, turn, and request provenance. Equal message replay
+authenticates both that provenance and the exact completed external-effect
+attempt carrying its normalized receipt, plus the exact update/wake satellites
+and their global outbox headers. A concurrent global `message_id` claim loser is
+a typed message-identity collision, not an unclassified database failure. A
+definitive process-message rejection stores its closed rejection kind,
+transition evidence when applicable, and originally minted message identity
+beside the exact terminal attempt; exact replay returns that typed outcome
+before classifying the request as non-executable. `session_child_result` has at
+most one row per spawning request and carries exactly one returned-text, failed,
+stopped, or cancelled shape with child turn provenance for returned, failed,
+result-unavailable, and child-originated terminal outcomes, or one of the same
+exclusive parent-turn-command and parent-goal-command provenance arms for a
+policy-driven stop or cancellation. A known provider failure, a pre-send
+capability failure, or a known effect-free tool-crash closure publishes the same
+typed failed child result in its terminal transaction. An authoritative reread
+of an ambiguous pre-send capability failure authenticates that exact delegated
+result plus its parent update, wake, and both delegation outbox headers before
+reporting the failure committed. Delivery satellites bind messages/results to
+their exact semantic entries; no transcript query supplies result content. Every
+pending message and background result delivery additionally receives one
+positive recipient-wide `delivery_sequence` under the recipient session lock.
+That sequence is unique and gap-free per recipient across both kinds;
+relationship ordinals remain relationship-local evidence and never order two
+different relationships. Foreground results stay ordered by their exact awaiting
+request and do not consume an inbox sequence. Their semantic entry repeats that
+awaiting request as the ordinary logical tool-result correlation, so the
+unchanged proposal-order and single-result checks admit it as the
+`await_session` result without admitting a second result for the same request.
+Tool-batch outbox decoding and context-compaction evidence count that foreground
+correlation as one tool result; a background result has no tool-result
+correlation and counts as neither one.
+
+An accepted background wait reserves one future recipient delivery position
+until its child result exists. Message and later-wait admission under the same
+recipient lock preserve all outstanding reservations; exhausted capacity is a
+typed definitive rejection, and a reconstituted executable process request
+commits its known-failed attempt end in that same transaction. Thus a child
+terminal transaction cannot be rolled back merely because unrelated messages
+consumed the result delivery's final position.
 
 `session_delegation_wake_turn_origin` distinguishes an idle-recipient wake from
 the delegated child's initial task. It binds the queued turn to one contiguous
@@ -1090,21 +1194,23 @@ delivery as the lifecycle origin entry. The schema admits at most one queued
 delegation-origin turn per recipient.
 
 Parent-and-descendants termination locks the root and complete reachable session
-frontier before inserting the applied parent command and therefore before any
-outbox allocation. It re-evaluates after a lock wait, then locks relationship
-rows in stable spawning-request order before it writes any disposition. Spawn
-admission takes the same parent-session lock, so spawn and cascade transactions
-do not invert the session/outbox lock order or omit an edge that committed while
-the cascade waited. The command and every evaluated edge commit together; a
-crash can leave all prior durable state or the complete typed evaluation, never
-an unrecorded partial cascade. Parent-alone takes no descendant authority.
-Deferred reverse constraints also reject an applied descendant-scoped root
-command that lacks its exact cascade row, so an omitted cascade writer fails
-closed instead of silently degrading to parent-alone. Background and
-bound-keep-running edges still receive a continue-running event when evaluated.
-An already-terminal edge receives its typed already-terminal event and traversal
-continues through that child's outgoing relationships, so a terminal
-intermediate session cannot hide live descendants.
+frontier in ascending session-identity order before the command repository takes
+its ordinary root or scheduler locks, before inserting the applied parent
+command, and therefore before any outbox allocation. It re-evaluates after a
+lock wait, then locks relationship rows in stable spawning-request order before
+it writes any disposition. Spawn admission takes the same parent-session lock,
+so spawn, message, and cascade transactions do not invert the session/outbox
+lock order or omit an edge that committed while the cascade waited. The command
+and every evaluated edge commit together; a crash can leave all prior durable
+state or the complete typed evaluation, never an unrecorded partial cascade.
+Parent-alone takes no descendant authority. Deferred reverse constraints also
+reject an applied descendant-scoped root command that lacks its exact cascade
+row, so an omitted cascade writer fails closed instead of silently degrading to
+parent-alone. Background and bound-keep-running edges still receive a
+continue-running event when evaluated. An already-terminal edge receives its
+typed already-terminal event and traversal continues through that child's
+outgoing relationships, so a terminal intermediate session cannot hide live
+descendants.
 
 **SPEC PROPOSAL — cascade terminal authority.** For each newly stopped or
 cancelled edge, the cascade transaction appends one immutable logical-terminal

@@ -54,10 +54,11 @@ use crate::{
     mapping::{
         ToolApprovalDecisionSourceStorageKind, accepted_input_id_from_uuid,
         dangerous_tool_auto_approval_to_str, defaults_version_to_numeric,
+        delegation_outcome_kind_to_str, delegation_outcome_reason_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, input_position_from_numeric,
         positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
         tool_approval_decision_source_to_str, tool_approval_posture_to_str,
-        tool_request_id_to_uuid, turn_id_to_uuid,
+        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -499,6 +500,7 @@ impl PostgresModelCallRepository {
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
@@ -620,7 +622,7 @@ impl PostgresModelCallRepository {
                                 "target-resolution failure could not close fresh execution state",
                             )
                         })?;
-                    persist_failed(
+                    persist_failed_with_delegated_child_result(
                         &mut transaction,
                         &failed,
                         ProviderReportedTokenUsage::unreported(),
@@ -749,7 +751,6 @@ impl PostgresModelCallRepository {
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_session(&mut transaction, session).await?;
             if locked_delegation_logical_terminal(&mut transaction, session, observation.call())
                 .await?
             {
@@ -800,7 +801,7 @@ impl PostgresModelCallRepository {
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_session(&mut transaction, session).await?;
+            lock_model_call_terminal_frontier(&mut transaction, session, call).await?;
             let execution = require_exact_call(
                 require_live_execution(&mut transaction, session, &self.targets).await?,
                 call,
@@ -816,7 +817,7 @@ impl PostgresModelCallRepository {
                         "capability failure requires a Prepared call",
                     )
                 })?;
-            persist_failed(
+            persist_failed_with_delegated_child_result(
                 &mut transaction,
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
@@ -910,7 +911,14 @@ impl PostgresModelCallRepository {
                         source_frontier,
                     )
                     .await?;
-                    if transition_history_matches && closure_matches {
+                    let delegated_result_matches = delegated_terminal_result_matches(
+                        &mut transaction,
+                        session,
+                        turn_id_from_uuid(turn),
+                        &ExpectedDelegatedChildResult::Failed,
+                    )
+                    .await?;
+                    if transition_history_matches && closure_matches && delegated_result_matches {
                         Ok(RetainedCapabilityFailureStatus::AlreadyCommitted)
                     } else {
                         Err(ModelCallRepositoryError::InvalidTransition(
@@ -1083,13 +1091,15 @@ impl PostgresModelCallRepository {
     ) -> Result<RetainedModelCallObservationStatus, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_session(&mut transaction, session).await?;
             let correlation = observation.correlation();
             if correlation.session() != session {
                 return Err(ModelCallRepositoryError::InvalidTransition(
                     "retained observation session changed",
                 ));
             }
+            let delegation_logically_terminal =
+                locked_delegation_logical_terminal(&mut transaction, session, observation.call())
+                    .await?;
             let stored_row = sqlx::query(
                 "SELECT session_id, turn_id, turn_attempt_id,
                         resolved_provider_model_identity_id, context_frontier_id,
@@ -1118,9 +1128,7 @@ impl PostgresModelCallRepository {
                     "retained observation correlation changed",
                 ));
             }
-            if locked_delegation_logical_terminal(&mut transaction, session, observation.call())
-                .await?
-            {
+            if delegation_logically_terminal {
                 return Ok(RetainedModelCallObservationStatus::DiscardedByLogicalTerminal);
             }
             match (stored.state.as_str(), stored.disposition.as_deref()) {
@@ -1193,6 +1201,13 @@ impl PostgresModelCallRepository {
                             "retained observation terminal closure changed",
                         ));
                     }
+                    if !delegated_observation_result_matches(&mut transaction, session, observation)
+                        .await?
+                    {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained observation delegated result closure changed",
+                        ));
+                    }
                     Ok(RetainedModelCallObservationStatus::AlreadyCommitted)
                 }
                 _ => Err(ModelCallRepositoryError::InvalidTransition(
@@ -1214,7 +1229,7 @@ impl PostgresModelCallRepository {
     ) -> Result<ModelCallTerminalOutcome, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_session(&mut transaction, session).await?;
+            lock_model_call_terminal_frontier(&mut transaction, session, call).await?;
             let execution = require_exact_call(
                 require_live_execution_for_restart(&mut transaction, session).await?,
                 call,
@@ -1230,6 +1245,341 @@ impl PostgresModelCallRepository {
         .await;
         finish_commit(transaction, result).await
     }
+}
+
+enum ExpectedDelegatedChildResult {
+    Returned(String),
+    Failed,
+    Cancelled,
+    ResultUnavailable,
+}
+
+struct StoredDelegatedChildResultFacts<'a> {
+    outcome: DelegationOutcomeKind,
+    reason: DelegationOutcomeReason,
+    content: Option<&'a str>,
+}
+
+impl ExpectedDelegatedChildResult {
+    fn stored_facts(&self) -> StoredDelegatedChildResultFacts<'_> {
+        match self {
+            Self::Returned(content) => StoredDelegatedChildResultFacts {
+                outcome: DelegationOutcomeKind::ResultReturned,
+                reason: DelegationOutcomeReason::ChildCompleted,
+                content: Some(content.as_str()),
+            },
+            Self::Failed => StoredDelegatedChildResultFacts {
+                outcome: DelegationOutcomeKind::ChildFailed,
+                reason: DelegationOutcomeReason::ChildExecutionFailed,
+                content: None,
+            },
+            Self::Cancelled => StoredDelegatedChildResultFacts {
+                outcome: DelegationOutcomeKind::ChildCancelled,
+                reason: DelegationOutcomeReason::ChildCancelled,
+                content: None,
+            },
+            Self::ResultUnavailable => StoredDelegatedChildResultFacts {
+                outcome: DelegationOutcomeKind::ChildFailed,
+                reason: DelegationOutcomeReason::ChildResultUnavailable,
+                content: None,
+            },
+        }
+    }
+}
+
+async fn delegated_observation_result_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    let expected = match observation.observation() {
+        ModelCallTerminalObservation::Completed { assistant_text } => {
+            match signalbox_domain::DelegationContent::from_assistant_text(assistant_text) {
+                Ok(content) => ExpectedDelegatedChildResult::Returned(content.as_str().to_owned()),
+                Err(_) => ExpectedDelegatedChildResult::ResultUnavailable,
+            }
+        }
+        ModelCallTerminalObservation::KnownFailed | ModelCallTerminalObservation::Refused => {
+            ExpectedDelegatedChildResult::Failed
+        }
+        ModelCallTerminalObservation::Cancelled => {
+            if cancelled_terminal_closure_matches(connection, session, observation).await? {
+                ExpectedDelegatedChildResult::Cancelled
+            } else {
+                ExpectedDelegatedChildResult::Failed
+            }
+        }
+        ModelCallTerminalObservation::CompletedWithTools { .. }
+        | ModelCallTerminalObservation::Ambiguous => {
+            return delegated_nonterminal_result_absent(
+                connection,
+                session,
+                observation.correlation().turn(),
+            )
+            .await;
+        }
+    };
+    delegated_terminal_result_matches(
+        connection,
+        session,
+        observation.correlation().turn(),
+        &expected,
+    )
+    .await
+}
+
+async fn delegated_terminal_result_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    expected: &ExpectedDelegatedChildResult,
+) -> Result<bool, ModelCallRepositoryError> {
+    let stored = expected.stored_facts();
+    let outcome_kind = delegation_outcome_kind_to_str(stored.outcome);
+    let reason_kind = delegation_outcome_reason_to_str(stored.reason).ok_or(
+        ModelCallCorruption::Inconsistent("delegated child result reason"),
+    )?;
+    Ok(sqlx::query_scalar::<_, bool>(
+        "WITH delegated AS (
+            SELECT task.spawning_tool_request_id,
+                   task.child_session_id,
+                   task.turn_id,
+                   relation.parent_session_id
+              FROM session_delegation_initial_task AS task
+              JOIN session_delegation AS relation
+                ON relation.spawning_tool_request_id = task.spawning_tool_request_id
+               AND relation.child_session_id = task.child_session_id
+             WHERE task.child_session_id = $1
+               AND task.turn_id = $2
+        ),
+        origin AS (
+            SELECT EXISTS (
+                       SELECT 1
+                         FROM turn_lifecycle
+                        WHERE session_id = $1
+                          AND turn_id = $2
+                          AND origin_kind = 'delegation'
+                   ) AS delegated,
+                   EXISTS (
+                       SELECT 1
+                         FROM session_delegation_initial_task
+                        WHERE child_session_id = $1
+                          AND turn_id = $2
+                   ) AS initial_task,
+                   EXISTS (
+                       SELECT 1
+                         FROM session_delegation_wake_turn_origin
+                        WHERE recipient_session_id = $1
+                          AND turn_id = $2
+                   ) AS wake
+        )
+        SELECT NOT origin.delegated
+            OR (origin.wake AND NOT origin.initial_task)
+            OR (
+                origin.initial_task
+                AND NOT origin.wake
+                AND (
+                    SELECT count(*) = 1
+                      FROM delegated
+                      JOIN session_child_result AS result
+                    ON result.spawning_tool_request_id =
+                       delegated.spawning_tool_request_id
+                   AND result.event_kind = 'outcome_recorded'
+                   AND result.outcome_kind = $3
+                   AND result.content_text IS NOT DISTINCT FROM $5
+                  JOIN session_delegation_event AS outcome
+                    ON outcome.spawning_tool_request_id =
+                       result.spawning_tool_request_id
+                   AND outcome.event_ordinal = result.event_ordinal
+                   AND outcome.event_kind = result.event_kind
+                   AND outcome.outcome_kind = result.outcome_kind
+                   AND outcome.reason_kind = $4
+                   AND outcome.provenance_kind = 'child_turn'
+                   AND outcome.provenance_session_id = delegated.child_session_id
+                   AND outcome.provenance_turn_id = delegated.turn_id
+                  JOIN delegation_update_outbox_event AS parent_update
+                    ON parent_update.result_spawning_request_id =
+                       delegated.spawning_tool_request_id
+                   AND parent_update.session_id = delegated.parent_session_id
+                   AND parent_update.update_kind = 'child_result'
+                   AND parent_update.spawning_tool_request_id =
+                       delegated.spawning_tool_request_id
+                   AND parent_update.child_session_id = delegated.child_session_id
+                   AND parent_update.outcome_kind = $3
+                   AND parent_update.reason_kind = $4
+                   AND parent_update.provenance_kind = 'child_turn'
+                   AND parent_update.provenance_session_id =
+                       delegated.child_session_id
+                   AND parent_update.provenance_turn_id = delegated.turn_id
+                   AND parent_update.content_text IS NOT DISTINCT FROM $5
+                   AND parent_update.event_kind = 'delegation_update'
+                   AND parent_update.storage_version = 1
+                  JOIN delegation_outbox_event AS update_header
+                    ON update_header.event_sequence = parent_update.event_sequence
+                   AND update_header.event_kind = parent_update.event_kind
+                   AND update_header.storage_version = parent_update.storage_version
+                   AND update_header.session_id = parent_update.session_id
+                   AND update_header.event_kind = 'delegation_update'
+                   AND update_header.storage_version = 1
+                  JOIN delegation_wake_outbox_event AS parent_wake
+                    ON parent_wake.result_spawning_request_id =
+                       delegated.spawning_tool_request_id
+                   AND parent_wake.session_id = delegated.parent_session_id
+                   AND parent_wake.spawning_tool_request_id =
+                       delegated.spawning_tool_request_id
+                   AND parent_wake.subject_kind = 'result'
+                   AND parent_wake.awaiting_tool_request_id IS NULL
+                   AND parent_wake.message_id IS NULL
+                   AND parent_wake.event_kind = 'delegation_wake'
+                   AND parent_wake.storage_version = 1
+                  JOIN delegation_outbox_event AS wake_header
+                    ON wake_header.event_sequence = parent_wake.event_sequence
+                   AND wake_header.event_kind = parent_wake.event_kind
+                   AND wake_header.storage_version = parent_wake.storage_version
+                   AND wake_header.session_id = parent_wake.session_id
+                   AND wake_header.event_kind = 'delegation_wake'
+                   AND wake_header.storage_version = 1
+                 WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM session_delegation_wait AS wait
+                      LEFT JOIN session_child_result_delivery AS delivery
+                        ON delivery.awaiting_tool_request_id =
+                           wait.awaiting_tool_request_id
+                       AND delivery.spawning_tool_request_id =
+                           wait.spawning_tool_request_id
+                       AND delivery.parent_session_id = wait.parent_session_id
+                      LEFT JOIN session_pending_delivery AS pending
+                        ON pending.recipient_session_id =
+                           delivery.parent_session_id
+                       AND pending.delivery_sequence = delivery.delivery_sequence
+                       AND pending.delivery_kind = delivery.delivery_kind
+                     WHERE wait.spawning_tool_request_id =
+                           delegated.spawning_tool_request_id
+                       AND (
+                            delivery.awaiting_tool_request_id IS NULL
+                            OR wait.wait_mode IS NULL
+                            OR wait.wait_mode NOT IN ('foreground', 'background')
+                            OR (
+                                wait.wait_mode = 'foreground'
+                                AND (
+                                    delivery.delivery_sequence IS NOT NULL
+                                    OR delivery.delivery_kind IS NOT NULL
+                                )
+                            )
+                            OR (
+                                wait.wait_mode = 'background'
+                                AND (
+                                    delivery.delivery_sequence IS NULL
+                                    OR delivery.delivery_kind <>
+                                       'background_result'
+                                    OR pending.delivery_sequence IS NULL
+                                )
+                            )
+                       )
+                 )
+                   AND NOT EXISTS (
+                    SELECT 1
+                      FROM session_child_result_delivery AS delivery
+                      LEFT JOIN session_delegation_wait AS wait
+                        ON wait.awaiting_tool_request_id =
+                           delivery.awaiting_tool_request_id
+                       AND wait.spawning_tool_request_id =
+                           delivery.spawning_tool_request_id
+                       AND wait.parent_session_id = delivery.parent_session_id
+                     WHERE delivery.spawning_tool_request_id =
+                           delegated.spawning_tool_request_id
+                       AND wait.awaiting_tool_request_id IS NULL
+                 )
+                )
+            )
+          FROM origin",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(outcome_kind)
+    .bind(reason_kind)
+    .bind(stored.content)
+    .fetch_one(connection)
+    .await?)
+}
+
+async fn delegated_nonterminal_result_absent(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<bool, ModelCallRepositoryError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "WITH delegated AS (
+            SELECT relation.spawning_tool_request_id
+              FROM session_delegation AS relation
+              JOIN session_delegation_initial_task AS task
+                ON task.spawning_tool_request_id = relation.spawning_tool_request_id
+               AND task.child_session_id = relation.child_session_id
+               AND task.turn_id = $2
+             WHERE relation.child_session_id = $1
+        ),
+        origin AS (
+            SELECT EXISTS (
+                       SELECT 1
+                         FROM turn_lifecycle
+                        WHERE session_id = $1
+                          AND turn_id = $2
+                          AND origin_kind = 'delegation'
+                   ) AS delegated,
+                   EXISTS (
+                       SELECT 1
+                         FROM session_delegation_initial_task
+                        WHERE child_session_id = $1
+                          AND turn_id = $2
+                   ) AS initial_task,
+                   EXISTS (
+                       SELECT 1
+                         FROM session_delegation_wake_turn_origin
+                        WHERE recipient_session_id = $1
+                          AND turn_id = $2
+                   ) AS wake
+        )
+        SELECT NOT origin.delegated
+            OR (origin.wake AND NOT origin.initial_task)
+            OR (
+                origin.initial_task
+                AND NOT origin.wake
+                AND (SELECT count(*) = 1 FROM delegated)
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM delegated
+                      JOIN session_child_result AS result
+                        ON result.spawning_tool_request_id =
+                           delegated.spawning_tool_request_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM delegated
+                      JOIN delegation_update_outbox_event AS parent_update
+                        ON parent_update.result_spawning_request_id =
+                           delegated.spawning_tool_request_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM delegated
+                      JOIN delegation_wake_outbox_event AS parent_wake
+                        ON parent_wake.result_spawning_request_id =
+                           delegated.spawning_tool_request_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM delegated
+                      JOIN session_child_result_delivery AS delivery
+                        ON delivery.spawning_tool_request_id =
+                           delegated.spawning_tool_request_id
+                )
+            )
+          FROM origin",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_one(connection)
+    .await?)
 }
 
 /// Prepares one continuation call inside a caller-owned tool-result
@@ -1339,7 +1689,7 @@ where
                         "continuation target failure could not close execution",
                     )
                 })?;
-            persist_failed(
+            persist_failed_with_delegated_child_result(
                 connection,
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
@@ -1415,8 +1765,8 @@ pub(crate) async fn resolve_session_credential(
 }
 
 /// Closes a turn after a prepared or effect-free tool attempt was lost across
-/// process restart. The caller owns the scheduler lock and commits this
-/// closure with the attempt's `CrashLost` evidence.
+/// process restart. The caller owns the delegated endpoint and scheduler locks
+/// and commits this closure with the attempt's `CrashLost` evidence.
 pub(crate) async fn fail_tool_crash_in_transaction<NextTurn>(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1457,7 +1807,7 @@ where
                 "tool crash could not close evidence-free execution",
             )
         })?;
-    persist_failed(
+    persist_failed_with_delegated_child_result(
         connection,
         &failed,
         ProviderReportedTokenUsage::unreported(),
@@ -1530,22 +1880,34 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
     }
 }
 
-/// Locks the delegated relationship owning this call's turn, then reports
-/// whether a cascade already delivered that turn's logical terminal.
+/// Locks the terminal-observation frontier, then reports whether a cascade
+/// already delivered this delegated turn's logical terminal.
 ///
-/// The cascade and a terminal-observation transaction share no lock until the
-/// relationship lock this takes, so reading the logical terminal before taking
-/// it decides on a snapshot the cascade can invalidate a moment later: the
-/// observation would then terminalize a turn whose stop was already delivered,
-/// replacing the relationship result the cascade recorded. Taking the lock
-/// first makes the answer authoritative for the rest of the transaction, for
-/// every terminal outcome kind — including the tool-round arm, which takes no
-/// relationship lock of its own.
+/// An ordinary call retains the model-execution scheduler lock. A delegated
+/// call instead shares peer-message ordering: canonical endpoint sessions,
+/// canonical endpoint schedulers, then the relationship. Besides making the
+/// logical-terminal read authoritative, this prevents a message transaction
+/// holding the parent session from waiting on a child scheduler held by an
+/// observation that is itself waiting for that parent session.
 async fn locked_delegation_logical_terminal(
     connection: &mut PgConnection,
     session: SessionId,
     call: ModelCallId,
 ) -> Result<bool, ModelCallRepositoryError> {
+    if lock_model_call_terminal_frontier(connection, session, call)
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    model_call_is_delegation_logically_terminal(connection, session, call).await
+}
+
+async fn lock_model_call_terminal_frontier(
+    connection: &mut PgConnection,
+    session: SessionId,
+    call: ModelCallId,
+) -> Result<Option<TurnId>, ModelCallRepositoryError> {
     let turn: Option<Uuid> = sqlx::query_scalar(
         "SELECT turn_id
            FROM model_call
@@ -1557,10 +1919,120 @@ async fn locked_delegation_logical_terminal(
     .fetch_optional(&mut *connection)
     .await?;
     let Some(turn) = turn else {
-        return Ok(false);
+        lock_session(connection, session).await?;
+        return Ok(None);
     };
-    lock_delegated_child_result_frontier(connection, session, TurnId::from_uuid(turn)).await?;
-    model_call_is_delegation_logically_terminal(connection, session, call).await
+    let turn = turn_id_from_uuid(turn);
+    lock_delegated_turn_terminal_frontier(connection, session, turn).await?;
+    Ok(Some(turn))
+}
+
+pub(crate) async fn lock_delegated_turn_terminal_frontier(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), ModelCallRepositoryError> {
+    let relation = load_delegation_terminal_relation(
+        connection,
+        crate::lock_inventory::DELEGATION_TERMINAL_RELATION_IDENTITY,
+        session_id_to_uuid(session),
+        turn_id_to_uuid(turn),
+    )
+    .await?;
+    let Some(relation) = relation else {
+        lock_session(connection, session).await?;
+        return Ok(());
+    };
+    let parent = session_id_from_uuid(relation.parent_session_id);
+    let (first, second) = crate::lock_inventory::ordered_session_pair(session, parent);
+    lock_delegation_terminal_session(connection, first).await?;
+    if second != first {
+        lock_delegation_terminal_session(connection, second).await?;
+    }
+    lock_session(connection, first).await?;
+    if second != first {
+        lock_session(connection, second).await?;
+    }
+    let locked = load_delegation_terminal_relation(
+        connection,
+        crate::lock_inventory::DELEGATION_TERMINAL_RELATION,
+        session_id_to_uuid(session),
+        turn_id_to_uuid(turn),
+    )
+    .await?;
+    if locked != Some(relation) {
+        return Err(ModelCallCorruption::Inconsistent(
+            "delegated terminal relationship changed while locking",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DelegationTerminalRelationRow {
+    spawning_tool_request_id: Uuid,
+    parent_session_id: Uuid,
+}
+
+async fn load_delegation_terminal_relation(
+    connection: &mut PgConnection,
+    statement: &'static str,
+    child: Uuid,
+    turn: Uuid,
+) -> Result<Option<DelegationTerminalRelationRow>, ModelCallRepositoryError> {
+    sqlx::query(statement)
+        .bind(child)
+        .bind(turn)
+        .fetch_optional(connection)
+        .await?
+        .map(|row| {
+            Ok(DelegationTerminalRelationRow {
+                spawning_tool_request_id: delegation_terminal_relation_uuid(
+                    &row,
+                    "spawning_tool_request_id",
+                )?,
+                parent_session_id: delegation_terminal_relation_uuid(&row, "parent_session_id")?,
+            })
+        })
+        .transpose()
+}
+
+fn delegation_terminal_relation_uuid(
+    row: &PgRow,
+    column: &'static str,
+) -> Result<Uuid, ModelCallRepositoryError> {
+    match row.try_get(column) {
+        Ok(value) => Ok(value),
+        Err(error @ (sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_))) => {
+            Err(delegation_terminal_relation_decode_error(error))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn delegation_terminal_relation_decode_error(error: sqlx::Error) -> ModelCallRepositoryError {
+    debug_assert!(matches!(
+        error,
+        sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_)
+    ));
+    ModelCallCorruption::Inconsistent("delegated terminal relationship identity").into()
+}
+
+async fn lock_delegation_terminal_session(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<(), ModelCallRepositoryError> {
+    let locked =
+        sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::DELEGATION_TERMINAL_ENDPOINT_SESSION)
+            .bind(session_id_to_uuid(session))
+            .fetch_optional(connection)
+            .await?;
+    if locked.is_some_and(|locked| session_id_from_uuid(locked) == session) {
+        Ok(())
+    } else {
+        Err(ModelCallCorruption::Missing("delegated terminal endpoint session").into())
+    }
 }
 
 async fn model_call_is_delegation_logically_terminal(
@@ -4261,12 +4733,11 @@ async fn persist_terminal_outcome_with_usage(
             .await
         }
         ModelCallTerminalOutcome::Failed(failed) => {
-            lock_delegated_child_result_frontier(connection, failed.session(), failed.turn())
-                .await?;
-            persist_failed(connection, failed, usage, provider_failure_cause).await?;
-            persist_delegated_child_result(
+            persist_failed_with_delegated_child_result(
                 connection,
-                &DelegationOutcome::from_failed_child(failed),
+                failed,
+                usage,
+                provider_failure_cause,
             )
             .await
         }
@@ -4299,36 +4770,80 @@ async fn persist_terminal_outcome_with_usage(
     }
 }
 
+async fn persist_failed_with_delegated_child_result(
+    connection: &mut PgConnection,
+    failed: &FailedModelCallTurn,
+    usage: ProviderReportedTokenUsage,
+    provider_failure_cause: Option<ProviderModelCallFailureCause>,
+) -> Result<(), ModelCallRepositoryError> {
+    lock_delegated_child_result_frontier(connection, failed.session(), failed.turn()).await?;
+    persist_failed(connection, failed, usage, provider_failure_cause).await?;
+    persist_delegated_child_result(connection, &DelegationOutcome::from_failed_child(failed)).await
+}
+
 async fn lock_delegated_child_result_frontier(
     connection: &mut PgConnection,
     child: SessionId,
     turn: TurnId,
 ) -> Result<(), ModelCallRepositoryError> {
-    let relation = sqlx::query_as::<_, (Uuid, Uuid)>(
+    let relation = load_delegation_terminal_relation(
+        connection,
         crate::lock_inventory::DELEGATION_TERMINAL_RELATION_IDENTITY,
+        session_id_to_uuid(child),
+        turn_id_to_uuid(turn),
     )
-    .bind(session_id_to_uuid(child))
-    .bind(turn_id_to_uuid(turn))
-    .fetch_optional(&mut *connection)
     .await?;
-    let Some((spawning_request, parent)) = relation else {
+    let Some(relation) = relation else {
         return Ok(());
     };
-    sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_PARENT_SESSION)
-        .bind(parent)
+    sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_ENDPOINT_SESSION)
+        .bind(relation.parent_session_id)
         .execute(&mut *connection)
         .await?;
-    let locked =
-        sqlx::query_as::<_, (Uuid, Uuid)>(crate::lock_inventory::DELEGATION_TERMINAL_RELATION)
-            .bind(session_id_to_uuid(child))
-            .bind(turn_id_to_uuid(turn))
-            .fetch_optional(&mut *connection)
-            .await?;
-    if locked != Some((spawning_request, parent)) {
+    let locked = load_delegation_terminal_relation(
+        connection,
+        crate::lock_inventory::DELEGATION_TERMINAL_RELATION,
+        session_id_to_uuid(child),
+        turn_id_to_uuid(turn),
+    )
+    .await?;
+    if locked != Some(relation) {
         return Err(ModelCallCorruption::Inconsistent(
             "delegated terminal relationship changed while locking",
         )
         .into());
+    }
+    Ok(())
+}
+
+/// Locks the immutable parent/child endpoint pair before a child scheduler can
+/// be locked by a transaction that may terminalize the delegated child.
+pub(crate) async fn lock_delegated_child_endpoint_sessions(
+    connection: &mut PgConnection,
+    child: SessionId,
+) -> Result<(), ModelCallRepositoryError> {
+    let parent: Option<Uuid> = sqlx::query_scalar(
+        "SELECT parent_session_id
+           FROM session_delegation
+          WHERE child_session_id = $1",
+    )
+    .bind(session_id_to_uuid(child))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(parent) = parent else {
+        return Ok(());
+    };
+    let parent = session_id_from_uuid(parent);
+    let (first, second) = crate::lock_inventory::ordered_session_pair(child, parent);
+    sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_ENDPOINT_SESSION)
+        .bind(session_id_to_uuid(first))
+        .execute(&mut *connection)
+        .await?;
+    if second != first {
+        sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_ENDPOINT_SESSION)
+            .bind(session_id_to_uuid(second))
+            .execute(&mut *connection)
+            .await?;
     }
     Ok(())
 }
@@ -4364,22 +4879,25 @@ async fn persist_delegated_child_result(
         }
     };
     let content = outcome.content().map(DelegationContent::as_str);
-    let relation =
-        sqlx::query_as::<_, (Uuid, Uuid)>(crate::lock_inventory::DELEGATION_TERMINAL_RELATION)
-            .bind(session_id_to_uuid(child))
-            .bind(turn_id_to_uuid(turn))
-            .fetch_optional(&mut *connection)
-            .await?;
-    let Some((spawning_request, parent)) = relation else {
+    let relation = load_delegation_terminal_relation(
+        connection,
+        crate::lock_inventory::DELEGATION_TERMINAL_RELATION,
+        session_id_to_uuid(child),
+        turn_id_to_uuid(turn),
+    )
+    .await?;
+    let Some(relation) = relation else {
         return Ok(());
     };
+    let spawning_request = relation.spawning_tool_request_id;
+    let parent = relation.parent_session_id;
     if sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1 FROM session_child_result
              WHERE spawning_tool_request_id = $1
         )",
     )
-    .bind(spawning_request)
+    .bind(relation.spawning_tool_request_id)
     .fetch_one(&mut *connection)
     .await?
     {
@@ -4468,8 +4986,8 @@ async fn persist_delegated_child_result(
                           THEN NULL ELSE 'background_result' END)",
         )
         .bind(awaiting_request)
-        .bind(spawning_request)
-        .bind(parent)
+        .bind(relation.spawning_tool_request_id)
+        .bind(relation.parent_session_id)
         .bind(delivery_sequence)
         .execute(&mut *connection)
         .await?;
@@ -6188,11 +6706,29 @@ mod tests {
     };
 
     use super::{
-        ModelCallIdentityCollision, ModelCallRepositoryError, StoredTerminalFrontierMember,
-        cancellation_poll_interval, commit_failure_is_ambiguous,
-        completed_terminal_frontier_matches, failed_terminal_frontier_matches,
-        record_reclassified_turn_candidate,
+        ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
+        StoredTerminalFrontierMember, cancellation_poll_interval, commit_failure_is_ambiguous,
+        completed_terminal_frontier_matches, delegation_terminal_relation_decode_error,
+        failed_terminal_frontier_matches, record_reclassified_turn_candidate,
     };
+
+    #[test]
+    fn delegated_terminal_relation_decode_failure_is_corruption() {
+        let error = sqlx::Error::ColumnDecode {
+            index: String::from("parent_session_id"),
+            source: Box::new(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "fixture UUID decode failure",
+            )),
+        };
+
+        assert!(matches!(
+            delegation_terminal_relation_decode_error(error),
+            ModelCallRepositoryError::Corruption(ModelCallCorruption::Inconsistent(
+                "delegated terminal relationship identity"
+            ))
+        ));
+    }
 
     #[tokio::test]
     async fn cancellation_polling_delays_missed_ticks() {
