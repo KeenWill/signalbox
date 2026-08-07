@@ -1419,9 +1419,8 @@ async fn committed_event_fixture(
 ///
 /// The comparison is deliberately *not* made here. `#[track_caller]` does not
 /// carry through an `async fn`, so a shared assertion would report all fifteen
-/// round trips from this one line; testing-style rule 16 requires a failure to
-/// name its call site, so each caller asserts for itself and this helper only
-/// hides the load.
+/// round trips from this one line, and a failure has to name its own call site.
+/// Each caller therefore asserts for itself and this helper only hides the load.
 ///
 /// A decode that drops, or silently rewrites, any field of a kind stalls
 /// repository-watch dispatch on that event forever, because the evaluation row

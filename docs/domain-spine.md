@@ -8707,6 +8707,10 @@ pub enum RepoWatchEventKindNameV1 {
     ReactionChanged,
 }
 
+impl RepoWatchEventKindNameV1 {
+    pub fn all() -> Vec<Self>;
+}
+
 pub enum ChecksOutcome {
     Success,
     Failure,

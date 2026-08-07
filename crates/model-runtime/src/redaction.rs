@@ -1852,43 +1852,46 @@ mod tests {
     #[test]
     fn streamed_tool_arguments_preserve_non_credential_escapes_byte_for_byte() {
         let key = credential("fixture_secret");
+        // Split mid-escape: the scrubber must hold `\` and decide about it only
+        // once the next chunk arrives.
+        let first = r#"{"text":"first\"#;
+        let second = r#"nsecond \"quoted\" \\ \t last"}"#;
         let mut observed = Vec::new();
         let mut sink = CredentialRedactingSink::new(&mut observed, &key);
         sink.observe(Observation {
             correlation: "call-1".to_string(),
             fact: ObservationFact::ToolArgumentsDelta {
                 index: 0,
-                fragment: r#"{"text":"first\"#.to_string(),
+                fragment: first.to_string(),
             },
         });
         sink.observe(Observation {
             correlation: "call-1".to_string(),
             fact: ObservationFact::ToolArgumentsDelta {
                 index: 0,
-                fragment: r#"nsecond \"quoted\" \\ \t last"}"#.to_string(),
+                fragment: second.to_string(),
             },
         });
         sink.flush();
         drop(sink);
 
+        // The claim is byte preservation of the reconstructed stream, not any
+        // particular delta segmentation: provider chunk boundaries are
+        // arbitrary, and an implementation that buffered or coalesced these
+        // safe fragments would still be correct.
         assert_eq!(
-            observed,
-            vec![
-                Observation {
-                    correlation: "call-1".to_string(),
-                    fact: ObservationFact::ToolArgumentsDelta {
-                        index: 0,
-                        fragment: r#"{"text":"first"#.to_string(),
-                    },
-                },
-                Observation {
-                    correlation: "call-1".to_string(),
-                    fact: ObservationFact::ToolArgumentsDelta {
-                        index: 0,
-                        fragment: r#"\nsecond \"quoted\" \\ \t last"}"#.to_string(),
-                    },
-                },
-            ]
+            joined_arguments(&observed, "call-1", 0),
+            format!("{first}{second}"),
+            "non-credential escapes reach the model byte for byte"
+        );
+        // ...and none of it is smuggled onto another correlation or index.
+        assert!(
+            observed.iter().all(|observation| matches!(
+                (&observation.correlation, &observation.fact),
+                (correlation, ObservationFact::ToolArgumentsDelta { index: 0, .. })
+                    if correlation == "call-1"
+            )),
+            "the preserved bytes stay on their own correlation and index: {observed:?}"
         );
     }
 

@@ -2738,17 +2738,24 @@ mod tests {
     /// tool authority its frontier rendering demands.
     ///
     /// Each round is one completed producing call contributing a single
-    /// `AssistantToolUse` frontier entry, so the recorded round count is the
-    /// one knob. The final request is denied, which closes the latest round
-    /// and makes the continuation call admissible. Identities are seeded from
-    /// a dedicated range, decorrelated from the round ordinal, so an
-    /// implementation counting identities instead of producing calls cannot
-    /// accidentally pass.
+    /// `AssistantToolUse` frontier entry paired with its own `ToolDenied`
+    /// result, so the recorded round count is the one knob. Every round is
+    /// denied, which closes it and leaves the continuation call admissible;
+    /// pairing each proposal with its result is what the tool loop actually
+    /// produces, and a proposal-only history is a shape no round can reach.
+    /// Identities are seeded from a dedicated range, decorrelated from the
+    /// round ordinal, so an implementation counting identities instead of
+    /// producing calls cannot accidentally pass.
+    ///
+    /// The returned failed turn closes *this* fixture's own prepared call, so
+    /// a test can require the committed terminalization to name the saturated
+    /// session and call rather than accepting any failed turn at all.
     fn tool_round_saturated_fixture(
         rounds: usize,
     ) -> (
         PreparedModelCallRequest,
         Box<[ResolvedToolConversationEntry]>,
+        FailedModelCallTurn,
     ) {
         let session_id = identity(200, SessionId::from_uuid);
         let direct = identity(201, DirectModelSelection::from_uuid);
@@ -2764,10 +2771,6 @@ mod tests {
             ResolvedProviderTarget::naming(identity(207, ProviderModelIdentity::from_uuid));
         let continuation_call = identity(208, ModelCallId::from_uuid);
         let current_frontier = identity(209, ContextFrontierId::from_uuid);
-        let denial_entry = SemanticTranscriptEntryRef::from_source(
-            session_id,
-            identity(210, SemanticTranscriptEntryId::from_uuid),
-        );
         let version = SessionConfigurationDefaultsVersion::first();
         let defaults = SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct));
         let session = SessionReconstitutionInput::new(
@@ -2839,27 +2842,43 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let denied_request = requests
-            .last()
-            .expect("a saturating fixture records at least one round")
-            .clone();
-        let denial = ToolApprovalResolutionReconstitutionInput::user_command(
-            DecideToolRequest::try_new(
-                identity(211, DurableCommandId::from_uuid),
-                denied_request.id(),
-                ToolApprovalDecision::Deny {
-                    reason: Some(
-                        ToolDenialReason::try_new(String::from("fixture closes the round"))
-                            .expect("fixture denial reason is valid"),
-                    ),
-                },
-            )
-            .expect("the fixture command identity is admitted")
-            .prepare_applied(&denied_request)
-            .expect("the command names the exact request"),
-        )
-        .reconstitute()
-        .expect("user denial provenance is implemented");
+        // Every round carries its own result. A continuation frontier must
+        // include the current round's complete result evidence, and proposals
+        // render paired with their results, so a history of `rounds` proposals
+        // closed by a single result is a shape the tool loop cannot produce.
+        // Denying each round is the cheapest spec-conformant pairing: it closes
+        // the round it belongs to and leaves the continuation admissible.
+        let denial_entries = (0_u128..)
+            .zip(&requests)
+            .map(|(round, _)| {
+                SemanticTranscriptEntryRef::from_source(
+                    session_id,
+                    identity(5_000 + round, SemanticTranscriptEntryId::from_uuid),
+                )
+            })
+            .collect::<Vec<_>>();
+        let denials = (0_u128..)
+            .zip(&requests)
+            .map(|(round, request)| {
+                ToolApprovalResolutionReconstitutionInput::user_command(
+                    DecideToolRequest::try_new(
+                        identity(6_000 + round, DurableCommandId::from_uuid),
+                        request.id(),
+                        ToolApprovalDecision::Deny {
+                            reason: Some(
+                                ToolDenialReason::try_new(String::from("fixture closes the round"))
+                                    .expect("fixture denial reason is valid"),
+                            ),
+                        },
+                    )
+                    .expect("the fixture command identity is admitted")
+                    .prepare_applied(request)
+                    .expect("the command names the exact request"),
+                )
+                .reconstitute()
+                .expect("user denial provenance is implemented")
+            })
+            .collect::<Vec<_>>();
         let semantic_entries = [SemanticTranscriptEntryReconstitutionInput::new(
             origin_entry.entry(),
             session_id,
@@ -2869,25 +2888,28 @@ mod tests {
         .chain(
             tool_use_entries
                 .iter()
+                .zip(&denial_entries)
                 .zip(&requests)
-                .map(|(entry, request)| {
-                    SemanticTranscriptEntryReconstitutionInput::new(
-                        entry.entry(),
-                        session_id,
-                        SemanticTranscriptEntryPayload::AssistantToolUse {
-                            producing_call: request.producing_call(),
-                            request: request.id(),
-                        },
-                    )
+                .flat_map(|((proposal, result), request)| {
+                    [
+                        SemanticTranscriptEntryReconstitutionInput::new(
+                            proposal.entry(),
+                            session_id,
+                            SemanticTranscriptEntryPayload::AssistantToolUse {
+                                producing_call: request.producing_call(),
+                                request: request.id(),
+                            },
+                        ),
+                        SemanticTranscriptEntryReconstitutionInput::new(
+                            result.entry(),
+                            session_id,
+                            SemanticTranscriptEntryPayload::ToolDenied {
+                                request: request.id(),
+                            },
+                        ),
+                    ]
                 }),
         )
-        .chain([SemanticTranscriptEntryReconstitutionInput::new(
-            denial_entry.entry(),
-            session_id,
-            SemanticTranscriptEntryPayload::ToolDenied {
-                request: denied_request.id(),
-            },
-        )])
         .collect::<Vec<_>>();
         let producing_calls = (0_u128..)
             .zip(&requests)
@@ -2954,10 +2976,16 @@ mod tests {
             .resolved_snapshot(starting_frontier)
             .cloned()
             .expect("the starting snapshot is projected");
+        // Proposal-ordered: each round's proposal is immediately followed by
+        // its own result, which is how the renderer pairs them.
         let frontier_references = [origin_entry]
             .into_iter()
-            .chain(tool_use_entries.iter().copied())
-            .chain([denial_entry])
+            .chain(
+                tool_use_entries
+                    .iter()
+                    .zip(&denial_entries)
+                    .flat_map(|(proposal, result)| [*proposal, *result]),
+            )
             .collect::<Vec<_>>();
         let frontier_entries = frontier_references
             .iter()
@@ -2991,7 +3019,7 @@ mod tests {
                 ModelCallReconstitutionState::Prepared,
             )],
         )
-        .with_tool_denial_correlations(vec![denial.clone()])
+        .with_tool_denial_correlations(denials.clone())
         .with_call_snapshot(ResolvedContextFrontierReconstitutionInput::new(
             session_id,
             current_frontier,
@@ -3001,23 +3029,33 @@ mod tests {
         .expect("the saturated Prepared facts reconstruct");
         let tool_evidence = tool_use_entries
             .iter()
+            .zip(&denial_entries)
             .zip(&requests)
-            .map(
-                |(source, request)| ResolvedToolConversationEntry::AssistantToolUse {
-                    source: *source,
-                    request: request.clone(),
-                },
-            )
-            .chain([ResolvedToolConversationEntry::Denied {
-                source: denial_entry,
-                request: denied_request,
-                approval: denial,
-            }])
+            .zip(&denials)
+            .flat_map(|(((proposal, result), request), approval)| {
+                [
+                    ResolvedToolConversationEntry::AssistantToolUse {
+                        source: *proposal,
+                        request: request.clone(),
+                    },
+                    ResolvedToolConversationEntry::Denied {
+                        source: *result,
+                        request: request.clone(),
+                        approval: approval.clone(),
+                    },
+                ]
+            })
             .collect::<Box<[_]>>();
         let request = execution
             .resume_prepared_call()
             .expect("the saturated Prepared request resumes");
-        (request, tool_evidence)
+        let failed = execution
+            .fail_prepared_call(FailedModelCallTurnIdentities::new(
+                identity(212, SemanticTranscriptEntryId::from_uuid),
+                identity(213, ContextFrontierId::from_uuid),
+            ))
+            .expect("the saturated Prepared call closes as a failed turn");
+        (request, tool_evidence, failed)
     }
 
     #[derive(Debug)]
@@ -4790,6 +4828,10 @@ mod tests {
     async fn capability_failure_commit_retries_an_identity_collision() {
         let (request, _) = prepared_fixture();
         let session = request.session();
+        // Captured before the request moves into the fake, so the retry is
+        // compared against the call that was actually prepared rather than only
+        // against itself.
+        let prepared_call = request.call().id();
         let failed = failed_turn_fixture();
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
@@ -4817,8 +4859,9 @@ mod tests {
         );
         let (_, _, failure, _, _, provider, _, _, retained) = service.into_parts();
         assert_eq!(failure.calls, 2);
-        // Both attempts must address the same failure — otherwise the retry
-        // terminalized something else — and the second must carry *fresh*
+        // Both attempts must address the prepared call — agreeing only with
+        // each other would still pass if the service handed the same stale or
+        // unrelated call to both — and the second must carry *fresh*
         // identities, which is the whole point of retrying a collision. A
         // retry reusing the colliding identities would collide again forever.
         let [first, second] = failure.recorded.as_slice() else {
@@ -4827,8 +4870,10 @@ mod tests {
                 failure.recorded.len()
             )
         };
-        assert_eq!(first.session, second.session);
-        assert_eq!(first.call, second.call);
+        assert_eq!(first.session, session);
+        assert_eq!(second.session, session);
+        assert_eq!(first.call, prepared_call);
+        assert_eq!(second.call, prepared_call);
         assert_ne!(
             first.identities, second.identities,
             "a retried identity collision must be retried with fresh identities"
@@ -4844,10 +4889,12 @@ mod tests {
     /// stop.
     #[tokio::test]
     async fn a_turn_at_the_automatic_tool_round_bound_fails_before_provider_entry() {
-        let (request, tool_entries) =
+        let (request, tool_entries, failed) =
             tool_round_saturated_fixture(MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN);
         let session = request.session();
-        let failed = failed_turn_fixture();
+        // Captured before the request moves into the fake: the committed
+        // terminalization has to name *this* saturated call.
+        let saturated_call = request.call().id();
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
@@ -4875,6 +4922,17 @@ mod tests {
         let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
+        // A count alone accepts `fail_prepared` called with an unrelated
+        // session or call, which would terminalize something other than the
+        // saturated turn while this test still claimed it was closed.
+        let [committed] = failure.recorded.as_slice() else {
+            panic!(
+                "expected exactly one failure-commit attempt, got {}",
+                failure.recorded.len()
+            )
+        };
+        assert_eq!(committed.session, session);
+        assert_eq!(committed.call, saturated_call);
         assert_eq!(
             provider.capability_preparation_count(),
             0,

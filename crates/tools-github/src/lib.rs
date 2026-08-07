@@ -2939,6 +2939,9 @@ fn nested_bool(value: &serde_json::Value, path: &[&str]) -> Result<bool, GitHubT
 }
 
 #[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
 mod tests {
     use std::{
         io::{self, Write},
@@ -2952,7 +2955,7 @@ mod tests {
     };
     use signalbox_model_runtime::CredentialAccessFailure;
 
-    use super::*;
+    use super::{test_support::*, *};
 
     const BASE_REVISION: &str = "1111111111111111111111111111111111111111";
     const HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
@@ -3464,6 +3467,69 @@ mod tests {
             OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true
             }
+        );
+    }
+
+    /// Answers a creation dispatch with one fixed transport rejection.
+    #[derive(Clone, Copy, Debug)]
+    struct RejectingCreateTransport {
+        status: u16,
+    }
+
+    impl GitHubTransport for RejectingCreateTransport {
+        async fn execute(
+            &mut self,
+            _operation: GitHubOperation,
+            _credential: &CredentialValue,
+            _policy: &GitHubEgressPolicy,
+        ) -> Result<GitHubResult, GitHubTransportFailure> {
+            Err(GitHubTransportFailure::rejected(self.status))
+        }
+    }
+
+    /// INV-025: a definitively rejected creation reaches the workflow as
+    /// `KnownFailed` *evidence* carrying the sanitized rejection detail.
+    ///
+    /// The classifier tests above call `failure_detail` directly, so they stay
+    /// green if `failure_evidence` stops wrapping the detail in `KnownFailed`
+    /// and emits completion or another terminal shape instead — a regression
+    /// that would report a denial as something else entirely. This drives the
+    /// executor through a real correlated invocation so the bound evidence
+    /// variant is what is asserted.
+    #[tokio::test]
+    async fn inv_025_definitive_create_rejection_binds_known_failure_evidence() {
+        let outcome = create_pull_request_evidence(RejectingCreateTransport {
+            status: FORBIDDEN_STATUS,
+        })
+        .await;
+        let expected = make_detail(REQUEST_REJECTED_DETAIL).expect("fixed detail is valid");
+
+        assert_eq!(
+            outcome.evidence,
+            Some(ToolExecutorEvidence::KnownFailed {
+                detail: Some(expected)
+            })
+        );
+        assert!(
+            outcome.committed,
+            "definitive evidence commits rather than stalling the batch"
+        );
+    }
+
+    /// INV-025: the same path refuses to bind *any* evidence when GitHub
+    /// answered ambiguously, so an effect that may have happened is never
+    /// reported as a definitive outcome the agent would retry.
+    #[tokio::test]
+    async fn inv_025_server_side_create_rejection_binds_no_evidence() {
+        let outcome = create_pull_request_evidence(RejectingCreateTransport {
+            status: BAD_GATEWAY_STATUS,
+        })
+        .await;
+
+        assert_eq!(outcome.evidence, None);
+        assert!(
+            !outcome.committed,
+            "an ambiguous commit must not close the attempt definitively"
         );
     }
 

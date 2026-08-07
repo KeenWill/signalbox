@@ -10165,8 +10165,15 @@ async fn s06_inv025_inv026_ambiguous_external_effect_parks_a_durable_recovery_wa
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x8180;
+    // The proposal must name an external-effect tool. An effect-free request
+    // would never reach this path in production: the catalog fixes its effect
+    // class, the application prepares an effect-free attempt, and the domain
+    // rejects an ambiguous observation against one outright. `external-tool` is
+    // this file's synthetic external-effect name, so the `ExternalEffect`
+    // attempt prepared below is the class the catalog would have chosen rather
+    // than one this test froze on its own authority.
     let (fixture, _, _, request) =
-        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+        checkpoint_confirmed_tool_round(&pool, seed, "external-tool", "{}").await?;
     let tool_repository = PostgresToolLoopRepository::new(pool.clone());
     let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22));
     tool_repository
@@ -10216,15 +10223,47 @@ async fn s06_inv025_inv026_ambiguous_external_effect_parks_a_durable_recovery_wa
     assert_eq!(ended.attempt(), tool_attempt);
     assert_eq!(ended.end(), &ToolAttemptEnd::Ambiguous);
     assert_eq!(parked_attempt, tool_attempt.into_uuid());
+    // The claim is that ambiguous work is *never* announced definitively, so
+    // membership is not enough: an outbox that carried both this recovery and a
+    // `ResultsProjected` for the same batch would satisfy `contains` while
+    // reporting the effect resolved. Pin the whole ordered transition set for
+    // this exact turn and producing call — the fixture's proposal, then the
+    // recovery — so any additional terminal announcement breaks the shape.
+    let batch_transitions = dispatched
+        .iter()
+        .filter_map(|kind| match kind {
+            DispatchedOutboxEventKind::ToolBatchTransition {
+                turn,
+                producing_call,
+                state,
+            } if *turn == fixture.turn && *producing_call == fixture.call => Some(*state),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [
+        DispatchedToolBatchState::Proposed { .. },
+        DispatchedToolBatchState::RecoveryRequired {
+            attempt: recovering,
+        },
+    ] = batch_transitions.as_slice()
+    else {
+        panic!(
+            "an ambiguous external effect announces exactly its proposal and its recovery, \
+             got {batch_transitions:?}"
+        )
+    };
+    assert_eq!(
+        *recovering, tool_attempt,
+        "the recovery names the exact ambiguous attempt the gate waits on"
+    );
+    // The turn itself must not be reported failed either: a definitive turn
+    // failure is the other way this batch could be announced as resolved.
     assert!(
-        dispatched.contains(&DispatchedOutboxEventKind::ToolBatchTransition {
-            turn: fixture.turn,
-            producing_call: fixture.call,
-            state: DispatchedToolBatchState::RecoveryRequired {
-                attempt: tool_attempt,
-            },
-        }),
-        "an ambiguous external effect announces the recovery the reconciliation gate waits on"
+        !dispatched.iter().any(|kind| matches!(
+            kind,
+            DispatchedOutboxEventKind::TurnFailed { turn, .. } if *turn == fixture.turn
+        )),
+        "an ambiguous external effect must not also report its turn definitively failed"
     );
 
     pool.close().await;
