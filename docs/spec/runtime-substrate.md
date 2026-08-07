@@ -240,6 +240,18 @@ strings appear only as retained detail inside already-classified variants:
   terminal marker, stream protocol violation) and the partial facts observed
   before the loss.
 
+**Committed unimplemented functionality — provider non-acceptance evidence.** No
+present `TerminalEvidence` variant or `ProviderErrorEvidence` field proves that
+a provider rejected a request before accepting it, and no current adapter can
+authorize an availability successor. The implementing child must add a sealed
+typed proof alongside `ProviderError` for the exact quota-exhausted,
+rate-limited, and overloaded provider responses whose protocol semantics
+establish non-acceptance. Each adapter owns its exhaustive native mapping; the
+provider bridge preserves the proof without deriving it from
+`ProviderErrorKind`, status retryability, or native prose. Classification alone
+remains insufficient, and absence of the proof keeps the known failure terminal.
+This constraint adds no proof to the implemented evidence vocabulary above.
+
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss
 in both direct HTTP adapters, never silently completed. A finish reason observed
@@ -669,6 +681,18 @@ creates, so construction rejects hosts where process-group control is
 unavailable; a descendant that deliberately leaves that group is outside the
 adapter's boundary. Host isolation owns containment beyond the created group —
 specifically the runner sandbox in build-out — and is not an adapter claim.
+
+**Committed unimplemented functionality — Codex file delivery.** The present
+adapter supports only its ambient credential home and keeps `OPENAI_API_KEY` and
+every other direct credential value outside the cleared child environment. The
+configuration grammar admits `file`, but the present composition rejects it as
+undelivered. Its implementing child must resolve the selected profile during
+preparation and add only that profile's validated `env_key` and value as an
+operation-scoped child override after clearing the parent environment. The value
+must be absent from argv, logs, debug output, retained evidence, and every later
+spawn, and must seed the adapter's exact-value redaction before any
+provider-controlled output leaves the crate. This future override does not
+weaken ambient mode's existing exclusion test.
 
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.

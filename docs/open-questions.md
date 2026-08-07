@@ -270,8 +270,10 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   the Codex CLI executes from such a store is established by its configurable
   credential-store mode and its documented access-token login, but not by
   observation. If it declines, `oauth` is unavailable for that adapter and
-  `codex_home` with its serialisation constraint is the only subscription
-  delivery. (S22)
+  `codex_home` is the only subscription delivery. That fallback retains the
+  delivery contract's actual concurrency policy: serialization exists only when
+  the deployment sets `max_concurrent_invocations = 1`; absent a bound,
+  concurrent refresh races remain an accepted risk. (S22)
 - **Reuse-detection blast radius.** Whether a provider rejecting a reused
   refresh token invalidates only that token or the whole authorization family is
   not determinable from either CLI's source. It does not affect the `oauth`

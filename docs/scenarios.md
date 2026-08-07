@@ -711,10 +711,13 @@ INV-tagged test names and attached doc comments.
   the predecessor call, and the qualifying cause.
 - **State transitions:** Predecessor call → known availability failure and
   predecessor attempt → known failed; turn → successor eligible; successor
-  attempt/call → terminal. The chain is bounded to at most one call per pool
-  member for the turn.
+  attempt/call → terminal. Each availability-successor chain is bounded to at
+  most one call per pool member; a successful call or release from a parked wait
+  ends that chain before later continuation.
 - **Transient updates:** No current client update announces that a successor is
-  being considered or selected; the durable call chain exposes it afterward.
+  being considered or selected. The predecessor, cause, and successor remain
+  durable storage evidence afterward; no current process-protocol snapshot or
+  history message projects that chain to a client.
 - **Owning component:** Daemon pool policy authorizes and selects the profile;
   provider adapters supply the typed classification and separate evidence that
   the request was not accepted. Adapters do not select successors.

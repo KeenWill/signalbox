@@ -1313,12 +1313,43 @@ delivery still validates the allocator singleton and cursor. Daemon task
 ownership, polling, fan-out, and client observation semantics are owned by
 [process-protocol](process-protocol.md).
 
+**Committed unimplemented functionality — OAuth refresh staging.** No present
+migration or repository stores daemon-owned OAuth material. Its implementing
+child must durably mark one profile generation `refresh_in_progress` before the
+network exchange, then atomically replace the token and clear that exact marker
+after a successful rotation. A definitely failed exchange may clear the marker
+without changing the token only when provider non-rotation is proven. After a
+commit ambiguity the repository rereads the generation: the committed
+replacement wins, while an uncleared marker is durable quarantine evidence.
+Startup treats that marker the same way and never submits the possibly
+superseded stored token again. Provisioning replaces the quarantined generation
+with a fresh authorization in one transaction. This paragraph constrains the
+future schema; no present storage surface provides it.
+
+**Committed unimplemented functionality — availability-successor storage.** No
+present migration, repository operation, or reconstitution path stores an
+availability successor or credential-availability wait. Its implementing child
+must give a predecessor-linked attempt a closed origin distinct from the
+tool-loop continuation origin and atomically persist its predecessor model call,
+the qualifying availability cause, and the typed non-acceptance evidence that
+authorized substitution. The successor's call remains subject to
+`model_call_attempt_once`, pins the same target and a different profile, and
+cannot exist without that complete predecessor proof. A credential-availability
+wait must atomically retain the active turn slot and store the immutable
+pool-policy identity, the exhausted chain's member evidence, and the optional
+earliest reset required by
+[turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
+Reconstitution and wake must fail closed on partial or mismatched evidence. This
+paragraph constrains that future schema; no present storage surface provides it.
+
 ## Open edges
 
 - Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
   in [open questions](../open-questions.md#protocols-and-persistence).
-- Attempt continuation is admitted only for the tool-loop yield/approval path;
-  no other producer can construct a predecessor-linked attempt.
+- Attempt continuation is presently admitted only for the tool-loop
+  yield/approval path. The availability-successor producer described above is
+  committed but unimplemented; no current producer can construct that second
+  predecessor-linked shape.
 - Frontier lineage checks admit `none` and checked imported-frontier ancestry;
   native `SingleSource` fork ancestry remains unimplemented.
 - The aggregate-map rows for model calls and the tool loop have landed; provider

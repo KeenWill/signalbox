@@ -736,8 +736,17 @@ acknowledged work is configuration-independent (INV-034).
 
 ## Credential deliveries
 
-A profile's closed `delivery` states how its secret reaches the provider. Three
+A profile's closed `delivery` states how its secret reaches the provider. Four
 are admitted, and an adapter admits a subset of them.
+
+**`ambient`** is fieldless. The CLI resolves the one login already visible in
+the daemon user's process environment; the daemon supplies no credential value
+or profile-specific home. A profile declaring `ambient` therefore rejects every
+delivery-specific field. Because one CLI adapter process environment exposes
+only one such authentication context, a document may declare at most one
+`ambient` profile for `claude_cli` and at most one for `codex_cli`, regardless
+of which pools contain it. Giving that same login two profile names would not
+make two credentials and could not authorize a successor call.
 
 **`file`** names an absolute deployment-owned path, read per preparation and
 never cached, narrowed by the trailing-line-termination rule below. The
@@ -776,17 +785,30 @@ coordinate.
 
 Where `max_concurrent_invocations` is set and reached, that member is skipped
 during selection exactly as an excluded member is. Contention is not exhaustion:
-when every member is merely at its bound, the turn waits for one to free rather
-than consulting `on_pool_exhausted`, because a member at its bound has reported
-no failure and carries no reset time. Exhaustion means every member is excluded
-by a trigger or a quarantine, which is a durable condition; contention resolves
-on its own.
+whenever at least one otherwise-admissible member is merely at its bound, the
+turn waits for any such member to free rather than consulting
+`on_pool_exhausted`. This includes a mixed pool whose other members carry
+durable exclusions. A bounded member has reported no failure and carries no
+reset time; its invocation completion wakes the waiter. Exhaustion means every
+member is excluded by a trigger or a quarantine and no otherwise-admissible
+member is merely bounded, which is a durable condition; contention resolves on
+its own.
 
 **`oauth`** is a rotating authorization the daemon owns. The profile carries the
 `client_id`, `token_url`, `device_authorization_url`, and `scopes` its provider
 requires. These are configuration, never build-provided constants: which OAuth
 client a deployment presents is the operator's decision and is recorded in the
 operator's own document, not asserted by this build.
+
+**Committed unimplemented functionality — OAuth delivery and administration.**
+No present configuration composition, runtime path, API, process message, CLI
+command, or separate administrative endpoint provisions, re-provisions, deletes,
+or clears quarantine for an `oauth` profile. The parser rejects this admitted
+delivery as unavailable in the present build. The paragraphs below state the
+compatibility contract for its implementing stack; that stack must add its
+operator-authorized administrative boundary, idempotency and response contract
+before it can make an OAuth profile usable. The current closed process-protocol
+inventory is therefore complete and supplies none of these operations.
 
 Provisioning is explicit and never automatic. An operator-invoked command
 creates a scratch credential home, runs the adapter's own CLI device
@@ -799,14 +821,22 @@ other login for that account: an operator's existing CLI logins on this or any
 other machine keep working, and deleting the profile's stored authorization ends
 only the daemon's own family.
 
-The daemon is the sole refresher of a stored authorization. A refresh takes a
-row lock, re-reads the stored token, exchanges it, and persists the returned
-token before the new access token is used anywhere. The store is updated in
-place and the previous refresh token is overwritten rather than retained: a
-superseded token is unusable, and keeping one would only preserve material whose
-sole remaining effect is to invalidate the live authorization if it were ever
-replayed. Access tokens are held in memory; a restart costs one refresh per
-profile and keeps them out of the database entirely.
+The daemon is the sole refresher of a stored authorization. Before contacting
+the provider, it locks the profile row, reads the stored token, and
+transactionally marks that generation's refresh in progress. The durable marker
+excludes another refresher after the lock is released for the network exchange.
+A second transaction re-locks and matches that generation, persists the returned
+token, and clears the marker before the new access token is used anywhere. A
+definitely committed replacement overwrites the previous refresh token rather
+than retaining it: a superseded token is unusable, and keeping one would only
+preserve material whose sole remaining effect is to invalidate the live
+authorization if it were ever replayed. If the exchange fails after possible
+provider rotation, its persistence commit is ambiguous, or the daemon restarts
+with the marker still present, it never replays the stored token. It first
+rereads the durable generation: a committed replacement is adopted; an uncleared
+marker quarantines the profile and requires re-provisioning. Access tokens are
+held in memory; a clean restart costs one refresh per profile and keeps them out
+of the database entirely.
 
 Dispatch supplies each invocation a scratch credential home carrying a
 daemon-minted access token, discarded when the process ends. The refresh token
@@ -870,8 +900,16 @@ The five admitted actions are:
 | `stay`               | The member keeps the session. The failure terminalizes as it would with no pool.                                                                      |
 | `switch_next_turn`   | The turn fails as it would with no pool. The next turn's preparation excludes this member.                                                            |
 | `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md#availability-successor-calls)). |
-| `avoid_new_sessions` | Sessions already pinned to the member keep it; preparation for a session with no prior completed call on this pool excludes it.                       |
+| `avoid_new_sessions` | Sessions with a prior completed call through the member keep it; preparation for a session without one on this pool excludes it.                      |
 | `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an operator clears it.                                          |
+
+`switch_next_turn` creates a durable pending displacement scoped to the session,
+pool-policy snapshot, and member that observed the trigger. It survives restart
+and excludes that member from the next model-call preparation for that pool. The
+transaction that successfully prepares a call through another member consumes
+the displacement. If no other member is admissible, the displacement remains
+pending while the pool's exhaustion policy runs; it cannot expire merely because
+a preparation found no successor. An explicit operator clear may remove it.
 
 An `avoid_new_sessions` exclusion is durable and scoped to the membership that
 observed it, not to every pool containing the profile. A reported reset time
@@ -885,40 +923,56 @@ sticky or exempt from the exclusion.
 `on_overloaded`, because only those causes carry proof that the request was not
 accepted. Selecting it for `on_credential_rejected` or `on_headroom_low` is a
 typed startup failure: a rejected credential is deployment misconfiguration that
-substitution would hide, and low headroom is not a failure at all.
+substitution would hide, and low headroom is not a failure at all. The
+`on_credential_rejected` trigger classifies rejection of an issued provider
+request. A `codex_home` refresh race or rejected daemon-owned OAuth refresh
+occurs in the delivery layer before such a request and bypasses pool trigger
+policy: either one quarantines the profile unconditionally as specified above.
 
 Selection happens at model-call preparation, never at session creation. For the
-resolved target's family, preparation reads the session's current pool from its
-credential history, then admits pool members in priority order, skipping any
-excluded by an action above, and breaks a priority tie by the pool's rule.
-Stickiness needs no separate durable state: preparation prefers the member the
-session's most recent completed call on that pool pinned, so a session stays on
-one account until a trigger displaces it. When the pool admits no member,
-`on_pool_exhausted` decides — `park` parks the turn in the durable wait carrying
-the earliest reset the pool's members reported. When no excluded member reports
-a reset, `park` records an indefinite durable wait with no deadline; only an
-operator clear, a zero-cost no-model availability probe, or another durable
-member-availability update wakes it. A restart alone does not. `fail` instead
-fails the turn as a known failure. Quarantine is durable and scoped to the
-profile rather than to the pool that observed it, because a rejected credential
-is a property of the account: a profile ranked in two pools is excluded from
-both. It is cleared only by an explicit operator command, or by a probe that
-costs nothing and calls no model where the adapter offers one — never by a
-timer, since a revoked credential does not heal on a schedule, and never by a
-restart. Why an operator command rather than rediscovery: for a `codex_home` or
-`oauth` profile the repair is an interactive re-authorization the operator
-performs, so the operator knows the moment it is fixed, and rediscovering it
-instead would spend a real model call to learn what they could have said.
-Reading a quarantine record is never on the recovery path for acknowledged work,
-so INV-034 is unaffected.
+resolved target's family, preparation reads the session's current immutable
+pool-policy snapshot from its credential history, then admits members in
+priority order, skipping any excluded by an action above, and breaks a priority
+tie by the snapshot's rule. `round_robin` owns one durable global cursor per
+immutable pool-policy revision and priority value; every session history entry
+that copied that validated revision refers to the same cursor, rather than
+creating a session-local one. When that rule must choose among two or more
+admitted equal-priority members, the transaction that commits the selected
+call's `Prepared` record also advances the cursor to the member after the one it
+selected, wrapping in declared order. A failed preparation advances nothing;
+restart preserves the cursor. Stickiness and a sole admitted member require no
+tie-break and do not advance it. Stickiness needs no separate durable state:
+preparation prefers the member the session's most recent completed call on that
+pool pinned, so a session stays on one account until a trigger displaces it.
+When the pool admits no member, `on_pool_exhausted` decides — `park` parks the
+turn in the durable wait carrying the earliest reset the pool's members
+reported. When no excluded member reports a reset, `park` records an indefinite
+durable wait with no deadline; only an operator clear, a zero-cost no-model
+availability probe, or another durable member-availability update wakes it. A
+restart alone does not. `fail` instead fails the turn as a known failure.
+Quarantine is durable and scoped to the profile rather than to the pool that
+observed it, because a rejected credential is a property of the account: a
+profile ranked in two pools is excluded from both. It is cleared only by an
+explicit operator command, or by a probe that costs nothing and calls no model
+where the adapter offers one — never by a timer, since a revoked credential does
+not heal on a schedule, and never by a restart. Why an operator command rather
+than rediscovery: for a `codex_home` or `oauth` profile the repair is an
+interactive re-authorization the operator performs, so the operator knows the
+moment it is fixed, and rediscovering it instead would spend a real model call
+to learn what they could have said. Reading a quarantine record is never on the
+recovery path for acknowledged work, so INV-034 is unaffected.
 
 The durable record is unchanged in kind. A session's credential history event
-carries a complete family-to-pool snapshot where it previously carried a
-family-to-reference snapshot, and each model call still pins the exact profile
-that authenticated it in `model_call.credential_reference` at the `Prepared`
-insert. A historical read therefore still resolves that call's billing kind and
-rates from the reference the call itself pinned, whatever selection chose it,
-and a pool edited across a restart cannot relabel a stored call.
+carries a complete family-to-pool-policy snapshot where it previously carried a
+family-to-reference snapshot. Each immutable policy includes the pool name,
+ordered members and their membership settings, tie-break and exhaustion rules,
+and all trigger actions; preparation never resolves that snapshot through the
+current document's pool table. Each model call still pins the exact profile that
+authenticated it in `model_call.credential_reference` at the `Prepared` insert.
+A historical read therefore still resolves that call's billing kind and rates
+from the reference the call itself pinned, whatever selection chose it, and a
+pool edited across a restart can neither broaden an existing session's admitted
+credentials nor relabel a stored call.
 
 Admission is fail-closed. Startup rejects a pool with no members, a duplicate
 member profile, a member naming an undeclared profile, a mapping naming an
@@ -1190,10 +1244,12 @@ deployment-side rules that code cannot enforce are stated in
 - **Session credential history.** First handling of every native or imported
   session-creation command appends event ordinal 1 to that session's credential
   history in the same transaction as the session. The event has creation-command
-  provenance and a complete, nonempty family-to-pool snapshot copied from the
-  validated mapping table. Record and entry rows are append-only; a guarded head
-  names the current event, and model-call preparation reads the latest entry for
-  the resolved target's family and then selects a member of the named pool
+  provenance and a complete, nonempty family-to-pool-policy snapshot copied from
+  the validated mapping and pool tables. Each family entry carries the immutable
+  policy fields enumerated above rather than only a pool name. Record and entry
+  rows are append-only; a guarded head names the current event, and model-call
+  preparation reads the latest entry for the resolved target's family and then
+  selects a member of that stored policy
   ([credential pools and selection](#credential-pools-and-selection)). Equal
   command replay returns the recorded session without consulting the current
   table, so a configuration edit never silently re-resolves an existing
