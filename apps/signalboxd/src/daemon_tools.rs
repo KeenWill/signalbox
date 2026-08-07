@@ -1334,10 +1334,11 @@ mod tests {
     }
 
     struct BridgeArtifactSelection {
-        executable: PathBuf,
         profile: OsString,
         target_dir: PathBuf,
     }
+
+    const CLAUDE_MCP_BRIDGE_BINARY: &str = "signalbox-claude-mcp-bridge";
 
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
@@ -1354,10 +1355,6 @@ mod tests {
             _ => profile_dir_name.to_os_string(),
         };
         BridgeArtifactSelection {
-            executable: profile_dir.join(format!(
-                "signalbox-claude-mcp-bridge{}",
-                std::env::consts::EXE_SUFFIX
-            )),
             profile,
             target_dir: profile_dir
                 .parent()
@@ -1437,27 +1434,70 @@ mod tests {
                 "-p",
                 "signalbox-model-runtime-claude-cli",
                 "--bin",
-                "signalbox-claude-mcp-bridge",
+                CLAUDE_MCP_BRIDGE_BINARY,
+                "--message-format=json-render-diagnostics",
             ])
             .arg("--profile")
             .arg(&selection.profile)
             .arg("--target-dir")
             .arg(&selection.target_dir)
             .current_dir(workspace)
+            .stdout(Stdio::piped())
             .spawn()
             .expect("bridge binary build starts");
+        let (messages, reader) = response_reader(BufReader::new(
+            build.stdout.take().expect("Cargo build stdout is piped"),
+        ));
         let Some(status) = wait_for_child(&mut build, BRIDGE_BUILD_TIMEOUT)
             .expect("bridge binary build is observed")
         else {
             terminate_child(&mut build);
+            reader.join().expect("Cargo build output reader exits");
             panic!("bridge binary build exceeded its timeout");
         };
+        reader.join().expect("Cargo build output reader exits");
         assert!(status.success(), "bridge binary build succeeds");
+        let executable = cargo_bridge_executable(messages);
         assert!(
-            selection.executable.is_file(),
+            executable.is_file(),
             "bridge binary build produces its target"
         );
-        selection.executable
+        executable
+    }
+
+    fn cargo_bridge_executable(messages: Receiver<Result<String, io::Error>>) -> PathBuf {
+        messages
+            .into_iter()
+            .map(|message| message.expect("Cargo build output is readable"))
+            .map(|message| {
+                serde_json::from_str::<serde_json::Value>(&message)
+                    .expect("Cargo build output is JSON")
+            })
+            .find_map(|message| cargo_bridge_executable_from_message(&message))
+            .expect("Cargo reports the bridge executable artifact")
+    }
+
+    fn cargo_bridge_executable_from_message(message: &serde_json::Value) -> Option<PathBuf> {
+        (message["reason"] == "compiler-artifact"
+            && message["target"]["name"] == CLAUDE_MCP_BRIDGE_BINARY)
+            .then(|| message["executable"].as_str())
+            .flatten()
+            .map(PathBuf::from)
+    }
+
+    #[test]
+    fn cargo_bridge_artifact_uses_the_reported_executable_path() {
+        let executable = PathBuf::from("synthetic-target/bridge");
+        let message = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": {"name": CLAUDE_MCP_BRIDGE_BINARY},
+            "executable": executable,
+        });
+
+        assert_eq!(
+            cargo_bridge_executable_from_message(&message),
+            Some(executable)
+        );
     }
 
     fn response_reader<Output>(
@@ -2079,7 +2119,7 @@ mod tests {
         expected_catalog: serde_json::Value,
         ready_path: PathBuf,
         executable: PathBuf,
-        bridge: McpBridgeProcess,
+        bridge: Option<McpBridgeProcess>,
     }
 
     impl McpBridgeFixture {
@@ -2104,60 +2144,77 @@ mod tests {
                 expected_catalog,
                 ready_path,
                 executable,
-                bridge,
+                bridge: Some(bridge),
             }
         }
 
         fn initialize(&mut self) -> serde_json::Value {
-            let initialized = self.bridge.request(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {"protocolVersion": MCP_PROTOCOL_VERSION},
-            }));
-            self.bridge.notify(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-            }));
+            let initialized = self
+                .bridge
+                .as_mut()
+                .expect("bridge remains active")
+                .request(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {"protocolVersion": MCP_PROTOCOL_VERSION},
+                }));
+            self.bridge
+                .as_mut()
+                .expect("bridge remains active")
+                .notify(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                }));
             initialized
         }
 
         fn list_tools(&mut self) -> serde_json::Value {
-            self.bridge.request(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/list",
-                "params": {},
-            }))
+            self.bridge
+                .as_mut()
+                .expect("bridge remains active")
+                .request(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": {},
+                }))
         }
 
         fn synchronize_without_listing(&mut self) {
-            let response = self.bridge.request(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 4,
-                "method": "ping",
-                "params": {},
-            }));
+            let response = self
+                .bridge
+                .as_mut()
+                .expect("bridge remains active")
+                .request(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "ping",
+                    "params": {},
+                }));
             assert_eq!(response["error"]["code"], -32601);
         }
 
         fn call_write_file(&mut self) -> serde_json::Value {
-            self.bridge.request(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 3,
-                "method": "tools/call",
-                "params": {
-                    "name": WRITE_FILE_NAME,
-                    "arguments": {
-                        "path": MCP_PROPOSAL_PATH,
-                        "content": MCP_PROPOSAL_CONTENT,
+            self.bridge
+                .as_mut()
+                .expect("bridge remains active")
+                .request(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": WRITE_FILE_NAME,
+                        "arguments": {
+                            "path": MCP_PROPOSAL_PATH,
+                            "content": MCP_PROPOSAL_CONTENT,
+                        },
                     },
-                },
-            }))
+                }))
         }
 
-        fn finish(self) {
-            self.bridge.finish();
+        fn finish(&mut self) {
+            self.bridge.take().expect("bridge remains active").finish();
         }
     }
 
@@ -2210,10 +2267,12 @@ mod tests {
         fixture.finish();
 
         assert_eq!(called["result"]["isError"], false);
-        assert_eq!(called["result"]["content"][0]["type"], "text");
         assert_eq!(
-            called["result"]["content"][0]["text"],
-            MCP_PROPOSAL_ACKNOWLEDGEMENT
+            called["result"]["content"],
+            serde_json::json!([{
+                "type": "text",
+                "text": MCP_PROPOSAL_ACKNOWLEDGEMENT,
+            }])
         );
     }
 
