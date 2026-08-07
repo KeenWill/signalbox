@@ -1128,6 +1128,17 @@ struct MessageAtomicityEvidence {
     completed_attempt_count: i64,
 }
 
+#[derive(sqlx::FromRow)]
+struct DelegatedResultMaterializationEvidence {
+    outcome_kind: String,
+    content_text: Option<String>,
+    reason_kind: String,
+    provenance_kind: String,
+    terminal_disposition_kind: String,
+    parent_update_count: i64,
+    parent_wake_count: i64,
+}
+
 /// S17 / INV-032: a background wait, its completed receipt, and its update are
 /// one replay-idempotent commit.
 /// S18 / INV-010 / INV-012: equal replay still requires its exact dispatch.
@@ -1323,8 +1334,9 @@ async fn s17_inv005_inv010_background_wait_delivery_exhaustion_terminalizes_atte
     sqlx::query("ALTER TABLE session_pending_delivery ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    let _dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
-    let outcome = SessionDelegationRepository::new(pool.clone())
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    let outcome = repository
         .record_process_wait(
             fixture.parent,
             fixture.parent_turn,
@@ -1332,6 +1344,18 @@ async fn s17_inv005_inv010_background_wait_delivery_exhaustion_terminalizes_atte
             fixture.child,
             DelegationWaitMode::Background,
         )
+        .await?;
+    let replay = repository
+        .record_process_wait(
+            fixture.parent,
+            fixture.parent_turn,
+            fixture.awaiting_request,
+            fixture.child,
+            DelegationWaitMode::Background,
+        )
+        .await?;
+    let durable_completion = PostgresToolLoopRepository::new(pool.clone())
+        .reread_durable_completion(dispatch.correlation())
         .await?;
     let attempt_state: (String, Option<String>) = sqlx::query_as(
         "SELECT state_kind, terminal_disposition_kind
@@ -1348,6 +1372,8 @@ async fn s17_inv005_inv010_background_wait_delivery_exhaustion_terminalizes_atte
             DelegationOperationRejection::DeliverySequenceExhausted,
         ))
     );
+    assert_eq!(replay, outcome);
+    assert!(durable_completion);
     assert_eq!(
         attempt_state,
         (String::from("terminal"), Some(String::from("known_failed")))
@@ -12034,7 +12060,7 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegation_schema_installs_every_reviewed_object() -> Result<(), Box<dyn Error>> {
-    const REVIEWED_FUNCTIONS: [&str; 20] = [
+    const REVIEWED_FUNCTIONS: [&str; 21] = [
         "accepted_input_turn_is_first_nonterminal(uuid,uuid)",
         "assert_model_call_steering_final_state(uuid)",
         "delegation_cascade_expected_frontier(uuid,text)",
@@ -12046,6 +12072,7 @@ async fn delegation_schema_installs_every_reviewed_object() -> Result<(), Box<dy
         "require_context_compaction_exact_evidence()",
         "require_delegation_initial_task_purpose()",
         "require_delegation_lifecycle_update()",
+        "require_delegation_wait_rejection_attempt()",
         "require_delegation_update_subject()",
         "require_delegation_wait_purpose()",
         "require_delegation_wait_update()",
@@ -21064,17 +21091,17 @@ async fn s17_inv032_delegated_completion_materializes_result_update_and_wake()
     )
     .await?;
 
-    let materialized: (String, String, String, String, String, i64, i64) = sqlx::query_as(
+    let materialized: DelegatedResultMaterializationEvidence = sqlx::query_as(
         "SELECT result.outcome_kind, result.content_text,
                 event.reason_kind, event.provenance_kind,
                 lifecycle.terminal_disposition_kind,
                 (SELECT count(*) FROM delegation_update_outbox_event AS parent_update
                   WHERE parent_update.result_spawning_request_id = $1
                     AND parent_update.session_id = $2
-                    AND parent_update.content_text = result.content_text),
+                    AND parent_update.content_text = result.content_text) AS parent_update_count,
                 (SELECT count(*) FROM delegation_wake_outbox_event AS wake
                   WHERE wake.result_spawning_request_id = $1
-                    AND wake.session_id = $2)
+                    AND wake.session_id = $2) AS parent_wake_count
            FROM session_child_result AS result
            JOIN session_delegation_event AS event
              ON event.spawning_tool_request_id = result.spawning_tool_request_id
@@ -21089,18 +21116,13 @@ async fn s17_inv032_delegated_completion_materializes_result_update_and_wake()
     .bind(child.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(
-        materialized,
-        (
-            "result_returned".into(),
-            expected_content.into(),
-            "child_completed".into(),
-            "child_turn".into(),
-            "completed".into(),
-            1,
-            1,
-        )
-    );
+    assert_eq!(materialized.outcome_kind, "result_returned");
+    assert_eq!(materialized.content_text.as_deref(), Some(expected_content));
+    assert_eq!(materialized.reason_kind, "child_completed");
+    assert_eq!(materialized.provenance_kind, "child_turn");
+    assert_eq!(materialized.terminal_disposition_kind, "completed");
+    assert_eq!(materialized.parent_update_count, 1);
+    assert_eq!(materialized.parent_wake_count, 1);
 
     pool.close().await;
     drop(container);
@@ -21141,15 +21163,16 @@ async fn s17_inv032_delegated_initial_target_failure_materializes_parent_deliver
     let PrepareInitialModelCallOutcome::TargetUnavailable(_) = outcome else {
         panic!("the empty target catalog must fail the delegated initial call")
     };
-    let materialized: (String, String, String, String, i64, i64) = sqlx::query_as(
-        "SELECT result.outcome_kind, event.reason_kind, event.provenance_kind,
+    let materialized: DelegatedResultMaterializationEvidence = sqlx::query_as(
+        "SELECT result.outcome_kind, result.content_text,
+                event.reason_kind, event.provenance_kind,
                 lifecycle.terminal_disposition_kind,
                 (SELECT count(*) FROM delegation_update_outbox_event AS update
                   WHERE update.result_spawning_request_id = $1
-                    AND update.session_id = $2),
+                    AND update.session_id = $2) AS parent_update_count,
                 (SELECT count(*) FROM delegation_wake_outbox_event AS wake
                   WHERE wake.result_spawning_request_id = $1
-                    AND wake.session_id = $2)
+                    AND wake.session_id = $2) AS parent_wake_count
            FROM session_child_result AS result
            JOIN session_delegation_event AS event
              ON event.spawning_tool_request_id = result.spawning_tool_request_id
@@ -21165,17 +21188,13 @@ async fn s17_inv032_delegated_initial_target_failure_materializes_parent_deliver
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(
-        materialized,
-        (
-            String::from("child_failed"),
-            String::from("child_execution_failed"),
-            String::from("child_turn"),
-            String::from("failed"),
-            1,
-            1,
-        )
-    );
+    assert_eq!(materialized.outcome_kind, "child_failed");
+    assert_eq!(materialized.content_text, None);
+    assert_eq!(materialized.reason_kind, "child_execution_failed");
+    assert_eq!(materialized.provenance_kind, "child_turn");
+    assert_eq!(materialized.terminal_disposition_kind, "failed");
+    assert_eq!(materialized.parent_update_count, 1);
+    assert_eq!(materialized.parent_wake_count, 1);
 
     pool.close().await;
     drop(container);

@@ -813,10 +813,8 @@ impl PostgresToolLoopRepository {
         let attempt_matches = match batch.attempt(correlation.request()) {
             Some(ReconstitutedToolAttempt::Ended(ended)) => {
                 let terminal_matches = match ended.end() {
-                    ToolAttemptEnd::Completed { .. } => true,
-                    ToolAttemptEnd::KnownFailed { .. }
-                    | ToolAttemptEnd::AwaitingChild { .. }
-                    | ToolAttemptEnd::Ambiguous => false,
+                    ToolAttemptEnd::Completed { .. } | ToolAttemptEnd::KnownFailed { .. } => true,
+                    ToolAttemptEnd::AwaitingChild { .. } | ToolAttemptEnd::Ambiguous => false,
                 };
                 ended.attempt() == correlation.attempt()
                     && ended.session() == correlation.session()

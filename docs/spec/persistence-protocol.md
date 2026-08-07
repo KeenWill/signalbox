@@ -698,10 +698,12 @@ Locks per transaction, in acquisition order:
   direction message transactions. Child terminalization uses the same canonical
   endpoint-session prefix before taking the child scheduler, so message,
   completion, and input submission never hold those row classes in reverse
-  order. Delivery-sequence allocation runs while the recipient session lock is
-  held. Message recording claims the global `message_id` before inserting the
-  relationship event; a concurrent claim loser returns the typed
-  message-identity collision without leaving a partial event.
+  order. After locking the relationship, a fresh message reads only its
+  immutable endpoints and bounded lifecycle/event frontier; it does not
+  reconstruct prior messages. Delivery-sequence allocation runs while the
+  recipient session lock is held. Message recording claims the global
+  `message_id` before inserting the relationship event; a concurrent claim loser
+  returns the typed message-identity collision without leaving a partial event.
 
 - **ReplaceSessionDefaults**: an unseen command locks its
   `session_current_defaults` pointer row `FOR UPDATE` before loading and
@@ -1123,10 +1125,13 @@ exact completed effect-free attempt and normalized registration receipt for its
 awaiting request. Equal wait replay independently authenticates that exact
 terminal attempt: the foreground arm requires its typed child-wait evidence and
 the background arm requires its normalized receipt; both arms also authenticate
-the exact update satellite and global outbox header. `session_message` is
-append-only, uniquely orders messages per relationship, and requires exact
-parent/child sender and recipient plus the sending tool request with its
-complete session, turn, and request provenance. Equal message replay
+the exact update satellite and global outbox header. A definitive process-wait
+rejection stores its closed rejection kind and transition evidence when
+applicable beside the exact known-failed attempt; exact replay returns that
+typed outcome before classifying the request as non-executable.
+`session_message` is append-only, uniquely orders messages per relationship, and
+requires exact parent/child sender and recipient plus the sending tool request
+with its complete session, turn, and request provenance. Equal message replay
 authenticates both that provenance and the exact completed external-effect
 attempt carrying its normalized receipt, plus the exact update/wake satellites
 and their global outbox headers. A concurrent global `message_id` claim loser is

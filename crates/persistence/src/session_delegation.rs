@@ -181,6 +181,19 @@ impl DispatchSource<'_> {
             Self::Reconstitute => true,
         }
     }
+
+    const fn definitive_rejection_persistence(self) -> DefinitiveRejectionPersistence {
+        match self {
+            Self::Issued(_) => DefinitiveRejectionPersistence::ReturnOnly,
+            Self::Reconstitute => DefinitiveRejectionPersistence::Persist,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DefinitiveRejectionPersistence {
+    ReturnOnly,
+    Persist,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -302,18 +315,18 @@ impl SessionDelegationRepository {
     ) -> Result<RecordDelegationWaitOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            let persist_definitive_rejection = matches!(dispatch, DispatchSource::Reconstitute);
+            let rejection_persistence = dispatch.definitive_rejection_persistence();
             lock_delivery_session(&mut transaction, request.request().session()).await?;
             lock_tool_session(&mut transaction, request.request().session()).await?;
+            if !dispatch.matches_request(request.request()) {
+                return Ok(RecordDelegationWaitOutcome::Rejected(
+                    DelegationOperationRejection::StaleDispatch {
+                        state: DelegationRequestExecutionState::AttemptEnded,
+                    },
+                ));
+            }
             if let Some(stored) = load_wait_replay(&mut transaction, request.request().id()).await?
             {
-                if !dispatch.matches_request(request.request()) {
-                    return Ok(RecordDelegationWaitOutcome::Rejected(
-                        DelegationOperationRejection::StaleDispatch {
-                            state: DelegationRequestExecutionState::AttemptEnded,
-                        },
-                    ));
-                }
                 let wait = DelegationWait::reconstitute_stored(
                     &request,
                     stored.spawning_request,
@@ -335,6 +348,11 @@ impl SessionDelegationRepository {
                     RecordedDelegationWait { wait },
                 ));
             }
+            if let Some(rejection) =
+                load_wait_rejection(&mut transaction, request.request().id()).await?
+            {
+                return Ok(RecordDelegationWaitOutcome::Rejected(rejection));
+            }
 
             let dispatch =
                 match resolve_dispatch(&mut transaction, request.request(), dispatch).await? {
@@ -351,7 +369,7 @@ impl SessionDelegationRepository {
                     &mut transaction,
                     &dispatch,
                     DelegationOperationRejection::RelationshipNotFound,
-                    persist_definitive_rejection,
+                    rejection_persistence,
                 )
                 .await;
             };
@@ -366,7 +384,7 @@ impl SessionDelegationRepository {
                             spawning_request: error.spawning_request(),
                             failure: error.failure(),
                         },
-                        persist_definitive_rejection,
+                        rejection_persistence,
                     )
                     .await;
                 }
@@ -394,7 +412,7 @@ impl SessionDelegationRepository {
                             &mut transaction,
                             &dispatch,
                             DelegationOperationRejection::DeliverySequenceExhausted,
-                            persist_definitive_rejection,
+                            rejection_persistence,
                         )
                         .await;
                     };
@@ -412,7 +430,7 @@ impl SessionDelegationRepository {
                             &mut transaction,
                             &dispatch,
                             DelegationOperationRejection::DeliverySequenceExhausted,
-                            persist_definitive_rejection,
+                            rejection_persistence,
                         )
                         .await;
                     }
@@ -502,10 +520,7 @@ impl SessionDelegationRepository {
     ) -> Result<RecordDelegationMessageWithSourceOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            let persist_definitive_rejection = match dispatch {
-                DispatchSource::Issued(_) => false,
-                DispatchSource::Reconstitute => true,
-            };
+            let rejection_persistence = dispatch.definitive_rejection_persistence();
             let peer_exists = session_exists(&mut transaction, request.peer()).await?;
             if peer_exists {
                 lock_message_sessions(
@@ -570,7 +585,7 @@ impl SessionDelegationRepository {
                     &dispatch,
                     message,
                     DelegationOperationRejection::RelationshipNotFound,
-                    persist_definitive_rejection,
+                    rejection_persistence,
                 )
                 .await;
             }
@@ -582,24 +597,31 @@ impl SessionDelegationRepository {
                     &dispatch,
                     message,
                     DelegationOperationRejection::RelationshipNotFound,
-                    persist_definitive_rejection,
+                    rejection_persistence,
                 )
                 .await;
             };
-            let relation = load_relation(&mut transaction, spawning_request).await?;
             let tool_request = request.request().id();
-            let (_, event) = match relation.deliver_message(request, message, &dispatch) {
+            let (event, endpoints) = match prepare_fresh_message_event(
+                &mut transaction,
+                spawning_request,
+                &request,
+                message,
+                &dispatch,
+            )
+            .await?
+            {
                 Ok(recorded) => recorded,
-                Err(error) => {
+                Err(failure) => {
                     return reject_message_operation(
                         &mut transaction,
                         &dispatch,
                         message,
                         DelegationOperationRejection::Transition {
-                            spawning_request: error.spawning_request(),
-                            failure: error.failure(),
+                            spawning_request,
+                            failure,
                         },
-                        persist_definitive_rejection,
+                        rejection_persistence,
                     )
                     .await;
                 }
@@ -610,7 +632,6 @@ impl SessionDelegationRepository {
                     .ok_or(SessionDelegationCorruption::Inconsistent(
                         "message transition event",
                     ))?;
-            let endpoints = relation_endpoints(&mut transaction, spawning_request).await?;
             let recipient = message_recipient(stored_message.direction(), endpoints);
             let reserved_background_results =
                 pending_background_result_reservations(&mut transaction, recipient).await?;
@@ -626,7 +647,7 @@ impl SessionDelegationRepository {
                     &dispatch,
                     message,
                     DelegationOperationRejection::DeliverySequenceExhausted,
-                    persist_definitive_rejection,
+                    rejection_persistence,
                 )
                 .await;
             };
@@ -645,7 +666,7 @@ impl SessionDelegationRepository {
                     &dispatch,
                     message,
                     DelegationOperationRejection::MessageIdentityCollision,
-                    persist_definitive_rejection,
+                    rejection_persistence,
                 )
                 .await;
             }
@@ -1025,23 +1046,14 @@ async fn reject_wait_operation(
     connection: &mut PgConnection,
     dispatch: &ToolDispatchAuthority,
     rejection: DelegationOperationRejection,
-    persist_definitive_rejection: bool,
+    persistence: DefinitiveRejectionPersistence,
 ) -> Result<RecordDelegationWaitOutcome, SessionDelegationRepositoryError> {
-    if persist_definitive_rejection {
-        let ended = dispatch
-            .attempt()
-            .clone()
-            .apply_terminal_observation(dispatch.executor_fence().bind(
-                ToolAttemptObservation::KnownFailed {
-                    error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
-                },
-            ))
-            .map_err(|_| {
-                SessionDelegationRepositoryError::InvalidTransition(
-                    "process delegation rejection cannot end the current attempt",
-                )
-            })?;
-        persist_ended_attempt(connection, &ended).await?;
+    match persistence {
+        DefinitiveRejectionPersistence::ReturnOnly => {}
+        DefinitiveRejectionPersistence::Persist => {
+            insert_wait_rejection(connection, dispatch.request().id(), rejection).await?;
+            persist_known_failed_rejection_attempt(connection, dispatch).await?;
+        }
     }
     Ok(RecordDelegationWaitOutcome::Rejected(rejection))
 }
@@ -1051,32 +1063,45 @@ async fn reject_message_operation(
     dispatch: &ToolDispatchAuthority,
     message: DelegationMessageId,
     rejection: DelegationOperationRejection,
-    persist_definitive_rejection: bool,
+    persistence: DefinitiveRejectionPersistence,
 ) -> Result<RecordDelegationMessageWithSourceOutcome, SessionDelegationRepositoryError> {
-    if persist_definitive_rejection {
-        insert_message_rejection(connection, dispatch.request().id(), message, rejection).await?;
-        let ended = dispatch
-            .attempt()
-            .clone()
-            .apply_terminal_observation(dispatch.executor_fence().bind(
-                ToolAttemptObservation::KnownFailed {
-                    error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
-                },
-            ))
-            .map_err(|_| {
-                SessionDelegationRepositoryError::InvalidTransition(
-                    "process delegation rejection cannot end the current attempt",
-                )
-            })?;
-        persist_ended_attempt(connection, &ended).await?;
-    }
+    let durable = match persistence {
+        DefinitiveRejectionPersistence::ReturnOnly => false,
+        DefinitiveRejectionPersistence::Persist => {
+            insert_message_rejection(connection, dispatch.request().id(), message, rejection)
+                .await?;
+            persist_known_failed_rejection_attempt(connection, dispatch).await?;
+            true
+        }
+    };
     Ok(RecordDelegationMessageWithSourceOutcome::Rejected(
         RecordedDelegationMessageRejection {
             rejection,
             message,
-            durable: persist_definitive_rejection,
+            durable,
         },
     ))
+}
+
+async fn persist_known_failed_rejection_attempt(
+    connection: &mut PgConnection,
+    dispatch: &ToolDispatchAuthority,
+) -> Result<(), SessionDelegationRepositoryError> {
+    let ended = dispatch
+        .attempt()
+        .clone()
+        .apply_terminal_observation(dispatch.executor_fence().bind(
+            ToolAttemptObservation::KnownFailed {
+                error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+            },
+        ))
+        .map_err(|_| {
+            SessionDelegationRepositoryError::InvalidTransition(
+                "process delegation rejection cannot end the current attempt",
+            )
+        })?;
+    persist_ended_attempt(connection, &ended).await?;
+    Ok(())
 }
 
 fn wait_receipt(wait: DelegationWait) -> Result<ToolResultText, SessionDelegationRepositoryError> {
@@ -1450,23 +1475,99 @@ struct RelationEndpoints {
     child: SessionId,
 }
 
-async fn relation_endpoints(
+async fn prepare_fresh_message_event(
     connection: &mut PgConnection,
     spawning_request: ToolRequestId,
-) -> Result<RelationEndpoints, SessionDelegationRepositoryError> {
+    request: &DelegationMessageRequest,
+    message: DelegationMessageId,
+    dispatch: &ToolDispatchAuthority,
+) -> Result<
+    Result<(DelegationEvent, RelationEndpoints), DelegationTransitionFailure>,
+    SessionDelegationRepositoryError,
+> {
     let row = sqlx::query(
-        "SELECT parent_session_id, child_session_id
-           FROM session_delegation
-          WHERE spawning_tool_request_id = $1",
+        "SELECT relation.parent_session_id, relation.child_session_id,
+                (SELECT max(event.event_ordinal)
+                   FROM session_delegation_event AS event
+                  WHERE event.spawning_tool_request_id = relation.spawning_tool_request_id)
+                    AS last_event_ordinal,
+                EXISTS (
+                    SELECT 1 FROM session_delegation_event AS event
+                     WHERE event.spawning_tool_request_id = relation.spawning_tool_request_id
+                       AND event.event_ordinal = 1
+                       AND event.event_kind = 'spawned'
+                ) AS has_spawn_event,
+                EXISTS (
+                    SELECT 1 FROM session_child_result AS result
+                     WHERE result.spawning_tool_request_id = relation.spawning_tool_request_id
+                ) AS is_terminal,
+                EXISTS (
+                    SELECT 1 FROM session_message AS existing
+                     WHERE existing.message_id = $2
+                       AND existing.spawning_tool_request_id =
+                           relation.spawning_tool_request_id
+                ) AS message_exists
+           FROM session_delegation AS relation
+          WHERE relation.spawning_tool_request_id = $1",
     )
     .bind(tool_request_id_to_uuid(spawning_request))
+    .bind(message.into_uuid())
     .fetch_optional(connection)
     .await?
     .ok_or(SessionDelegationCorruption::Missing("delegation relation"))?;
-    Ok(RelationEndpoints {
+    let endpoints = RelationEndpoints {
         parent: session_id_from_uuid(required(&row, "parent_session_id")?),
         child: session_id_from_uuid(required(&row, "child_session_id")?),
-    })
+    };
+    let last: Decimal = required(&row, "last_event_ordinal")?;
+    let has_spawn_event: bool = required(&row, "has_spawn_event")?;
+    if !has_spawn_event {
+        return Err(SessionDelegationCorruption::Inconsistent("delegation event frontier").into());
+    }
+    if dispatch.request() != request.request() || request.request().id() == spawning_request {
+        return Ok(Err(DelegationTransitionFailure::InvalidProvenance));
+    }
+    if required::<bool>(&row, "message_exists")? {
+        return Ok(Err(DelegationTransitionFailure::DuplicateMessageIdentity));
+    }
+    let direction = if request.request().session() == endpoints.parent
+        && request.peer() == endpoints.child
+    {
+        DelegationMessageDirection::ParentToChild
+    } else if request.request().session() == endpoints.child && request.peer() == endpoints.parent {
+        DelegationMessageDirection::ChildToParent
+    } else {
+        return Ok(Err(DelegationTransitionFailure::InvalidProvenance));
+    };
+    let stored_message = DelegationMessage::reconstitute(
+        request,
+        message,
+        direction,
+        DelegationMessageEndpoints {
+            parent: endpoints.parent,
+            child: endpoints.child,
+        },
+    )
+    .ok_or(SessionDelegationCorruption::Inconsistent(
+        "fresh message endpoints",
+    ))?;
+    let next = decode_positive(last, "last_event_ordinal")?
+        .checked_add(1)
+        .map(DelegationEventOrdinal::new)
+        .ok_or(DelegationTransitionFailure::EventOrdinalExhausted);
+    let ordinal = match next {
+        Ok(ordinal) if required::<bool>(&row, "is_terminal")? || ordinal.get() < u64::MAX => {
+            ordinal
+        }
+        Ok(_) | Err(_) => return Ok(Err(DelegationTransitionFailure::EventOrdinalExhausted)),
+    };
+    Ok(Ok((
+        DelegationEvent::MessageDelivered {
+            ordinal,
+            message: stored_message,
+        },
+        endpoints,
+    )))
 }
 
 async fn load_relation(
@@ -2412,6 +2513,108 @@ async fn insert_message_rejection(
     .execute(connection)
     .await?;
     Ok(())
+}
+
+async fn insert_wait_rejection(
+    connection: &mut PgConnection,
+    request: ToolRequestId,
+    rejection: DelegationOperationRejection,
+) -> Result<(), SessionDelegationRepositoryError> {
+    let (kind, spawning_request, transition_failure) = encode_wait_rejection(rejection)?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wait_rejection
+            (tool_request_id, rejection_kind, spawning_tool_request_id,
+             transition_failure_kind)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(tool_request_id_to_uuid(request))
+    .bind(kind)
+    .bind(spawning_request.map(tool_request_id_to_uuid))
+    .bind(transition_failure)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn load_wait_rejection(
+    connection: &mut PgConnection,
+    request: ToolRequestId,
+) -> Result<Option<DelegationOperationRejection>, SessionDelegationRepositoryError> {
+    let row = sqlx::query(
+        "SELECT rejection_kind, spawning_tool_request_id, transition_failure_kind
+           FROM session_delegation_wait_rejection
+          WHERE tool_request_id = $1",
+    )
+    .bind(tool_request_id_to_uuid(request))
+    .fetch_optional(connection)
+    .await?;
+    row.map(|row| {
+        let kind: String = required(&row, "rejection_kind")?;
+        let spawning_request =
+            optional::<Uuid>(&row, "spawning_tool_request_id")?.map(tool_request_id_from_uuid);
+        let transition_failure: Option<String> = optional(&row, "transition_failure_kind")?;
+        decode_wait_rejection(&kind, spawning_request, transition_failure.as_deref())
+    })
+    .transpose()
+}
+
+fn encode_wait_rejection(
+    rejection: DelegationOperationRejection,
+) -> Result<
+    (&'static str, Option<ToolRequestId>, Option<&'static str>),
+    SessionDelegationRepositoryError,
+> {
+    match rejection {
+        DelegationOperationRejection::RelationshipNotFound => {
+            Ok(("relationship_not_found", None, None))
+        }
+        DelegationOperationRejection::DeliverySequenceExhausted => {
+            Ok(("delivery_sequence_exhausted", None, None))
+        }
+        DelegationOperationRejection::Transition {
+            spawning_request,
+            failure,
+        } => Ok((
+            "transition",
+            Some(spawning_request),
+            Some(transition_failure_to_str(failure)),
+        )),
+        DelegationOperationRejection::StaleDispatch { .. }
+        | DelegationOperationRejection::MessageIdentityCollision => {
+            Err(SessionDelegationRepositoryError::InvalidTransition(
+                "delegation rejection is not a definitive wait outcome",
+            ))
+        }
+    }
+}
+
+fn decode_wait_rejection(
+    kind: &str,
+    spawning_request: Option<ToolRequestId>,
+    transition_failure: Option<&str>,
+) -> Result<DelegationOperationRejection, SessionDelegationRepositoryError> {
+    match (kind, spawning_request, transition_failure) {
+        ("relationship_not_found", None, None) => {
+            Ok(DelegationOperationRejection::RelationshipNotFound)
+        }
+        ("delivery_sequence_exhausted", None, None) => {
+            Ok(DelegationOperationRejection::DeliverySequenceExhausted)
+        }
+        ("transition", Some(spawning_request), Some(failure)) => {
+            Ok(DelegationOperationRejection::Transition {
+                spawning_request,
+                failure: transition_failure_from_str(failure)?,
+            })
+        }
+        ("relationship_not_found" | "delivery_sequence_exhausted" | "transition", _, _) => {
+            Err(SessionDelegationCorruption::Inconsistent("wait rejection shape").into())
+        }
+        (unsupported, _, _) => Err(SessionDelegationCorruption::Unsupported {
+            field: "rejection_kind",
+            value: unsupported.to_owned(),
+        }
+        .into()),
+    }
 }
 
 async fn load_message_rejection(
