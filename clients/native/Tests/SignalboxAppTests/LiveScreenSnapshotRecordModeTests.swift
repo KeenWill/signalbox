@@ -20,32 +20,36 @@ final class LiveScreenSnapshotRecordModeTests: XCTestCase {
         XCTAssertEqual(liveScreenSnapshotRecordMode(requested: ""), .never)
     }
 
-    /// Each mode the README and the recording script document, so the two
-    /// vocabularies cannot drift apart without a failure here.
+    /// Every mode the README and the recording script document, spelled out one
+    /// per line so each is verifiable by reading it. If either document grows a
+    /// fifth spelling, this test is where it fails to be accepted.
     func testEveryDocumentedModeIsAccepted() {
-        let documented: [(String, SnapshotTestingConfiguration.Record)] = [
-            ("all", .all),
-            ("missing", .missing),
-            ("failed", .failed),
-            ("never", .never),
-        ]
-
-        for (spelling, expected) in documented {
-            XCTAssertEqual(
-                liveScreenSnapshotRecordMode(requested: spelling),
-                expected,
-                "\(spelling) is documented but was not accepted"
-            )
-        }
+        XCTAssertEqual(liveScreenSnapshotRecordMode(requested: "all"), .all)
+        XCTAssertEqual(liveScreenSnapshotRecordMode(requested: "missing"), .missing)
+        XCTAssertEqual(liveScreenSnapshotRecordMode(requested: "failed"), .failed)
+        XCTAssertEqual(liveScreenSnapshotRecordMode(requested: "never"), .never)
     }
 
-    /// An unknown value is reported rather than absorbed: a typo that silently
-    /// fell back to `.never` would look exactly like a correct verification run,
-    /// and a typo that silently fell back to recording would be worse.
+    /// An unknown value is reported *and* records nothing, and the two are
+    /// asserted separately on purpose.
+    ///
+    /// The matcher is what keeps them separate. An unfiltered `XCTExpectFailure`
+    /// absorbs any failure in its scope, including the equality assertion's own
+    /// — so a regression that stopped reporting the diagnostic and returned
+    /// `.all` would satisfy the expectation with the assertion it broke, and
+    /// this test would pass while permitting exactly the unsafe recording it
+    /// exists to reject. Only the diagnostic is expected here; the returned mode
+    /// is checked by an ordinary assertion outside the block.
     func testAnUnknownValueIsReportedAndRecordsNothing() {
-        XCTExpectFailure("an unknown record mode is reported to the runner")
+        var mode: SnapshotTestingConfiguration.Record?
 
-        XCTAssertEqual(liveScreenSnapshotRecordMode(requested: "yes"), .never)
+        XCTExpectFailure("an unknown record mode is reported to the runner") {
+            mode = liveScreenSnapshotRecordMode(requested: "yes")
+        } issueMatcher: { issue in
+            issue.compactDescription.contains("it takes all, missing, failed, or never")
+        }
+
+        XCTAssertEqual(mode, .never)
     }
 }
 #endif
