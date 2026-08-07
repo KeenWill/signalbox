@@ -44,10 +44,42 @@ jobs:
         run: python3 scripts/check_migration_versions.py
       - name: Check user vocabulary
         run: python3 scripts/check_user_vocabulary.py
+      # Report-only. The tree still violates the conventions this checker
+      # decides, so the step publishes per-rule counts and can never fail the
+      # workflow or gate a merge. Promoting a rule to blocking is a deliberate
+      # later step taken once that rule's count reaches zero, and it adds a step
+      # of its own — `check_style_rules.py --rule SR-N`, with no
+      # `continue-on-error` — rather than removing the tolerance here: this
+      # invocation runs every rule, so dropping its tolerance would gate on the
+      # rules still being burned down and no rule could be promoted alone.
+      # Neither is ever a side effect of a change that merely reduces a count.
+      - name: Check style rules (report only)
+        continue-on-error: true
+        run: |
+          report="$RUNNER_TEMP/style-rules.txt"
+          set +e
+          python3 scripts/check_style_rules.py | tee "$report"
+          status="${PIPESTATUS[0]}"
+          set -e
+          {
+            echo '## Style rules (report only)'
+            echo
+            echo 'This report has no threshold and gates nothing. The counts are'
+            echo 'the burndown baseline for the conventions in `docs/style.md`.'
+            echo
+            echo '```text'
+            sed -n '/^style-rule counts/,/^  total/p' "$report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
       - name: Test user vocabulary checker
         run: python3 scripts/test_check_user_vocabulary.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
+      # The checker's own tests gate normally: report-only describes what the
+      # checker says about the tree, not whether the checker works.
+      - name: Test style-rule checker
+        run: python3 scripts/test_check_style_rules.py
       - name: Test documentation consistency checker
         run: python3 scripts/test_check_docs_consistency.py
       - name: Test the PostgreSQL suite manifest reader
