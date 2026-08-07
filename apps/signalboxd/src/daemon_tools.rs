@@ -1854,7 +1854,7 @@ mod tests {
 
     #[test]
     fn mcp_response_envelope_rejects_a_wrong_protocol_version() {
-        let request_id = serde_json::json!(7);
+        let request_id = serde_json::json!(MCP_ENVELOPE_REQUEST_ID);
         let response =
             serde_json::json!({"jsonrpc": "1.0", "id": request_id.clone(), "result": {}});
 
@@ -1863,15 +1863,16 @@ mod tests {
 
     #[test]
     fn mcp_response_envelope_rejects_a_mismatched_request_identity() {
-        let request_id = serde_json::json!(7);
-        let response = serde_json::json!({"jsonrpc": "2.0", "id": 8, "result": {}});
+        let request_id = serde_json::json!(MCP_ENVELOPE_REQUEST_ID);
+        let response =
+            serde_json::json!({"jsonrpc": "2.0", "id": MCP_OTHER_REQUEST_ID, "result": {}});
 
         assert!(!valid_mcp_response_envelope(&response, &request_id));
     }
 
     #[test]
     fn mcp_response_envelope_rejects_result_and_error_together() {
-        let request_id = serde_json::json!(7);
+        let request_id = serde_json::json!(MCP_ENVELOPE_REQUEST_ID);
         let response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": request_id.clone(),
@@ -1891,26 +1892,59 @@ mod tests {
         }
     }
 
-    fn wait_for_bridge_ready(executable: &Path, ready: &Path, workspace: &Path) {
-        let mut waiter = Command::new(executable)
-            .arg("--wait-ready")
-            .arg(ready)
-            .current_dir(workspace)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("bridge readiness waiter starts");
-        let Some(status) = wait_for_child(&mut waiter, BRIDGE_EXIT_TIMEOUT)
-            .expect("bridge readiness exit is observed")
-        else {
-            terminate_child(&mut waiter);
-            panic!("bridge readiness wait exceeded its timeout");
-        };
-        assert!(
-            status.success(),
-            "bridge publishes readiness after listing tools"
-        );
+    struct McpBridgeReadyWaiter {
+        child: Child,
+    }
+
+    struct McpBridgeReadyWaiterSpawn<'a> {
+        executable: &'a Path,
+        ready: &'a Path,
+        workspace: &'a Path,
+    }
+
+    impl McpBridgeReadyWaiter {
+        fn start(config: McpBridgeReadyWaiterSpawn<'_>) -> Self {
+            let child = Command::new(config.executable)
+                .arg("--wait-ready")
+                .arg(config.ready)
+                .current_dir(config.workspace)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("bridge readiness waiter starts");
+            Self { child }
+        }
+
+        fn assert_waiting(&mut self) {
+            assert!(
+                wait_for_child(&mut self.child, BRIDGE_CHILD_TEST_TIMEOUT)
+                    .expect("bridge readiness waiter remains observable")
+                    .is_none(),
+                "bridge readiness waiter stays active before tool discovery"
+            );
+        }
+
+        fn finish(mut self) {
+            let Some(status) = wait_for_child(&mut self.child, BRIDGE_EXIT_TIMEOUT)
+                .expect("bridge readiness exit is observed")
+            else {
+                terminate_child(&mut self.child);
+                panic!("bridge readiness wait exceeded its timeout");
+            };
+            assert!(
+                status.success(),
+                "bridge publishes readiness after listing tools"
+            );
+        }
+    }
+
+    impl Drop for McpBridgeReadyWaiter {
+        fn drop(&mut self) {
+            if self.child.try_wait().ok().flatten().is_none() {
+                terminate_child(&mut self.child);
+            }
+        }
     }
 
     #[test]
@@ -2261,6 +2295,8 @@ mod tests {
     }
 
     const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+    const MCP_ENVELOPE_REQUEST_ID: u64 = 7;
+    const MCP_OTHER_REQUEST_ID: u64 = 8;
     const MCP_PROPOSAL_PATH: &str = "bridge-must-not-write.txt";
     const MCP_PROPOSAL_CONTENT: &str = "proposal only\n";
     const MCP_PROPOSAL_ACKNOWLEDGEMENT: &str =
@@ -2403,12 +2439,14 @@ mod tests {
         fixture.initialize();
         fixture.synchronize_without_listing();
         assert!(!fixture.ready_path.exists());
+        let mut waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
+            executable: &fixture.executable,
+            ready: &fixture.ready_path,
+            workspace: fixture.workspace.path(),
+        });
+        waiter.assert_waiting();
         fixture.list_tools();
-        wait_for_bridge_ready(
-            &fixture.executable,
-            &fixture.ready_path,
-            fixture.workspace.path(),
-        );
+        waiter.finish();
         assert!(fixture.ready_path.is_file());
         fixture.finish();
     }
