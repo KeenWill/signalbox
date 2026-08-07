@@ -516,11 +516,23 @@ def launched_command(tokens: list[str]) -> list[str]:
             continue
         if word.rsplit("/", 1)[-1] == "env":
             index += 1
-            while index < len(tokens) and (
-                ENVIRONMENT_ASSIGNMENT.fullmatch(tokens[index])
-                or tokens[index] in ENV_VALUE_OPTIONS
-            ):
-                index += 2 if tokens[index] in ENV_VALUE_OPTIONS else 1
+            while index < len(tokens):
+                argument = tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
+                if argument in ENV_VALUE_OPTIONS:
+                    index += 2
+                    continue
+                # `-i`, `--ignore-environment`, `-0` and friends take no value
+                # and still run the trailing command.
+                if argument.startswith("-") and argument != "-":
+                    index += 1
+                    continue
+                if ENVIRONMENT_ASSIGNMENT.fullmatch(argument):
+                    index += 1
+                    continue
+                break
             continue
         break
     return tokens[index:]
@@ -671,24 +683,31 @@ def documentation_disagreements(
     failures: list[tuple[int, str]] = []
     for line, arguments in documented_ignored_commands(text):
         cargo_arguments = arguments[: arguments.index("--")]
-        package = None
-        features: set[str] = set()
+        # Cargo accepts `-p` repeatedly and runs every package named. Keeping
+        # only the last one let an unmanifested package trailing a manifested
+        # one hide the suite that actually needed checking.
+        selected: list[str] = []
+        by_manifest_path: list[str] = []
+        declared: set[str] = set()
         index = 0
         while index < len(cargo_arguments):
             argument = cargo_arguments[index]
             if argument in ("-p", "--package") and index + 1 < len(cargo_arguments):
-                package = package_spec_name(cargo_arguments[index + 1])
+                name = package_spec_name(cargo_arguments[index + 1])
+                if name:
+                    selected.append(name)
                 index += 2
                 continue
-            # A manifest path selects its own package as surely as `-p` does.
-            # `-p` wins if both appear, matching Cargo.
+            # A manifest path selects its own package as surely as `-p` does,
+            # and `-p` wins if both appear, matching Cargo.
             if argument == "--manifest-path" and index + 1 < len(cargo_arguments):
-                selected = manifest_path_package(root, cargo_arguments[index + 1])
-                package = package or selected
+                name = manifest_path_package(root, cargo_arguments[index + 1])
+                if name:
+                    by_manifest_path.append(name)
                 index += 2
                 continue
             if argument in ("--features", "-F") and index + 1 < len(cargo_arguments):
-                features.update(
+                declared.update(
                     part
                     for part in re.split(r"[ ,]+", cargo_arguments[index + 1])
                     if part
@@ -696,46 +715,75 @@ def documentation_disagreements(
                 index += 2
                 continue
             index += 1
-        if package is None or package not in packages:
-            continue
-        # `--all-features` and `--no-default-features` name a feature set by
-        # reference to the package's own table rather than by listing it, so
-        # what they select cannot be compared against the manifest without
-        # resolving that table — and a reader cannot see which suite they mean
-        # either. Documentation of a manifested suite states the manifest's
-        # features explicitly, so these are reported rather than guessed at.
-        indirect = sorted(
-            flag
-            for flag in ("--all-features", "--no-default-features")
-            if flag in cargo_arguments
-        )
-        if indirect:
-            failures.append(
-                (
-                    line,
-                    f"{label} documents `cargo test -p {package}` for ignored "
-                    f"tests with {' and '.join(indirect)}; state the features "
-                    f"{MANIFEST} archives that suite with instead",
-                )
+        for name in selected or by_manifest_path:
+            report_documented_selection(
+                failures, label, line, name, declared, cargo_arguments,
+                packages, known, suites,
             )
-            continue
-        if (package, frozenset(features)) in known:
-            continue
-        expected = sorted(
-            ",".join(suite.features) or "(none)"
-            for suite in suites
-            if suite.package == package
-        )
+    return failures
+
+
+def report_documented_selection(
+    failures: list[tuple[int, str]],
+    label: str,
+    line: int,
+    package: str,
+    declared: set[str],
+    cargo_arguments: list[str],
+    packages: set[str],
+    known: set[tuple[str, frozenset[str]]],
+    suites: tuple[Suite, ...],
+) -> None:
+    """Compare one selected package's documented features with the manifest."""
+    if package not in packages:
+        return
+    # `--features pkg/feature` enables `feature` on `pkg`; for the package
+    # under comparison that is the same thing its bare name means, so the
+    # matching prefix is dropped. A different package's qualified feature
+    # enables something on a dependency and stays distinct.
+    features = {
+        feature.split("/", 1)[1]
+        if feature.startswith(f"{package}/")
+        else feature
+        for feature in declared
+    }
+    # `--all-features` and `--no-default-features` name a feature set by
+    # reference to the package's own table rather than by listing it, so what
+    # they select cannot be compared against the manifest without resolving
+    # that table — and a reader cannot see which suite they mean either.
+    # Documentation of a manifested suite states the manifest's features
+    # explicitly, so these are reported rather than guessed at.
+    indirect = sorted(
+        flag
+        for flag in ("--all-features", "--no-default-features")
+        if flag in cargo_arguments
+    )
+    if indirect:
         failures.append(
             (
                 line,
-                f"{label} documents `cargo test -p {package}` with features "
-                f"{','.join(sorted(features)) or '(none)'} for ignored tests, "
-                f"but {MANIFEST} archives that package with "
-                f"{' or '.join(expected)}",
+                f"{label} documents `cargo test -p {package}` for ignored "
+                f"tests with {' and '.join(indirect)}; state the features "
+                f"{MANIFEST} archives that suite with instead",
             )
         )
-    return failures
+        return
+    if (package, frozenset(features)) in known:
+        return
+    expected = sorted(
+        ",".join(suite.features) or "(none)"
+        for suite in suites
+        if suite.package == package
+    )
+    failures.append(
+        (
+            line,
+            f"{label} documents `cargo test -p {package}` with features "
+            f"{','.join(sorted(features)) or '(none)'} for ignored tests, "
+            f"but {MANIFEST} archives that package with "
+            f"{' or '.join(expected)}",
+        )
+    )
 
 
 def main() -> int:

@@ -457,6 +457,25 @@ class WorkflowAgreementTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("outside", failures[0])
 
+    def test_valueless_env_options_do_not_hide_the_command(self) -> None:
+        # `-i`/`--ignore-environment` take no value and still run the command.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + '      - run: env -i PATH=/bin cargo test -p alpha -- --ignored\n'
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("outside", failures[0])
+
+    def test_an_env_terminator_does_not_hide_the_command(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "      - run: env -i -- cargo test -p alpha -- --ignored\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("outside", failures[0])
+
     def test_an_unarchived_nextest_ignored_run_is_reported(self) -> None:
         # The archived run existing is not enough: a rogue one can sit beside
         # it, choosing its own packages.
@@ -794,6 +813,42 @@ class DocumentedCommandTests(unittest.TestCase):
 
         self.assertEqual(len(failures), 1)
         self.assertIn("--no-default-features", failures[0][1])
+
+    def test_every_repeated_package_selection_is_checked(self) -> None:
+        # Cargo runs every `-p` named. Keeping only the last let an
+        # unmanifested package trailing a manifested one hide the suite that
+        # actually needed checking.
+        failures = documentation_disagreements(
+            "AGENTS.md",
+            "`cargo test -p pa -p elsewhere --features other --tests"
+            " -- --ignored`\n",
+            (suite(package="pa", features=("one",)),),
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("other", failures[0][1])
+
+    def test_a_package_qualified_feature_matches_its_bare_name(self) -> None:
+        # `--features pa/one` enables `one` on `pa`, which for the package
+        # under comparison is what its bare name already means.
+        self.assertEqual(
+            documentation_disagreements(
+                "AGENTS.md",
+                "`cargo test -p pa --features pa/one --tests -- --ignored`\n",
+                (suite(package="pa", features=("one",)),),
+            ),
+            [],
+        )
+
+    def test_another_packages_qualified_feature_stays_distinct(self) -> None:
+        failures = documentation_disagreements(
+            "AGENTS.md",
+            "`cargo test -p pa --features other/one --tests -- --ignored`\n",
+            (suite(package="pa", features=("one",)),),
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("other/one", failures[0][1])
 
     def test_a_version_qualified_spec_selects_its_package(self) -> None:
         # `-p name@version` is a valid spec; comparing the whole spec against
