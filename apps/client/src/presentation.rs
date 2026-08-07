@@ -42,6 +42,18 @@ pub(crate) struct ChildResultPresentation<'a> {
     pub(crate) provenance: DelegationProvenance,
 }
 
+pub(crate) struct SessionSpawnedPresentation {
+    pub(crate) tool_request_id: CanonicalUuid,
+    pub(crate) child_session_id: CanonicalUuid,
+    pub(crate) relationship: DelegationPolicy,
+}
+
+pub(crate) struct SessionAwaitRegisteredPresentation {
+    pub(crate) tool_request_id: CanonicalUuid,
+    pub(crate) child_session_id: CanonicalUuid,
+    pub(crate) mode: DelegationWaitMode,
+}
+
 pub(crate) struct SessionMessageSentPresentation {
     pub(crate) tool_request_id: CanonicalUuid,
     pub(crate) peer_session_id: CanonicalUuid,
@@ -665,10 +677,13 @@ impl<'a> Output<'a> {
 
     pub(crate) fn session_spawned(
         &mut self,
-        tool_request_id: CanonicalUuid,
-        child_session_id: CanonicalUuid,
-        relationship: DelegationPolicy,
+        receipt: SessionSpawnedPresentation,
     ) -> io::Result<()> {
+        let SessionSpawnedPresentation {
+            tool_request_id,
+            child_session_id,
+            relationship,
+        } = receipt;
         match relationship {
             DelegationPolicy::Background {} => writeln!(
                 self.stdout,
@@ -689,10 +704,13 @@ impl<'a> Output<'a> {
 
     pub(crate) fn session_await_registered(
         &mut self,
-        tool_request_id: CanonicalUuid,
-        child_session_id: CanonicalUuid,
-        mode: DelegationWaitMode,
+        receipt: SessionAwaitRegisteredPresentation,
     ) -> io::Result<()> {
+        let SessionAwaitRegisteredPresentation {
+            tool_request_id,
+            child_session_id,
+            mode,
+        } = receipt;
         writeln!(
             self.stdout,
             "await_request={tool_request_id} child_session={child_session_id} mode={}",
