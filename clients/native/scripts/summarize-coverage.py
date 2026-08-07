@@ -128,7 +128,7 @@ def load_baseline(path: Path, label: str, sha: str, date: str) -> tuple["Baselin
     return Baseline(covered=covered, executable=executable, label=label, sha=sha, date=date), ""
 
 
-def baseline_note(baseline: Baseline) -> list[str]:
+def baseline_note(baseline: Baseline, measurement_incomplete: bool = False) -> list[str]:
     """State which baseline the delta is against, and how old it may be.
 
     Hard-wrapped like the rest of this report's prose, with the two
@@ -139,9 +139,26 @@ def baseline_note(baseline: Baseline) -> list[str]:
     measures a `main` push only when that push touched the native client, so
     the most recent measured `main` commit can be well behind `main` itself —
     a fact a reader cannot recover from the label and can from the date.
+
+    `measurement_incomplete` says the test run that produced *this* report did
+    not finish. The reporting step runs under `always()` precisely so a partial
+    measurement still names untested code, which means the delta can be the
+    tests that never ran rather than a code change. That is not a caveat the
+    prose can leave to the reader, because a large negative delta is exactly
+    what a real regression looks like.
     """
     measured = f"`{baseline.sha}`, measured {baseline.date}."
-    if baseline.label == BASE:
+    if measurement_incomplete:
+        provenance = [
+            "**This run's tests did not finish**, so the measurement above",
+            "covers only the bundles that ran. The delta is therefore not",
+            "attributable to this branch: comparing a partial measurement",
+            "against a complete baseline shows the tests that were lost, at",
+            "whatever size they happen to be. The baseline it is measured",
+            "against is",
+            measured,
+        ]
+    elif baseline.label == BASE:
         provenance = [
             "Compared against the base this pull request is open against:",
             measured,
@@ -233,6 +250,7 @@ def render(
     *,
     baseline: "Baseline | None" = None,
     baseline_unavailable: str = "",
+    measurement_incomplete: bool = False,
 ) -> str:
     """Render the whole report, with a delta only when a baseline was supplied.
 
@@ -259,7 +277,7 @@ def render(
         headline + ".",
     ]
     if baseline is not None:
-        lines.extend(["", *baseline_note(baseline)])
+        lines.extend(["", *baseline_note(baseline, measurement_incomplete)])
     elif baseline_unavailable:
         lines.extend(["", *baseline_unavailable_note(baseline_unavailable)])
     lines.extend(
@@ -340,6 +358,14 @@ def main(argv: list[str]) -> int:
         default="",
         help="why there is no baseline, stated in the report in place of the delta",
     )
+    parser.add_argument(
+        "--measurement-incomplete",
+        action="store_true",
+        help=(
+            "the test run that produced this report did not finish, so the delta "
+            "must not be attributed to the branch"
+        ),
+    )
     arguments = parser.parse_args(argv)
     # A mislabelled delta is worse than no delta, so the label is not defaulted
     # to either value. This is a caller contract, not a runtime condition: the
@@ -369,6 +395,7 @@ def main(argv: list[str]) -> int:
             arguments.title,
             baseline=baseline,
             baseline_unavailable=unavailable,
+            measurement_incomplete=arguments.measurement_incomplete,
         )
     )
     return 0

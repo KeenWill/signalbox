@@ -119,6 +119,11 @@ jobs:
       # a second simulator pass would, and a measurement is not worth a second
       # pass.
       - name: Run native unit-test bundles
+        # Identified so the reporting step below can tell whether the
+        # measurement it is about to render is complete. That step runs under
+        # `always()` on purpose, so without this it cannot distinguish "these
+        # lines are untested" from "these tests never ran".
+        id: native-tests
         run: clients/native/scripts/test-xcode.sh
         env:
           SIGNALBOX_NATIVE_SKIP_TESTING: SignalboxNativeUITests
@@ -185,6 +190,11 @@ jobs:
           WORKFLOW_FILE: swift.yml
           ARTIFACT_NAME: native-coverage
           SUMMARY_FILE: coverage.json
+          # Named once. A candidate baseline is only usable if this step
+          # concluded `success` in the run that produced it, so this string
+          # has to stay identical to the step's `name:` above; a rename that
+          # missed one would silently reject every candidate.
+          TEST_STEP_NAME: Run native unit-test bundles
           CANDIDATE_LIMIT: 30
         run: |
           # A failing command here must fall through to a stated reason rather
@@ -215,15 +225,21 @@ jobs:
             exit 0
           }
 
-          # Successful pushes to main only, and both halves of that matter. A
-          # pull-request run measured a synthetic merge commit that never
-          # landed. A run that ended red lost something its per-suite
-          # `continue-on-error` could not absorb, so its report covers a
-          # smaller workspace than a green one, and a delta against it would be
-          # that gap rather than a code change. When no green main run exists,
-          # the comment says so, which is itself the readout worth having.
+          # Pushes to main only: a pull-request run measured a synthetic merge
+          # commit that never landed.
+          #
+          # Completed, not successful. What disqualifies a baseline is an
+          # incomplete *measurement*, and the run's conclusion does not report
+          # that: this job continues past the coverage report into the privacy,
+          # Tart, and screenshot checks below, so a run whose tests all passed
+          # and whose artifact is complete still ends red when one of those
+          # fails. Filtering on `success` discarded those measurements and
+          # reported an older baseline as the most recent one measured, which
+          # is a false statement rather than a conservative one. The narrower
+          # question — did the bundles actually run — is asked per candidate
+          # below, against the test step's own conclusion.
           if ! runs="$(gh api \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW_FILE/runs?branch=main&event=push&status=success&per_page=100")"; then
+            "repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW_FILE/runs?branch=main&event=push&status=completed&per_page=100")"; then
             unavailable "the list of \`main\` runs of this workflow could not be read"
           fi
 
@@ -272,6 +288,30 @@ jobs:
             IFS=$'\t' read -r artifact_id expired <<<"$artifact"
             if [ "$expired" = 'true' ]; then
               [ -n "$reason" ] || reason="the artifact from run $run_id has expired"
+              continue
+            fi
+
+            # Did the bundles actually run? The reporting step runs under
+            # `always()`, so a run whose tests failed still uploads an artifact
+            # — a structurally valid one measuring less of the workspace. No
+            # shape check can tell that apart from genuinely uncovered code,
+            # so the test step's own conclusion is what decides it. Asked
+            # after the artifact lookup and before the download, so a
+            # candidate is rejected on the cheap call rather than the
+            # expensive one.
+            if ! step_ok="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
+              | jq -r --arg step "$TEST_STEP_NAME" '
+                  [.jobs[]?.steps[]? | select(.name == $step)] as $steps
+                  | if ($steps | length) == 0 then "missing"
+                    elif all($steps[]; .conclusion == "success") then "yes"
+                    else "no"
+                    end')"; then
+              [ -n "$reason" ] || reason="the jobs of run $run_id could not be read"
+              continue
+            fi
+            if [ "$step_ok" != 'yes' ]; then
+              [ -n "$reason" ] || reason="run $run_id did not finish its native tests, so its measurement is partial"
               continue
             fi
 
@@ -340,7 +380,7 @@ jobs:
           done <<<"$candidates"
 
           if [ -z "$reason" ]; then
-            unavailable "no successful \`main\` run of this workflow was found"
+            unavailable "no completed \`main\` run of this workflow was found"
           fi
           unavailable "$reason (up to the $CANDIDATE_LIMIT most recent successful \`main\` runs were examined)"
       # Report only, and structurally incapable of gating: it never fails the
@@ -377,6 +417,10 @@ jobs:
           BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
           BASELINE_DATE: ${{ steps.baseline.outputs.date }}
           BASELINE_SUMMARY: ${{ runner.temp }}/native-coverage-baseline/coverage.json
+          # Anything but `success` means the bundles did not all run, so the
+          # measurement below is partial and its delta is the missing tests
+          # rather than a code change.
+          NATIVE_TESTS_OUTCOME: ${{ steps.native-tests.outcome }}
         run: |
           # Built in one place so a delta can never be rendered without the
           # label saying which baseline produced it; the summarizer refuses the
@@ -393,6 +437,13 @@ jobs:
             set -- --baseline-unavailable "$BASELINE_REASON"
           else
             set --
+          fi
+
+          # Only meaningful alongside a baseline — with no delta there is
+          # nothing to misattribute — but passed unconditionally so the flag
+          # never depends on which branch above ran.
+          if [ -n "$NATIVE_TESTS_OUTCOME" ] && [ "$NATIVE_TESTS_OUTCOME" != 'success' ]; then
+            set -- "$@" --measurement-incomplete
           fi
 
           clients/native/scripts/report-coverage.sh "$@" >> "$GITHUB_STEP_SUMMARY"

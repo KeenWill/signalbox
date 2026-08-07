@@ -248,7 +248,19 @@ class BaselineDeltaTests(unittest.TestCase):
             baseline=baseline_of(executable=100, covered=50),
         )
 
-        self.assertIn("**60.00%** of product lines covered (60/100)", rendered)
+        # Read back off the product target the fixture built, so a
+        # behaviour-preserving change to those numbers moves the expectation
+        # with them instead of reading as a regression. Naming the product
+        # target here also states that the `.xctest` target is the excluded
+        # one, which is the property this test exists for.
+        product = document["targets"][0]
+        covered = product["coveredLines"]
+        executable = product["executableLines"]
+        share = 100.0 * covered / executable
+        self.assertIn(
+            f"**{share:.2f}%** of product lines covered ({covered}/{executable})",
+            rendered,
+        )
         self.assertIn("+10.00 pp", rendered)
 
     def test_a_base_baseline_claims_the_delta_for_this_branch(self) -> None:
@@ -265,6 +277,45 @@ class BaselineDeltaTests(unittest.TestCase):
 
         self.assertIn("the base this pull request is open against", rendered)
         self.assertIn("this branch's own doing", rendered)
+
+    def test_an_incomplete_run_withdraws_the_attribution(self) -> None:
+        """The reporting step runs under `always()`, so a run whose bundles
+        crashed still renders a measurement — a partial one. Compared against
+        a complete baseline that reads as a large negative delta, which is
+        indistinguishable from a real regression unless the report says so."""
+        rendered = summarize_coverage.render(
+            one_target_report(executable=100, covered=60),
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline=baseline_of(executable=100, covered=50, label=summarize_coverage.BASE),
+            measurement_incomplete=True,
+        )
+
+        # Whitespace-normalized: this prose is hard-wrapped, so an assertion
+        # on a contiguous phrase would break on a rewrap rather than on a
+        # change of meaning.
+        flowed = " ".join(rendered.split())
+        self.assertIn("tests did not finish", flowed)
+        self.assertIn("not attributable to this branch", flowed)
+        # The unconditional claim must be gone, not merely qualified further
+        # down: a reader who stops at the first sentence must not be misled.
+        self.assertNotIn("this branch's own doing", flowed)
+
+    def test_a_complete_run_keeps_the_attribution(self) -> None:
+        """Negative control for the case above: the withdrawal is driven by
+        the flag, not present unconditionally."""
+        rendered = summarize_coverage.render(
+            one_target_report(executable=100, covered=60),
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline=baseline_of(executable=100, covered=50, label=summarize_coverage.BASE),
+            measurement_incomplete=False,
+        )
+
+        self.assertIn("this branch's own doing", rendered)
+        self.assertNotIn("did not finish", rendered)
 
     def test_a_latest_main_baseline_disclaims_it(self) -> None:
         """The fallback baseline is not the pull request's base, so the delta
