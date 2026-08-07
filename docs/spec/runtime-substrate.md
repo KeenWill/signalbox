@@ -1060,10 +1060,12 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   signal so a blocked read cannot hold a cancelled operation. Failures are
   reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
   secret bytes.
-- The production implementation is signalboxd's `FileCredentialAccess`: each
-  resolve rereads the key file named by `ANTHROPIC_API_KEY_FILE` or
-  `OPENAI_API_KEY_FILE` and feeds the production `AnthropicRuntime` or
-  `OpenAiRuntime`.
+- The production implementation is signalboxd's `FileCredentialAccess`. The
+  present pre-pool composition maps singleton provider environment paths. The
+  committed credential-pool child instead supplies the complete map of every
+  `file` profile reference to its catalog path, whatever direct HTTP adapter
+  consumes it. Each resolve rereads the mapped file and feeds the selected
+  runtime. No present composition implements that replacement.
 - The resolved value is scoped to the one prepared request as a
   sensitivity-marked HTTP header; execute performs no second lookup.
 - Provider-controlled text is credential-sanitized before leaving the adapter:

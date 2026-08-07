@@ -310,24 +310,29 @@ mutation carrying a user-global `command_id` and one closed `target` object:
 - `membership_exclusion { pool_policy_id, profile, record_generation }` names
   one `avoid_new_sessions` exclusion; and
 - `session_displacement { session_id, pool_policy_id, profile, record_generation }`
-  names one `switch_next_turn` displacement.
+  names one `switch_next_turn` displacement; and
+- `chain_exclusion { session_id, turn_id, pool_policy_id, profile, predecessor_model_call_id }`
+  names the exact qualifying predecessor observation that excluded one member
+  from an availability-successor chain.
 
 Every identity is a nonempty bounded configuration or durable identity already
-owned by the credential contract, and `record_generation` is a positive
+owned by the credential contract, and each `record_generation` is a positive
 canonical decimal string. The mutation atomically marks only that exact active
-generation cleared. A later active generation is `stale_generation`; a target
-with no such generation is `unknown_credential_exclusion`; and ordinary
-authorization failure is `credential_administration_forbidden`. OAuth quarantine
-rejects this mutation because only re-provisioning can clear it.
+generation or predecessor correlation cleared. A later active generation is
+`stale_generation`; a chain target whose predecessor does not exactly correlate
+with the named profile's active exclusion, or any target with no such record, is
+`unknown_credential_exclusion`; and ordinary authorization failure is
+`credential_administration_forbidden`. OAuth quarantine rejects this mutation
+because only re-provisioning can clear it.
 
 Success returns `credential_exclusion_cleared { target, outcome }`, where
 `outcome` is `cleared` for the winning transition or `already_cleared` when a
-fresh command names that same inactive generation. The inactive generation is
-retained so the latter result is durable. Equal `command_id` replay returns its
-original logical receipt before inspecting current state; structurally different
-reuse is the ordinary durable-command conflict. These rules give an indefinite
-`park` wait a concrete writer without making a model call or inventing adapter
-liveness evidence.
+fresh command names that same inactive generation or predecessor correlation.
+The inactive record is retained so the latter result is durable. Equal
+`command_id` replay returns its original logical receipt before inspecting
+current state; structurally different reuse is the ordinary durable-command
+conflict. These rules give an indefinite `park` wait a concrete writer without
+making a model call or inventing adapter liveness evidence.
 
 The session-placement object is exactly `pathless {}`, `scoped { path }`, or
 `root_global_read { path, intent: "acknowledged" }`. A path is one through 64

@@ -1345,6 +1345,13 @@ source turn and cannot apply within that turn. Clearing marks the exact
 generation inactive rather than deleting it, which supplies the replay and
 `already_cleared` contract.
 
+A chain-exclusion row is scoped to the session, turn, immutable pool policy,
+profile, and predecessor model call whose qualifying observation created it. It
+carries active/cleared state and that exact observation correlation rather than
+an independently allocated generation. Clearing marks only that correlation
+inactive, retains it for replay, and wakes a matching indefinite availability
+wait without inventing provider evidence.
+
 Pre-call exhaustion uses one turn-correlated failure header with cause exactly
 `credential_pool_exhausted`, the current attempt, and the immutable policy
 identity, plus contiguous member rows in policy order carrying the closed
@@ -1365,12 +1372,20 @@ the qualifying availability cause, and the typed non-acceptance evidence that
 authorized substitution. The successor's call remains subject to
 `model_call_attempt_once`, pins the same target and a different profile, and
 cannot exist without that complete predecessor proof. A credential-availability
-wait must atomically retain the active turn slot and store the immutable
-pool-policy identity, every exhausted-chain member's evidence and optional
-reset, and the optional earliest-reset deadline required by
+wait must atomically retain the active turn slot and store a closed
+`exhausted`/`contended` discriminator plus the immutable pool-policy identity.
+The exhausted form stores every policy member's exclusion evidence and optional
+reset plus the optional earliest-reset deadline. The contended form stores every
+durable exclusion in the selection snapshot and the complete nonempty set of
+otherwise-admissible bounded members with their exact invocation-reservation
+identities and generations. Invocation completion releases its reservation and
+writes the wake signal atomically; startup closes prior-process reservations as
+lost before waking their waiters and retains reservations owned by the live
+fenced process. These are the shapes required by
 [turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
-Reconstitution and wake must fail closed on partial or mismatched evidence. This
-paragraph constrains that future schema; no present storage surface provides it.
+Reconstitution and wake must fail closed on partial, stale, or mismatched
+evidence. This paragraph constrains that future schema; no present storage
+surface provides it.
 
 ## Open edges
 

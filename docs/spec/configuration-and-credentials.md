@@ -806,6 +806,19 @@ member is excluded by a trigger or a quarantine and no otherwise-admissible
 member is merely bounded, which is a durable condition; contention resolves on
 its own.
 
+The wait records which case it represents. An exhausted wait carries the
+complete policy-member exclusion snapshot described below. A contended wait
+carries that same frozen policy identity, every durable exclusion that removed a
+member, and the complete nonempty set of otherwise-admissible bounded members
+with their exact invocation-reservation identities and generations. A member's
+admission acquires its reservation in the same transaction that prepares the
+call. Every pre-send closure or terminal observation atomically releases it and
+emits the durable availability update that makes the waiter eligible. Startup
+retains reservations owned by a live fenced process and closes reservations
+owned by an earlier process as lost before making their waiters eligible; no
+provider request is repeated because a contended waiter has not issued one.
+Partial, foreign, or stale reservation evidence fails reconstitution closed.
+
 **`oauth`** is a rotating authorization the daemon owns. The profile carries the
 `client_id`, `token_url`, `device_authorization_url`, and `scopes` its provider
 requires. These are configuration, never build-provided constants: which OAuth
@@ -842,41 +855,56 @@ scavenges every entry it can prove is an owned scratch home beneath that root;
 an ownership, type, or containment mismatch fails startup and removes nothing.
 Thus a host or daemon crash can leave only effective-user-restricted residue
 until the next startup, never an indefinitely trusted login store. The
-interactive flow therefore stays in the provider's own client. Because each
-authorization mints an independent token family, provisioning neither disturbs
-nor depends on any other login for that account: an operator's existing CLI
-logins on this or any other machine keep working, and deleting the profile's
-stored authorization ends only the daemon's own family.
+invocation must explicitly force the provider CLI's file or ephemeral credential
+backend to that scratch home and disable every OS keyring, credential helper,
+ambient home, and external store. Provisioning fails before starting the child
+or relaying an authorization code when the adapter cannot enforce that backend,
+and harvesting reads only the forced store beneath the scratch root. The
+interactive flow therefore stays in the provider's own client without allowing
+that client to persist outside daemon custody. Because each authorization mints
+an independent token family, provisioning neither disturbs nor depends on any
+other login for that account: an operator's existing CLI logins on this or any
+other machine keep working, and deleting the profile's stored authorization ends
+only the daemon's own family.
 
 The daemon is the sole refresher of a stored authorization. Before contacting
 the provider, it locks the profile row, reads the stored token, and
 transactionally marks that generation's refresh in progress. The durable marker
 excludes another refresher after the lock is released for the network exchange.
-A second transaction re-locks and matches that generation, persists the returned
-token, and clears the marker before the new access token is used anywhere. A
-definitely committed replacement overwrites the previous refresh token rather
-than retaining it: a superseded token is unusable, and keeping one would only
-preserve material whose sole remaining effect is to invalidate the live
-authorization if it were ever replayed. If the exchange fails after possible
-provider rotation, its persistence commit is ambiguous, or the daemon restarts
-with the marker still present, it never replays the stored token. It first
-rereads the durable generation: a committed replacement is adopted; an uncleared
-marker quarantines the profile and requires re-provisioning. Access tokens are
-held in memory. A clean restart discards them without contacting any provider;
-the first later call preparation that needs a profile lazily refreshes it. This
-keeps access tokens out of the database and preserves configuration-independent
-recovery even when a token endpoint is unavailable.
+A refresh client sends exactly one POST for that generation to the configured
+`token_url`'s exact scheme, host, effective port, path, and query. Redirect
+following and automatic HTTP, transport, and protocol retries are disabled at
+every layer. Once any request bytes may have been written, a connection loss,
+redirect response, or indeterminate response is ambiguous: the daemon does not
+send again and follows the quarantine path below. A second transaction re-locks
+and matches that generation, persists the returned token, and clears the marker
+before the new access token is used anywhere. A definitely committed replacement
+overwrites the previous refresh token rather than retaining it: a superseded
+token is unusable, and keeping one would only preserve material whose sole
+remaining effect is to invalidate the live authorization if it were ever
+replayed. If the exchange fails after possible provider rotation, its
+persistence commit is ambiguous, or the daemon restarts with the marker still
+present, it never replays the stored token. It first rereads the durable
+generation: a committed replacement is adopted; an uncleared marker quarantines
+the profile and requires re-provisioning. Access tokens are held in memory. A
+clean restart discards them without contacting any provider; the first later
+call preparation that needs a profile lazily refreshes it. This keeps access
+tokens out of the database and preserves configuration-independent recovery even
+when a token endpoint is unavailable.
 
 Dispatch supplies each invocation a scratch credential home carrying a
 daemon-minted access token. It uses the same restrictive root, file modes,
 descriptor-relative operations, normal cleanup, and pre-work startup scavenging
-as provisioning; the access token is otherwise retained only in memory. The
-refresh token is not absent from the design — it is the whole of it — but it
-stays with the daemon and is never copied into a scratch home. Withholding it is
-what buys the concurrency: a CLI process holding a refresh token could decide to
-refresh, so N concurrent processes could race exactly as they do under
-`codex_home`. Holding none, they share no mutable authorization state, and the
-daemon refreshes once under its row lock on behalf of all of them.
+as provisioning and explicitly forces the CLI's file or ephemeral backend to
+that home while disabling ambient, keyring, helper, and external stores. Failure
+to enforce that selection is a typed pre-send delivery failure and starts no CLI
+child. The access token is otherwise retained only in memory. The refresh token
+is not absent from the design — it is the whole of it — but it stays with the
+daemon and is never copied into a scratch home. Withholding it is what buys the
+concurrency: a CLI process holding a refresh token could decide to refresh, so N
+concurrent processes could race exactly as they do under `codex_home`. Holding
+none, they share no mutable authorization state, and the daemon refreshes once
+under its row lock on behalf of all of them.
 
 A daemon-minted access token can expire while a long invocation is still
 running, and that is not an authorization failure. The daemon minted the token

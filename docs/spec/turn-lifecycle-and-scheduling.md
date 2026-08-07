@@ -92,17 +92,23 @@ batch and carries no live turn or tool attempt ([tool-loop](tool-loop.md)).
 
 **Committed unimplemented functionality — credential-availability wait.** No
 present `ActiveTurnPhase`, storage discriminator, startup-scan branch, scheduler
-path, or process state supplies the pool-exhaustion wait in
+path, or process state supplies the pool-availability wait in
 [model-call execution](model-call-execution.md#availability-successor-calls),
 and no present runtime can enter it. Its implementing child must add a distinct
-active phase that retains the session slot and durably binds the frozen
-pool-policy snapshot, every exhausted-chain member's evidence and optional
-reset, and the earliest of those resets as its optional deadline. Startup may
-reconstitute it only from that complete evidence. The scheduler must make a
-deadline reached or a durable member-availability update eligible; release
-returns the same turn to `Running` with a fresh attempt and a fresh availability
-chain while carrying forward member evidence whose reset has not passed, every
-durable membership exclusion, and every profile quarantine.
+active phase with a closed `exhausted`/`contended` cause that retains the
+session slot and durably binds the frozen pool-policy snapshot. The exhausted
+form carries every policy member's exclusion evidence and optional reset, plus
+the earliest reset as its optional deadline. The contended form carries every
+durable exclusion in the selection snapshot and the complete nonempty set of
+otherwise-admissible bounded members with exact invocation-reservation
+identities and generations. Startup may reconstitute either only from that
+complete evidence; it retains live-process reservations and closes fenced
+prior-process reservations as lost before waking a contended waiter. The
+scheduler makes a reached deadline, an exact reservation release, or a durable
+member-availability update eligible. Release returns the same turn to `Running`
+with a fresh attempt and availability chain while carrying forward member
+evidence whose reset has not passed, every durable membership exclusion, and
+every profile quarantine.
 
 The wait has an exact occupied-slot control matrix. `steer` is accepted as
 ordinary pending steering bound to this source turn and remains pending until a
@@ -771,14 +777,17 @@ values—`DATABASE_URL`, `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML
 naming provider targets, selections, and aliases),
 `SIGNALBOX_TEMPLATE_CONFIG_FILE`, `BRAVE_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and
 `SIGNALBOX_SOCKET_PATH`—from the process environment, plus the optional
-`SIGNALBOX_RUNNER_SOCKET_PATH` override and `HOME` as specified below. It
-additionally requires `ANTHROPIC_API_KEY_FILE` when at least one static model
-mapping selects the Anthropic adapter, as specified by
-[configuration and credentials](configuration-and-credentials.md#process-configuration).
-The configuration page owns these provisional channels. It validates the model
-catalog, then resolves the template catalog and all of its prompt files against
-that model catalog, before connecting. It then acquires the single-daemon guard,
-fences the prior pool incarnation, migrates and resolves the one-time imported
+`SIGNALBOX_RUNNER_SOCKET_PATH` override and `HOME` as specified below. The
+present pre-pool composition additionally has a conditional singleton
+model-provider credential channel. The committed credential-pool child replaces
+that channel: model-provider paths then come only from each `file` profile in
+the static catalog, and composition builds `FileCredentialAccess` from the
+complete profile map. No present composition implements that replacement.
+[Configuration and credentials](configuration-and-credentials.md#process-configuration)
+owns the resulting channel inventory. It validates the model catalog, then
+resolves the template catalog and all of its prompt files against that model
+catalog, before connecting. It then acquires the single-daemon guard, fences the
+prior pool incarnation, migrates and resolves the one-time imported
 display-title backfill
 ([conversation-import](conversation-import.md#derived-display-titles)),
 completes the generic recovery scan, marks every prior-process nonterminal

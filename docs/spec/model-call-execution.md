@@ -583,6 +583,19 @@ its own attempt, `model_call_attempt_once UNIQUE (turn_attempt_id)` still admits
 exactly one call row per attempt and needs no relaxation; the attempt chain is
 the one intra-turn tool rounds already create.
 
+An observation that admits this path ends the predecessor attempt as
+`KnownFailure` but does not terminalize the turn. Under the session-scheduler
+lock, its atomic observation transaction applies the frozen `switch_now` action
+and either prepares the successor attempt and call or enters the pool's
+exhausted or contended disposition. It appends no `TurnFailed`, creates no
+terminal frontier, and does not reclassify pending steering while a successor or
+wait retains the active turn. A concurrently accepted stop is serialized by that
+same lock: when its applied-interrupt proof already exists, the known failure
+follows the ordinary stop-requested terminal path and no successor is created;
+when the observation wins first, the later stop targets the newly active
+successor. One commit can therefore never both terminalize the turn and
+authorize a successor.
+
 Three causes qualify and no others. Refusal never qualifies: it is provider
 judgment about the request, so another account would refuse the same content and
 substituting one would be shopping for a different answer. Ambiguity never
@@ -603,8 +616,9 @@ prepared. Releasing a parked wait also ends the exhausted chain; the resumed
 turn starts a fresh chain and recomputes admission. It drops a chain-local
 member exclusion only when that member's reported reset has passed or a durable
 availability update invalidates it; every later or absent reset remains initial
-exclusion evidence in the fresh chain. Every durable membership exclusion and
-profile quarantine is retained as well.
+exclusion evidence in the fresh chain. An explicit clear of its exact
+predecessor correlation is such an update. Every durable membership exclusion
+and profile quarantine is retained as well.
 
 When no member remains admissible, the pool's `on_pool_exhausted` decides. If
 the chain observed a qualifying provider failure, `fail` fails the turn as a
@@ -781,10 +795,12 @@ persistence commits it atomically with its outbox rows
 - **KnownFailed.** The call ends `KnownFailed`; definitive provider-error
   evidence additionally retains only its closed `ProviderErrorKind`
   classification as the optional provider-failure cause — never provider prose.
-  An unstopped attempt ends `KnownFailure`, and the turn fails with a
-  `TurnFailed` entry and terminal frontier. A stop-requested attempt instead
-  ends `AfterCancellation(KnownFailure)` and still fails; the physical result
-  has not proven cancellation.
+  An unstopped attempt ends `KnownFailure`. Unless the same atomic observation
+  admits the availability-successor path above, the turn fails with a
+  `TurnFailed` entry and terminal frontier; an admitted successor instead keeps
+  the turn active without either. A stop-requested attempt ends
+  `AfterCancellation(KnownFailure)` and still fails, and cannot admit a
+  successor; the physical result has not proven cancellation.
 - **Cancelled.** Without the exact applied-interrupt proof, a physical
   cancellation is an unstopped known failure. With the exact proof — carried
   directly by the atomic interrupt transition before any call exists or for an
