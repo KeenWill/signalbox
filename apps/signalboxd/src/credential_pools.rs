@@ -13,6 +13,7 @@ use std::{
     sync::Arc,
 };
 
+use signalbox_model_runtime_claude_cli::CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY;
 use toml_edit::{InlineTable, Item, Table};
 use url::Url;
 
@@ -157,6 +158,9 @@ fn parse_file_env_key(
         }
         ModelAdapter::ClaudeCli => {
             let env_key = validated_name(required_string(profile, "env_key")?)?;
+            if env_key.as_ref() != CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY {
+                return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+            }
             Ok(Some(env_key))
         }
         ModelAdapter::CodexCli => {

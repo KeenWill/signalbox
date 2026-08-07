@@ -42,7 +42,7 @@ pub(crate) struct EventDecoder<C> {
     exchange: ExchangeFacts,
     reported_model: Option<ProviderReportedModel>,
     native_session_id: Option<String>,
-    native_model: Option<String>,
+    native_assistant_model: Option<String>,
     message_id: Option<ProviderMessageId>,
     native_message_id: Option<String>,
     content: Vec<AssistantPart>,
@@ -89,7 +89,7 @@ impl<C: Clone> EventDecoder<C> {
             exchange: ExchangeFacts::default(),
             reported_model: None,
             native_session_id: None,
-            native_model: None,
+            native_assistant_model: None,
             message_id: None,
             native_message_id: None,
             content: Vec::new(),
@@ -169,10 +169,25 @@ impl<C: Clone> EventDecoder<C> {
         value: Value,
         sink: &mut RedactingSink<'_, C>,
     ) -> Result<(), DecodeFailure> {
-        if value.get("subtype").and_then(Value::as_str) != Some("init") || self.initialized {
-            return Err(DecodeFailure::stream_protocol(
-                "unexpected or duplicate Claude system event",
-            ));
+        let subtype = value.get("subtype").and_then(Value::as_str);
+        if matches!(
+            subtype,
+            Some(
+                "status"
+                    | "hook_started"
+                    | "hook_progress"
+                    | "hook_response"
+                    | "api_retry"
+                    | "thinking_tokens"
+            )
+        ) {
+            return Ok(());
+        }
+        if subtype != Some("init") || self.initialized {
+            let subtype = subtype.unwrap_or("<missing>");
+            return Err(DecodeFailure::stream_protocol(format!(
+                "unexpected or duplicate Claude system event subtype `{subtype}`"
+            )));
         }
         let event: SystemInit = decode(value)?;
         if event.session_id.is_empty() || event.model.is_empty() {
@@ -214,7 +229,6 @@ impl<C: Clone> EventDecoder<C> {
         let request_id = sink.redact_provider_id("", &event.session_id);
         let model = sink.redact_provider_id(&request_id, &event.model);
         self.native_session_id = Some(event.session_id);
-        self.native_model = Some(event.model);
         self.exchange.provider_request_id = Some(ProviderRequestId::new(request_id.clone()));
         self.reported_model = Some(ProviderReportedModel::new(model.clone()));
         self.initialized = true;
@@ -269,10 +283,17 @@ impl<C: Clone> EventDecoder<C> {
             self.message_id = Some(ProviderMessageId::new(sanitized));
             self.native_message_id = Some(event.message.id.clone());
         }
-        if self.native_model.as_deref() != Some(event.message.model.as_str()) {
+        if self
+            .native_assistant_model
+            .as_ref()
+            .is_some_and(|model| model != &event.message.model)
+        {
             return Err(DecodeFailure::stream_protocol(
-                "Claude assistant model contradicts system init",
+                "Claude assistant model contradicts prior assistant content",
             ));
+        }
+        if self.native_assistant_model.is_none() {
+            self.native_assistant_model = Some(event.message.model.clone());
         }
         if let Some(usage) = event.message.usage {
             self.usage.absorb(message_usage(usage));

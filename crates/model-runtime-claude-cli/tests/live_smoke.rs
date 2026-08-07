@@ -28,12 +28,14 @@
 //! exchange per pin bump there is never a second read to amortize it against.
 //! Caching would raise the price of the very run it is supposed to cheapen.
 //!
-//! Credential discipline: this test never reads, receives, or logs credential
-//! material. The CLI resolves its own login from the credential home the
-//! adapter forwards, exactly as in production. The version probe discards the
-//! child's stderr rather than reporting it, and every other failure message
-//! carries only evidence the adapter has already run through its
-//! credential-shape redaction.
+//! Credential discipline: the live entry point receives only a non-secret path
+//! and resolves that file through the same per-preparation access boundary as
+//! production. The adapter writes the value to a private request-scoped Claude
+//! settings store and forwards only that store's `CLAUDE_CONFIG_DIR`; it never
+//! puts the key itself in the child's process environment. The version probe
+//! discards the child's stderr rather than reporting it, and every other
+//! failure message carries only evidence the adapter has already redacted with
+//! the exact request credential.
 
 #![allow(
     clippy::expect_used,
@@ -46,13 +48,15 @@ use std::time::Duration;
 
 use signalbox_model_runtime::{
     BoundaryLossEvidence, CancellationSignal, CompletionEvidence, CompletionFinish,
-    ConversationMessage, CredentialReference, DeliveryMode, ExchangeFacts, LossCause,
-    ModelOperation, ModelRuntime, ModelSettings, PreparationDefect, PreparationFailure,
-    PreparationOutcome, ProviderReportedModel, ProviderRequestId, RefusalEvidence, RequestedTarget,
-    ResolvedTarget, TerminalEvidence, TokenUsage,
+    ConversationMessage, CredentialAccess, CredentialAccessError, CredentialAccessFailure,
+    CredentialReference, CredentialValue, DeliveryMode, ExchangeFacts, LossCause, ModelOperation,
+    ModelRuntime, ModelSettings, PreparationDefect, PreparationFailure, PreparationOutcome,
+    ProviderReportedModel, ProviderRequestId, RefusalEvidence, RequestedTarget, ResolvedTarget,
+    TerminalEvidence, TokenUsage,
 };
 use signalbox_model_runtime_claude_cli::{
-    ClaudeCliConfig, ClaudeCliPreparedRequest, ClaudeCliRuntime, SUPPORTED_CLAUDE_CLI_VERSION,
+    CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY, ClaudeCliConfig, ClaudeCliPreparedRequest,
+    ClaudeCliRuntime, SUPPORTED_CLAUDE_CLI_VERSION,
 };
 
 /// Overrides the executable under test. The default resolves through `PATH`;
@@ -65,6 +69,10 @@ const EXECUTABLE_VARIABLE: &str = "SIGNALBOX_CLAUDE_SMOKE_EXECUTABLE";
 /// subscription login do not offer the same set — so the caller can name
 /// another.
 const MODEL_VARIABLE: &str = "SIGNALBOX_CLAUDE_SMOKE_MODEL";
+
+/// Deployment-owned file the gated workflow writes before the test process
+/// starts. The value itself never enters this process's environment.
+const CREDENTIAL_FILE_VARIABLE: &str = "SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE";
 
 const DEFAULT_EXECUTABLE: &str = "claude";
 
@@ -107,6 +115,13 @@ async fn the_pinned_claude_cli_completes_one_exchange() {
 
     let working_directory = tempfile::tempdir().expect("smoke working directory is created");
     let credential_reference = CredentialReference::new("claude-smoke");
+    let credentials = SmokeFileCredentialAccess {
+        path: std::path::PathBuf::from(
+            std::env::var_os(CREDENTIAL_FILE_VARIABLE)
+                .expect("the gated smoke supplies a credential file path"),
+        ),
+        reference: credential_reference.clone(),
+    };
     let mut config = ClaudeCliConfig::new(
         &executable,
         mcp_bridge_executable(),
@@ -114,7 +129,12 @@ async fn the_pinned_claude_cli_completes_one_exchange() {
         credential_reference.clone(),
     );
     config.exchange_timeout = Duration::from_secs(4 * 60);
-    let runtime = ClaudeCliRuntime::new(config).expect("smoke runtime configuration is valid");
+    let runtime = ClaudeCliRuntime::new_with_file_delivery(
+        config,
+        credentials,
+        CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY,
+    )
+    .expect("smoke runtime file delivery is valid");
 
     let mut operation = ModelOperation::new(
         "claude-smoke".to_string(),
@@ -156,6 +176,38 @@ async fn the_pinned_claude_cli_completes_one_exchange() {
             && decoded.usage.output_tokens.is_some(),
         "the terminal `result` event no longer reports the usage counters the adapter reads"
     );
+}
+
+struct SmokeFileCredentialAccess {
+    path: std::path::PathBuf,
+    reference: CredentialReference,
+}
+
+impl CredentialAccess for SmokeFileCredentialAccess {
+    async fn resolve(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        if reference != &self.reference {
+            return Err(CredentialAccessError::new(
+                reference.clone(),
+                CredentialAccessFailure::Unmapped,
+            ));
+        }
+        tokio::fs::read(&self.path)
+            .await
+            .map(CredentialValue::new)
+            .map_err(|error| {
+                CredentialAccessError::new(
+                    reference.clone(),
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        CredentialAccessFailure::Unavailable
+                    } else {
+                        CredentialAccessFailure::Unreadable
+                    },
+                )
+            })
+    }
 }
 
 /// Credential-free entry point for the real-CLI controls that must pass before
@@ -510,12 +562,12 @@ fn reported_version_rejects_a_blank_first_line() {
 
 /// Every place the smoke workflow is permitted to reach the credential's
 /// *value*, in file order. The single environment binding scopes the secret to
-/// the one step that spends the exchange, and the presence guard fails that
-/// step early with a clear message when the environment supplies nothing —
-/// `test -n` reads the variable without rendering it anywhere.
+/// the source-file materialization step, whose guard and shell-builtin write
+/// read it without rendering it or placing it in an argument vector.
 const PERMITTED_CREDENTIAL_SITES: &[&str] = &[
     "ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}",
     "test -n \"${ANTHROPIC_API_KEY}\" \\",
+    "printf '%s' \"${ANTHROPIC_API_KEY}\" > \"${SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE}\"",
 ];
 
 /// The workflow's active lines, trimmed and in file order, each paired with
@@ -631,7 +683,7 @@ fn workflow_step_lines(workflow: &str, name: &str) -> Vec<String> {
 }
 
 /// The one step that carries the credential's value.
-const CREDENTIALED_STEP: &str = "Run one live exchange through the adapter";
+const CREDENTIALED_STEP: &str = "Materialize the file-delivered credential";
 
 /// Every line that step executes, in file order.
 ///
@@ -639,31 +691,22 @@ const CREDENTIALED_STEP: &str = "Run one live exchange through the adapter";
 /// A command such as `env`, `export -p`, or `set` writes the whole environment
 /// — the key with it — without the variable appearing on its line, so an
 /// inventory keyed on the name cannot see it. Nothing else in this workflow
-/// holds the value: it is bound in this step alone, so pinning this step closes
-/// the indirect route completely. The name-keyed inventory above stays as the
-/// complement, catching a binding that puts the credential into some *other*
-/// step, which this assertion would not see.
+/// receives the value in its environment: this step writes the deployment-owned
+/// source file and the test process later receives only its path. The
+/// name-keyed inventory above remains the complement, catching a binding that
+/// puts the credential into some other step.
 const CREDENTIALED_STEP_LINES: &[&str] = &[
-    "- name: Run one live exchange through the adapter",
+    "- name: Materialize the file-delivered credential",
     "env:",
     "ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}",
-    "SIGNALBOX_CLAUDE_SMOKE_MODEL: ${{ vars.CLAUDE_SMOKE_MODEL }}",
+    "SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE: >-",
+    "${{ runner.temp }}/signalbox-claude-smoke-credential",
     "run: |",
     "set -euo pipefail",
     "test -n \"${ANTHROPIC_API_KEY}\" \\",
     "|| { echo \"the claude-smoke environment provides no API key\"; exit 1; }",
-    "test_name=the_pinned_claude_cli_completes_one_exchange",
-    "result=\"${RUNNER_TEMP}/claude-smoke-live-result\"",
-    "cargo test --color never --no-fail-fast \\",
-    "-p signalbox-model-runtime-claude-cli --test live_smoke -- \\",
-    "--ignored --exact \"${test_name}\" 2>&1 | tee \"${result}\"",
-    "passed_count=$(sed -n \\",
-    "'s/^test result: ok\\. \\([0-9][0-9]*\\) passed;.*/\\1/p' \\",
-    "\"${result}\")",
-    "if [[ \"${passed_count}\" != \"1\" ]]; then",
-    "echo \"::error::Expected exactly one live smoke test to execute; libtest reported '${passed_count:-no passed count}'.\"",
-    "exit 1",
-    "fi",
+    "umask 077",
+    "printf '%s' \"${ANTHROPIC_API_KEY}\" > \"${SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE}\"",
 ];
 
 /// Any line added to, removed from, or changed in the credentialed step fails
@@ -762,6 +805,40 @@ fn the_smoke_workflow_reaches_the_credential_only_where_permitted() {
         PERMITTED_CREDENTIAL_SITES,
         "the smoke workflow's credential references changed; every site that reads \
          {SMOKE_CREDENTIAL_VARIABLE} must be reviewed before it is permitted"
+    );
+}
+
+#[test]
+fn the_smoke_workflow_supplies_and_cleans_one_nonsecret_credential_file_path() {
+    let path_binding = "${{ runner.temp }}/signalbox-claude-smoke-credential".to_string();
+    assert!(workflow_declares(
+        CLAUDE_SMOKE_WORKFLOW,
+        "SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE: >-"
+    ));
+    assert!(workflow_declares(
+        CLAUDE_SMOKE_WORKFLOW,
+        "${{ runner.temp }}/signalbox-claude-smoke-credential"
+    ));
+    assert!(
+        workflow_step_lines(
+            CLAUDE_SMOKE_WORKFLOW,
+            "Run one live exchange through the adapter"
+        )
+        .contains(&path_binding)
+    );
+    assert_eq!(
+        workflow_step_lines(
+            CLAUDE_SMOKE_WORKFLOW,
+            "Remove the file-delivered credential"
+        ),
+        [
+            "- name: Remove the file-delivered credential",
+            "if: ${{ always() }}",
+            "env:",
+            "SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE: >-",
+            "${{ runner.temp }}/signalbox-claude-smoke-credential",
+            "run: rm -f \"${SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE}\"",
+        ]
     );
 }
 
