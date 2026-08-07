@@ -95,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         system_event("hook_response")?;
         system_status(Some("requesting"))?;
         system_event("api_retry")?;
+        system_event("thinking_tokens")?;
         assistant_text(fixtures::ANSWER)?;
         success("end_turn", Some(fixtures::ANSWER))?;
         return Ok(());

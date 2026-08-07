@@ -172,7 +172,14 @@ impl<C: Clone> EventDecoder<C> {
         let subtype = value.get("subtype").and_then(Value::as_str);
         if matches!(
             subtype,
-            Some("status" | "hook_started" | "hook_progress" | "hook_response" | "api_retry")
+            Some(
+                "status"
+                    | "hook_started"
+                    | "hook_progress"
+                    | "hook_response"
+                    | "api_retry"
+                    | "thinking_tokens"
+            )
         ) {
             return Ok(());
         }
