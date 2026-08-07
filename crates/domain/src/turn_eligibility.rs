@@ -146,6 +146,74 @@ pub enum AcceptedInputTurnSchedulingRecordState {
     },
 }
 
+/// Stored lifecycle classification for one delegation-origin turn retained by
+/// an accepted-input scheduling projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DelegatedTurnSchedulingState {
+    /// The delegated turn still owns its physical runtime slot.
+    Active,
+    /// Parent-command authority made the delegated turn logically terminal
+    /// without rewriting its retained physical lifecycle state.
+    RuntimeTerminal,
+    /// The delegated turn completed with delivered assistant content.
+    TerminalCompleted,
+    /// The delegated turn completed with an explicit refusal.
+    TerminalRefused,
+    /// The delegated turn ended with a known failure.
+    TerminalFailed,
+    /// The delegated turn ended from applied cancellation authority.
+    TerminalCancelled,
+    /// The delegated turn ended with unresolved physical ambiguity.
+    TerminalReconciliationRequired,
+}
+
+/// Complete configuration and lifecycle facts for one delegation-origin turn
+/// referenced outside the accepted-input turn collection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DelegatedTurnSchedulingFact {
+    turn: TurnId,
+    defaults_version: crate::SessionConfigurationDefaultsVersion,
+    selected: DirectModelSelection,
+    state: DelegatedTurnSchedulingState,
+}
+
+impl DelegatedTurnSchedulingFact {
+    /// Records the exact stored configuration and lifecycle projection.
+    pub const fn new(
+        turn: TurnId,
+        defaults_version: crate::SessionConfigurationDefaultsVersion,
+        selected: DirectModelSelection,
+        state: DelegatedTurnSchedulingState,
+    ) -> Self {
+        Self {
+            turn,
+            defaults_version,
+            selected,
+            state,
+        }
+    }
+
+    /// Returns the delegation-origin turn identity.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns the defaults epoch frozen by the delegated origin.
+    pub const fn defaults_version(&self) -> crate::SessionConfigurationDefaultsVersion {
+        self.defaults_version
+    }
+
+    /// Returns the exact selected direct model frozen by the delegated origin.
+    pub const fn selected(&self) -> DirectModelSelection {
+        self.selected
+    }
+
+    /// Returns the stored lifecycle classification.
+    pub const fn state(&self) -> DelegatedTurnSchedulingState {
+        self.state
+    }
+}
+
 /// Correlated stored execution provenance for one failed terminal turn.
 ///
 /// The optional enclosing value distinguishes a direct failure with no
@@ -1325,7 +1393,7 @@ pub struct AcceptedInputSchedulingReconstitutionInput {
     compactions: Vec<crate::ContextCompactionReconstitutionInput>,
     consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
     delegated_consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
-    delegated_turns: Vec<TurnId>,
+    delegated_turns: Vec<DelegatedTurnSchedulingFact>,
     steering_continuation_rounds: Vec<SteeringContinuationRoundReconstitutionInput>,
     continuation_rounds: Vec<ContinuationRoundReconstitutionInput>,
     active_acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
@@ -1427,7 +1495,10 @@ impl AcceptedInputSchedulingReconstitutionInput {
 
     /// Supplies delegation-origin turns outside this accepted-input projection
     /// whose semantic entries and completed model calls remain in its frontiers.
-    pub fn with_delegated_turn_facts(mut self, delegated_turns: Vec<TurnId>) -> Self {
+    pub fn with_delegated_turn_facts(
+        mut self,
+        delegated_turns: Vec<DelegatedTurnSchedulingFact>,
+    ) -> Self {
         self.delegated_turns = delegated_turns;
         self
     }
@@ -1498,7 +1569,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
     }
 
     /// Returns delegation-origin turns represented only by semantic facts.
-    pub fn delegated_turns(&self) -> &[TurnId] {
+    pub fn delegated_turns(&self) -> &[DelegatedTurnSchedulingFact] {
         &self.delegated_turns
     }
 
@@ -3679,9 +3750,10 @@ fn reconstitute_inner(
         .iter()
         .map(|record| (record.turn, record))
         .collect::<BTreeMap<_, _>>();
-    let mut delegated_turns = BTreeSet::new();
-    for turn in input.delegated_turns.iter().copied() {
-        if records_by_turn.contains_key(&turn) || !delegated_turns.insert(turn) {
+    let mut delegated_turns = BTreeMap::new();
+    for fact in input.delegated_turns.iter().copied() {
+        let turn = fact.turn();
+        if records_by_turn.contains_key(&turn) || delegated_turns.insert(turn, fact).is_some() {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::DelegatedTurnFactMismatch { turn },
             );
@@ -3800,27 +3872,28 @@ fn reconstitute_inner(
                 defaults_version,
                 selected,
             } => {
-                let Some(record) = records_by_turn.get(turn) else {
-                    if delegated_turns.contains(turn) {
-                        continue;
-                    }
-                    return Err(
-                        AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
-                            entry: candidate.identity(),
-                        },
-                    );
-                };
-                if matches!(
-                    &record.state,
-                    AcceptedInputTurnSchedulingRecordState::Queued
-                ) || record.origin_configuration.session_defaults_version() != *defaults_version
-                    || record
-                        .origin_configuration
-                        .effective()
-                        .model()
-                        .selected_direct()
-                        != *selected
-                {
+                let configuration_matches = records_by_turn.get(turn).map_or_else(
+                    || {
+                        delegated_turns.get(turn).is_some_and(|fact| {
+                            fact.defaults_version() == *defaults_version
+                                && fact.selected() == *selected
+                        })
+                    },
+                    |record| {
+                        !matches!(
+                            &record.state,
+                            AcceptedInputTurnSchedulingRecordState::Queued
+                        ) && record.origin_configuration.session_defaults_version()
+                            == *defaults_version
+                            && record
+                                .origin_configuration
+                                .effective()
+                                .model()
+                                .selected_direct()
+                                == *selected
+                    },
+                );
+                if !configuration_matches {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {
                             entry: candidate.identity(),
@@ -3839,20 +3912,20 @@ fn reconstitute_inner(
                 }
             }
             InitialSemanticTranscriptEntryPayload::TurnFailed { turn } => {
-                let Some(record) = records_by_turn.get(turn) else {
-                    if delegated_turns.contains(turn) {
-                        continue;
-                    }
-                    return Err(
-                        AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
-                            entry: candidate.identity(),
-                        },
-                    );
-                };
-                if !matches!(
-                    &record.state,
-                    AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }
-                ) {
+                let state_matches = records_by_turn.get(turn).map_or_else(
+                    || {
+                        delegated_turns.get(turn).is_some_and(|fact| {
+                            fact.state() == DelegatedTurnSchedulingState::TerminalFailed
+                        })
+                    },
+                    |record| {
+                        matches!(
+                            &record.state,
+                            AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }
+                        )
+                    },
+                );
+                if !state_matches {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {
                             entry: candidate.identity(),
@@ -3881,20 +3954,20 @@ fn reconstitute_inner(
             | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
             | InitialSemanticTranscriptEntryPayload::DelegationResult { .. } => {}
             InitialSemanticTranscriptEntryPayload::TurnCompleted { turn } => {
-                let Some(record) = records_by_turn.get(turn) else {
-                    if delegated_turns.contains(turn) {
-                        continue;
-                    }
-                    return Err(
-                        AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
-                            entry: candidate.identity(),
-                        },
-                    );
-                };
-                if !matches!(
-                    &record.state,
-                    AcceptedInputTurnSchedulingRecordState::TerminalCompleted { .. }
-                ) {
+                let state_matches = records_by_turn.get(turn).map_or_else(
+                    || {
+                        delegated_turns.get(turn).is_some_and(|fact| {
+                            fact.state() == DelegatedTurnSchedulingState::TerminalCompleted
+                        })
+                    },
+                    |record| {
+                        matches!(
+                            &record.state,
+                            AcceptedInputTurnSchedulingRecordState::TerminalCompleted { .. }
+                        )
+                    },
+                );
+                if !state_matches {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {
                             entry: candidate.identity(),
@@ -3910,20 +3983,20 @@ fn reconstitute_inner(
                 }
             }
             InitialSemanticTranscriptEntryPayload::TurnCancelled { turn } => {
-                let Some(record) = records_by_turn.get(turn) else {
-                    if delegated_turns.contains(turn) {
-                        continue;
-                    }
-                    return Err(
-                        AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
-                            entry: candidate.identity(),
-                        },
-                    );
-                };
-                if !matches!(
-                    &record.state,
-                    AcceptedInputTurnSchedulingRecordState::TerminalCancelled { .. }
-                ) {
+                let state_matches = records_by_turn.get(turn).map_or_else(
+                    || {
+                        delegated_turns.get(turn).is_some_and(|fact| {
+                            fact.state() == DelegatedTurnSchedulingState::TerminalCancelled
+                        })
+                    },
+                    |record| {
+                        matches!(
+                            &record.state,
+                            AcceptedInputTurnSchedulingRecordState::TerminalCancelled { .. }
+                        )
+                    },
+                );
+                if !state_matches {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {
                             entry: candidate.identity(),
@@ -4766,7 +4839,9 @@ fn reconstitute_inner(
                                 starting.is_semantic_prefix_of(call_snapshot)
                             })
                 });
-        let delegated_turn_matches = delegated_turns.contains(&ended.turn())
+        let delegated_turn_matches = delegated_turns
+            .get(&ended.turn())
+            .is_some_and(|fact| ended.selection().selected_direct() == fact.selected())
             && !records_by_turn.contains_key(&ended.turn())
             && call_snapshot.is_some();
         if ended.disposition() != ModelCallDisposition::Completed
@@ -14991,7 +15066,14 @@ mod tests {
     fn s03_inv009_reconstitution_rejects_delegated_accepted_turn_fact() {
         let session = current_session();
         let queued = accepted_origin(1);
-        let input = queued_input(&session, queued).with_delegated_turn_facts(vec![queued.turn()]);
+        let input = queued_input(&session, queued).with_delegated_turn_facts(vec![
+            DelegatedTurnSchedulingFact::new(
+                queued.turn(),
+                SessionConfigurationDefaultsVersion::first(),
+                direct(1),
+                DelegatedTurnSchedulingState::Active,
+            ),
+        ]);
 
         let failure = assert_input_rejects_unchanged(input);
 
@@ -15010,8 +15092,13 @@ mod tests {
         let session = current_session();
         let queued = accepted_origin(1);
         let delegated = turn_id(99);
-        let input =
-            queued_input(&session, queued).with_delegated_turn_facts(vec![delegated, delegated]);
+        let fact = DelegatedTurnSchedulingFact::new(
+            delegated,
+            SessionConfigurationDefaultsVersion::first(),
+            direct(1),
+            DelegatedTurnSchedulingState::Active,
+        );
+        let input = queued_input(&session, queued).with_delegated_turn_facts(vec![fact, fact]);
 
         let failure = assert_input_rejects_unchanged(input);
 
@@ -15019,6 +15106,78 @@ mod tests {
             failure,
             AcceptedInputSchedulingReconstitutionFailure::DelegatedTurnFactMismatch {
                 turn: delegated,
+            }
+        );
+    }
+
+    /// S18 / INV-008 / INV-009: a delegated model-identity entry must match
+    /// the exact configuration frozen by its stored turn origin.
+    #[test]
+    fn s18_inv008_inv009_delegated_model_identity_requires_stored_configuration() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let delegated = turn_id(99);
+        let identity_entry = semantic_entry(99);
+        let mut input = queued_input(&session, queued).with_delegated_turn_facts(vec![
+            DelegatedTurnSchedulingFact::new(
+                delegated,
+                SessionConfigurationDefaultsVersion::first(),
+                direct(1),
+                DelegatedTurnSchedulingState::Active,
+            ),
+        ]);
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                identity_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::ModelIdentityChanged {
+                    turn: delegated,
+                    defaults_version: SessionConfigurationDefaultsVersion::first(),
+                    selected: direct(2),
+                },
+            ));
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {
+                entry: identity_entry.id(),
+            }
+        );
+    }
+
+    /// S18 / INV-009: a delegated terminal semantic entry must match the
+    /// independently stored delegated lifecycle state.
+    #[test]
+    fn s18_inv009_delegated_terminal_entry_requires_stored_lifecycle() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let delegated = turn_id(99);
+        let failure_entry = semantic_entry(99);
+        let mut input = queued_input(&session, queued).with_delegated_turn_facts(vec![
+            DelegatedTurnSchedulingFact::new(
+                delegated,
+                SessionConfigurationDefaultsVersion::first(),
+                direct(1),
+                DelegatedTurnSchedulingState::Active,
+            ),
+        ]);
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                failure_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::TurnFailed { turn: delegated },
+            ));
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {
+                entry: failure_entry.id(),
             }
         );
     }

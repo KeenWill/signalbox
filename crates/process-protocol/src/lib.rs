@@ -6700,6 +6700,12 @@ impl ServerMessage {
             } if ordinal.value() < 2 || delivery_sequence.value() == 0 => {
                 return Err(FrameValidationError::DelegationShape);
             }
+            Self::SessionAwaitRegistered {
+                mode: DelegationWaitMode::Background,
+                ..
+            }
+            | Self::ChildResult { .. }
+            | Self::SessionMessageSent { .. } => {}
             Self::InputSubmitted { model_settings, .. } => model_settings.validate()?,
             Self::SessionDefaultsReplaced {
                 model_selection,

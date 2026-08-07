@@ -398,7 +398,7 @@ where
         .map_err(map_scheduling_error)?;
     let delegated_phase = match (scheduling.active_turn_execution(), active_turn) {
         (None, Some(turn)) => {
-            sqlx::query_scalar::<_, String>(
+            let stored = sqlx::query_scalar::<_, Option<String>>(
                 "SELECT active_phase_kind
                    FROM turn_lifecycle
                   WHERE session_id = $1
@@ -410,7 +410,16 @@ where
             .bind(session_id_to_uuid(requested_session))
             .bind(turn)
             .fetch_optional(&mut *connection)
-            .await?
+            .await?;
+            match stored {
+                Some(Some(phase)) => Some(phase),
+                Some(None) => {
+                    return Err(
+                        StartupScanCorruption::Inconsistent("delegated active phase").into(),
+                    );
+                }
+                None => None,
+            }
         }
         (Some(_), _) | (None, None) => None,
     };

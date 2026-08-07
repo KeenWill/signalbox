@@ -948,8 +948,10 @@ public summary deliberately omits, before it constructs the summary. Load paths
 do not panic on durable data; checked interrupt application produces the exact
 cancellation-requested or reconciliation-required transition, while a projection
 that cannot support that transition fails closed as typed corruption. Startup
-recovery operates only on successfully reconstituted projections (INV-034), and
-a successful reconstitution does not waive the guarded compare-and-set when a
+recovery operates only on successfully reconstituted projections (INV-034). A
+stored active delegation-origin lifecycle whose phase is null or outside the
+closed phase vocabulary is corruption rather than retryable database failure. A
+successful reconstitution does not waive the guarded compare-and-set when a
 later transaction commits: every guarded write that matches zero rows is either
 benign staleness (reload and rederive) or, where the transaction's own premises
 made a match mandatory, corruption. Why: the dangerous corruption cases are rows
@@ -1092,7 +1094,12 @@ starts model execution from the existing delegated-task semantic entry as the
 child's one-member initial frontier. The same typed path activates an idle
 recipient's delivery-range wake after its exact terminal predecessor, appending
 the contiguous checked message or background-result entries to that predecessor
-frontier.
+frontier. Any accepted-input scheduling reread that retains delegation-origin
+semantic history supplies each referenced delegated turn's independently stored
+defaults version, selected direct model, and active, logical-terminal, or
+physical-terminal lifecycle classification. Model-identity, terminal semantic,
+and completed-call facts must match that projection; a turn identity alone is
+never sufficient reconstitution authority.
 
 `session_delegation_event` is an append-only per-relationship ordinal stream.
 Its closed kind/shape checks require every lifecycle disposition to carry one
@@ -1134,20 +1141,23 @@ result-unavailable, and child-originated terminal outcomes, or one of the same
 exclusive parent-turn-command and parent-goal-command provenance arms for a
 policy-driven stop or cancellation. A known provider failure, a pre-send
 capability failure, or a known effect-free tool-crash closure publishes the same
-typed failed child result in its terminal transaction. Delivery satellites bind
-messages/results to their exact semantic entries; no transcript query supplies
-result content. Every pending message and background result delivery
-additionally receives one positive recipient-wide `delivery_sequence` under the
-recipient session lock. That sequence is unique and gap-free per recipient
-across both kinds; relationship ordinals remain relationship-local evidence and
-never order two different relationships. Foreground results stay ordered by
-their exact awaiting request and do not consume an inbox sequence. Their
-semantic entry repeats that awaiting request as the ordinary logical tool-result
-correlation, so the unchanged proposal-order and single-result checks admit it
-as the `await_session` result without admitting a second result for the same
-request. Tool-batch outbox decoding and context-compaction evidence count that
-foreground correlation as one tool result; a background result has no
-tool-result correlation and counts as neither one.
+typed failed child result in its terminal transaction. An authoritative reread
+of an ambiguous pre-send capability failure authenticates that exact delegated
+result plus its parent update, wake, and both delegation outbox headers before
+reporting the failure committed. Delivery satellites bind messages/results to
+their exact semantic entries; no transcript query supplies result content. Every
+pending message and background result delivery additionally receives one
+positive recipient-wide `delivery_sequence` under the recipient session lock.
+That sequence is unique and gap-free per recipient across both kinds;
+relationship ordinals remain relationship-local evidence and never order two
+different relationships. Foreground results stay ordered by their exact awaiting
+request and do not consume an inbox sequence. Their semantic entry repeats that
+awaiting request as the ordinary logical tool-result correlation, so the
+unchanged proposal-order and single-result checks admit it as the
+`await_session` result without admitting a second result for the same request.
+Tool-batch outbox decoding and context-compaction evidence count that foreground
+correlation as one tool result; a background result has no tool-result
+correlation and counts as neither one.
 
 An accepted background wait reserves one future recipient delivery position
 until its child result exists. Message and later-wait admission under the same
