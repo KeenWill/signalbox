@@ -33,13 +33,13 @@ use signalbox_application::{
     UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
-    ContextFrontierId, DangerousToolAutoApproval, DeliveryRequest, DirectModelSelection,
-    DurableCommandId, ModelCallId, ModelSelectionOverride, ModelSelectionRequest,
-    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
-    PerInputConfigurationChoices, ProviderModelIdentity, ResolvedProviderTarget,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionId, SubmitInputAppliedResult, SubmitInputResult, ToolAttemptId,
-    ToolName as DomainToolName, ToolRequestId, TurnAttemptId, TurnId, UserContent,
+    DangerousToolAutoApproval, DeliveryRequest, DirectModelSelection, DurableCommandId,
+    ModelCallId, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
+    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
+    ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SubmitInputAppliedResult, SubmitInputResult, ToolAttemptId, ToolName as DomainToolName,
+    ToolRequestId, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -54,8 +54,8 @@ use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
     process_read::{
-        ProcessReadRepository, ProcessToolExecutionResultDisposition, ProcessTranscriptEntry,
-        ProcessTurnState,
+        ProcessFailedModelCallDisposition, ProcessReadRepository,
+        ProcessToolExecutionResultDisposition, ProcessTranscriptEntry, ProcessTurnState,
     },
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
@@ -126,8 +126,8 @@ const ARBITRARY_EVAL_SESSION_ID: u128 = 0x9107;
 const ARBITRARY_EVAL_MODEL_CALL_ID: u128 = 0x9108;
 const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x9109;
 const ARBITRARY_SECOND_EVAL_REQUEST_ID: u128 = 0x910a;
-const ARBITRARY_EVAL_FRONTIER_ID: u128 = 0x910b;
 const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
+const SYNTHETIC_EXECUTOR_FAILURE: &str = "synthetic executor failure";
 
 type EvalResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -704,8 +704,18 @@ impl SharedFamilyExecutor {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct FamilyExecutorError;
+#[derive(Debug)]
+struct FamilyExecutorError {
+    source: Box<dyn Error + Send + Sync>,
+}
+
+impl FamilyExecutorError {
+    fn new(source: impl Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
 
 impl fmt::Display for FamilyExecutorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -713,12 +723,26 @@ impl fmt::Display for FamilyExecutorError {
     }
 }
 
-impl Error for FamilyExecutorError {}
+impl Error for FamilyExecutorError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
 
 impl ClassifyOperatorFailure for FamilyExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         OperatorFailureClass::CallerOrHubBug
     }
+}
+
+#[test]
+fn family_executor_error_preserves_its_concrete_source() {
+    let error = FamilyExecutorError::new(io::Error::other(SYNTHETIC_EXECUTOR_FAILURE));
+
+    assert_eq!(
+        error.source().map(ToString::to_string),
+        Some(String::from(SYNTHETIC_EXECUTOR_FAILURE))
+    );
 }
 
 impl ToolExecutor for SharedFamilyExecutor {
@@ -734,7 +758,7 @@ impl ToolExecutor for SharedFamilyExecutor {
             FamilyExecutor::Git(executor) => executor
                 .execute(invocation)
                 .await
-                .map_err(|_| FamilyExecutorError),
+                .map_err(FamilyExecutorError::new),
             FamilyExecutor::Workspace { read, .. }
                 if matches!(
                     name.as_str(),
@@ -743,20 +767,20 @@ impl ToolExecutor for SharedFamilyExecutor {
             {
                 read.execute(invocation)
                     .await
-                    .map_err(|_| FamilyExecutorError)
+                    .map_err(FamilyExecutorError::new)
             }
             FamilyExecutor::Workspace { mutation, .. } => mutation
                 .execute(invocation)
                 .await
-                .map_err(|_| FamilyExecutorError),
+                .map_err(FamilyExecutorError::new),
             FamilyExecutor::Web { fetch, .. } if name == WEB_FETCH_NAME => fetch
                 .execute(invocation)
                 .await
-                .map_err(|_| FamilyExecutorError),
+                .map_err(FamilyExecutorError::new),
             FamilyExecutor::Web { search, .. } => search
                 .execute(invocation)
                 .await
-                .map_err(|_| FamilyExecutorError),
+                .map_err(FamilyExecutorError::new),
         }
     }
 }
@@ -1303,6 +1327,7 @@ fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SnapshotTurnDisposition {
     Completed,
+    ProviderFailure,
     Other,
 }
 
@@ -1310,13 +1335,18 @@ impl SnapshotTurnDisposition {
     fn from_process_state(state: &ProcessTurnState) -> Self {
         match state {
             ProcessTurnState::Completed { .. } => Self::Completed,
+            ProcessTurnState::Failed {
+                terminal_model_call,
+                ..
+            } => Self::from_failed_model_call(
+                terminal_model_call.as_ref().map(|call| call.disposition()),
+            ),
             ProcessTurnState::Queued { .. }
             | ProcessTurnState::QueuedDelegated { .. }
             | ProcessTurnState::QueuedDelegationWake { .. }
             | ProcessTurnState::DelegationTerminated { .. }
             | ProcessTurnState::ActiveRunning { .. }
             | ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
-            | ProcessTurnState::Failed { .. }
             | ProcessTurnState::Cancelled { .. }
             | ProcessTurnState::Refused { .. }
             | ProcessTurnState::ActiveAwaitingToolApproval { .. }
@@ -1326,16 +1356,26 @@ impl SnapshotTurnDisposition {
         }
     }
 
+    const fn from_failed_model_call(
+        disposition: Option<ProcessFailedModelCallDisposition>,
+    ) -> Self {
+        match disposition {
+            Some(ProcessFailedModelCallDisposition::KnownFailed) => Self::ProviderFailure,
+            Some(ProcessFailedModelCallDisposition::Cancelled) | None => Self::Other,
+        }
+    }
+
     const fn is_completed(self) -> bool {
         match self {
             Self::Completed => true,
-            Self::Other => false,
+            Self::ProviderFailure | Self::Other => false,
         }
     }
 
     const fn label(self) -> &'static str {
         match self {
             Self::Completed => "completed",
+            Self::ProviderFailure => "provider failure",
             Self::Other => "not completed",
         }
     }
@@ -1351,6 +1391,9 @@ struct CaseOutcome {
 
 impl CaseOutcome {
     fn forced_disposition(&self) -> EvalDisposition {
+        if self.snapshot.turn_disposition == SnapshotTurnDisposition::ProviderFailure {
+            return EvalDisposition::Infrastructure;
+        }
         let Some(target) = self.target.as_deref() else {
             return EvalDisposition::Miss;
         };
@@ -1370,6 +1413,9 @@ impl CaseOutcome {
     }
 
     fn natural_loop_disposition(&self, family: EvalFamily) -> EvalDisposition {
+        if self.snapshot.turn_disposition == SnapshotTurnDisposition::ProviderFailure {
+            return EvalDisposition::Infrastructure;
+        }
         let required_names: &[&str] = match family {
             EvalFamily::Git => &[GIT_STAGE_NAME, GIT_CREATE_COMMIT_NAME],
             EvalFamily::Workspace => &[READ_FILE_NAME, WRITE_FILE_NAME],
@@ -1443,18 +1489,36 @@ fn turn_snapshot_reports_ambiguous_model_recovery_as_a_miss() {
 }
 
 #[test]
-fn turn_snapshot_reports_a_terminal_model_failure_as_a_miss() {
-    let state = ProcessTurnState::Failed {
-        terminal_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(
-            ARBITRARY_EVAL_FRONTIER_ID,
+fn turn_snapshot_reports_a_terminal_provider_failure_distinctly() {
+    assert_eq!(
+        SnapshotTurnDisposition::from_failed_model_call(Some(
+            ProcessFailedModelCallDisposition::KnownFailed
         )),
-        terminal_attempt: None,
-        terminal_model_call: None,
+        SnapshotTurnDisposition::ProviderFailure
+    );
+}
+
+#[test]
+fn provider_failure_is_reported_as_infrastructure_not_a_model_miss() {
+    let outcome = CaseOutcome {
+        target: Some(String::from(GIT_STATUS_NAME)),
+        expected_arguments: Some(String::from("{}")),
+        execution_completed: true,
+        result_round_trips: 0,
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::ProviderFailure,
+            requests: Vec::new(),
+            model_calls: 1,
+        },
     };
 
     assert_eq!(
-        SnapshotTurnDisposition::from_process_state(&state),
-        SnapshotTurnDisposition::Other
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Git),
+        EvalDisposition::Infrastructure
     );
 }
 
@@ -1931,6 +1995,7 @@ fn web_natural_state_requires_the_exact_query() -> EvalResult {
 enum EvalDisposition {
     Pass,
     Miss,
+    Infrastructure,
 }
 
 impl EvalDisposition {
@@ -1942,6 +2007,8 @@ impl EvalDisposition {
         match (self, other) {
             (Self::Pass, Self::Pass) => Self::Pass,
             (Self::Pass, Self::Miss) | (Self::Miss, Self::Pass | Self::Miss) => Self::Miss,
+            (Self::Infrastructure, Self::Pass | Self::Miss | Self::Infrastructure)
+            | (Self::Pass | Self::Miss, Self::Infrastructure) => Self::Infrastructure,
         }
     }
 
@@ -1949,6 +2016,7 @@ impl EvalDisposition {
         match self {
             Self::Pass => "PASS",
             Self::Miss => "MISS",
+            Self::Infrastructure => "INFRA",
         }
     }
 }
