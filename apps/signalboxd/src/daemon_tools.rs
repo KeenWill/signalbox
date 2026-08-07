@@ -1061,6 +1061,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
     use std::{
         ffi::OsString,
         fmt, fs,
@@ -1069,13 +1071,15 @@ mod tests {
         process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio},
         sync::{
             Mutex,
-            mpsc::{self, Receiver, RecvTimeoutError},
+            mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
         },
         thread::{self, JoinHandle},
         time::{Duration, Instant, SystemTime},
     };
 
     use signalbox_application::ToolCatalog;
+    use signalbox_application::ToolInputSchema;
+    use signalbox_domain::{ToolEffectClass, ToolPermissionDefault};
     use signalbox_model_runtime::{
         CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
     };
@@ -1333,19 +1337,59 @@ mod tests {
         serde_json::json!({"tools": tools})
     }
 
+    const SYNTHETIC_BRIDGE_TOOL_NAME: &str = "synthetic_bridge_tool";
+    const SYNTHETIC_BRIDGE_TOOL_DESCRIPTION: &str = "Projects a synthetic bridge tool.";
+    const SYNTHETIC_BRIDGE_TOOL_SCHEMA: &str =
+        r#"{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}"#;
+
+    fn synthetic_bridge_tool_definition() -> ToolDefinition {
+        ToolDefinition::new(
+            ToolName::try_new(String::from(SYNTHETIC_BRIDGE_TOOL_NAME))
+                .expect("synthetic bridge tool name is valid"),
+            String::from(SYNTHETIC_BRIDGE_TOOL_DESCRIPTION),
+            ToolInputSchema::try_new(String::from(SYNTHETIC_BRIDGE_TOOL_SCHEMA))
+                .expect("synthetic bridge tool schema is valid"),
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::EffectFree,
+        )
+    }
+
+    #[test]
+    fn bridge_catalog_projects_definition_fields_into_mcp_shape() {
+        let definition = synthetic_bridge_tool_definition();
+
+        assert_eq!(
+            bridge_catalog(&[definition]),
+            serde_json::json!({
+                "tools": [{
+                    "name": SYNTHETIC_BRIDGE_TOOL_NAME,
+                    "description": SYNTHETIC_BRIDGE_TOOL_DESCRIPTION,
+                    "inputSchema": serde_json::from_str::<serde_json::Value>(
+                        SYNTHETIC_BRIDGE_TOOL_SCHEMA,
+                    )
+                    .expect("synthetic expected schema is valid JSON"),
+                }],
+            })
+        );
+    }
+
     struct BridgeArtifactSelection {
         profile: OsString,
         target_dir: PathBuf,
     }
 
     const CLAUDE_MCP_BRIDGE_BINARY: &str = "signalbox-claude-mcp-bridge";
+    const CARGO_TEST_PROFILE: &str = "test";
 
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
-        claude_mcp_bridge_artifact_selection_for(&current)
+        claude_mcp_bridge_artifact_selection_for(&current, CARGO_TEST_PROFILE)
     }
 
-    fn claude_mcp_bridge_artifact_selection_for(current: &Path) -> BridgeArtifactSelection {
+    fn claude_mcp_bridge_artifact_selection_for(
+        current: &Path,
+        debug_profile: &str,
+    ) -> BridgeArtifactSelection {
         let profile_dir = current
             .parent()
             .and_then(Path::parent)
@@ -1354,7 +1398,7 @@ mod tests {
             .file_name()
             .expect("Cargo profile directory has a name");
         let profile = match profile_dir_name.to_str() {
-            Some("debug") => OsString::from("dev"),
+            Some("debug") => OsString::from(debug_profile),
             Some("release") => OsString::from("release"),
             _ => profile_dir_name.to_os_string(),
         };
@@ -1367,12 +1411,17 @@ mod tests {
         }
     }
 
-    fn assert_bridge_artifact_selection(executable: &Path, expected_profile: &str) {
+    #[track_caller]
+    fn assert_bridge_artifact_selection(
+        executable: &Path,
+        debug_profile: &str,
+        expected_profile: &str,
+    ) {
         let profile_dir = executable
             .parent()
             .and_then(Path::parent)
             .expect("synthetic executable has a profile directory");
-        let selection = claude_mcp_bridge_artifact_selection_for(executable);
+        let selection = claude_mcp_bridge_artifact_selection_for(executable, debug_profile);
 
         assert_eq!(selection.profile, OsString::from(expected_profile));
         assert_eq!(
@@ -1384,24 +1433,24 @@ mod tests {
     }
 
     #[test]
-    fn bridge_artifact_selection_maps_debug_to_the_dev_profile() {
+    fn bridge_artifact_selection_maps_debug_to_the_explicit_test_profile() {
         let executable = Path::new("synthetic-target/debug/deps/daemon-tools-test");
 
-        assert_bridge_artifact_selection(executable, "dev");
+        assert_bridge_artifact_selection(executable, CARGO_TEST_PROFILE, CARGO_TEST_PROFILE);
     }
 
     #[test]
     fn bridge_artifact_selection_preserves_the_release_profile() {
         let executable = Path::new("synthetic-target/release/deps/daemon-tools-test");
 
-        assert_bridge_artifact_selection(executable, "release");
+        assert_bridge_artifact_selection(executable, CARGO_TEST_PROFILE, "release");
     }
 
     #[test]
     fn bridge_artifact_selection_preserves_a_custom_profile() {
         let executable = Path::new("synthetic-target/ci-fast/deps/daemon-tools-test");
 
-        assert_bridge_artifact_selection(executable, "ci-fast");
+        assert_bridge_artifact_selection(executable, CARGO_TEST_PROFILE, "ci-fast");
     }
 
     const BRIDGE_BUILD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -1429,6 +1478,21 @@ mod tests {
         let _ = child.wait();
     }
 
+    fn configure_owned_process_group(command: &mut Command) {
+        #[cfg(unix)]
+        command.process_group(0);
+        #[cfg(not(unix))]
+        let _ = command;
+    }
+
+    fn terminate_owned_process_group(child: &mut Child) {
+        #[cfg(unix)]
+        if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
+        terminate_child(child);
+    }
+
     #[test]
     #[ignore = "subprocess fixture for the bounded child-wait regression test"]
     fn bridge_wait_child_fixture() {
@@ -1438,21 +1502,22 @@ mod tests {
     #[test]
     fn wait_for_child_returns_none_at_its_deadline_and_cleanup_reaps() {
         let current = std::env::current_exe().expect("test executable path is available");
-        let mut child = Command::new(current)
+        let mut child_command = Command::new(current);
+        child_command
             .arg("daemon_tools::tests::bridge_wait_child_fixture")
             .args(["--exact", "--ignored"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("bounded-wait child starts");
+            .stderr(Stdio::null());
+        configure_owned_process_group(&mut child_command);
+        let mut child = child_command.spawn().expect("bounded-wait child starts");
 
         assert!(
             wait_for_child(&mut child, BRIDGE_CHILD_TEST_TIMEOUT)
                 .expect("bounded wait observes the live child")
                 .is_none()
         );
-        terminate_child(&mut child);
+        terminate_owned_process_group(&mut child);
         assert!(
             child
                 .try_wait()
@@ -1468,7 +1533,8 @@ mod tests {
         let selection = claude_mcp_bridge_artifact_selection();
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut build = Command::new(cargo)
+        let mut build_command = Command::new(cargo);
+        build_command
             .args([
                 "build",
                 "--offline",
@@ -1483,16 +1549,16 @@ mod tests {
             .arg("--target-dir")
             .arg(&selection.target_dir)
             .current_dir(workspace)
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("bridge binary build starts");
+            .stdout(Stdio::piped());
+        configure_owned_process_group(&mut build_command);
+        let mut build = build_command.spawn().expect("bridge binary build starts");
         let (messages, reader) = response_reader(BufReader::new(
             build.stdout.take().expect("Cargo build stdout is piped"),
         ));
         let Some(status) = wait_for_child(&mut build, BRIDGE_BUILD_TIMEOUT)
             .expect("bridge binary build is observed")
         else {
-            terminate_child(&mut build);
+            terminate_owned_process_group(&mut build);
             reader.join().expect("Cargo build output reader exits");
             panic!("bridge binary build exceeded its timeout");
         };
@@ -1576,6 +1642,8 @@ mod tests {
 
     struct OneLineThenPanic {
         consumed: bool,
+        read_started: Option<SyncSender<()>>,
+        release_read: Receiver<()>,
     }
 
     impl Read for OneLineThenPanic {
@@ -1591,6 +1659,14 @@ mod tests {
     impl BufRead for OneLineThenPanic {
         fn fill_buf(&mut self) -> io::Result<&[u8]> {
             assert!(!self.consumed, "reader is not polled after disconnection");
+            self.read_started
+                .take()
+                .expect("first read is signalled once")
+                .send(())
+                .expect("read-start receiver remains connected");
+            self.release_read
+                .recv()
+                .expect("first read is released by the fixture");
             Ok(b"response\n")
         }
 
@@ -1642,8 +1718,20 @@ mod tests {
 
     #[test]
     fn bridge_response_reader_stops_when_its_receiver_disconnects() {
-        let (responses, reader) = response_reader(OneLineThenPanic { consumed: false });
+        let (read_started, read_started_receiver) = mpsc::sync_channel(0);
+        let (release_read, release_read_receiver) = mpsc::sync_channel(0);
+        let (responses, reader) = response_reader(OneLineThenPanic {
+            consumed: false,
+            read_started: Some(read_started),
+            release_read: release_read_receiver,
+        });
+        read_started_receiver
+            .recv_timeout(BRIDGE_RESPONSE_TIMEOUT)
+            .expect("response reader starts its first read");
         drop(responses);
+        release_read
+            .send(())
+            .expect("blocked first read remains connected");
 
         reader
             .join()
@@ -1750,8 +1838,11 @@ mod tests {
         response: &serde_json::Value,
         request_id: &serde_json::Value,
     ) -> bool {
+        let has_result = response.get("result").is_some();
+        let has_error = response.get("error").is_some();
         response.get("jsonrpc").and_then(serde_json::Value::as_str) == Some("2.0")
             && response.get("id") == Some(request_id)
+            && has_result != has_error
     }
 
     #[test]
@@ -1766,6 +1857,19 @@ mod tests {
     fn mcp_response_envelope_rejects_a_mismatched_request_identity() {
         let request_id = serde_json::json!(7);
         let response = serde_json::json!({"jsonrpc": "2.0", "id": 8});
+
+        assert!(!valid_mcp_response_envelope(&response, &request_id));
+    }
+
+    #[test]
+    fn mcp_response_envelope_rejects_result_and_error_together() {
+        let request_id = serde_json::json!(7);
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id.clone(),
+            "result": {},
+            "error": {"code": -32603, "message": "synthetic error"},
+        });
 
         assert!(!valid_mcp_response_envelope(&response, &request_id));
     }
