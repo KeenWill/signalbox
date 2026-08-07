@@ -763,6 +763,27 @@ class WorkflowAgreementTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("manifest-driven", failures[0])
 
+    def test_a_result_assertion_in_another_job_does_not_count(self) -> None:
+        # The aggregate job carries the required check's name, so the same
+        # binding and assertion sitting elsewhere proves nothing about it.
+        stripped = AGREEING_WORKFLOW.replace(
+            "          RUN_RESULT: ${{ needs.postgres-integration-run.result }}\n",
+            "",
+        ).replace('          test "$RUN_RESULT" = success\n', "")
+        failures = self.disagreements(
+            stripped
+            + "  decoy:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - env:\n"
+            "          RUN_RESULT: ${{ needs.postgres-integration-run.result }}\n"
+            "        run: |\n"
+            '          test "$RUN_RESULT" = success\n'
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("postgres-integration-run", failures[0])
+
     def test_an_aggregate_check_that_only_mentions_the_result_is_reported(self) -> None:
         # `echo "$RUN_RESULT was not success"` names the variable and the word
         # and exits zero regardless.

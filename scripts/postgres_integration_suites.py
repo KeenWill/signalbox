@@ -80,6 +80,7 @@ ARCHIVED_RUN_OPTIONS = {
     "-E": ("filter",),
 }
 WORKSPACE_SELECTORS = ("--workspace", "--all")
+AGGREGATE_JOB = "postgres-integration"
 # A path value may contain spaces inside a `${{ … }}` expression, so it runs
 # to the end of the line rather than to the first space.
 ARTIFACT_PATH = re.compile(r"^[ ]*path:[ ]*(?P<path>.+?)[ ]*$")
@@ -319,6 +320,31 @@ def uploaded_artifacts(text: str) -> list[tuple[str, str | None]]:
     return uploads
 
 
+def job_lines(text: str, name: str) -> list[str]:
+    """Return the lines of one workflow job's block, or none if it is absent.
+
+    The aggregate job carries the required check's name, so what it asserts has
+    to be read from that job and nowhere else: the same binding and assertion
+    sitting in an unrelated job says nothing about whether branch protection
+    consults the shards.
+    """
+    lines = text.splitlines()
+    opening = re.compile(rf"^(?P<indent>[ ]+){re.escape(name)}:[ ]*$")
+    for index, line in enumerate(lines):
+        match = opening.match(line)
+        if match is None:
+            continue
+        indent = len(match.group("indent"))
+        for end in range(index + 1, len(lines)):
+            following = lines[end]
+            if following.strip() and (
+                len(following) - len(following.lstrip(" ")) <= indent
+            ):
+                return lines[index:end]
+        return lines[index:]
+    return []
+
+
 def step_matrix_variables(lines: list[str], run_index: int, indent: int) -> dict[str, str]:
     """Return the matrix bindings in scope for one `run:` scalar's own step.
 
@@ -551,15 +577,22 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
 
     # The aggregate job carries the required check's name, so it going green
     # without consulting the shards would let branch protection pass while
-    # every manifest-declared test failed or never ran.
+    # every manifest-declared test failed or never ran. Read from that job's
+    # own block: the same binding and assertion elsewhere proves nothing.
+    aggregate = "\n".join(job_lines(text, AGGREGATE_JOB))
     asserted = {
         match.group("job"): match.group("variable")
-        for match in NEEDS_RESULT.finditer(text)
+        for match in NEEDS_RESULT.finditer(aggregate)
     }
+    aggregate_commands = [
+        tokens
+        for command, _ in workflow_shell_commands(aggregate)
+        for tokens in simple_commands(command)
+    ]
     for job in ("build", "run"):
         variable = asserted.get(job)
         if variable is None or not any(
-            asserts_success(tokens, variable) for tokens, _ in executed
+            asserts_success(tokens, variable) for tokens in aggregate_commands
         ):
             failures.append(
                 f"{WORKFLOW} does not assert "
