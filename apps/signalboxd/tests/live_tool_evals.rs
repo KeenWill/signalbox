@@ -14,7 +14,7 @@
 )]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt, fs, io,
     path::{Path, PathBuf},
@@ -135,11 +135,12 @@ async fn run_selected_family_if_enabled() -> EvalResult {
         natural_suite.natural_prompt(),
     )
     .await?;
+    let natural_state = natural_suite.natural_state_passed(&natural.snapshot)?;
     let report = FamilyReport {
         family,
         forced,
         natural,
-        natural_state: EvalDisposition::from_passed(natural_suite.natural_state_passed()?),
+        natural_state: EvalDisposition::from_passed(natural_state),
     };
     write_report(&report)?;
     Ok(())
@@ -149,10 +150,11 @@ async fn run_forced_tier(
     database: &EvalDatabase,
     suite: &FamilySuite,
 ) -> EvalResult<Vec<CaseOutcome>> {
+    suite.validate_forced_inventory()?;
     let mut outcomes = Vec::new();
     for case in suite.forced_cases() {
         suite.prepare_for(case.name)?;
-        outcomes.push(run_case(database, suite, Some(case.name), case.prompt).await?);
+        outcomes.push(run_case(database, suite, Some(case), case.prompt).await?);
     }
     Ok(outcomes)
 }
@@ -160,9 +162,10 @@ async fn run_forced_tier(
 async fn run_case(
     database: &EvalDatabase,
     suite: &FamilySuite,
-    forced_tool: Option<&str>,
+    forced_case: Option<&ForcedCase>,
     prompt: &str,
 ) -> EvalResult<CaseOutcome> {
+    let forced_tool = forced_case.map(|case| case.name);
     let (session, turn, activated) = database.start_turn(prompt).await?;
     let tracker = OperationTracker::default();
     let runtime = EvalOpenAiRuntime::new(forced_tool, tracker.clone())?;
@@ -181,13 +184,17 @@ async fn run_case(
         suite.catalog.clone(),
         suite.executor.clone(),
     );
-    let execution_completed = timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
+    timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
         .await
-        .is_ok_and(|outcome| outcome.is_ok());
+        .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))?
+        .map_err(|_| io::Error::other("the daemon tool eval turn execution failed"))?;
     let snapshot = CaseSnapshot::read(&database.pool, session, turn).await?;
     Ok(CaseOutcome {
         target: forced_tool.map(str::to_owned),
-        execution_completed,
+        expected_arguments: forced_case
+            .map(|case| normalized_arguments_text(case.expected_arguments))
+            .transpose()?,
+        execution_completed: true,
         result_round_trips: tracker.result_round_trips(),
         snapshot,
     })
@@ -237,36 +244,44 @@ impl EvalFamily {
 
 struct ForcedCase {
     name: &'static str,
+    expected_arguments: &'static str,
     prompt: &'static str,
 }
 
 const GIT_CASES: &[ForcedCase] = &[
     ForcedCase {
         name: GIT_BRANCH_CREATE_NAME,
+        expected_arguments: r#"{"name":"created-by-eval","start":"HEAD"}"#,
         prompt: "Call git_branch_create with exactly {\"name\":\"created-by-eval\",\"start\":\"HEAD\"}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: GIT_BRANCH_SWITCH_NAME,
+        expected_arguments: r#"{"name":"switch-target"}"#,
         prompt: "Call git_branch_switch with exactly {\"name\":\"switch-target\"}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: GIT_CREATE_COMMIT_NAME,
+        expected_arguments: r#"{"message":"forced eval commit"}"#,
         prompt: "Call git_create_commit with exactly {\"message\":\"forced eval commit\"}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: GIT_DIFF_NAME,
+        expected_arguments: r#"{"scope":"worktree"}"#,
         prompt: "Call git_diff with exactly {\"scope\":\"worktree\"}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: GIT_LOG_NAME,
+        expected_arguments: r#"{"revision":"HEAD","max_entries":5}"#,
         prompt: "Call git_log with exactly {\"revision\":\"HEAD\",\"max_entries\":5}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: GIT_STAGE_NAME,
+        expected_arguments: r#"{"paths":["stage-me.txt"]}"#,
         prompt: "Call git_stage with exactly {\"paths\":[\"stage-me.txt\"]}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: GIT_STATUS_NAME,
+        expected_arguments: "{}",
         prompt: "Call git_status with exactly {}. After its result, answer done without another tool call.",
     },
 ];
@@ -274,30 +289,37 @@ const GIT_CASES: &[ForcedCase] = &[
 const WORKSPACE_CASES: &[ForcedCase] = &[
     ForcedCase {
         name: APPLY_PATCH_NAME,
+        expected_arguments: r#"{"patch":"*** Begin Patch\n*** Add File: patched.txt\n+patched by eval\n*** End Patch"}"#,
         prompt: "Call apply_patch with exactly {\"patch\":\"*** Begin Patch\\n*** Add File: patched.txt\\n+patched by eval\\n*** End Patch\"}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: EDIT_FILE_NAME,
+        expected_arguments: r#"{"path":"brief.txt","old_string":"alpha","new_string":"beta","replace_all":false}"#,
         prompt: "Call edit_file with exactly {\"path\":\"brief.txt\",\"old_string\":\"alpha\",\"new_string\":\"beta\",\"replace_all\":false}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: WRITE_FILE_NAME,
+        expected_arguments: r#"{"path":"written.txt","content":"written by eval\n"}"#,
         prompt: "Call write_file with exactly {\"path\":\"written.txt\",\"content\":\"written by eval\\n\"}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: READ_FILE_NAME,
+        expected_arguments: r#"{"path":"brief.txt","max_bytes":1024}"#,
         prompt: "Call read_file with exactly {\"path\":\"brief.txt\",\"max_bytes\":1024}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: LIST_DIRECTORY_NAME,
+        expected_arguments: r#"{"path":".","max_results":20}"#,
         prompt: "Call list_directory with exactly {\"path\":\".\",\"max_results\":20}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: GLOB_FILES_NAME,
+        expected_arguments: r#"{"path":".","pattern":"*.txt","max_results":20}"#,
         prompt: "Call glob_files with exactly {\"path\":\".\",\"pattern\":\"*.txt\",\"max_results\":20}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: SEARCH_FILES_NAME,
+        expected_arguments: r#"{"path":".","pattern":"beta","max_results":20}"#,
         prompt: "Call search_files with exactly {\"path\":\".\",\"pattern\":\"beta\",\"max_results\":20}. After its result, answer done without another tool call.",
     },
 ];
@@ -305,10 +327,12 @@ const WORKSPACE_CASES: &[ForcedCase] = &[
 const WEB_CASES: &[ForcedCase] = &[
     ForcedCase {
         name: WEB_FETCH_NAME,
+        expected_arguments: r#"{"url":"https://example.com/eval"}"#,
         prompt: "Call web_fetch with exactly {\"url\":\"https://example.com/eval\"}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: WEB_SEARCH_NAME,
+        expected_arguments: r#"{"query":"Signalbox tool evaluation"}"#,
         prompt: "Call web_search with exactly {\"query\":\"Signalbox tool evaluation\"}. After its result, answer done without another tool call.",
     },
 ];
@@ -389,6 +413,26 @@ impl FamilySuite {
         }
     }
 
+    fn validate_forced_inventory(&self) -> EvalResult {
+        let catalog_names = self
+            .catalog
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name().as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        let cases = self.forced_cases();
+        let case_names = cases
+            .iter()
+            .map(|case| case.name.to_owned())
+            .collect::<BTreeSet<_>>();
+        if catalog_names != case_names || case_names.len() != cases.len() {
+            return Err(
+                io::Error::other("the forced eval inventory differs from its catalog").into(),
+            );
+        }
+        Ok(())
+    }
+
     const fn natural_prompt(&self) -> &'static str {
         match self.family {
             EvalFamily::Git => {
@@ -410,18 +454,25 @@ impl FamilySuite {
         Ok(())
     }
 
-    fn natural_state_passed(&self) -> EvalResult<bool> {
+    fn natural_state_passed(&self, snapshot: &CaseSnapshot) -> EvalResult<bool> {
         match self.family {
             EvalFamily::Git => git_natural_state_passed(self.workspace.path()),
             EvalFamily::Workspace => {
-                Ok(fs::read(self.workspace.path().join(WORKSPACE_ANSWER_PATH))
+                let bytes_match = fs::read(self.workspace.path().join(WORKSPACE_ANSWER_PATH))
                     .ok()
                     .as_deref()
-                    == Some(WORKSPACE_ANSWER.as_bytes()))
+                    == Some(WORKSPACE_ANSWER.as_bytes());
+                Ok(bytes_match && snapshot.workspace_natural_requests_passed())
             }
-            EvalFamily::Web => Ok(true),
+            EvalFamily::Web => snapshot.web_natural_requests_passed(),
         }
     }
+}
+
+fn normalized_arguments_text(arguments: &str) -> EvalResult<String> {
+    NormalizedToolArguments::try_from_provider_text(arguments.to_owned())
+        .map(|arguments| arguments.as_str().to_owned())
+        .map_err(|_| io::Error::other("the eval fixture arguments do not normalize").into())
 }
 
 fn seed_git_repository(root: &Path) -> EvalResult {
@@ -896,7 +947,14 @@ struct CaseSnapshot {
 #[derive(sqlx::FromRow)]
 struct RequestSnapshot {
     name: String,
+    arguments_text: String,
     attempt_disposition: Option<String>,
+}
+
+impl RequestSnapshot {
+    fn arguments(&self) -> Option<serde_json::Value> {
+        serde_json::from_str(&self.arguments_text).ok()
+    }
 }
 
 impl CaseSnapshot {
@@ -912,12 +970,13 @@ impl CaseSnapshot {
         .await?;
         let requests = sqlx::query_as::<_, RequestSnapshot>(
             "SELECT request.tool_name AS name,
+                    request.arguments_text,
                     attempt.terminal_disposition_kind AS attempt_disposition
                FROM tool_request AS request
                LEFT JOIN tool_attempt AS attempt
                  ON attempt.request_id = request.request_id
               WHERE request.session_id = $1 AND request.turn_id = $2
-              ORDER BY request.request_ordinal",
+              ORDER BY request.producing_model_call_id, request.request_ordinal",
         )
         .bind(session.into_uuid())
         .bind(turn.into_uuid())
@@ -947,10 +1006,42 @@ impl CaseSnapshot {
             .collect::<Vec<_>>()
             .join(", ")
     }
+
+    fn workspace_natural_requests_passed(&self) -> bool {
+        let read = self.requests.iter().position(|request| {
+            request.name == READ_FILE_NAME
+                && request
+                    .arguments()
+                    .is_some_and(|arguments| arguments["path"] == WORKSPACE_SEED_PATH)
+        });
+        let write = self.requests.iter().position(|request| {
+            request.name == WRITE_FILE_NAME
+                && request.arguments().is_some_and(|arguments| {
+                    arguments["path"] == WORKSPACE_ANSWER_PATH
+                        && arguments["content"] == WORKSPACE_ANSWER
+                })
+        });
+        read.zip(write).is_some_and(|(read, write)| read < write)
+    }
+
+    fn web_natural_requests_passed(&self) -> EvalResult<bool> {
+        let expected_query = normalized_arguments_text(r#"{"query":"Signalbox tool evaluation"}"#)?;
+        let expected_url = normalized_arguments_text(r#"{"url":"https://example.com/eval"}"#)?;
+        let search = self.requests.iter().position(|request| {
+            request.name == WEB_SEARCH_NAME && request.arguments_text == expected_query
+        });
+        let fetch = self.requests.iter().position(|request| {
+            request.name == WEB_FETCH_NAME && request.arguments_text == expected_url
+        });
+        Ok(search
+            .zip(fetch)
+            .is_some_and(|(search, fetch)| search < fetch))
+    }
 }
 
 struct CaseOutcome {
     target: Option<String>,
+    expected_arguments: Option<String>,
     execution_completed: bool,
     result_round_trips: usize,
     snapshot: CaseSnapshot,
@@ -961,6 +1052,9 @@ impl CaseOutcome {
         let Some(target) = self.target.as_deref() else {
             return EvalDisposition::Miss;
         };
+        let Some(expected_arguments) = self.expected_arguments.as_deref() else {
+            return EvalDisposition::Miss;
+        };
         EvalDisposition::from_passed(
             self.execution_completed
                 && self.snapshot.turn_disposition.as_deref() == Some("completed")
@@ -968,6 +1062,7 @@ impl CaseOutcome {
                 && self.result_round_trips >= 1
                 && self.snapshot.requests.len() == 1
                 && self.snapshot.requests[0].name == target
+                && self.snapshot.requests[0].arguments_text == expected_arguments
                 && self.snapshot.requests[0].attempt_disposition.as_deref() == Some("completed"),
         )
     }
@@ -1002,12 +1097,14 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
     let target = GIT_STATUS_NAME;
     let outcome = CaseOutcome {
         target: Some(String::from(target)),
+        expected_arguments: Some(String::from("{}")),
         execution_completed: true,
         result_round_trips: 1,
         snapshot: CaseSnapshot {
             turn_disposition: Some(String::from("completed")),
             requests: vec![RequestSnapshot {
                 name: String::from(target),
+                arguments_text: String::from("{}"),
                 attempt_disposition: Some(String::from("completed")),
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -1022,12 +1119,14 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
     let target = GIT_STATUS_NAME;
     let outcome = CaseOutcome {
         target: Some(String::from(target)),
+        expected_arguments: Some(String::from("{}")),
         execution_completed: true,
         result_round_trips: 0,
         snapshot: CaseSnapshot {
             turn_disposition: Some(String::from("completed")),
             requests: vec![RequestSnapshot {
                 name: String::from(target),
+                arguments_text: String::from("{}"),
                 attempt_disposition: Some(String::from("completed")),
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -1041,12 +1140,14 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
 fn unforced_git_tier_requires_both_task_tools() {
     let outcome = CaseOutcome {
         target: None,
+        expected_arguments: None,
         execution_completed: true,
         result_round_trips: 1,
         snapshot: CaseSnapshot {
             turn_disposition: Some(String::from("completed")),
             requests: vec![RequestSnapshot {
                 name: String::from(GIT_STAGE_NAME),
+                arguments_text: String::from(r#"{"paths":["eval.txt"]}"#),
                 attempt_disposition: Some(String::from("completed")),
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -1057,6 +1158,87 @@ fn unforced_git_tier_requires_both_task_tools() {
         outcome.natural_loop_disposition(EvalFamily::Git),
         EvalDisposition::Miss
     );
+}
+
+#[test]
+fn forced_case_inventory_matches_every_family_catalog() -> EvalResult {
+    let git = FamilySuite::git()?;
+    let workspace = FamilySuite::workspace()?;
+    let web = FamilySuite::web()?;
+
+    git.validate_forced_inventory()?;
+    workspace.validate_forced_inventory()?;
+    web.validate_forced_inventory()?;
+    Ok(())
+}
+
+#[test]
+fn forced_tier_reports_a_miss_for_drifted_arguments() {
+    let target = GIT_STATUS_NAME;
+    let outcome = CaseOutcome {
+        target: Some(String::from(target)),
+        expected_arguments: Some(String::from("{}")),
+        execution_completed: true,
+        result_round_trips: 1,
+        snapshot: CaseSnapshot {
+            turn_disposition: Some(String::from("completed")),
+            requests: vec![RequestSnapshot {
+                name: String::from(target),
+                arguments_text: String::from(r#"{"unexpected":true}"#),
+                attempt_disposition: Some(String::from("completed")),
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn workspace_natural_state_requires_the_read_before_the_write() {
+    let snapshot = CaseSnapshot {
+        turn_disposition: Some(String::from("completed")),
+        requests: vec![
+            RequestSnapshot {
+                name: String::from(WRITE_FILE_NAME),
+                arguments_text: String::from(
+                    r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
+                ),
+                attempt_disposition: Some(String::from("completed")),
+            },
+            RequestSnapshot {
+                name: String::from(READ_FILE_NAME),
+                arguments_text: String::from(r#"{"path":"brief.txt"}"#),
+                attempt_disposition: Some(String::from("completed")),
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!snapshot.workspace_natural_requests_passed());
+}
+
+#[test]
+fn web_natural_state_requires_the_exact_query() -> EvalResult {
+    let snapshot = CaseSnapshot {
+        turn_disposition: Some(String::from("completed")),
+        requests: vec![
+            RequestSnapshot {
+                name: String::from(WEB_SEARCH_NAME),
+                arguments_text: String::from(r#"{"query":"different query"}"#),
+                attempt_disposition: Some(String::from("completed")),
+            },
+            RequestSnapshot {
+                name: String::from(WEB_FETCH_NAME),
+                arguments_text: String::from(r#"{"url":"https://example.com/eval"}"#),
+                attempt_disposition: Some(String::from("completed")),
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!snapshot.web_natural_requests_passed()?);
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
