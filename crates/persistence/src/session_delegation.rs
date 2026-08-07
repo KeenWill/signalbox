@@ -234,6 +234,7 @@ impl SessionDelegationRepository {
                 {
                     return Err(SessionDelegationCorruption::Inconsistent("stored wait row").into());
                 }
+                validate_wait_replay_update(&mut transaction, wait).await?;
                 validate_wait_replay_attempt(&mut transaction, dispatch, wait).await?;
                 validate_wait_replay_delivery(&mut transaction, wait).await?;
                 return Ok(RecordDelegationWaitOutcome::Recorded(
@@ -513,6 +514,11 @@ fn complete_attempt(
 }
 
 fn wait_receipt(wait: DelegationWait) -> Result<ToolResultText, SessionDelegationRepositoryError> {
+    if wait.mode() != DelegationWaitMode::Background {
+        return Err(SessionDelegationRepositoryError::InvalidTransition(
+            "wait receipts represent background waits only",
+        ));
+    }
     ToolResultText::try_new(
         serde_json::json!({
             "result": "session_await_registered",
@@ -728,6 +734,40 @@ async fn validate_wait_replay_delivery(
     }
 }
 
+async fn validate_wait_replay_update(
+    connection: &mut PgConnection,
+    wait: DelegationWait,
+) -> Result<(), SessionDelegationRepositoryError> {
+    let row = sqlx::query(
+        "SELECT event_kind, storage_version, session_id, update_kind,
+                spawning_tool_request_id, child_session_id,
+                awaiting_tool_request_id, wait_mode
+           FROM delegation_update_outbox_event
+          WHERE update_kind = 'child_waiting'
+            AND awaiting_tool_request_id = $1",
+    )
+    .bind(tool_request_id_to_uuid(wait.awaiting_request()))
+    .fetch_optional(connection)
+    .await?
+    .ok_or(SessionDelegationCorruption::Missing(
+        "wait update outbox satellite",
+    ))?;
+    if required::<String>(&row, "event_kind")? != "delegation_update"
+        || required::<i16>(&row, "storage_version")? != STORAGE_VERSION
+        || session_id_from_uuid(required(&row, "session_id")?) != wait.parent()
+        || required::<String>(&row, "update_kind")? != "child_waiting"
+        || tool_request_id_from_uuid(required(&row, "spawning_tool_request_id")?)
+            != wait.spawning_request()
+        || session_id_from_uuid(required(&row, "child_session_id")?) != wait.child()
+        || tool_request_id_from_uuid(required(&row, "awaiting_tool_request_id")?)
+            != wait.awaiting_request()
+        || required::<String>(&row, "wait_mode")? != delegation_wait_mode_to_str(wait.mode())
+    {
+        return Err(SessionDelegationCorruption::Inconsistent("stored wait update").into());
+    }
+    Ok(())
+}
+
 async fn find_relation_for_wait(
     connection: &mut PgConnection,
     request: &DelegationAwaitRequest,
@@ -745,13 +785,21 @@ async fn find_relation_for_message(
     connection: &mut PgConnection,
     request: &DelegationMessageRequest,
 ) -> Result<Option<ToolRequestId>, SessionDelegationRepositoryError> {
-    let row = sqlx::query(DELEGATION_FIND_RELATION_FOR_MESSAGE)
+    let rows = sqlx::query(DELEGATION_FIND_RELATION_FOR_MESSAGE)
         .bind(session_id_to_uuid(request.request().session()))
         .bind(session_id_to_uuid(request.peer()))
-        .fetch_optional(connection)
+        .fetch_all(connection)
         .await?;
-    row.map(|row| required::<Uuid>(&row, "spawning_tool_request_id").map(tool_request_id_from_uuid))
-        .transpose()
+    match rows.as_slice() {
+        [] => Ok(None),
+        [row] => required::<Uuid>(row, "spawning_tool_request_id")
+            .map(tool_request_id_from_uuid)
+            .map(Some),
+        _ => Err(SessionDelegationCorruption::Inconsistent(
+            "ambiguous delegation message endpoints",
+        )
+        .into()),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -862,6 +910,14 @@ async fn load_events(
                 }
             }
             "message_delivered" => {
+                let result_kind: Option<String> = optional(&row, "result_outcome_kind")?;
+                let result_content: Option<String> = optional(&row, "result_content_text")?;
+                if result_kind.is_some() || result_content.is_some() {
+                    return Err(SessionDelegationCorruption::Inconsistent(
+                        "message event result payload",
+                    )
+                    .into());
+                }
                 let request_id =
                     tool_request_id_from_uuid(required(&row, "provenance_tool_request_id")?);
                 let request = message_requests
