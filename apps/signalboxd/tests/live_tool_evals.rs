@@ -25,20 +25,22 @@ use std::{
 use git2::{IndexAddOption, Repository, Signature, Status};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
-    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    OperatorFailureClass, StartEligibleTurnOutcome, StartEligibleTurnService, SubmitInputOutcome,
-    SubmitInputRequest, SubmitInputService, ToolCatalog, ToolCatalogValidationFailure,
-    ToolDefinition, ToolExecutionInvocation, ToolExecutor, UuidV7SessionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
+    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
+    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+    ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
+    StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+    ToolCatalog, ToolCatalogValidationFailure, ToolDefinition, ToolExecutionInvocation,
+    ToolExecutor, UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
-    DangerousToolAutoApproval, DeliveryRequest, DirectModelSelection, DurableCommandId,
-    ModelCallId, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
-    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
-    ProviderModelIdentity, ResolvedProviderTarget, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
-    ToolName as DomainToolName, TurnId, UserContent,
+    DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult, DeliveryRequest,
+    DirectModelSelection, DurableCommandId, ModelCallId, ModelSelectionOverride,
+    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    PerInputConfigurationChoices, ProviderModelIdentity, ResolvedProviderTarget,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SubmitInputAppliedResult, SubmitInputResult, ToolApprovalDecision, ToolName as DomainToolName,
+    ToolRequestId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -53,6 +55,7 @@ use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
+    tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_tools_exec::{
     CARGO_DIAGNOSTICS_NAME, CargoDiagnosticsExecutor, CargoDiagnosticsTool, ExecExecutor,
@@ -112,11 +115,14 @@ const WORKSPACE_ANSWER: &str = "model loop observed\n";
 const EXEC_SUPERVISOR_VARIABLE: &str = "SIGNALBOX_EXEC_SUPERVISOR";
 const EXEC_RESULT_PATH: &str = "exec-result.txt";
 const EXEC_RESULT: &str = "model loop observed\n";
+const EXEC_FORCED_READ_ONLY_PROGRAM: &str = "/usr/bin/printf";
+const EXEC_FORCED_READ_ONLY_OUTPUT: &str = "forced unsandboxed eval\n";
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
 const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
 const ARBITRARY_EVAL_SELECTION_ID: u128 = 0x9101;
 const ARBITRARY_EVAL_PROVIDER_ID: u128 = 0x9102;
+const ARBITRARY_EVAL_APPROVAL_COMMAND_ID: u128 = 0x9103;
 const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
 
 type EvalResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -189,9 +195,20 @@ async fn run_case(
         suite.catalog.clone(),
         suite.executor.clone(),
     );
-    let execution_completed = timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
+    let initial_execution_completed = timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
         .await
         .is_ok_and(|outcome| outcome.is_ok());
+    let execution_completed = if forced_tool == Some(UNSANDBOXED_EXEC_NAME)
+        && database
+            .approve_exact_read_only_unsandboxed_request(session, turn)
+            .await?
+    {
+        timeout(TURN_TIMEOUT, execution.resume_active(session))
+            .await
+            .is_ok_and(|outcome| outcome.is_ok())
+    } else {
+        initial_execution_completed
+    };
     let snapshot = CaseSnapshot::read(&database.pool, session, turn).await?;
     Ok(CaseOutcome {
         target: forced_tool.map(str::to_owned),
@@ -332,7 +349,7 @@ const EXEC_CASES: &[ForcedCase] = &[
     },
     ForcedCase {
         name: UNSANDBOXED_EXEC_NAME,
-        prompt: "Call unsandboxed_exec with exactly {\"program\":\"printf\",\"arguments\":[\"forced unsandboxed eval\\n\"],\"working_directory\":\".\",\"timeout_seconds\":30}. After its result, answer done without another tool call.",
+        prompt: "Call unsandboxed_exec with exactly {\"program\":\"/usr/bin/printf\",\"arguments\":[\"forced unsandboxed eval\\n\"],\"working_directory\":\".\",\"timeout_seconds\":30}. This exact read-only command may be approved. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: CARGO_DIAGNOSTICS_NAME,
@@ -962,6 +979,75 @@ impl EvalDatabase {
             return Err(io::Error::other("eval turn did not activate").into());
         };
         Ok((session, turn, *activated))
+    }
+
+    async fn approve_exact_read_only_unsandboxed_request(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> EvalResult<bool> {
+        let pending = sqlx::query_as::<_, PendingApproval>(
+            "SELECT request.request_id, request.tool_name, request.arguments_text
+               FROM turn_lifecycle AS lifecycle
+               JOIN tool_request AS request
+                 ON request.request_id = lifecycle.approval_tool_request_id
+                AND request.session_id = lifecycle.session_id
+                AND request.turn_id = lifecycle.turn_id
+              WHERE lifecycle.session_id = $1
+                AND lifecycle.turn_id = $2
+                AND lifecycle.active_phase_kind = 'awaiting_tool_approval'",
+        )
+        .bind(session.into_uuid())
+        .bind(turn.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(pending) = pending else {
+            return Ok(false);
+        };
+        if !pending.is_exact_read_only_unsandboxed_request()? {
+            return Ok(false);
+        }
+        let mut service = DecideToolRequestService::new(
+            UuidV7ToolLoopIdGenerator,
+            PostgresToolLoopRepository::new(self.pool.clone()),
+        );
+        let prepared = service
+            .execute(
+                DecideToolRequest::try_new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(
+                        ARBITRARY_EVAL_APPROVAL_COMMAND_ID,
+                    )),
+                    ToolRequestId::from_uuid(pending.request_id),
+                    ToolApprovalDecision::Approve,
+                )
+                .map_err(|_| io::Error::other("the exact read-only exec approval is invalid"))?,
+            )
+            .await?;
+        if !matches!(prepared.result(), DecideToolRequestResult::Applied(_)) {
+            return Err(io::Error::other("the exact read-only exec approval was rejected").into());
+        }
+        Ok(true)
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct PendingApproval {
+    request_id: Uuid,
+    tool_name: String,
+    arguments_text: String,
+}
+
+impl PendingApproval {
+    fn is_exact_read_only_unsandboxed_request(&self) -> EvalResult<bool> {
+        let arguments = serde_json::from_str::<serde_json::Value>(&self.arguments_text)?;
+        Ok(self.tool_name == UNSANDBOXED_EXEC_NAME
+            && arguments
+                == serde_json::json!({
+                    "program": EXEC_FORCED_READ_ONLY_PROGRAM,
+                    "arguments": [EXEC_FORCED_READ_ONLY_OUTPUT],
+                    "working_directory": ".",
+                    "timeout_seconds": 30,
+                }))
     }
 }
 
