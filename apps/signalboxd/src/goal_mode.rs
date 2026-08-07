@@ -24,32 +24,31 @@ use crate::HubModelConfiguration;
 
 pub(crate) const GOAL_DECLARE_NAME: &str = "goal_declare";
 const GOAL_DECLARE_DESCRIPTION: &str = "Declares the current commissioned goal achieved or blocked for the invoking session. Write the exact report or need as assistant text immediately before this final response call.";
-const GOAL_DECLARE_SCHEMA: &str = r#"{
-    "oneOf": [
-        {
-            "additionalProperties": false,
-            "properties": {
-                "transition": {"const": "achieved"}
-            },
-            "required": ["transition"],
-            "type": "object"
+/// Object-rooted advertisement of the internally tagged declaration.
+///
+/// The transition property discriminates and its description carries what a
+/// root `oneOf` used to state, because a function tool's parameters must
+/// describe an object and no provider is obliged to accept a root
+/// combinator. `decode_goal_declaration` still refuses `achieved` with a
+/// reason and `blocked` without one.
+pub(crate) const GOAL_DECLARE_SCHEMA: &str = r#"{
+    "additionalProperties": false,
+    "properties": {
+        "reason": {
+            "description": "`blocked`: why the goal cannot proceed without the operator.",
+            "enum": [
+                "user_input_required",
+                "external_change_required",
+                "authorization_required"
+            ]
         },
-        {
-            "additionalProperties": false,
-            "properties": {
-                "reason": {
-                    "enum": [
-                        "user_input_required",
-                        "external_change_required",
-                        "authorization_required"
-                    ]
-                },
-                "transition": {"const": "blocked"}
-            },
-            "required": ["transition", "reason"],
-            "type": "object"
+        "transition": {
+            "description": "`achieved`: the commissioned goal is complete. Takes no other property. `blocked`: the commissioned goal cannot proceed. Requires `reason`.",
+            "enum": ["achieved", "blocked"],
+            "type": "string"
         }
-    ],
+    },
+    "required": ["transition"],
     "type": "object"
 }"#;
 const GOAL_DECLARE_INVALID_ARGUMENTS: &str = "expected achieved or a model-selectable blocked reason; write the exact report or need as assistant text immediately before the final response call";
@@ -544,6 +543,57 @@ mod tests {
         else {
             panic!("fixture decodes as achievement");
         };
+    }
+
+    /// Rooting the advertised schema in an object widened what the *schema*
+    /// permits, not what serde decodes: the argument type is unchanged, so
+    /// both transitions still decode exactly as before and every combination
+    /// the flat object no longer excludes is still refused here.
+    #[test]
+    fn goal_declaration_arguments_decode_unchanged_under_the_object_rooted_schema() {
+        let blocked = arguments(r#"{"transition":"blocked","reason":"user_input_required"}"#);
+        let achieved_with_reason =
+            arguments(r#"{"transition":"achieved","reason":"user_input_required"}"#);
+        let blocked_without_reason = arguments(r#"{"transition":"blocked"}"#);
+        let untagged = arguments(r#"{"reason":"user_input_required"}"#);
+
+        let CheckedGoalDeclaration::Blocked { reason } =
+            decode_goal_declaration(&blocked).expect("a blocked reason is admitted")
+        else {
+            panic!("fixture decodes as a block");
+        };
+
+        assert_eq!(reason, GoalModelBlockedReasonKind::UserInputRequired);
+        assert_eq!(
+            decode_goal_declaration(&achieved_with_reason)
+                .expect_err("achievement takes no reason"),
+            InvalidGoalDeclaration
+        );
+        assert_eq!(
+            decode_goal_declaration(&blocked_without_reason).expect_err("a block needs a reason"),
+            InvalidGoalDeclaration
+        );
+        assert_eq!(
+            decode_goal_declaration(&untagged).expect_err("the transition is mandatory"),
+            InvalidGoalDeclaration
+        );
+    }
+
+    /// The advertised schema states an object root carrying the discriminating
+    /// transition property, never the root `oneOf` a function-tool wire
+    /// rejects.
+    #[test]
+    fn goal_declaration_schema_is_object_rooted() {
+        let schema: serde_json::Value =
+            serde_json::from_str(GOAL_DECLARE_SCHEMA).expect("the static schema is JSON");
+
+        assert_eq!(schema["type"], serde_json::json!("object"));
+        assert_eq!(
+            schema["properties"]["transition"]["enum"],
+            serde_json::json!(["achieved", "blocked"])
+        );
+        assert_eq!(schema["required"], serde_json::json!(["transition"]));
+        assert!(schema.get("oneOf").is_none());
     }
 
     #[test]

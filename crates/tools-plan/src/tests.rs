@@ -1345,3 +1345,89 @@ fn read_rejects_current_entries_that_contradict_complete_history() {
 
     assert!(is_port_contract(&error));
 }
+
+/// Rooting `plan_write`'s advertised schema in an object widened what the
+/// *schema* permits, not what serde decodes: the argument type is unchanged,
+/// so every object the daemon accepted under the root `oneOf` still decodes to
+/// exactly the same operation, and every combination the flat object no longer
+/// excludes is still refused here.
+#[test]
+fn plan_write_arguments_decode_unchanged_under_the_object_rooted_schema() {
+    let create = decode_write_operation(&arguments(json!({
+        "kind": "create",
+        "text": INITIAL_TEXT
+    })))
+    .expect("create arguments are admitted");
+    let revise = decode_write_operation(&arguments(json!({
+        "kind": "revise",
+        "entry_id": 1,
+        "text": REVISED_TEXT
+    })))
+    .expect("revise arguments are admitted");
+    let set_status = decode_write_operation(&arguments(json!({
+        "kind": "set_status",
+        "entry_id": 1,
+        "status": "completed"
+    })))
+    .expect("status arguments are admitted");
+    let depends_on = decode_write_operation(&arguments(json!({
+        "kind": "depends_on",
+        "entry_id": 1,
+        "dependency_id": 2
+    })))
+    .expect("dependency arguments are admitted");
+
+    assert_eq!(
+        create,
+        PlanOperation::Write(PlanEventDraft::Create {
+            text: text(INITIAL_TEXT)
+        })
+    );
+    assert_eq!(
+        revise,
+        PlanOperation::Write(PlanEventDraft::Revise {
+            entry: entry(1),
+            text: text(REVISED_TEXT)
+        })
+    );
+    assert_eq!(
+        set_status,
+        PlanOperation::Write(PlanEventDraft::SetStatus {
+            entry: entry(1),
+            status: PlanStatus::Completed
+        })
+    );
+    assert_eq!(
+        depends_on,
+        PlanOperation::Write(PlanEventDraft::DependsOn {
+            entry: entry(1),
+            dependency: entry(2)
+        })
+    );
+}
+
+/// The flat advertised object cannot exclude a payload that belongs to another
+/// variant, so the argument type remains the only authority that does.
+#[test]
+fn plan_write_arguments_still_reject_payloads_from_another_variant() {
+    assert_eq!(
+        decode_write_operation(&arguments(json!({
+            "kind": "create",
+            "text": INITIAL_TEXT,
+            "entry_id": 1
+        }))),
+        Err(InvalidPlanArguments)
+    );
+    assert_eq!(
+        decode_write_operation(&arguments(json!({"kind": "revise", "entry_id": 1}))),
+        Err(InvalidPlanArguments)
+    );
+    assert_eq!(
+        decode_write_operation(&arguments(json!({"kind": "depends_on", "entry_id": 1}))),
+        Err(InvalidPlanArguments)
+    );
+    assert_eq!(
+        decode_write_operation(&arguments(json!({"text": INITIAL_TEXT}))),
+        Err(InvalidPlanArguments)
+    );
+}

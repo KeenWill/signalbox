@@ -1612,13 +1612,9 @@ mod tests {
         );
     }
 
-    /// The merged process-lifetime catalog exposes every daemon declaration in
-    /// deterministic name order.
-    #[test]
-    fn daemon_catalog_contains_every_injected_tool_family() {
-        let workspace = tempfile::tempdir().expect("workspace root exists");
-        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
-        let (catalog, _executor) = DaemonTools::try_new(
+    /// Composes every injected family against offline boundaries.
+    fn fully_composed_catalog(workspace: &Path) -> DaemonToolCatalog {
+        DaemonTools::try_new(
             || SystemTime::UNIX_EPOCH,
             OfflineTransport,
             MappedDaemonCredentialInputs {
@@ -1632,7 +1628,7 @@ mod tests {
             OfflineGitHubTransport,
             GitHubEgressPolicy::github_api_only(),
             LocalWorkspaceFileSystem,
-            workspace.path(),
+            workspace,
             git_identity(),
             TokioProcessRunner::try_new(
                 std::env::current_exe().expect("test executable path is available"),
@@ -1643,7 +1639,17 @@ mod tests {
             WebFetchEgressPolicy::deny_all(),
         )
         .expect("static daemon tools compile")
-        .into_parts();
+        .into_parts()
+        .0
+    }
+
+    /// The merged process-lifetime catalog exposes every daemon declaration in
+    /// deterministic name order.
+    #[test]
+    fn daemon_catalog_contains_every_injected_tool_family() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
+        let catalog = fully_composed_catalog(workspace.path());
 
         let definitions = catalog.definitions();
         let names = definition_names(&definitions);
@@ -1703,6 +1709,133 @@ mod tests {
                 WEB_SEARCH_NAME,
                 WRITE_FILE_NAME,
             ]
+        );
+    }
+
+    /// Root-level JSON Schema keywords that are not an object declaration.
+    ///
+    /// A root combinator leaves the argument shape to its branches, so a
+    /// validator that requires an object-typed root cannot accept it even
+    /// when a sibling `"type"` is present.
+    const ROOT_COMBINATORS: [&str; 5] = ["allOf", "anyOf", "not", "oneOf", "$ref"];
+
+    /// Fails one advertised schema that a function-tool wire would reject.
+    ///
+    /// OpenAI Chat Completions documents `tools[].function.parameters` as
+    /// "The parameters the functions accepts, described as a JSON Schema
+    /// object" (platform.openai.com/docs/api-reference/chat/create), and its
+    /// Structured Outputs guide states the matching root rule directly: a
+    /// schema root must be an `object` and must not be a root `anyOf`
+    /// (platform.openai.com/docs/guides/structured-outputs). Its supported
+    /// composition keyword is `anyOf` alone; `oneOf`, `allOf`, and `not`
+    /// appear nowhere in that subset.
+    ///
+    /// This assertion pins the strictest reading of those two rules — a
+    /// declared `"type": "object"` root carrying no combinator at all — for
+    /// two reasons. The rejection this test exists to prevent was a root
+    /// `oneOf`, and a catalog that satisfies the strict-mode root rule stays
+    /// usable if a strict function contract is ever requested. Accepted
+    /// cost: a schema may not express a root-level union, and must instead
+    /// discriminate through one tag property, as
+    /// `signalbox_tool_contract::rendered_contract_schema` now renders
+    /// internally tagged argument enums.
+    ///
+    /// Nested combinators are untouched: only the root is constrained, so a
+    /// property may still carry `oneOf`, `anyOf`, or a `$ref` into `$defs`.
+    ///
+    /// The stake is the blast radius, not one tool. Every request carries the
+    /// whole catalog, so one rejected schema returns 400 for every exchange
+    /// that offers it — not merely for calls to the offending tool.
+    fn assert_object_rooted(name: &str, schema: &str) {
+        let decoded: serde_json::Value = serde_json::from_str(schema)
+            .unwrap_or_else(|error| panic!("{name} schema is JSON: {error}"));
+        let root = decoded
+            .as_object()
+            .unwrap_or_else(|| panic!("{name} schema root is a JSON object"));
+        assert_eq!(
+            root.get("type").and_then(serde_json::Value::as_str),
+            Some("object"),
+            "{name} schema root must declare \"type\": \"object\""
+        );
+        for combinator in ROOT_COMBINATORS {
+            assert!(
+                !root.contains_key(combinator),
+                "{name} schema root must not carry `{combinator}`"
+            );
+        }
+    }
+
+    /// Every schema the daemon advertises satisfies the function-tool wire's
+    /// root constraint, so no single declaration can fail whole exchanges.
+    ///
+    /// The sweep runs over the fully composed catalog rather than a listed
+    /// subset: a tool family added later joins it without being remembered.
+    #[test]
+    fn every_advertised_tool_schema_is_object_rooted() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
+        let catalog = fully_composed_catalog(workspace.path());
+
+        let definitions = catalog.definitions();
+
+        assert!(!definitions.is_empty(), "the composed catalog is not empty");
+        for definition in &definitions {
+            assert_object_rooted(
+                definition.name().as_str(),
+                definition.input_schema().as_str(),
+            );
+        }
+        // `goal_declare` compiles only against a live pool, so the composed
+        // catalog cannot carry it and its static declaration joins directly.
+        assert_object_rooted(GOAL_DECLARE_NAME, crate::goal_mode::GOAL_DECLARE_SCHEMA);
+    }
+
+    /// `git_diff` is the declaration whose root `oneOf` failed every Git
+    /// exchange through the OpenAI adapter. Its rendered shape is pinned so
+    /// the tagged-enum root cannot come back unnoticed.
+    #[test]
+    fn git_diff_advertises_one_object_with_a_discriminating_scope() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
+        let catalog = fully_composed_catalog(workspace.path());
+        let name = ToolName::try_new(String::from(signalbox_tools_git::GIT_DIFF_NAME))
+            .expect("git_diff is a valid tool name");
+
+        let schema: serde_json::Value = serde_json::from_str(
+            catalog
+                .definition(&name)
+                .expect("git_diff is composed")
+                .input_schema()
+                .as_str(),
+        )
+        .expect("git_diff schema is JSON");
+
+        assert_eq!(
+            schema,
+            serde_json::json!({
+                "additionalProperties": false,
+                "properties": {
+                    "base": {
+                        "description": "Older `HEAD`, full `refs/...` name, or full object ID.",
+                        "maxLength": 1030,
+                        "minLength": 1,
+                        "type": "string"
+                    },
+                    "head": {
+                        "description": "Newer `HEAD`, full `refs/...` name, or full object ID.",
+                        "maxLength": 1030,
+                        "minLength": 1,
+                        "type": "string"
+                    },
+                    "scope": {
+                        "description": "`worktree`: Includes both staged and unstaged worktree changes against HEAD. Takes no other property. `revisions`: Compares trees named by exact revision identifiers. Requires `base`, `head`.",
+                        "enum": ["worktree", "revisions"],
+                        "type": "string"
+                    }
+                },
+                "required": ["scope"],
+                "type": "object"
+            })
         );
     }
 }
