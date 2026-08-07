@@ -1448,7 +1448,7 @@ mod tests {
             .and_then(Path::parent)
             .and_then(Path::parent)
             .expect("test executable has a Cargo artifact parent");
-        if configured.as_os_str().is_empty() {
+        if configured.as_os_str().is_empty() || configured.file_name().is_none() {
             if artifact_parent
                 .file_name()
                 .is_some_and(|name| known_targets.contains(name))
@@ -1499,7 +1499,7 @@ mod tests {
         let target_dir = metadata["target_directory"]
             .as_str()
             .expect("Cargo target metadata names the artifact directory");
-        lexically_normalized(Path::new(target_dir))
+        canonicalized_target_dir(Path::new(target_dir))
     }
 
     #[track_caller]
@@ -1941,6 +1941,49 @@ mod tests {
         let configured_target_dir = configured_cargo_target_dir_for(
             &executable,
             Path::new("."),
+            &synthetic_known_targets(),
+        );
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: Some(SYNTHETIC_CARGO_TARGET),
+            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
+        });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_resolves_a_parent_only_relative_directory() {
+        let target_dir = Path::new("synthetic-parent");
+        let executable = target_dir.join("debug/deps/daemon-tools-test");
+        let configured_target_dir =
+            configured_cargo_target_dir_for(&executable, Path::new(".."), &BTreeSet::new());
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: None,
+        });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_preserves_a_target_with_a_parent_only_directory() {
+        let target_dir = Path::new("synthetic-parent");
+        let executable = target_dir
+            .join(SYNTHETIC_CARGO_TARGET)
+            .join("debug/deps/daemon-tools-test");
+        let configured_target_dir = configured_cargo_target_dir_for(
+            &executable,
+            Path::new(".."),
             &synthetic_known_targets(),
         );
 
