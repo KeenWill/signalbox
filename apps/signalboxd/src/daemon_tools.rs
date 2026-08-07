@@ -1459,14 +1459,26 @@ mod tests {
         known_targets: &BTreeSet<OsString>,
     ) -> Option<PathBuf> {
         let configured = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR")?);
-        let configured = std::env::var_os("PWD")
-            .and_then(|directory| {
-                resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
-                    configured: &configured,
-                    invocation_directory: Path::new(&directory),
+        let configured = if configured.is_absolute() {
+            configured
+        } else {
+            std::env::var_os("PWD")
+                .and_then(|directory| {
+                    resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
+                        configured: &configured,
+                        invocation_directory: Path::new(&directory),
+                    })
                 })
-            })
-            .unwrap_or(configured);
+                .or_else(|| {
+                    std::env::current_dir().ok().and_then(|directory| {
+                        resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
+                            configured: &configured,
+                            invocation_directory: &directory,
+                        })
+                    })
+                })
+                .unwrap_or(configured)
+        };
         let configured = configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
             current_executable: current,
             configured: &configured,
@@ -2129,6 +2141,36 @@ mod tests {
             expected_profile: CARGO_TEST_PROFILE,
             expected_target: None,
             recognized_target: None,
+        });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_keeps_a_recognized_name_as_a_dot_relative_host_root() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let target_dir = parent.path().join(SYNTHETIC_CARGO_TARGET);
+        fs::create_dir(&target_dir).expect("fixture target directory exists");
+        let executable = target_dir.join("debug/deps/daemon-tools-test");
+        let resolved = resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
+            configured: Path::new("."),
+            invocation_directory: &target_dir,
+        })
+        .expect("dot-relative target root resolves from the invocation directory");
+        let configured_target_dir =
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: &resolved,
+                known_targets: &synthetic_known_targets(),
+            });
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: &target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
         });
     }
 
