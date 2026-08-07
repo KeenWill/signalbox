@@ -1114,19 +1114,8 @@ where
         )
         .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
         let messages = render_runtime_messages(operation.messages());
-        let tools = operation
-            .tools()
-            .iter()
-            .map(|definition| {
-                let schema = decode_checked_raw_json(definition.input_schema().as_str())
-                    .map_err(|_| RuntimeInputTokenCountError::InvalidToolSchema)?;
-                Ok(ToolDefinition::with_raw_schema(
-                    definition.name().as_str(),
-                    definition.description(),
-                    schema,
-                ))
-            })
-            .collect::<Result<Vec<_>, RuntimeInputTokenCountError>>()?;
+        let tools = runtime_tool_definitions(operation.tools())
+            .map_err(|_| RuntimeInputTokenCountError::InvalidToolSchema)?;
         let mut runtime_operation = ModelOperation::new(
             correlation,
             CredentialReference::new(operation.credential_reference().as_str().to_owned()),
@@ -1213,25 +1202,13 @@ where
             frontier: call.frontier().snapshot(),
         };
         let messages = render_runtime_messages(operation.messages());
-        let tools = operation
-            .tools()
-            .iter()
-            .map(|definition| {
-                let schema =
-                    decode_checked_raw_json(definition.input_schema().as_str()).map_err(|_| {
-                        fail_closed(
-                            telemetry,
-                            RuntimeModelCallProviderError::InvalidToolSchema,
-                            None,
-                        )
-                    })?;
-                Ok(ToolDefinition::with_raw_schema(
-                    definition.name().as_str(),
-                    definition.description(),
-                    schema,
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let tools = runtime_tool_definitions(operation.tools()).map_err(|_| {
+            fail_closed(
+                telemetry,
+                RuntimeModelCallProviderError::InvalidToolSchema,
+                None,
+            )
+        })?;
         let selected_target = ResolvedTarget::new(definition.provider_model().to_owned());
         let resolved_target = ResolvedTarget::new(effective_definition.provider_model().to_owned());
         let mut runtime_operation = ModelOperation::new(
@@ -1643,6 +1620,34 @@ fn decode_checked_raw_json(
     value: &str,
 ) -> Result<Box<serde_json::value::RawValue>, serde_json::Error> {
     serde_json::value::RawValue::from_string(value.to_owned())
+}
+
+/// One application tool definition carried a schema that is not valid JSON.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidRuntimeToolSchema;
+
+/// Projects one application tool catalog into the runtime tool definitions
+/// every adapter receives.
+///
+/// This is the single production projection from the daemon registry toward a
+/// provider. Conformance tests derive their bridge input through it rather
+/// than reproducing it, so a projection that drops or alters a tool is
+/// classified instead of being reproduced on both sides of an assertion.
+pub fn runtime_tool_definitions(
+    definitions: &[signalbox_application::ToolDefinition],
+) -> Result<Vec<ToolDefinition>, InvalidRuntimeToolSchema> {
+    definitions
+        .iter()
+        .map(|definition| {
+            let schema = decode_checked_raw_json(definition.input_schema().as_str())
+                .map_err(|_| InvalidRuntimeToolSchema)?;
+            Ok(ToolDefinition::with_raw_schema(
+                definition.name().as_str(),
+                definition.description(),
+                schema,
+            ))
+        })
+        .collect()
 }
 
 /// A correlation mismatch is a fail-closed bridge defect like any other, so

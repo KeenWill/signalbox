@@ -1421,7 +1421,41 @@ mod tests {
     }
 
     #[track_caller]
+    /// Renders the bridge catalog document from the daemon registry through the
+    /// production projection every adapter receives.
+    ///
+    /// Routing the bridge's input through `runtime_tool_definitions` means a
+    /// projection that drops or alters a daemon tool changes what the bridge is
+    /// given, while `expected_bridge_tools` derives the expectation straight
+    /// from the registry. The listing assertion therefore classifies the
+    /// daemon-to-bridge path rather than comparing one helper with itself.
+    #[track_caller]
     fn bridge_catalog(definitions: &[ToolDefinition]) -> serde_json::Value {
+        let projected = signalbox_model_provider_runtime::runtime_tool_definitions(definitions)
+            .expect("daemon tool schemas project into runtime definitions");
+        let tools = projected
+            .iter()
+            .map(|definition| {
+                serde_json::json!({
+                    "name": definition.name.as_str(),
+                    "description": definition.description,
+                    "inputSchema": serde_json::from_str::<serde_json::Value>(
+                        definition.input_schema.get(),
+                    )
+                    .expect("projected tool schema remains valid JSON"),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({"tools": tools})
+    }
+
+    /// The MCP tool listing the daemon registry itself declares.
+    ///
+    /// This reads the application definitions directly, so it is an
+    /// independent source from the projected document the bridge is started
+    /// with.
+    #[track_caller]
+    fn expected_bridge_tools(definitions: &[ToolDefinition]) -> serde_json::Value {
         let tools = definitions
             .iter()
             .map(|definition| {
@@ -1435,7 +1469,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        serde_json::json!({"tools": tools})
+        serde_json::json!(tools)
     }
 
     const SYNTHETIC_BRIDGE_TOOL_NAME: &str = "synthetic_bridge_tool";
@@ -3766,7 +3800,7 @@ mod tests {
     struct McpBridgeFixture {
         workspace: tempfile::TempDir,
         _support: tempfile::TempDir,
-        expected_catalog: serde_json::Value,
+        expected_tools: serde_json::Value,
         ready_path: PathBuf,
         executable: PathBuf,
         bridge: Option<McpBridgeProcess>,
@@ -3777,13 +3811,15 @@ mod tests {
         fn start() -> Self {
             let workspace = tempfile::tempdir().expect("workspace root exists");
             let catalog = mapped_daemon_catalog(workspace.path());
-            let expected_catalog = bridge_catalog(&catalog.definitions());
+            let definitions = catalog.definitions();
+            let projected_catalog = bridge_catalog(&definitions);
+            let expected_tools = expected_bridge_tools(&definitions);
             let support = tempfile::tempdir().expect("bridge support directory exists");
             let catalog_path = support.path().join("tools.json");
             let ready_path = support.path().join("ready");
             fs::write(
                 &catalog_path,
-                serde_json::to_vec(&expected_catalog).expect("bridge catalog serializes"),
+                serde_json::to_vec(&projected_catalog).expect("bridge catalog serializes"),
             )
             .expect("bridge catalog is written");
             let executable = ensure_claude_mcp_bridge_executable();
@@ -3796,7 +3832,7 @@ mod tests {
             Self {
                 workspace,
                 _support: support,
-                expected_catalog,
+                expected_tools,
                 ready_path,
                 executable,
                 bridge: Some(bridge),
@@ -3955,7 +3991,7 @@ mod tests {
     fn claude_mcp_bridge_lists_the_exact_daemon_catalog() {
         let mut fixture = McpBridgeFixture::start();
         fixture.initialize();
-        let expected = fixture.expected_catalog["tools"].clone();
+        let expected = fixture.expected_tools.clone();
         let listed = fixture.list_tools();
         fixture.finish();
 
