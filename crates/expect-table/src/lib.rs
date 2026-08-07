@@ -1,35 +1,40 @@
 //! Table rendering for [`expect-test`] snapshots from any `Debug` value.
 //!
-//! Snapshot tables in this workspace follow `docs/agents/testing-style.md` rules
-//! 9–12: deterministic ordering, relevant fields only, right-trimmed lines
-//! that stay byte-stable under re-blessing. This crate renders such tables
-//! from plain `T: Debug` rows — no serde, no derive, no annotations: each row
-//! is formatted with `{:?}` and the derived-`Debug` grammar is parsed back
-//! into a value tree by a hand-written parser that never fails (an
-//! unrecognized region, such as a custom `Debug` impl's output, degrades to
-//! one verbatim atomic cell).
+//! Snapshot tables in this workspace follow
+//! `docs/agents/testing-style.md` rules 9–12: deterministic ordering,
+//! relevant fields only, right-trimmed lines that stay byte-stable under
+//! re-blessing. This crate renders such tables from plain `T: Debug` rows —
+//! no serde, no derive, no annotations: each row is formatted with `{:?}`
+//! and the derived-`Debug` grammar is parsed back into a value tree by a
+//! hand-written parser that never fails (an unrecognized region, such as a
+//! custom `Debug` impl's output, degrades to one verbatim atomic cell).
 //!
-//! Degradation is best-effort and asymmetric about bare commas. In a
-//! struct body a custom `Debug` leaf that prints an unbracketed comma
-//! (`x, y`) stays one cell and keeps its sibling columns, because a real
-//! field boundary — `identifier:` (never `::`) or the closing brace — is
-//! recognizable ahead of the comma. A map value degrades the same way: a
-//! comma ends the entry only when a map-entry boundary — the next key
-//! region reaching its `": "` colon-space separator, or the map's
-//! closing brace — follows, so a comma-printing custom value keeps its
-//! key/value association, sibling entries keep parsing, and entry
-//! sorting still applies over intact entries. Inside tuples, lists, and
-//! sets no such signal exists, so every depth-zero comma separates items
-//! and a comma-printing custom leaf splits there. A hostile leaf whose
-//! text itself mimics the boundary grammar may still split: `foo, bar:
-//! baz` inside a struct, a map value printing `x: y, z: w` — which
-//! splits a phantom entry, sorted with the rest — or a custom map key
-//! whose own text contains `": "`, indistinguishable from the key/value
-//! separator, are best-effort observed behavior, not promises. Field names using non-ASCII XID-continue characters
-//! that are not alphanumeric — combining marks such as in `x́` — stop the
-//! field grammar and degrade the row to the single `value` column: full
-//! Unicode XID tables would require a dependency this zero-dependency
-//! crate deliberately omits, and the degradation is local and verbatim.
+//! Degradation is best-effort and asymmetric about bare commas, because
+//! only some contexts put a recognizable boundary after them. In a struct
+//! body a custom `Debug` leaf that prints an unbracketed comma (`x, y`)
+//! stays one cell and keeps its sibling columns: a real field boundary —
+//! `identifier:` (never `::`), the `..` non-exhaustive marker, or the
+//! closing brace — is recognizable ahead of the comma. A map value
+//! degrades the same way: a comma ends the entry only when a map-entry
+//! boundary — the next key region reaching its `": "` colon-space
+//! separator, or the map's closing brace — follows, so a comma-printing
+//! custom value keeps its key/value association, sibling entries keep
+//! parsing, and entry sorting still applies over intact entries. Inside
+//! tuples, lists, and sets no such signal exists, so every depth-zero
+//! comma separates items and a comma-printing custom leaf splits there.
+//!
+//! A hostile leaf whose text itself mimics the boundary grammar may still
+//! split, and such splits are best-effort observed behavior, not promises:
+//! `foo, bar: baz` inside a struct; a map value printing `x: y, z: w`,
+//! which splits a phantom entry, sorted with the rest; and a custom map
+//! key whose own text contains `": "`, indistinguishable from the
+//! key/value separator.
+//!
+//! Field names using non-ASCII XID-continue characters that are not
+//! alphanumeric — combining marks such as in `x́` — stop the field grammar
+//! and degrade the row to the single `value` column: full Unicode XID
+//! tables would require a dependency this zero-dependency crate
+//! deliberately omits, and the degradation is local and verbatim.
 //!
 //! Rendering rules:
 //!
@@ -72,9 +77,9 @@
 //!   compact `DebugMap` output emits, so atomic key text with interior
 //!   colons (an `Ipv6Addr` key renders `{2001:db8::1: 10}`) stays whole
 //!   and an `Ipv6Addr` set stays a set.
-//!   Entries render in sorted-by-rendered-text order — maps by key text
-//!   (value text tie-breaking), sets by entry text — not iteration
-//!   order: a deliberate normalization so `HashMap`- and
+//! - Map and set entries render in sorted-by-rendered-text order — maps
+//!   by key text (value text tie-breaking), sets by entry text — not
+//!   iteration order: a deliberate normalization so `HashMap`- and
 //!   `HashSet`-bearing rows render byte-identically across processes.
 //!   `BTreeMap` output with single-token keys typically renders
 //!   unchanged, but textual order is not `Ord` order: key `10` sorts

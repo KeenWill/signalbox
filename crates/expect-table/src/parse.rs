@@ -22,20 +22,15 @@
 //! keep parse order in the tree — rendering owns the sorted-entry
 //! normalization the crate docs state.
 //!
-//! A depth-zero comma is context-sensitive. In a struct body it ends the
-//! current element only when what follows looks like the field grammar —
-//! `identifier:` (not `::`, which is a path), the `..` non-exhaustive
-//! marker, or the closing `}`; otherwise the comma came from a custom
-//! `Debug` leaf and belongs to the atom. In a map value it likewise ends
-//! the entry only when a map-entry boundary follows — a nonempty key
-//! region reaching a depth-zero `": "` before any depth-zero comma or
-//! closer, or the map's closing `}` — so a comma-printing custom value
-//! stays inside its own entry and its neighbors keep their key/value
-//! associations; a value whose text itself mimics an entry (`x: y, z: w`)
-//! splits best-effort. In tuples, lists, and set entries a depth-zero
-//! comma always separates items: no boundary signal exists there, so a
-//! comma-printing custom leaf splits — the best-effort asymmetry the
-//! crate docs state.
+//! A depth-zero comma is context-sensitive. [`Context`] records which
+//! region an element sits in: in item lists — tuples, lists, and set
+//! entries — and in map keys such a comma always separates, while in
+//! struct bodies and map values it separates only at a recognized field
+//! or map-entry boundary ([`Parser::comma_separates_struct_fields`],
+//! [`Parser::comma_separates_map_entries`]); otherwise the comma came
+//! from a custom `Debug` leaf and belongs to the atom. The crate docs
+//! own the best-effort asymmetry that follows, including which hostile
+//! custom `Debug` output still splits.
 
 /// A value parsed from derived-`Debug` output.
 #[derive(Clone, Debug, PartialEq, Eq)]
