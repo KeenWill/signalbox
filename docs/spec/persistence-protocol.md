@@ -41,7 +41,9 @@ wake obligations were verified through this PR
 (`agent/delegation-persistence-schema`); the delegated child-input, await,
 peer-message, terminal-observation, and restart-recovery locks plus wait/message
 replay satellites and headers were verified through this PR
-(`agent/delegation-runtime-persistence-v2`); the model-settings command fields,
+(`agent/delegation-runtime-persistence-v2`), and the broader child-terminal
+endpoint locks were verified through this PR
+(`agent/delegation-runtime-daemon-v2`); the model-settings command fields,
 immutable evidence, snapshot projection, and typed outbox records were verified
 through this PR (`agent/model-settings-persistence`); the defaults-replacement
 pointer-lock admission is verified through this PR
@@ -615,22 +617,26 @@ Locks per transaction, in acquisition order:
   commands commit without firing the trigger, and exact user-command replay
   takes no row lock.
 
-- **StartEligibleTurn**, **startup recovery**, and the **model-call execution
-  transactions** (prepare, authorize, observation commit, restart recovery — all
-  in `model_execution.rs`, reusing the same inventory statement): the
-  `session_scheduler` row `FOR UPDATE` is ordinarily the only explicit lock
-  (session existence is checked with a bare `EXISTS`). Credential-pool call
-  preparation additionally locks every potentially selected bounded profile's
-  shared capacity row `FOR UPDATE`, in profile-reference byte order, after the
-  scheduler lock and before reading reservation counts. When `round_robin`
-  decides among the first admitted priority's members, preparation next locks
-  that immutable-policy-and-priority cursor row `FOR UPDATE` before reading the
-  cursor, choosing a member, or advancing it with `Prepared`. It rereads the
-  protected selection facts after acquiring the lock. No other path may take a
-  scheduler lock while holding a capacity-row lock, or take a capacity-row lock
-  while holding a cursor-row lock. The session row is locked only `KEY SHARE`,
-  implicitly, by the inserts' foreign keys, and the candidate `turn_lifecycle`
-  row is locked by the guarded `UPDATE` itself.
+- **StartEligibleTurn** and nonterminal **model-call execution transactions**
+  (prepare and authorize): the `session_scheduler` row `FOR UPDATE` is the only
+  explicit lock (session existence is checked with a bare `EXISTS`). The session
+  row is locked only `KEY SHARE`, implicitly, by the inserts' foreign keys, and
+  the candidate `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
+  Terminal observation commit and reread, restart recovery, startup recovery,
+  and submit-input interruption first discover whether the target is a delegated
+  child. When it is, they lock the immutable parent/child session pair
+  `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
+  scheduler lock. This is the shared prefix for any path that can record a child
+  result. Credential-pool call preparation additionally locks every potentially
+  selected bounded profile's shared capacity row `FOR UPDATE`, in
+  profile-reference byte order, after the scheduler lock and before reading
+  reservation counts. When `round_robin` decides among the first admitted
+  priority's members, preparation next locks that immutable-policy-and-priority
+  cursor row `FOR UPDATE` before reading the cursor, choosing a member, or
+  advancing it with `Prepared`. It rereads the protected selection facts after
+  acquiring the lock. No other path may take a scheduler lock while holding a
+  capacity-row lock, or take a capacity-row lock while holding a cursor-row
+  lock.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -694,10 +700,12 @@ Locks per transaction, in acquisition order:
 - **Descendant-scoped stop and interrupt transactions**: after registry
   inspection and an unseen command claim, but before the ordinary root-session
   or scheduler locks, the repository locks the complete reachable session
-  frontier in ascending session-identity order. It re-evaluates that frontier
-  after waits and then locks its relationships in spawning-request order. The
-  goal-stop and input-interrupt writers share this prefix; parent-alone commands
-  take no descendant locks.
+  frontier in ascending session-identity order. When the root is itself a
+  delegated child, that same ordered set includes its immutable parent endpoint,
+  so the later child-terminal prefix reacquires only rows already held. It
+  re-evaluates the descendant frontier after waits and then locks its
+  relationships in spawning-request order. The goal-stop and input-interrupt
+  writers share this prefix; parent-alone commands take no descendant locks.
 
 - **Delegated peer-message transactions**: after a nonlocking peer-existence
   read, message recording locks both endpoint session rows `FOR NO KEY UPDATE`
@@ -706,7 +714,12 @@ Locks per transaction, in acquisition order:
   `session_delegation` row `FOR UPDATE`. An absent peer instead locks the
   issuing session and scheduler before returning the typed rejection. This
   common endpoint order is acyclic with delegated-child input and opposite-
-  direction message transactions. Delivery-sequence allocation runs while the
+  direction message transactions. Child terminalization uses the same canonical
+  endpoint-session prefix before taking the child scheduler, so message,
+  completion, and input submission never hold those row classes in reverse
+  order. After locking the relationship, a fresh message reads only its
+  immutable endpoints and bounded lifecycle/event frontier; it does not
+  reconstruct prior messages. Delivery-sequence allocation runs while the
   recipient session lock is held. Message recording claims the global
   `message_id` before inserting the relationship event; a concurrent claim loser
   returns the typed message-identity collision without leaving a partial event.
@@ -1131,37 +1144,52 @@ exact completed effect-free attempt and normalized registration receipt for its
 awaiting request. Equal wait replay independently authenticates that exact
 terminal attempt: the foreground arm requires its typed child-wait evidence and
 the background arm requires its normalized receipt; both arms also authenticate
-the exact update satellite and global outbox header. `session_message` is
-append-only, uniquely orders messages per relationship, and requires exact
-parent/child sender and recipient plus the sending tool request with its
-complete session, turn, and request provenance. Equal message replay
+the exact update satellite and global outbox header. A definitive process-wait
+rejection stores its closed rejection kind and transition evidence when
+applicable beside the exact known-failed attempt; exact replay returns that
+typed outcome before classifying the request as non-executable.
+`session_message` is append-only, uniquely orders messages per relationship, and
+requires exact parent/child sender and recipient plus the sending tool request
+with its complete session, turn, and request provenance. Equal message replay
 authenticates both that provenance and the exact completed external-effect
 attempt carrying its normalized receipt, plus the exact update/wake satellites
 and their global outbox headers. A concurrent global `message_id` claim loser is
-a typed message-identity collision, not an unclassified database failure.
-`session_child_result` has at most one row per spawning request and carries
-exactly one returned-text, failed, stopped, or cancelled shape with child turn
-provenance for returned, failed, result-unavailable, and child-originated
-terminal outcomes, or one of the same exclusive parent-turn-command and
-parent-goal-command provenance arms for a policy-driven stop or cancellation. A
-known provider failure, a pre-send capability failure, or a known effect-free
-tool-crash closure publishes the same typed failed child result in its terminal
-transaction. An authoritative reread of an ambiguous pre-send capability failure
-authenticates that exact delegated result plus its parent update, wake, and both
-delegation outbox headers before reporting the failure committed. Delivery
-satellites bind messages/results to their exact semantic entries; no transcript
-query supplies result content. Every pending message and background result
-delivery additionally receives one positive recipient-wide `delivery_sequence`
-under the recipient session lock. That sequence is unique and gap-free per
-recipient across both kinds; relationship ordinals remain relationship-local
-evidence and never order two different relationships. Foreground results stay
-ordered by their exact awaiting request and do not consume an inbox sequence.
-Their semantic entry repeats that awaiting request as the ordinary logical
-tool-result correlation, so the unchanged proposal-order and single-result
-checks admit it as the `await_session` result without admitting a second result
-for the same request. Tool-batch outbox decoding and context-compaction evidence
-count that foreground correlation as one tool result; a background result has no
-tool-result correlation and counts as neither one.
+a typed message-identity collision, not an unclassified database failure. A
+definitive process-message rejection stores its closed rejection kind,
+transition evidence when applicable, and originally minted message identity
+beside the exact terminal attempt; exact replay returns that typed outcome
+before classifying the request as non-executable. `session_child_result` has at
+most one row per spawning request and carries exactly one returned-text, failed,
+stopped, or cancelled shape with child turn provenance for returned, failed,
+result-unavailable, and child-originated terminal outcomes, or one of the same
+exclusive parent-turn-command and parent-goal-command provenance arms for a
+policy-driven stop or cancellation. A known provider failure, a pre-send
+capability failure, or a known effect-free tool-crash closure publishes the same
+typed failed child result in its terminal transaction. An authoritative reread
+of an ambiguous pre-send capability failure authenticates that exact delegated
+result plus its parent update, wake, and both delegation outbox headers before
+reporting the failure committed. Delivery satellites bind messages/results to
+their exact semantic entries; no transcript query supplies result content. Every
+pending message and background result delivery additionally receives one
+positive recipient-wide `delivery_sequence` under the recipient session lock.
+That sequence is unique and gap-free per recipient across both kinds;
+relationship ordinals remain relationship-local evidence and never order two
+different relationships. Foreground results stay ordered by their exact awaiting
+request and do not consume an inbox sequence. Their semantic entry repeats that
+awaiting request as the ordinary logical tool-result correlation, so the
+unchanged proposal-order and single-result checks admit it as the
+`await_session` result without admitting a second result for the same request.
+Tool-batch outbox decoding and context-compaction evidence count that foreground
+correlation as one tool result; a background result has no tool-result
+correlation and counts as neither one.
+
+An accepted background wait reserves one future recipient delivery position
+until its child result exists. Message and later-wait admission under the same
+recipient lock preserve all outstanding reservations; exhausted capacity is a
+typed definitive rejection, and a reconstituted executable process request
+commits its known-failed attempt end in that same transaction. Thus a child
+terminal transaction cannot be rolled back merely because unrelated messages
+consumed the result delivery's final position.
 
 `session_delegation_wake_turn_origin` distinguishes an idle-recipient wake from
 the delegated child's initial task. It binds the queued turn to one contiguous

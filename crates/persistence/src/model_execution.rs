@@ -500,6 +500,7 @@ impl PostgresModelCallRepository {
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
@@ -621,7 +622,7 @@ impl PostgresModelCallRepository {
                                 "target-resolution failure could not close fresh execution state",
                             )
                         })?;
-                    persist_failed(
+                    persist_failed_with_delegated_child_result(
                         &mut transaction,
                         &failed,
                         ProviderReportedTokenUsage::unreported(),
@@ -816,16 +817,11 @@ impl PostgresModelCallRepository {
                         "capability failure requires a Prepared call",
                     )
                 })?;
-            persist_failed(
+            persist_failed_with_delegated_child_result(
                 &mut transaction,
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
                 None,
-            )
-            .await?;
-            persist_delegated_child_result(
-                &mut transaction,
-                &DelegationOutcome::from_failed_child(&failed),
             )
             .await?;
             Ok(failed)
@@ -1693,7 +1689,7 @@ where
                         "continuation target failure could not close execution",
                     )
                 })?;
-            persist_failed(
+            persist_failed_with_delegated_child_result(
                 connection,
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
@@ -1769,8 +1765,8 @@ pub(crate) async fn resolve_session_credential(
 }
 
 /// Closes a turn after a prepared or effect-free tool attempt was lost across
-/// process restart. The caller owns the scheduler lock and commits this
-/// closure with the attempt's `CrashLost` evidence.
+/// process restart. The caller owns the delegated endpoint and scheduler locks
+/// and commits this closure with the attempt's `CrashLost` evidence.
 pub(crate) async fn fail_tool_crash_in_transaction<NextTurn>(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1811,15 +1807,13 @@ where
                 "tool crash could not close evidence-free execution",
             )
         })?;
-    persist_failed(
+    persist_failed_with_delegated_child_result(
         connection,
         &failed,
         ProviderReportedTokenUsage::unreported(),
         None,
     )
     .await?;
-    persist_delegated_child_result(connection, &DelegationOutcome::from_failed_child(&failed))
-        .await?;
     Ok(failed)
 }
 
@@ -2029,10 +2023,11 @@ async fn lock_delegation_terminal_session(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<(), ModelCallRepositoryError> {
-    let locked = sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::DELEGATION_DELIVERY_SESSION)
-        .bind(session_id_to_uuid(session))
-        .fetch_optional(connection)
-        .await?;
+    let locked =
+        sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::DELEGATION_TERMINAL_ENDPOINT_SESSION)
+            .bind(session_id_to_uuid(session))
+            .fetch_optional(connection)
+            .await?;
     if locked.is_some_and(|locked| session_id_from_uuid(locked) == session) {
         Ok(())
     } else {
@@ -4738,12 +4733,11 @@ async fn persist_terminal_outcome_with_usage(
             .await
         }
         ModelCallTerminalOutcome::Failed(failed) => {
-            lock_delegated_child_result_frontier(connection, failed.session(), failed.turn())
-                .await?;
-            persist_failed(connection, failed, usage, provider_failure_cause).await?;
-            persist_delegated_child_result(
+            persist_failed_with_delegated_child_result(
                 connection,
-                &DelegationOutcome::from_failed_child(failed),
+                failed,
+                usage,
+                provider_failure_cause,
             )
             .await
         }
@@ -4776,6 +4770,17 @@ async fn persist_terminal_outcome_with_usage(
     }
 }
 
+async fn persist_failed_with_delegated_child_result(
+    connection: &mut PgConnection,
+    failed: &FailedModelCallTurn,
+    usage: ProviderReportedTokenUsage,
+    provider_failure_cause: Option<ProviderModelCallFailureCause>,
+) -> Result<(), ModelCallRepositoryError> {
+    lock_delegated_child_result_frontier(connection, failed.session(), failed.turn()).await?;
+    persist_failed(connection, failed, usage, provider_failure_cause).await?;
+    persist_delegated_child_result(connection, &DelegationOutcome::from_failed_child(failed)).await
+}
+
 async fn lock_delegated_child_result_frontier(
     connection: &mut PgConnection,
     child: SessionId,
@@ -4791,7 +4796,7 @@ async fn lock_delegated_child_result_frontier(
     let Some(relation) = relation else {
         return Ok(());
     };
-    sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_PARENT_SESSION)
+    sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_ENDPOINT_SESSION)
         .bind(relation.parent_session_id)
         .execute(&mut *connection)
         .await?;
@@ -4807,6 +4812,38 @@ async fn lock_delegated_child_result_frontier(
             "delegated terminal relationship changed while locking",
         )
         .into());
+    }
+    Ok(())
+}
+
+/// Locks the immutable parent/child endpoint pair before a child scheduler can
+/// be locked by a transaction that may terminalize the delegated child.
+pub(crate) async fn lock_delegated_child_endpoint_sessions(
+    connection: &mut PgConnection,
+    child: SessionId,
+) -> Result<(), ModelCallRepositoryError> {
+    let parent: Option<Uuid> = sqlx::query_scalar(
+        "SELECT parent_session_id
+           FROM session_delegation
+          WHERE child_session_id = $1",
+    )
+    .bind(session_id_to_uuid(child))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(parent) = parent else {
+        return Ok(());
+    };
+    let parent = session_id_from_uuid(parent);
+    let (first, second) = crate::lock_inventory::ordered_session_pair(child, parent);
+    sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_ENDPOINT_SESSION)
+        .bind(session_id_to_uuid(first))
+        .execute(&mut *connection)
+        .await?;
+    if second != first {
+        sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_ENDPOINT_SESSION)
+            .bind(session_id_to_uuid(second))
+            .execute(&mut *connection)
+            .await?;
     }
     Ok(())
 }

@@ -3646,6 +3646,7 @@ dependencies = [
  "signalbox-tools-git",
  "signalbox-tools-github",
  "signalbox-tools-plan",
+ "signalbox-tools-sessions",
  "signalbox-tools-web",
  "signalbox-tools-workspace",
  "sqlx",
