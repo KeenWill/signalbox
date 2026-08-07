@@ -497,11 +497,13 @@ fn record_helper_delivery(settings: &str) -> std::io::Result<()> {
 fn record_credential_mode() -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    let credential =
-        std::path::PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR").unwrap_or_default())
-            .join("credential");
+    let store = std::path::PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR").unwrap_or_default());
+    let credential = store.join("credential");
     let mode = std::fs::metadata(credential)?.permissions().mode() & 0o777;
-    std::fs::write("fake-claude-credential-mode", format!("{mode:o}"))
+    std::fs::write("fake-claude-credential-mode", format!("{mode:o}"))?;
+    let helper = store.join("credential-helper");
+    let mode = std::fs::metadata(helper)?.permissions().mode() & 0o777;
+    std::fs::write("fake-claude-helper-mode", format!("{mode:o}"))
 }
 
 #[cfg(not(unix))]

@@ -551,6 +551,7 @@ fn create_support_files(
     let mcp_config = directory.path().join("mcp.json");
     let settings = directory.path().join("settings.json");
     let credential_file = directory.path().join("credential");
+    let credential_helper = directory.path().join("credential-helper");
     let bridge_text = bridge
         .to_str()
         .ok_or_else(|| "MCP bridge path is not valid UTF-8".to_string())?;
@@ -592,8 +593,16 @@ fn create_support_files(
         let credential_text = credential_file
             .to_str()
             .ok_or_else(|| "Claude credential-store path is not valid UTF-8".to_string())?;
+        let credential_helper_text = credential_helper
+            .to_str()
+            .ok_or_else(|| "Claude credential-helper path is not valid UTF-8".to_string())?;
+        let helper = format!(
+            "#!/bin/sh\nseparator=\nwhile\n    IFS= read -r line\n    read_status=$?\n    case \"$read_status:$line\" in\n        0:*) : ;;\n        *:) break ;;\n        *) : ;;\n    esac\ndo\n    printf '%s%s' \"$separator\" \"$line\"\n    separator='\n'\ndone < {}\n",
+            shell_quote(credential_text)
+        );
+        write_private_executable(&credential_helper, helper.as_bytes())?;
         isolated_settings["apiKeyHelper"] =
-            serde_json::json!(format!("cat {}", shell_quote(credential_text)));
+            serde_json::json!(format!("exec {}", shell_quote(credential_helper_text)));
     }
     write_private_file(
         &settings,
@@ -607,13 +616,23 @@ fn create_support_files(
 }
 
 fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+    write_private_support_file(path, contents, 0o600)
+}
+
+fn write_private_executable(path: &Path, contents: &[u8]) -> Result<(), String> {
+    write_private_support_file(path, contents, 0o700)
+}
+
+fn write_private_support_file(path: &Path, contents: &[u8], mode: u32) -> Result<(), String> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(mode);
     }
+    #[cfg(not(unix))]
+    let _ = mode;
     let mut file = options
         .open(path)
         .map_err(|error| format!("could not create private support file: {error}"))?;

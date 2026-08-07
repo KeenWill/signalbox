@@ -172,12 +172,14 @@ credential_pool = "anthropic-main"
 # executable = "/absolute/path/to/codex"
 # working_directory = "/absolute/path/to/workspace"
 
-# To serve a Claude Code model family, add this mapping and process
-# configuration. Claude Code resolves its own subscription login, so no key file
-# is involved. `mcp_bridge_executable` names the `signalbox-claude-mcp-bridge`
-# program this workspace builds: the adapter spawns it as Claude Code's only
-# tool server, and the deployment names it explicitly rather than having the
-# daemon guess a path from its own image. That name takes either form. A bare
+# To serve a Claude Code model family with an API credential, provision the file
+# named by the profile below, then add this mapping and process configuration.
+# The adapter copies its per-preparation value into a private Claude settings
+# store without passing the key directly in the child environment.
+# `mcp_bridge_executable` names the `signalbox-claude-mcp-bridge` program this
+# workspace builds: the adapter spawns it as Claude Code's only tool server, and
+# the deployment names it explicitly rather than having the daemon guess a path
+# from its own image. That name takes either form. A bare
 # program name, as below, is resolved once at startup against the daemon's own
 # PATH: the form for a deployment that installs the bridge alongside the daemon,
 # which is what `devenv up` does for the dev instance. Any other value is a

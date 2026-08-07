@@ -970,16 +970,17 @@ Ambient delivery leaves subscription-login resolution inside Claude Code. File
 delivery resolves the reference during cancellable preparation, rejects an
 empty, non-UTF-8, or NUL-bearing value, and writes the exact value to a
 mode-0600 credential file in a private request-scoped settings store. That
-store's mode-0600 `settings.json` configures Claude's `apiKeyHelper` to read the
-file. The credential, settings, and existing MCP support files share the
-temporary directory; the adapter replaces only the already allowlisted
-`CLAUDE_CONFIG_DIR` value with that directory and still never adds
-`ANTHROPIC_API_KEY` itself to the child process environment. Dropping the
-prepared capability removes the directory. The exact value remains in the
-one-shot capability so provider-controlled observations and terminal evidence
-receive exact-value redaction in addition to the CLI credential-shape and
-cross-fragment discipline. Proxy userinfo and unusable credential-home paths
-still fail before spawn.
+store's mode-0600 `settings.json` configures Claude's `apiKeyHelper` to invoke a
+mode-0700 request-scoped reader. The reader preserves the exact file bytes using
+only fixed shell builtins and resolves no executable through `PATH`. The
+credential, helper, settings, and existing MCP support files share the temporary
+directory; the adapter replaces only the already allowlisted `CLAUDE_CONFIG_DIR`
+value with that directory and still never adds `ANTHROPIC_API_KEY` itself to the
+child process environment. Dropping the prepared capability removes the
+directory. The exact value remains in the one-shot capability so
+provider-controlled observations and terminal evidence receive exact-value
+redaction in addition to the CLI credential-shape and cross-fragment discipline.
+Proxy userinfo and unusable credential-home paths still fail before spawn.
 
 The output-token ceiling is enforced by the cleared child environment, while
 reasoning level and fast mode use the explicit preparation mappings owned by

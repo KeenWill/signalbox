@@ -6828,9 +6828,10 @@ context_window_tokens = 200000
         let directory = tempfile::tempdir().expect("fixture directory is available");
         let primary_path = directory.path().join("primary");
         let historical_path = directory.path().join("historical");
-        std::fs::write(&primary_path, b"primary-test-value").expect("primary fixture is writable");
-        std::fs::write(&historical_path, b"historical-test-value")
-            .expect("historical fixture is writable");
+        let primary_value = b"primary-test-value";
+        let historical_value = b"historical-test-value";
+        std::fs::write(&primary_path, primary_value).expect("primary fixture is writable");
+        std::fs::write(&historical_path, historical_value).expect("historical fixture is writable");
         let primary = CredentialReference::new("primary-profile");
         let historical = CredentialReference::new("historical-profile");
         let source = FileCredentialAccess::from_files([
@@ -6844,7 +6845,7 @@ context_window_tokens = 200000
                 .await
                 .expect("primary profile resolves")
                 .expose_bytes(),
-            b"primary-test-value"
+            primary_value
         );
         assert_eq!(
             source
@@ -6852,7 +6853,7 @@ context_window_tokens = 200000
                 .await
                 .expect("historical profile resolves")
                 .expose_bytes(),
-            b"historical-test-value"
+            historical_value
         );
     }
 
