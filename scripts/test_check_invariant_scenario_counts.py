@@ -674,6 +674,15 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
         self.assertIn("more than once", result.stdout)
         self.assertIn(INVARIANT_TAGS[0], result.stdout)
 
+    def test_an_en_dash_range_is_not_read_as_its_upper_bound(self) -> None:
+        """This repository writes ranges with an en dash, so a range would
+        otherwise start matching after the dash and report its upper bound —
+        which can *agree* with the catalog and pass silently."""
+        self.assert_no_count_read_from(f"There are 5\u2013{SCENARIO_COUNT} scenarios")
+
+    def test_an_em_dash_range_is_not_read_as_its_upper_bound(self) -> None:
+        self.assert_no_count_read_from(f"There are 5\u2014{SCENARIO_COUNT} scenarios")
+
     def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
         """A tracked path can vanish between `git ls-files` and the read.
 

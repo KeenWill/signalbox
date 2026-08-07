@@ -159,6 +159,12 @@ NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 # range written "5-10 scenarios" no longer matches, which is correct — a range
 # states no total.
 #
+# The Unicode dashes U+2010-U+2015 join the ASCII hyphen for the same reason.
+# This repository writes ranges with an en dash — "1-64 ASCII letters" in
+# docs/spec/tool-loop.md is really "1\u201364" — so "5\u201337 scenarios" would start
+# matching after the dash and report 37, which *agrees* with a 37-scenario
+# catalog and passes silently. A range states no total, whichever dash it uses.
+#
 # `,` joins them for the mirror-image reason `NOT_PARTIAL_NUMBER` exists: without
 # it the engine simply restarts after the comma, so "There are 12,037 scenarios"
 # matches at `037` and reads as 37 — which *agrees* with a 37-scenario catalog
@@ -171,7 +177,7 @@ NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 # snake_case identifier written as bare prose, which this repository formats as
 # inline code — masked above before any of these patterns run.
 NUMBER_BEFORE_NOUN = re.compile(
-    rf"(?<![0-9A-Za-z.,-])(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}{WRAPPED_GAP}"
+    rf"(?<![0-9A-Za-z.,\u2010-\u2015-])(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}{WRAPPED_GAP}"
     rf"(?P<noun>invariants?|scenarios?)(?![0-9A-Za-z-])",
     re.IGNORECASE,
 )
