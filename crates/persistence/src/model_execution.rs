@@ -914,10 +914,11 @@ impl PostgresModelCallRepository {
                         source_frontier,
                     )
                     .await?;
-                    let delegated_result_matches = delegated_capability_failure_result_matches(
+                    let delegated_result_matches = delegated_terminal_result_matches(
                         &mut transaction,
                         session,
                         turn_id_from_uuid(turn),
+                        &ExpectedDelegatedChildResult::Failed,
                     )
                     .await?;
                     if transition_history_matches && closure_matches && delegated_result_matches {
@@ -1203,6 +1204,13 @@ impl PostgresModelCallRepository {
                             "retained observation terminal closure changed",
                         ));
                     }
+                    if !delegated_observation_result_matches(&mut transaction, session, observation)
+                        .await?
+                    {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained observation delegated result closure changed",
+                        ));
+                    }
                     Ok(RetainedModelCallObservationStatus::AlreadyCommitted)
                 }
                 _ => Err(ModelCallRepositoryError::InvalidTransition(
@@ -1242,11 +1250,67 @@ impl PostgresModelCallRepository {
     }
 }
 
-async fn delegated_capability_failure_result_matches(
+enum ExpectedDelegatedChildResult {
+    Returned(String),
+    Failed,
+    Cancelled,
+    ResultUnavailable,
+}
+
+impl ExpectedDelegatedChildResult {
+    fn stored_facts(&self) -> (&'static str, &'static str, Option<&str>) {
+        match self {
+            Self::Returned(content) => {
+                ("result_returned", "child_completed", Some(content.as_str()))
+            }
+            Self::Failed => ("child_failed", "child_execution_failed", None),
+            Self::Cancelled => ("child_cancelled", "child_cancelled", None),
+            Self::ResultUnavailable => ("child_failed", "child_result_unavailable", None),
+        }
+    }
+}
+
+async fn delegated_observation_result_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    let expected = match observation.observation() {
+        ModelCallTerminalObservation::Completed { assistant_text } => {
+            match signalbox_domain::DelegationContent::from_assistant_text(assistant_text) {
+                Ok(content) => ExpectedDelegatedChildResult::Returned(content.as_str().to_owned()),
+                Err(_) => ExpectedDelegatedChildResult::ResultUnavailable,
+            }
+        }
+        ModelCallTerminalObservation::KnownFailed | ModelCallTerminalObservation::Refused => {
+            ExpectedDelegatedChildResult::Failed
+        }
+        ModelCallTerminalObservation::Cancelled => {
+            if cancelled_terminal_closure_matches(connection, session, observation).await? {
+                ExpectedDelegatedChildResult::Cancelled
+            } else {
+                ExpectedDelegatedChildResult::Failed
+            }
+        }
+        ModelCallTerminalObservation::CompletedWithTools { .. }
+        | ModelCallTerminalObservation::Ambiguous => return Ok(true),
+    };
+    delegated_terminal_result_matches(
+        connection,
+        session,
+        observation.correlation().turn(),
+        &expected,
+    )
+    .await
+}
+
+async fn delegated_terminal_result_matches(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
+    expected: &ExpectedDelegatedChildResult,
 ) -> Result<bool, ModelCallRepositoryError> {
+    let (outcome_kind, reason_kind, content_text) = expected.stored_facts();
     Ok(sqlx::query_scalar::<_, bool>(
         "WITH delegated AS (
             SELECT task.spawning_tool_request_id,
@@ -1262,8 +1326,8 @@ async fn delegated_capability_failure_result_matches(
         )
         SELECT NOT EXISTS (
                     SELECT 1
-                      FROM session_delegation_initial_task
-                     WHERE child_session_id = $1 AND turn_id = $2
+                      FROM session_delegation
+                     WHERE child_session_id = $1
                )
             OR (
                 SELECT count(*) = 1
@@ -1272,15 +1336,15 @@ async fn delegated_capability_failure_result_matches(
                     ON result.spawning_tool_request_id =
                        delegated.spawning_tool_request_id
                    AND result.event_kind = 'outcome_recorded'
-                   AND result.outcome_kind = 'child_failed'
-                   AND result.content_text IS NULL
+                   AND result.outcome_kind = $3
+                   AND result.content_text IS NOT DISTINCT FROM $5
                   JOIN session_delegation_event AS outcome
                     ON outcome.spawning_tool_request_id =
                        result.spawning_tool_request_id
                    AND outcome.event_ordinal = result.event_ordinal
                    AND outcome.event_kind = result.event_kind
                    AND outcome.outcome_kind = result.outcome_kind
-                   AND outcome.reason_kind = 'child_execution_failed'
+                   AND outcome.reason_kind = $4
                    AND outcome.provenance_kind = 'child_turn'
                    AND outcome.provenance_session_id = delegated.child_session_id
                    AND outcome.provenance_turn_id = delegated.turn_id
@@ -1292,18 +1356,22 @@ async fn delegated_capability_failure_result_matches(
                    AND parent_update.spawning_tool_request_id =
                        delegated.spawning_tool_request_id
                    AND parent_update.child_session_id = delegated.child_session_id
-                   AND parent_update.outcome_kind = 'child_failed'
-                   AND parent_update.reason_kind = 'child_execution_failed'
+                   AND parent_update.outcome_kind = $3
+                   AND parent_update.reason_kind = $4
                    AND parent_update.provenance_kind = 'child_turn'
                    AND parent_update.provenance_session_id =
                        delegated.child_session_id
                    AND parent_update.provenance_turn_id = delegated.turn_id
-                   AND parent_update.content_text IS NULL
+                   AND parent_update.content_text IS NOT DISTINCT FROM $5
+                   AND parent_update.event_kind = 'delegation_update'
+                   AND parent_update.storage_version = 1
                   JOIN delegation_outbox_event AS update_header
                     ON update_header.event_sequence = parent_update.event_sequence
                    AND update_header.event_kind = parent_update.event_kind
                    AND update_header.storage_version = parent_update.storage_version
                    AND update_header.session_id = parent_update.session_id
+                   AND update_header.event_kind = 'delegation_update'
+                   AND update_header.storage_version = 1
                   JOIN delegation_wake_outbox_event AS parent_wake
                     ON parent_wake.result_spawning_request_id =
                        delegated.spawning_tool_request_id
@@ -1313,15 +1381,22 @@ async fn delegated_capability_failure_result_matches(
                    AND parent_wake.subject_kind = 'result'
                    AND parent_wake.awaiting_tool_request_id IS NULL
                    AND parent_wake.message_id IS NULL
+                   AND parent_wake.event_kind = 'delegation_wake'
+                   AND parent_wake.storage_version = 1
                   JOIN delegation_outbox_event AS wake_header
                     ON wake_header.event_sequence = parent_wake.event_sequence
                    AND wake_header.event_kind = parent_wake.event_kind
                    AND wake_header.storage_version = parent_wake.storage_version
                    AND wake_header.session_id = parent_wake.session_id
+                   AND wake_header.event_kind = 'delegation_wake'
+                   AND wake_header.storage_version = 1
             )",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
+    .bind(outcome_kind)
+    .bind(reason_kind)
+    .bind(content_text)
     .fetch_one(connection)
     .await?)
 }
