@@ -1452,8 +1452,11 @@ optional reset. Deferred constraints require the complete policy membership, no
 model call for the attempt, `KnownFailure` attempt end, `Failed` turn, exact
 `TurnFailed` marker and terminal frontier, and one typed preparation-failure
 outbox row in the same commit. Reconstitution rejects a missing, duplicate,
-reordered, stale, or foreign evidence row. This paragraph constrains the future
-schema; no present storage surface provides it.
+reordered, or foreign evidence row and any correlation that was not active in
+that failure commit. It accepts a retained correlation later marked inactive by
+an authorized clear; the immutable generation or predecessor observation and its
+active-at-failure fact remain historical evidence. This paragraph constrains the
+future schema; no present storage surface provides it.
 
 **Committed unimplemented functionality — availability-successor storage.** No
 present migration, repository operation, or reconstitution path stores an
@@ -1476,9 +1479,17 @@ all candidate capacity rows in profile-reference byte order, counts their live
 reservation rows under those locks, and inserts the selected reservation with
 the `Prepared` call. A deferred constraint rejects a committed live count above
 the policy member's bound. Invocation completion releases its reservation and
-writes the wake signal atomically; startup closes prior-process reservations as
-lost before waking their waiters and retains reservations owned by the live
-fenced process. These are the shapes required by
+writes the wake signal atomically. Entering either wait ends the call-free
+current attempt as `WithoutStop(YieldedToDurableWait)` in the same transaction.
+Release atomically consumes the wait and creates its fresh `Prepared` successor
+attempt; `stop_turn` instead atomically consumes it, creates the fresh
+immediate-successor attempt, applies the interrupt proof, ends that attempt
+`AfterCancellation(Cancelled)`, and terminalizes the turn. Each reservation
+stores the child process group's reuse-safe host identity. Startup closes a
+prior-process reservation as lost only after proving that exact group absent or
+terminating it and then proving absence; failure to establish absence fails
+startup before scheduling. It retains reservations owned by the live fenced
+process. These are the shapes required by
 [turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
 Reconstitution and wake must fail closed on partial, stale, or mismatched
 evidence. This paragraph constrains that future schema; no present storage

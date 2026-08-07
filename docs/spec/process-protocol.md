@@ -2563,9 +2563,12 @@ session-correlated policy read to return that same complete ordered inventory,
 before exposing the terminal state. A producer that omits or reorders evidence
 therefore cannot make its second event-local copy authoritative. Reconnect and
 live follow project the same typed cause rather than a generic failed turn.
-Until the coordinated daemon-and-client slice lands, version one rejects both
-new variants and the policy read, and no present producer may terminalize a turn
-for this pre-call cause.
+Configuration admission limits each profile and pool name to 256 UTF-8 bytes and
+each pool to 1,024 members, reserving enough of the 8 MiB frame for the complete
+duplicated failure evidence under worst-case JSON escaping; this projection is
+never paginated or truncated. Until the coordinated daemon-and-client slice
+lands, version one rejects both new variants and the policy read, and no present
+producer may terminalize a turn for this pre-call cause.
 
 **Committed unimplemented functionality — credential-availability projection.**
 No present request, event, transcript message, or closed turn-state object

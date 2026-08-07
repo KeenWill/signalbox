@@ -630,10 +630,12 @@ exhausted pool before issuing any call instead fails with the distinct
 member-exclusion evidence; it never fabricates provider evidence or borrows a
 stale provider cause. `park` parks the turn in a durable wait carrying every
 excluded member's evidence and optional reset, plus the earliest reset as its
-deadline. The scheduler releases it when that deadline passes. If no member
-reported a reset, the wait has no deadline and only a durable
-member-availability update wakes it. A parked turn holds its session slot,
-appends no failure entry, and is not a terminal outcome.
+deadline. Entering that wait atomically ends the call-free current attempt as
+`WithoutStop(YieldedToDurableWait)`; it never leaves a live attempt behind. The
+scheduler releases it when that deadline passes. If no member reported a reset,
+the wait has no deadline and only a durable member-availability update wakes it.
+A parked turn holds its session slot, appends no failure entry, and is not a
+terminal outcome.
 
 **Committed unimplemented functionality — pre-call pool-exhaustion failure.** No
 present domain transition, repository shape, or process event can produce this
@@ -650,8 +652,12 @@ appends the ordinary `TurnFailed { turn }` marker to that attempt's source
 frontier, and atomically emits the typed preparation-failure event owned by
 [process protocol](process-protocol.md#credential-pool-preparation-failure).
 Partial evidence, a member outside the frozen policy, duplicate or reordered
-members, or any correlated record that is no longer exclusion evidence fails
-closed. Persistence owns the corresponding all-or-nothing representation below.
+members, or a correlation that did not supply active exclusion evidence in the
+atomic failure commit fails closed. A later authorized clear leaves that
+historical correlation valid: reconstitution validates the retained generation
+or predecessor observation and its active-at-failure fact, not its current
+active state. Persistence owns the corresponding all-or-nothing representation
+below.
 
 The same child adds the selecting immutable pool-policy identity to every
 pool-selected `Prepared` call as an insert-only authorization fact beside its

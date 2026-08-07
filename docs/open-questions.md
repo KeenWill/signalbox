@@ -265,15 +265,16 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   calls no model. What remains open is whether any adapter can offer such a
   probe. Absent one, an operator command is the only clearing path. Blocks
   automatic recovery from a rejected credential, not recovery itself. (S22)
-- **Access-token-only dispatch for the Codex CLI.** The `oauth` delivery hands
-  each invocation a store carrying an access token and no refresh token. That
-  the Codex CLI executes from such a store is established by its configurable
-  credential-store mode and its documented access-token login, but not by
-  observation. If it declines, `oauth` is unavailable for that adapter and
-  `codex_home` is the only subscription delivery. That fallback retains the
-  delivery contract's actual concurrency policy: serialization exists only when
-  the deployment sets `max_concurrent_invocations = 1`; absent a bound,
-  concurrent refresh races remain an accepted risk. (S22)
+- **Access-token-only Codex CLI conformance evidence.** The committed `oauth`
+  delivery requires each invocation to use a scratch store carrying an access
+  token and no refresh token. What remains open is the minimum supported CLI
+  version and exact live conformance check that establish this behavior. The
+  implementing slice cannot land until that evidence exists; a current CLI
+  version declining the store blocks that slice rather than making the committed
+  delivery optional. `codex_home` remains a distinct subscription delivery with
+  serialization only when the deployment explicitly sets
+  `max_concurrent_invocations = 1`; absent a bound, concurrent refresh races
+  remain an accepted risk. (S22)
 - **Reuse-detection blast radius.** Whether a provider rejecting a reused
   refresh token invalidates only that token or the whole authorization family is
   not determinable from either CLI's source. It does not affect the `oauth`

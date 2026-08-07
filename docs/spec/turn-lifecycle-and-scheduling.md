@@ -102,28 +102,34 @@ the earliest reset as its optional deadline. The contended form carries every
 durable exclusion in the selection snapshot and the complete nonempty set of
 otherwise-admissible bounded members with exact invocation-reservation
 identities and generations. Startup may reconstitute either only from that
-complete evidence; it retains live-process reservations and closes fenced
-prior-process reservations as lost before waking a contended waiter. The
-scheduler makes a reached deadline, an exact reservation release, or a durable
-member-availability update eligible. Release returns the same turn to `Running`
-with a fresh attempt and availability chain while carrying forward member
-evidence whose reset has not passed, every durable membership exclusion, and
-every profile quarantine.
+complete evidence. Entering either form atomically ends the call-free current
+attempt as `WithoutStop(YieldedToDurableWait)` and stores the wait, leaving no
+live attempt. Each reservation carries the child process group's reuse-safe host
+identity. Startup retains live-process reservations and closes a fenced
+prior-process reservation as lost only after proving that exact process group
+absent, or terminating it and then proving absence; otherwise startup fails
+before scheduling. The scheduler makes a reached deadline, an exact reservation
+release, or a durable member-availability update eligible. Release atomically
+consumes the wait, creates a fresh `Prepared` successor attempt, and returns the
+same turn to `Running` with a fresh availability chain while carrying forward
+member evidence whose reset has not passed, every durable membership exclusion,
+and every profile quarantine.
 
 The wait has an exact occupied-slot control matrix. `steer` is accepted as
 ordinary pending steering bound to this source turn and remains pending until a
 release transaction consumes it with the fresh call. `stop_turn` is admitted:
 under the scheduler lock it revalidates the exact wait, accepts the configured
-immediate-successor origin, records the ordinary applied-interrupt proof, closes
-the wait as interrupted, appends `TurnCancelled` after the wait's latest
-frontier, and terminalizes `Cancelled`, all atomically. Equal replay returns
-that receipt; a released or otherwise changed wait returns the ordinary
-active-turn mismatch. A goal `stop_goal` or supersede command remains a
-goal-state transition and does not manufacture turn-interrupt authority; if the
-caller also wants to release this active slot it submits the existing
-`stop_turn` command. No approval or reconciliation command applies to the wait.
-This compatibility constraint does not add that phase or these branches to the
-implemented closed vocabulary above.
+immediate-successor origin, closes the wait, creates the fresh `Prepared`
+attempt, records the ordinary applied-interrupt proof on that attempt, ends it
+`AfterCancellation(Cancelled)`, appends `TurnCancelled` after the wait's latest
+frontier, and terminalizes `Cancelled`, all atomically. No live attempt remains.
+Equal replay returns that receipt; a released or otherwise changed wait returns
+the ordinary active-turn mismatch. A goal `stop_goal` or supersede command
+remains a goal-state transition and does not manufacture turn-interrupt
+authority; if the caller also wants to release this active slot it submits the
+existing `stop_turn` command. No approval or reconciliation command applies to
+the wait. This compatibility constraint does not add that phase or these
+branches to the implemented closed vocabulary above.
 
 At most one turn per session is `active`. Enforcement is layered:
 
