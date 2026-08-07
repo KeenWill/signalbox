@@ -208,6 +208,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tool_result(fixtures::CREDENTIAL_PREFIX_TOOL_ID)?;
             success("tool_use", Some(fixtures::OPAQUE_CREDENTIAL_CONTINUATION))?;
         }
+        // A complete, fully decodable event and then silence at a line
+        // boundary: the deadline fires with the reader holding nothing.
+        "complete_event_then_hang" => {
+            assistant_text(fixtures::ANSWER)?;
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
         // A prefix of an `assistant` event, then silence. The exchange deadline
         // fires while `read_bounded_line` holds bytes it will never deliver, so
         // the suffix that would have said whether a tool call opened is lost.

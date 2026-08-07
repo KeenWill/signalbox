@@ -400,10 +400,18 @@ pub enum ToolCallsAtLoss {
     /// At least one tool call had opened in the material decoded before the
     /// loss.
     Opened,
-    /// The adapter held no decoded view of the response's tool material when
-    /// the loss occurred — the body never parsed, the decode stopped before
-    /// reaching content, or the loss was raised by a layer that reads no
-    /// response material. Not a claim that no tool call opened.
+    /// The adapter's view of the response's tool material was incomplete when
+    /// the loss occurred, so neither answer above is established.
+    ///
+    /// This is the absence of a *conclusion*, not the absence of decoded
+    /// content: an adapter can reach it having decoded a great deal. It holds
+    /// wherever material that could have opened a tool call went unexamined —
+    /// a body that never parsed, a decode abandoned with content blocks still
+    /// unread, a record or event whose payload failed to decode, material the
+    /// runner read off the transport but never delivered to a decoder, and a
+    /// loss raised by a layer that reads no response material at all. Never a
+    /// claim that no tool call opened; `NoneOpened` is that claim, and it is
+    /// made only where the adapter examined enough to support it.
     Unobserved,
 }
 

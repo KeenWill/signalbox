@@ -515,13 +515,16 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
     drop(stdin);
 
     let mut stdout = BufReader::new(stdout);
+    // Survives each read future so an interrupted read can say whether it had
+    // taken bytes it never delivered.
+    let mut line_progress = LineProgress::AtLineBoundary;
     let mut reaped_status = None;
     let mut deadline_stderr = None;
     loop {
         let terminal_observed = decoder.terminal_observed();
         let next = tokio::select! {
             biased;
-            result = read_bounded_line(&mut stdout, event_limit, labels) => ProcessStep::Line(result),
+            result = read_bounded_line(&mut stdout, event_limit, labels, &mut line_progress) => ProcessStep::Line(result),
             () = &mut *cancellation => ProcessStep::Cancelled,
             () = tokio::time::sleep_until(deadline) => ProcessStep::TimedOut,
         };
@@ -600,7 +603,9 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 });
             }
             ProcessStep::Cancelled => {
-                decoder.note_undelivered_line();
+                if line_progress == LineProgress::PartialLineHeld {
+                    decoder.note_undelivered_line();
+                }
                 // Work-first: a leader that has already exited on its own is
                 // definitive evidence a simultaneous cancellation must not
                 // discard — even after a terminal marker, because a nonzero
@@ -640,7 +645,9 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             }
             ProcessStep::TimedOut => {
-                decoder.note_undelivered_line();
+                if line_progress == LineProgress::PartialLineHeld {
+                    decoder.note_undelivered_line();
+                }
                 // An inherited stdout handle can outlive a leader that
                 // already exited on its own; that exit stays definitive —
                 // an observed terminal marker or the exit status — and only
@@ -1215,11 +1222,27 @@ enum InputStep {
     TimedOut,
 }
 
+/// Whether the bounded-line reader is holding bytes it has not yet returned.
+///
+/// Caller-owned, because a dropped future returns nothing: this is the only way
+/// to learn what an interrupted read had already taken off the transport. The
+/// reader leaves it at [`Self::AtLineBoundary`] on every path that returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineProgress {
+    /// No byte of a next line has been consumed.
+    AtLineBoundary,
+    /// Bytes of a line the reader has not delivered have been consumed; losing
+    /// the future here discards them unexamined.
+    PartialLineHeld,
+}
+
 async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     limit: usize,
     labels: CliProcessLabels,
+    progress: &mut LineProgress,
 ) -> std::io::Result<Option<Vec<u8>>> {
+    *progress = LineProgress::AtLineBoundary;
     let mut line = Vec::new();
     // Payload bytes counted so far. Tracked apart from `line.len()` because a
     // `\r` ending a batch is only a delimiter byte once the next batch shows
@@ -1234,8 +1257,10 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
             // it was payload rather than half a delimiter. It is still attached
             // to the line the decoder receives, so charge it before admitting.
             if deferred_carriage_return && counted.saturating_add(1) > limit {
+                *progress = LineProgress::AtLineBoundary;
                 return Err(oversize_event(limit, labels));
             }
+            *progress = LineProgress::AtLineBoundary;
             return if line.is_empty() {
                 Ok(None)
             } else {
@@ -1269,15 +1294,22 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
             None => available.len(),
         };
         if counted.saturating_add(payload) > limit {
+            *progress = LineProgress::AtLineBoundary;
             return Err(oversize_event(limit, labels));
         }
         counted += payload;
         line.extend_from_slice(&available[..take]);
         reader.consume(take);
+        // Consumed and not yet delivered: from here until this call returns, an
+        // interruption discards these bytes.
+        if !line.is_empty() {
+            *progress = LineProgress::PartialLineHeld;
+        }
         if newline.is_some() {
             while matches!(line.last(), Some(b'\n' | b'\r')) {
                 line.pop();
             }
+            *progress = LineProgress::AtLineBoundary;
             return Ok(Some(line));
         }
     }
@@ -1601,7 +1633,7 @@ mod tests {
     use super::{
         BoundedOutput, CliDecodeFailure, CliDecodeFailureClass, CliEnvironmentOverride,
         CliEnvironmentVariable, CliProcessLabels, CliProcessRequest, CliSession,
-        CliTerminalTextCapture, EnvironmentRejection, EnvironmentRejectionReason,
+        CliTerminalTextCapture, EnvironmentRejection, EnvironmentRejectionReason, LineProgress,
         TRUNCATION_SUFFIX, absolute_credential_home, allowlisted_environment, execute_cli_process,
         read_bounded_line, read_bounded_output, sanitized_stderr, validated_environment_overrides,
     };
@@ -2277,9 +2309,14 @@ mod tests {
         let input = b"12345".as_slice();
         let mut reader = tokio::io::BufReader::new(input);
 
-        let error = read_bounded_line(&mut reader, 4, TEST_LABELS)
-            .await
-            .expect_err("the fifth byte exceeds the configured event bound");
+        let error = read_bounded_line(
+            &mut reader,
+            4,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect_err("the fifth byte exceeds the configured event bound");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
@@ -2293,9 +2330,14 @@ mod tests {
         let input = b"1234\n".as_slice();
         let mut reader = tokio::io::BufReader::new(input);
 
-        let line = read_bounded_line(&mut reader, 4, TEST_LABELS)
-            .await
-            .expect("an exactly-limit payload plus its delimiter is admitted");
+        let line = read_bounded_line(
+            &mut reader,
+            4,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect("an exactly-limit payload plus its delimiter is admitted");
 
         assert_eq!(line.as_deref(), Some(b"1234".as_slice()));
     }
@@ -2306,9 +2348,14 @@ mod tests {
         let input = b"1234\r\n".as_slice();
         let mut reader = tokio::io::BufReader::new(input);
 
-        let line = read_bounded_line(&mut reader, 4, TEST_LABELS)
-            .await
-            .expect("an exactly-limit payload plus its CRLF delimiter is admitted");
+        let line = read_bounded_line(
+            &mut reader,
+            4,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect("an exactly-limit payload plus its CRLF delimiter is admitted");
 
         assert_eq!(line.as_deref(), Some(b"1234".as_slice()));
     }
@@ -2322,9 +2369,14 @@ mod tests {
         let input = b"1234\r\n".as_slice();
         let mut reader = tokio::io::BufReader::with_capacity(5, input);
 
-        let line = read_bounded_line(&mut reader, 4, TEST_LABELS)
-            .await
-            .expect("a CRLF split across reader batches is still a delimiter");
+        let line = read_bounded_line(
+            &mut reader,
+            4,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect("a CRLF split across reader batches is still a delimiter");
 
         assert_eq!(line.as_deref(), Some(b"1234".as_slice()));
     }
@@ -2337,9 +2389,14 @@ mod tests {
         let input = b"12\r345\n".as_slice();
         let mut reader = tokio::io::BufReader::with_capacity(3, input);
 
-        let error = read_bounded_line(&mut reader, 5, TEST_LABELS)
-            .await
-            .expect_err("an interior carriage return counts toward the limit");
+        let error = read_bounded_line(
+            &mut reader,
+            5,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect_err("an interior carriage return counts toward the limit");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
@@ -2353,9 +2410,14 @@ mod tests {
         let input = b"1234\r".as_slice();
         let mut reader = tokio::io::BufReader::with_capacity(5, input);
 
-        let error = read_bounded_line(&mut reader, 4, TEST_LABELS)
-            .await
-            .expect_err("an unterminated trailing carriage return is payload");
+        let error = read_bounded_line(
+            &mut reader,
+            4,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect_err("an unterminated trailing carriage return is payload");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
@@ -2366,9 +2428,14 @@ mod tests {
         let input = b"1234\r".as_slice();
         let mut reader = tokio::io::BufReader::with_capacity(5, input);
 
-        let line = read_bounded_line(&mut reader, 5, TEST_LABELS)
-            .await
-            .expect("payload plus its trailing carriage return fits the bound");
+        let line = read_bounded_line(
+            &mut reader,
+            5,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect("payload plus its trailing carriage return fits the bound");
 
         assert_eq!(line.as_deref(), Some(b"1234\r".as_slice()));
     }
@@ -2379,9 +2446,14 @@ mod tests {
         let input = b"12345\n".as_slice();
         let mut reader = tokio::io::BufReader::new(input);
 
-        let error = read_bounded_line(&mut reader, 4, TEST_LABELS)
-            .await
-            .expect_err("a payload past the limit is rejected even with a delimiter");
+        let error = read_bounded_line(
+            &mut reader,
+            4,
+            TEST_LABELS,
+            &mut LineProgress::AtLineBoundary,
+        )
+        .await
+        .expect_err("a payload past the limit is rejected even with a delimiter");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }

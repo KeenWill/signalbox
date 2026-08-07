@@ -677,6 +677,22 @@ async fn a_line_rejected_by_the_event_bound_withholds_the_tool_fact() {
     assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
 }
 
+/// A deadline that fires at a line boundary discarded nothing, so every event
+/// the adapter received was examined and the negative is a fact.
+///
+/// This is the companion to the test below: without it, marking every deadline
+/// as undelivered would pass, and the fact would be withheld across ordinary
+/// idle cancellations.
+#[tokio::test]
+async fn a_deadline_at_a_line_boundary_states_the_negative() {
+    let report = execute_hanging_scenario("complete_event_then_hang").await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report else {
+        panic!("an exchange deadline is boundary loss");
+    };
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
+}
+
 /// A deadline that fires while the bounded-line reader holds a partial event
 /// discards those bytes without ever decoding them, so the fact is withheld.
 ///
@@ -685,6 +701,20 @@ async fn a_line_rejected_by_the_event_bound_withholds_the_tool_fact() {
 /// `tool_use`.
 #[tokio::test]
 async fn a_deadline_dropping_a_partial_line_withholds_the_tool_fact() {
+    let report = execute_hanging_scenario("partial_assistant_then_hang").await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report else {
+        panic!("an exchange deadline is boundary loss");
+    };
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+}
+
+/// Runs a scenario that never terminates, against a deadline short enough to
+/// keep the test quick.
+///
+/// Plumbing: the timeout is the only value these two tests depend on, and they
+/// depend on it identically.
+async fn execute_hanging_scenario(scenario: &str) -> TerminalEvidence {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let mut config = ClaudeCliConfig::new(
         fake_cli(),
@@ -695,19 +725,11 @@ async fn a_deadline_dropping_a_partial_line_withholds_the_tool_fact() {
     config.exchange_timeout = Duration::from_millis(300);
     config.interrupt_grace = Duration::from_millis(100);
     let runtime = ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid");
-    let prepared = prepare(
-        &runtime,
-        operation("partial_assistant_then_hang", OperationShape::Text),
-    )
-    .await;
-    let report = runtime
+    let prepared = prepare(&runtime, operation(scenario, OperationShape::Text)).await;
+    runtime
         .execute(prepared, &mut Vec::new(), CancellationSignal::never())
-        .await;
-
-    let TerminalEvidence::BoundaryLoss(loss) = report.evidence else {
-        panic!("an exchange deadline is boundary loss");
-    };
-    assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+        .await
+        .evidence
 }
 
 async fn execute_scenario(scenario: &str, shape: OperationShape) -> ExecutionResult {
