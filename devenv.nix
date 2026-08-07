@@ -414,18 +414,35 @@ in
       if [ ! -f ${shellArg daemonConfigFile} ]; then
         echo "dev instance: seeding" ${shellArg daemonConfigFile} \
              "from config/signalboxd.example.toml"
+        seeded_daemon_config=${shellArg daemonConfigFile}.seed-staging
         cp "$DEVENV_ROOT/config/signalboxd.example.toml" \
-           ${shellArg daemonConfigFile}
+           "$seeded_daemon_config"
         # The example names deployment secret paths that do not exist here, and
         # a credential profile now carries its own path rather than reading one
         # from the process environment. Point the seeded copy at this
         # developer's key file once; the copy is theirs to edit afterwards.
         seed_key_file="''${SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE:-$HOME/.config/signalbox/anthropic-api-key}"
-        sed -i.seed-backup \
-          "s|^file = \"/run/secrets/anthropic-primary\"$|file = \"$seed_key_file\"|" \
-          ${shellArg daemonConfigFile}
-        rm -f ${shellArg daemonConfigFile}.seed-backup
-        chmod 644 ${shellArg daemonConfigFile}
+        ${tomlPython}/bin/python3 -c ${shellArg ''
+          import sys
+          from pathlib import Path
+
+          import tomlkit
+
+          config_path = Path(sys.argv[1])
+          credential_path = sys.argv[2]
+          document = tomlkit.parse(config_path.read_text())
+          profiles = document.get("credential_profiles", [])
+          profile = next(
+              (entry for entry in profiles if entry.get("name") == "anthropic-primary"),
+              None,
+          )
+          if profile is None:
+              raise SystemExit("example config has no anthropic-primary profile")
+          profile["file"] = credential_path
+          config_path.write_text(tomlkit.dumps(document))
+        ''} "$seeded_daemon_config" "$seed_key_file"
+        chmod 644 "$seeded_daemon_config"
+        mv -f "$seeded_daemon_config" ${shellArg daemonConfigFile}
       fi
 
       if [ ! -f ${shellArg daemonTemplateConfigFile} ]; then

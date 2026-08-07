@@ -73,10 +73,11 @@ verified against this stack's parser pull request
 (`agent/credential-pools-parser`), in `apps/signalboxd/src/credential_pools.rs`
 and `apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, the
 `codex_home` and `oauth` deliveries, durable quarantine, and availability
-successor calls remain the foundation proposal at the bottom of their
-implementing stack and become verified only with those child pull requests;
-every other paragraph on this page describes behavior verified against the
-references above.
+successor calls, together with durable session pool-policy snapshots and legacy
+family-to-reference migration, remain the foundation proposal at the bottom of
+their implementing stack and become verified only with those child pull
+requests; every other paragraph on this page describes behavior verified against
+the references above.
 
 ## Process configuration
 
@@ -1091,16 +1092,17 @@ No present process or application surface implements that request, so every
 explicit-clear path above remains committed unimplemented functionality; the
 parser slice does not claim that an indefinite wait can presently be released.
 
-The durable record is unchanged in kind. A session's credential history event
-carries a complete family-to-pool-policy snapshot where it previously carried a
-family-to-reference snapshot. Each immutable policy includes the pool name,
-ordered members and their membership settings, tie-break and exhaustion rules,
-and all trigger actions; preparation never resolves that snapshot through the
-current document's pool table. Each model call still pins the exact profile that
-authenticated it in `model_call.credential_reference` at the `Prepared` insert.
-A historical read therefore still resolves that call's billing kind and rates
-from the reference the call itself pinned, whatever selection chose it, and a
-pool edited across a restart can neither broaden an existing session's admitted
+**Committed unimplemented functionality — durable pool-policy snapshots.** No
+present persistence or composition surface stores a pool policy in session
+credential history or migrates a family-to-reference entry. The implementing
+slice must preserve the durable record's kind while replacing each family
+reference with a complete immutable pool-policy snapshot: pool name, ordered
+members and membership settings, tie-break and exhaustion rules, and all trigger
+actions. Preparation must not resolve that snapshot through the current
+document's pool table. Each model call must continue to pin the exact profile
+that authenticated it in `model_call.credential_reference` at the `Prepared`
+insert, so historical billing resolution remains bound to the call's reference
+and a later pool edit can neither broaden an existing session's admitted
 credentials nor relabel a stored call.
 
 Selection is presently degenerate. Preparation observes no trigger and records
@@ -1109,10 +1111,11 @@ lowest priority value, first-listed among equals — and every call on that fami
 authenticates as that member. The trigger, tie-break, and exhaustion vocabulary
 above is parsed and validated in full; the exclusion, stickiness, and rotation
 it describes are not yet performed, and a multi-member pool therefore behaves as
-its preferred member alone. Because one runtime per adapter carries one
-credential reference, two families of one adapter resolving to different
+its preferred member alone. Because one CLI runtime per adapter carries one
+credential reference, two families of one CLI adapter resolving to different
 profiles is a typed startup failure rather than a silent pin of whichever parsed
-last.
+last. Direct HTTP adapters instead resolve the exact session-pinned reference
+from their complete file credential catalog.
 
 Admission is fail-closed. Startup rejects a pool with no members, a duplicate
 member profile, a member naming an undeclared profile, a mapping naming an
@@ -1384,24 +1387,17 @@ deployment-side rules that code cannot enforce are stated in
   a missing or unsynced credential cannot block startup or the recovery scan.
   Why: recovery of acknowledged work must not depend on any provider or
   integration credential (INV-034).
-- **Session credential history.** First handling of every native or imported
-  session-creation command appends event ordinal 1 to that session's credential
-  history in the same transaction as the session. The event has creation-command
-  provenance and a complete, nonempty family-to-pool-policy snapshot copied from
-  the validated mapping and pool tables. Each family entry carries the immutable
-  policy fields enumerated above rather than only a pool name. Record and entry
-  rows are append-only; a guarded head names the current event, and model-call
-  preparation reads the latest entry for the resolved target's family and then
-  selects a member of that stored policy
-  ([credential pools and selection](#credential-pools-and-selection)). Equal
-  command replay returns the recorded session without consulting the current
-  table, so a configuration edit never silently re-resolves an existing
-  session's credentials. For each existing family-to-reference entry, migration
-  creates a durable one-member pool containing exactly that referenced profile
-  and rewrites the entry to name it. The migrated pool is independent of the
-  document's current mapping, so even a mapping that now names a multi-member
-  pool cannot broaden the session's credentials. A one-member pool admits only
-  the exact profile the legacy entry named.
+- **Committed unimplemented functionality — session pool-policy history.** No
+  present persistence surface appends a family-to-pool-policy event or migrates
+  the existing family-to-reference shape. The implementing slice must append the
+  complete nonempty immutable policy at session creation with the existing
+  creation-command provenance, append-only record and entry rows, guarded head,
+  and equal-replay behavior. Preparation must read the latest family entry
+  before selecting from its stored policy
+  ([credential pools and selection](#credential-pools-and-selection)). Migration
+  must turn each existing family-to-reference entry into an independent durable
+  one-member policy containing exactly that profile, so the current document's
+  mapping cannot broaden a legacy session's admitted credentials.
 - **Resolution timing.** Each direct HTTP adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
   before send authorization — and scopes the resulting value to that request
