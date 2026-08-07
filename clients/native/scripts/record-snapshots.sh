@@ -44,7 +44,7 @@ all | missing | failed | never) ;;
 esac
 
 # The same destination scripts/test-snapshots.sh verifies against, from the
-# same owner: a reference recorded against one model and checked against
+# same definition: a reference recorded against one model and checked against
 # another reports a difference nobody introduced.
 DESTINATION="$(snapshot_xcode_destination)"
 echo "Recording $SNAPSHOT_SUITE against $DESTINATION"

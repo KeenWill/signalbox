@@ -86,12 +86,15 @@ it sees no scene lifecycle, no window chrome, and no sheet presentation; sheet
 content is snapshotted as its own screen. `ScreenshotScenario` selects the
 fixtures, the same seam the golden capture scripts below use.
 
-Run these against the simulator CI pins, which is what `scripts/test-xcode.sh`
-resolves by default. Nine of the ten goldens are byte-identical across iPhone
-simulators, but the regular-layout canvas is wider than a phone screen, so the
-window's corner mask and the glass materials composite against the device: that
-one golden can fail on a destination other than CI's, and re-recording it there
-would commit a rendering the pinned simulator then rejects.
+Record and verify through the two scripts below and nothing else:
+`scripts/record-snapshots.sh` and `scripts/test-snapshots.sh` take the suite and
+the simulator from `scripts/lib/snapshots.sh`, which is what CI runs, while a
+bare `scripts/test-xcode.sh` resolves whichever compatible phone is booted.
+Nine of the ten goldens are byte-identical across iPhone simulators, but the
+regular-layout canvas is wider than a phone screen, so the window's corner mask
+and the glass materials composite against the device: that one golden can fail
+on a destination other than CI's, and re-recording it there would commit a
+rendering the pinned simulator then rejects.
 
 The suite runs as a report-only step in CI, which uploads the reference, the
 failed rendering, and their difference as an artifact when a comparison fails.
@@ -104,12 +107,12 @@ the same discipline for every snapshot in the repository.
 ```bash
 scripts/record-snapshots.sh
 SIGNALBOX_NATIVE_SNAPSHOT_RECORD=missing scripts/record-snapshots.sh
-scripts/test-xcode.sh
+scripts/test-snapshots.sh
 ```
 
 `SIGNALBOX_NATIVE_SNAPSHOT_RECORD` takes `all` (the recording script's default,
 rewriting every golden), `missing`, `failed`, or `never`. Only that script
-passes it to the suite; `scripts/test-xcode.sh` always compares.
+passes it to the suite; every other entry point always compares.
 
 ## Screenshots
 

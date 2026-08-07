@@ -6,8 +6,8 @@ set -euo pipefail
 # A thin entry point over test-xcode.sh rather than a second test runner: the
 # suite it selects and the simulator it selects both come from
 # scripts/lib/snapshots.sh, which is what makes this run and the recording run
-# agree. CI calls this instead of naming the suite itself, so the identifier
-# has one owner.
+# agree. CI calls this instead of naming the suite itself, so the identifier is
+# spelled in exactly one place.
 #
 #     scripts/test-snapshots.sh
 #     XCODE_DESTINATION="platform=iOS Simulator,name=iPhone Air" scripts/test-snapshots.sh
