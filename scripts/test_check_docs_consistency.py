@@ -49,7 +49,19 @@ def write_manifest_workflow(root: Path, *names: str) -> None:
         f"      - uses: actions/upload-artifact@v7\n"
         f"        with:\n"
         f"          name: postgres-integration-archive-{name}\n"
+        f"          path: ${{{{ runner.temp }}}}/{name}.tar.zst\n"
         for name in names
+    )
+    aggregate = (
+        "  postgres-integration:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - env:\n"
+        "          BUILD_RESULT: ${{ needs.postgres-integration-build.result }}\n"
+        "          RUN_RESULT: ${{ needs.postgres-integration-run.result }}\n"
+        "        run: |\n"
+        '          test "$BUILD_RESULT" = success\n'
+        '          test "$RUN_RESULT" = success\n'
     )
     workflow.write_text(
         "jobs:\n"
@@ -70,7 +82,7 @@ def write_manifest_workflow(root: Path, *names: str) -> None:
         "      - run: python3 scripts/postgres_integration_suites.py --matrix\n"
         "      - run: python3 scripts/postgres_integration_suites.py"
         " --archive-plan\n"
-        f"{uploads}",
+        f"{uploads}{aggregate}",
         encoding="utf-8",
     )
 
@@ -702,7 +714,19 @@ class DocsConsistencyTests(unittest.TestCase):
             "    steps:\n"
             "      - uses: actions/upload-artifact@v7\n"
             "        with:\n"
-            "          name: postgres-integration-archive-fixture\n",
+            "          name: postgres-integration-archive-fixture\n"
+            "          path: ${{ runner.temp }}/fixture.tar.zst\n"
+            "  postgres-integration:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - env:\n"
+            "          BUILD_RESULT: "
+            "${{ needs.postgres-integration-build.result }}\n"
+            "          RUN_RESULT: "
+            "${{ needs.postgres-integration-run.result }}\n"
+            "        run: |\n"
+            '          test "$BUILD_RESULT" = success\n'
+            '          test "$RUN_RESULT" = success\n',
             encoding="utf-8",
         )
 

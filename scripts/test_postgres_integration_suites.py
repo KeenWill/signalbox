@@ -298,6 +298,16 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: postgres-integration-archive-alpha
+          path: ${{ runner.temp }}/alpha.tar.zst
+  postgres-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          BUILD_RESULT: ${{ needs.postgres-integration-build.result }}
+          RUN_RESULT: ${{ needs.postgres-integration-run.result }}
+        run: |
+          test "$BUILD_RESULT" = success
+          test "$RUN_RESULT" = success
 """
 # Only the `run:` scalar, so a case can remove or vary the command while the
 # step's `matrix.*` bindings stay in place and are judged separately.
@@ -374,8 +384,14 @@ class WorkflowAgreementTests(unittest.TestCase):
 
     def test_an_artifact_without_a_suite_is_reported(self) -> None:
         failures = self.disagreements(
-            AGREEING_WORKFLOW + "          name: "
-            "postgres-integration-archive-ghost\n"
+            AGREEING_WORKFLOW
+            + "  ghost-upload:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/upload-artifact@v7\n"
+            "        with:\n"
+            "          name: postgres-integration-archive-ghost\n"
+            "          path: ${{ runner.temp }}/ghost.tar.zst\n"
         )
 
         self.assertEqual(len(failures), 1)
@@ -462,7 +478,7 @@ class WorkflowAgreementTests(unittest.TestCase):
 
         self.assertEqual(len(failures), 2)
         self.assertTrue(any("--run-ignored only" in failure for failure in failures))
-        self.assertTrue(any("without an archive" in failure for failure in failures))
+        self.assertTrue(any("manifest-driven" in failure for failure in failures))
 
     def test_an_environment_prefix_does_not_hide_the_command(self) -> None:
         failures = self.disagreements(
@@ -510,7 +526,7 @@ class WorkflowAgreementTests(unittest.TestCase):
         )
 
         self.assertEqual(len(failures), 1)
-        self.assertIn("without an archive", failures[0])
+        self.assertIn("manifest-driven", failures[0])
 
     def test_a_toolchain_selector_does_not_hide_the_subcommand(self) -> None:
         # `cargo +toolchain …` is rustup's selector, not an option.
@@ -570,7 +586,12 @@ class WorkflowAgreementTests(unittest.TestCase):
     def test_a_matrix_command_scalar_ignored_run_is_reported(self) -> None:
         failures = self.disagreements(
             AGREEING_WORKFLOW
-            + "          - suite: alpha\n"
+            + "  legacy-matrix:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            "        include:\n"
+            "          - suite: alpha\n"
             "            command: >-\n"
             "              cargo test -p alpha --tests\n"
             "              -- --ignored\n"
@@ -677,6 +698,52 @@ class WorkflowAgreementTests(unittest.TestCase):
             ),
             ["echo 'a # b'"],
         )
+
+    def test_an_artifact_uploading_another_suites_archive_is_reported(self) -> None:
+        # The right label over the wrong archive: every shard passes having run
+        # a suite the manifest did not declare for that name.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                "${{ runner.temp }}/alpha.tar.zst",
+                "${{ runner.temp }}/persistence.tar.zst",
+            )
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("alpha.tar.zst", failures[0])
+
+    def test_a_second_nonconforming_archived_run_is_reported(self) -> None:
+        # One conforming run existing is not enough; a leftover archived run
+        # dropping the partition would rerun a whole suite on every shard.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + '      - run: cargo nextest run --archive-file "$RUNNER_TEMP/a.z"'
+            " --run-ignored only\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("manifest-driven", failures[0])
+
+    def test_an_aggregate_check_dropping_the_run_result_is_reported(self) -> None:
+        # The aggregate job carries the required check's name, so it going
+        # green without consulting the shards would let branch protection pass
+        # while every declared test failed.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace('          test "$RUN_RESULT" = success\n', "")
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("postgres-integration-run", failures[0])
+
+    def test_an_aggregate_check_dropping_the_build_result_is_reported(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                '          test "$BUILD_RESULT" = success\n', ""
+            )
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("postgres-integration-build", failures[0])
 
     def test_an_artifact_named_only_in_a_comment_is_not_published(self) -> None:
         # An upload step deleted while its artifact name survives in a comment
@@ -838,6 +905,19 @@ class DocumentedCommandTests(unittest.TestCase):
 
         self.assertEqual(len(failures), 1)
         self.assertIn("--no-default-features", failures[0][1])
+
+    def test_a_chained_documented_command_is_split(self) -> None:
+        # `cargo fmt && cargo test …` is two commands; reading the chain as one
+        # made the leading subcommand hide the test run.
+        failures = documentation_disagreements(
+            "AGENTS.md",
+            "`cargo fmt && cargo test -p pa --features other --tests"
+            " -- --ignored`\n",
+            (suite(package="pa", features=("one",)),),
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("other", failures[0][1])
 
     def test_workspace_selection_covers_every_manifested_package(self) -> None:
         # `--workspace` runs the persistence package without its feature, so

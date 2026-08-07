@@ -68,6 +68,13 @@ PACKAGE_SPEC = re.compile(r"(?:.*#)?(?P<name>[^@#/]+?)(?:@[^@]*)?$")
 MATRIX_BINDING = re.compile(r"\$\{\{[ ]*matrix\.(?P<field>[A-Za-z_][A-Za-z0-9_]*)[ ]*\}\}")
 MATRIX_FIELDS = ("suite", "partition", "partitions", "filter")
 WORKSPACE_SELECTORS = ("--workspace", "--all")
+# A path value may contain spaces inside a `${{ … }}` expression, so it runs
+# to the end of the line rather than to the first space.
+ARTIFACT_PATH = re.compile(r"^[ ]*path:[ ]*(?P<path>.+?)[ ]*$")
+NEEDS_RESULT = re.compile(
+    r"(?P<variable>[A-Za-z_][A-Za-z0-9_]*):[ ]*"
+    r"\$\{\{[ ]*needs\.postgres-integration-(?P<job>build|run)\.result[ ]*\}\}"
+)
 SUBSTITUTION = re.compile(r"\$\((?P<body>[^()]*)\)")
 # Cargo feature names, one per manifest entry. Cargo would read a comma or a
 # space inside one entry as a separator and enable two features; the docs
@@ -264,8 +271,8 @@ def strip_shell_comment(line: str) -> str:
     return line.rstrip()
 
 
-def uploaded_artifacts(text: str) -> set[str]:
-    """Return the artifact names published by `actions/upload-artifact` steps.
+def uploaded_artifacts(text: str) -> list[tuple[str, str | None]]:
+    """Return each `actions/upload-artifact` step's artifact name and path.
 
     Read from the upload steps themselves, not from the file's text: an
     artifact name surviving in a comment after its upload step was deleted
@@ -273,12 +280,14 @@ def uploaded_artifacts(text: str) -> set[str]:
     asserting that a suite whose archive no longer exists is executed.
     """
     lines = text.splitlines()
-    names: set[str] = set()
+    uploads: list[tuple[str, str | None]] = []
     for index, line in enumerate(lines):
         match = UPLOAD_ACTION.match(line)
         if match is None:
             continue
         indentation = len(match.group("indent"))
+        name: str | None = None
+        path: str | None = None
         for following in lines[index + 1 :]:
             if not following.strip():
                 continue
@@ -289,8 +298,13 @@ def uploaded_artifacts(text: str) -> set[str]:
                 break
             named = ARCHIVE_ARTIFACT.match(following)
             if named is not None:
-                names.add(named.group("suite"))
-    return names
+                name = named.group("suite")
+            located = ARTIFACT_PATH.match(following)
+            if located is not None:
+                path = located.group("path")
+        if name is not None:
+            uploads.append((name, path))
+    return uploads
 
 
 def workflow_shell_commands(text: str) -> list[str]:
@@ -422,10 +436,21 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
                 f"PostgreSQL integration jobs no longer derive from {MANIFEST}"
             )
 
+    uploads = uploaded_artifacts(text)
     named = {
-        name.removeprefix("postgres-integration-archive-")
-        for name in uploaded_artifacts(text)
+        name.removeprefix("postgres-integration-archive-") for name, _ in uploads
     }
+    # An upload keeping its name while pointing at another suite's archive
+    # would publish the wrong tests under the right label, and every shard
+    # would pass having run the wrong suite.
+    for name, path in uploads:
+        suite = name.removeprefix("postgres-integration-archive-")
+        basename = None if path is None else path.rsplit("/", 1)[-1]
+        if basename != f"{suite}.tar.zst":
+            failures.append(
+                f"{WORKFLOW} uploads `{name}` from `{path}`, which is not that "
+                f"suite's `{suite}.tar.zst` archive"
+            )
     expected = {suite.name for suite in suites}
     for missing in sorted(expected - named):
         failures.append(
@@ -454,10 +479,11 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
         # not the manifest-driven run: it chooses its own packages. Requiring
         # only that one archive-backed run exists would let a rogue one sit
         # beside it.
-        if unarchived_ignored_nextest(tokens):
+        if nonconforming_ignored_nextest(tokens):
             failures.append(
-                f"{WORKFLOW} runs ignored tests through `cargo nextest` "
-                f"without an archive, outside {MANIFEST}: {' '.join(tokens)}"
+                f"{WORKFLOW} runs ignored tests through a `cargo nextest run` "
+                f"that is not the manifest-driven archived run, outside "
+                f"{MANIFEST}: {' '.join(tokens)}"
             )
 
     if not any(runs_archived_ignored_tests(tokens) for tokens in executed):
@@ -466,6 +492,25 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
             f"`--run-ignored only`, so the suites {MANIFEST} declares are "
             "never executed"
         )
+
+    # The aggregate job carries the required check's name, so it going green
+    # without consulting the shards would let branch protection pass while
+    # every manifest-declared test failed or never ran.
+    asserted = {
+        match.group("job"): match.group("variable")
+        for match in NEEDS_RESULT.finditer(text)
+    }
+    for job in ("build", "run"):
+        variable = asserted.get(job)
+        if variable is None or not any(
+            f"${variable}" in command and "success" in command
+            for command in commands
+        ):
+            failures.append(
+                f"{WORKFLOW} does not assert "
+                f"`needs.postgres-integration-{job}.result` is success, so the "
+                "aggregate check can pass without it"
+            )
 
     bound = {match.group("field") for match in MATRIX_BINDING.finditer(text)}
     for field in MATRIX_FIELDS:
@@ -585,13 +630,21 @@ def cargo_test_arguments(tokens: list[str]) -> list[str] | None:
     return None if arguments is None else normalized_cargo_arguments(arguments)
 
 
-def unarchived_ignored_nextest(tokens: list[str]) -> bool:
-    """Return whether one command runs ignored tests through nextest, unarchived."""
+def nonconforming_ignored_nextest(tokens: list[str]) -> bool:
+    """Return whether one nextest run selects ignored tests some other way.
+
+    Every ignored-test run has to be the manifest-driven one, not merely one of
+    them: a second archived run that drops the partition would rerun a whole
+    suite on every shard, and one naming its own packages would run tests the
+    manifest never declared. Both would sit beside a conforming run unreported
+    if only the existence of a conforming run were required.
+    """
     arguments = cargo_subcommand_arguments(tokens, ("nextest",))
     if not arguments or arguments[0] != "run":
         return False
-    arguments = normalized_cargo_arguments(arguments[1:])
-    return "--run-ignored" in arguments and "--archive-file" not in arguments
+    if "--run-ignored" not in normalized_cargo_arguments(arguments[1:]):
+        return False
+    return not runs_archived_ignored_tests(tokens)
 
 
 def runs_archived_ignored_tests(tokens: list[str]) -> bool:
@@ -663,14 +716,14 @@ def documented_ignored_commands(text: str) -> list[tuple[int, list[str]]]:
     found: list[tuple[int, list[str]]] = []
     for number, line in logical:
         for match in re.finditer(r"cargo\b[^`]*", line):
-            try:
-                tokens = shlex.split(match.group(0))
-            except ValueError:
-                continue
-            arguments = cargo_test_arguments(tokens)
-            if arguments is None or not runs_ignored_tests(arguments):
-                continue
-            found.append((number, arguments))
+            # A documented command may be chained — `cargo fmt && cargo test …`
+            # — so the match is split into the commands a shell would run
+            # rather than read as one.
+            for tokens in simple_commands(match.group(0)):
+                arguments = cargo_test_arguments(tokens)
+                if arguments is None or not runs_ignored_tests(arguments):
+                    continue
+                found.append((number, arguments))
     return found
 
 
