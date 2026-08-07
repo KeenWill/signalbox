@@ -242,13 +242,13 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   places on present change is recorded in
   [one call, one physical interaction](spec/model-call-execution.md#one-call-one-physical-interaction);
   no present surface implements it. (S22, S23)
-- **Which failure classes permit fallback.** Decided: only classified
-  availability failures carrying proof that the request was not accepted —
-  provider quota exhaustion, rate limiting, and overload. Refusal never
-  qualifies. An ambiguous outcome never qualifies, because a lost
-  acknowledgement cannot prove the provider did not act (INV-025). Credential
-  resolution failure never qualifies: it is deployment misconfiguration, and
-  substitution would hide it. (S22, S23)
+- **Which failure classes permit fallback.** Decided: only provider quota
+  exhaustion, rate limiting, and overload accompanied by distinct typed evidence
+  that the request was not accepted. The availability classification alone is
+  insufficient. Refusal never qualifies. An ambiguous outcome never qualifies,
+  because a lost acknowledgement cannot prove the provider did not act
+  (INV-025). Credential resolution failure never qualifies: it is deployment
+  misconfiguration, and substitution would hide it. (S22, S23)
 - **Fallback configuration.** Decided in shape: a deployment groups
   interchangeable credential profiles into a pool, ranks each membership within
   its own pool rather than globally, and states the per-trigger response,
@@ -278,12 +278,13 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   the durable per-call provenance schema that would record the concrete served
   identity and a substitution as evidence rather than as operator diagnostics
   and a fail-closed error. Blocks the provider provenance schema. (S20–S23)
-- **Future same-target retry.** Repeating a known or ambiguous provider failure
-  against the target and credential profile that produced it remains outside
-  every accepted policy; the successor-call decision above authorizes another
-  profile, never a repeat of the same one. Any later same-target retry command
-  or policy, including backoff and resource limits, is a separate decision the
-  accepted no-retry policy leaves open. Blocks retry features. (S02, S04, S22)
+- **Future same-target retry.** Repeating a known provider failure or ambiguous
+  outcome against the target and credential profile that produced it remains
+  outside every accepted policy; the successor-call decision above authorizes
+  another profile, never a repeat of the same one. Any later same-target retry
+  command or policy, including backoff and resource limits, is a separate
+  decision the accepted no-retry policy leaves open. Blocks retry features.
+  (S02, S04, S22)
 
 ## Scheduling and runners
 

@@ -561,18 +561,20 @@ exactly-once claim.
 present configuration, command, or scheduler path selects another credential
 profile after a failed call; every known failure fails its attempt and turn as
 described above. A future availability-failover surface constrains present
-change in four ways, and states nothing further about how selection behaves. Its
-successor is a distinct model call with its own pinned target and its own
+change in four ways; selection behavior is owned by
+[model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
+Its successor is a distinct model call with its own pinned target and its own
 durable credential reference, never a second authorization or a substituted
 identity on an existing call, so the accepted no-silent-substitution rule
-(INV-018) is untouched. That successor belongs to a successor turn attempt, so
+(INV-014) is untouched. That successor belongs to a successor turn attempt, so
 `model_call_attempt_once UNIQUE (turn_attempt_id)` continues to admit exactly
-one call row per attempt and needs no relaxation. Its admitted causes are drawn
-only from classified availability failures that prove non-acceptance; an
-ambiguous outcome stays outside them under INV-025, and a refusal stays outside
-them because refusal is provider judgment rather than provider capacity. And the
-reason a successor exists is recorded as durable evidence rather than inferred
-from the pair of calls. The qualifying-cause decision this constrains is
+one call row per attempt and needs no relaxation. Its admitted causes require
+distinct typed non-acceptance evidence accompanying an admitted availability
+classification; the classification alone is insufficient. An ambiguous outcome
+stays outside them under INV-025, and a refusal stays outside them because
+refusal is provider judgment rather than provider capacity. And the reason a
+successor exists is recorded as durable evidence rather than inferred from the
+pair of calls. The qualifying-cause decision this constrains is
 [model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 
 ## Provider observation classification
