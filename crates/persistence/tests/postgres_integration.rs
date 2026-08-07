@@ -1023,6 +1023,9 @@ fn recorded_wait(outcome: RecordDelegationWaitOutcome) -> RecordedDelegationWait
         RecordDelegationWaitOutcome::Rejected(rejection) => {
             panic!("fixture wait was rejected: {rejection:?}")
         }
+        RecordDelegationWaitOutcome::DurablyRejected(rejection) => {
+            panic!("fixture wait was durably rejected: {rejection:?}")
+        }
     }
 }
 
@@ -1335,6 +1338,11 @@ async fn s17_inv005_inv010_background_wait_delivery_exhaustion_terminalizes_atte
         .execute(&pool)
         .await?;
     let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let logical = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
     let repository = SessionDelegationRepository::new(pool.clone());
     let outcome = repository
         .record_process_wait(
@@ -1354,6 +1362,7 @@ async fn s17_inv005_inv010_background_wait_delivery_exhaustion_terminalizes_atte
             DelegationWaitMode::Background,
         )
         .await?;
+    let model_replay = repository.record_wait(logical, &dispatch).await?;
     let durable_completion = PostgresToolLoopRepository::new(pool.clone())
         .reread_durable_completion(dispatch.correlation())
         .await?;
@@ -1373,6 +1382,12 @@ async fn s17_inv005_inv010_background_wait_delivery_exhaustion_terminalizes_atte
         ))
     );
     assert_eq!(replay, outcome);
+    assert_eq!(
+        model_replay,
+        RecordDelegationWaitOutcome::DurablyRejected(
+            DelegationOperationRejection::DeliverySequenceExhausted,
+        )
+    );
     assert!(durable_completion);
     assert_eq!(
         attempt_state,

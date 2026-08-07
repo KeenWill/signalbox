@@ -465,6 +465,8 @@ pub enum AwaitSessionPortOutcome {
     ForegroundPending(DelegationWait),
     /// Domain or durable admission definitively refused the request.
     Rejected,
+    /// A definitive refusal and its known-failed attempt end are already durable.
+    DurablyRejected,
 }
 
 /// Nonblocking durable boundary for the session-delegation tool family.
@@ -1042,6 +1044,7 @@ where
                         Ok(UnboundExecutionDisposition::ForegroundPending(wait))
                     }
                     AwaitSessionPortOutcome::Rejected => self.rejected(),
+                    AwaitSessionPortOutcome::DurablyRejected => self.durably_rejected(),
                     AwaitSessionPortOutcome::BackgroundRegistered(_)
                     | AwaitSessionPortOutcome::Delivered(_)
                     | AwaitSessionPortOutcome::ForegroundPending(_) => {

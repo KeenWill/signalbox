@@ -2198,7 +2198,9 @@ where
             )
             .await
         }
-        Ok(ProcessDelegationOutcome::Applied(AwaitSessionPortOutcome::Rejected)) => {
+        Ok(ProcessDelegationOutcome::Applied(
+            AwaitSessionPortOutcome::Rejected | AwaitSessionPortOutcome::DurablyRejected,
+        )) => {
             write_error(
                 writer,
                 version,

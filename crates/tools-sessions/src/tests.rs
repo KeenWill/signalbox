@@ -779,6 +779,23 @@ fn background_await_returns_registration_without_child_content() {
 }
 
 #[test]
+fn stored_await_rejection_is_reported_as_already_durable() {
+    let child = session(140);
+    let raw = await_request(141, child, "background");
+    let (_catalog, mut executor) = SessionDelegationTools::try_new(FakePort::awaiting(
+        AwaitSessionPortOutcome::DurablyRejected,
+    ))
+    .expect("fixture tools compile")
+    .into_parts();
+    let operation = decode_operation(&raw).expect("fixture background await is canonical");
+    let authority = dispatch(&raw, ToolEffectClass::EffectFree);
+    let disposition = run_ready(executor.execute_operation(operation, authority))
+        .expect("stored await rejection remains trustworthy");
+
+    assert_durably_rejected(disposition);
+}
+
+#[test]
 fn already_delivered_foreground_result_retains_exact_child_content() {
     let child = session(15);
     let raw = await_request(16, child, "foreground");

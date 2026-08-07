@@ -200,6 +200,7 @@ enum DefinitiveRejectionPersistence {
 pub enum RecordDelegationWaitOutcome {
     Recorded(RecordedDelegationWait),
     Rejected(DelegationOperationRejection),
+    DurablyRejected(DelegationOperationRejection),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -351,7 +352,7 @@ impl SessionDelegationRepository {
             if let Some(rejection) =
                 load_wait_rejection(&mut transaction, request.request().id()).await?
             {
-                return Ok(RecordDelegationWaitOutcome::Rejected(rejection));
+                return Ok(RecordDelegationWaitOutcome::DurablyRejected(rejection));
             }
 
             let dispatch =
@@ -761,6 +762,11 @@ impl SessionDelegationRepository {
             RecordDelegationWaitOutcome::Rejected(rejection) => ProcessDelegationOutcome::Rejected(
                 ProcessDelegationRequestRejection::Operation(rejection),
             ),
+            RecordDelegationWaitOutcome::DurablyRejected(rejection) => {
+                ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::Operation(
+                    rejection,
+                ))
+            }
         })
     }
 
@@ -1049,13 +1055,15 @@ async fn reject_wait_operation(
     persistence: DefinitiveRejectionPersistence,
 ) -> Result<RecordDelegationWaitOutcome, SessionDelegationRepositoryError> {
     match persistence {
-        DefinitiveRejectionPersistence::ReturnOnly => {}
+        DefinitiveRejectionPersistence::ReturnOnly => {
+            Ok(RecordDelegationWaitOutcome::Rejected(rejection))
+        }
         DefinitiveRejectionPersistence::Persist => {
             insert_wait_rejection(connection, dispatch.request().id(), rejection).await?;
             persist_known_failed_rejection_attempt(connection, dispatch).await?;
+            Ok(RecordDelegationWaitOutcome::DurablyRejected(rejection))
         }
     }
-    Ok(RecordDelegationWaitOutcome::Rejected(rejection))
 }
 
 async fn reject_message_operation(

@@ -57,6 +57,9 @@ impl PostgresSessionDelegationPort {
             RecordDelegationWaitOutcome::Rejected(_) => {
                 return Ok(AwaitSessionPortOutcome::Rejected);
             }
+            RecordDelegationWaitOutcome::DurablyRejected(_) => {
+                return Ok(AwaitSessionPortOutcome::DurablyRejected);
+            }
         };
         let wait = recorded.wait();
         match wait.mode() {
