@@ -22,6 +22,9 @@ verified through this PR (`agent/model-settings-persistence`).
 The tool-approval decision event surface is verified against this implementing
 change.
 
+The session-delegation process and terminal surface was re-verified through PR
+#459 (`agent/delegation-client-verbs-v2`).
+
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
@@ -1604,18 +1607,18 @@ the process protocol explicitly maps them.
 
 ## Session-delegation process surface
 
-The session-follow event shapes, internal-wake exclusion, and closed mutation
-request and receipt frame vocabulary in this section are implemented. Daemon
-execution and terminal-client verbs remain committed unimplemented functionality
+The session-follow event shapes, internal-wake exclusion, closed mutation
+request and receipt frame vocabulary, and terminal-client verbs in this section
+are implemented. Daemon execution remains committed unimplemented functionality
 in this slice: each admitted delegation request currently receives
-`invalid_request` without mutation, and no client verb emits one. Their fixed
-compatibility constraint is that the composed process surface admits only exact
-already-issued model work for terminal operation and recovery; it must not let a
-client fabricate model provenance. The model-facing tool names and arguments are
-owned by [tool-loop](tool-loop.md#session-delegation-tool-family). Future
-`spawn_session`, `await_session`, and `send_session_message` requests therefore
-each carry the invoking session, turn, and `tool_request_id`, which must
-reconstitute one matching logical request before any mutation occurs.
+`invalid_request` without mutation. Its fixed compatibility constraint is that
+the composed process surface admits only exact already-issued model work for
+terminal operation and recovery; it must not let a client fabricate model
+provenance. The model-facing tool names and arguments are owned by
+[tool-loop](tool-loop.md#session-delegation-tool-family). `spawn_session`,
+`await_session`, and `send_session_message` requests each carry the invoking
+session, turn, and `tool_request_id`, which must reconstitute one matching
+logical request before any mutation occurs.
 
 Logical-request reconstitution alone is not execution authority. Before a first
 mutation, the daemon must also reconstitute the exact authorized, executable
@@ -2016,23 +2019,24 @@ below. The client accepts a global `--socket <path>` override or reads
   and
 - `chat <session-uuid>`.
 
-**Committed unimplemented functionality.** No present client provides the
-delegation commands below. Their shapes constrain the client surface implemented
-later in this stack:
+The terminal client provides these delegation commands for exact already-issued
+tool requests:
 
 - `session spawn <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> (--task <text> | --task-file <path>) (--background | --bound --on-parent-stopped <keep_running|stop|cancel> --on-parent-cancelled <keep_running|stop|cancel>)`;
 - `session await <parent-session-uuid> <parent-turn-uuid> <tool-request-uuid> <child-session-uuid> --mode <foreground|background>`;
   and
 - `session message <sender-session-uuid> <sender-turn-uuid> <tool-request-uuid> <peer-session-uuid> (--content <text> | --content-file <path>)`.
 
-When implemented, delegation mutations print the exact spawning or awaiting
-request, child or peer session, closed mode/policy, and recorded message/result
-identity. Follow and chat render child results as delivered content labeled with
-the child session; they never inline the child transcript. Lifecycle lines
-always show outcome, typed reason, and provenance, including `continue_running`.
-Background result wakes are labeled separately from foreground tool-result
-continuation so a user can see whether an old turn resumed or a new parent turn
-became eligible.
+Delegation mutations print the exact spawning or awaiting request, child or peer
+session, closed mode or policy, and recorded message or result identity. Follow
+and chat render child results as delivered content labeled with the child
+session; they never inline the child transcript. Lifecycle lines always show
+outcome, typed reason, and provenance, including `continue_running`. Background
+result wakes are labeled separately from foreground tool-result continuation so
+a user can see whether an old turn resumed or a new parent turn became eligible.
+Before presenting success, the terminal client requires every child or peer to
+be distinct from the invoking session in spawn, both await-result modes, and
+message receipts.
 
 `chat` is the plain line-oriented interactive surface for one live session. It
 opens one long-lived `follow_session` connection before accepting input and
