@@ -45,4 +45,5 @@ mod wire;
 
 pub use config::OpenAiConfig;
 pub use runtime::{OpenAiConstructionError, OpenAiPreparedRequest, OpenAiRuntime};
+pub use stream::OUTPUT_CEILING_VIOLATION_DETAIL;
 pub use translate::validate_model_settings;
