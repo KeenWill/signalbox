@@ -13,7 +13,8 @@ use signalbox_domain::{
     ToolResultText,
 };
 use signalbox_tool_contract::{
-    ToolContract, ToolContractCompileError, compile_contract_definition,
+    CANONICAL_UUID_TEXT_BYTES, ToolContract, ToolContractCompileError, compile_contract_definition,
+    decode_canonical_uuid,
 };
 
 /// Model-facing name for the unified conversation inventory.
@@ -42,7 +43,6 @@ pub const MAX_TRANSCRIPT_CONTENT_BYTES: usize = 128 * 1024;
 /// Greatest title prefix emitted for one listed conversation.
 pub const MAX_LIST_TITLE_BYTES: usize = 1024;
 
-const UUID_TEXT_BYTES: usize = 36;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded conversation-tool arguments";
 const CONVERSATION_NOT_FOUND_DETAIL: &str = "conversation does not exist";
 const IMPORTED_CONVERSATION_NOT_FOUND_DETAIL: &str = "imported conversation does not exist";
@@ -413,7 +413,7 @@ pub struct ConversationCursorArguments {
     /// Origin class of the cursor identity.
     pub kind: ConversationCursorKind,
     /// Canonical lowercase hyphenated UUID.
-    #[schemars(length(min = UUID_TEXT_BYTES, max = UUID_TEXT_BYTES))]
+    #[schemars(length(min = CANONICAL_UUID_TEXT_BYTES, max = CANONICAL_UUID_TEXT_BYTES))]
     pub id: String,
 }
 
@@ -447,7 +447,7 @@ pub struct ReadOwnConversationArguments {
 #[serde(deny_unknown_fields)]
 pub struct ReadConversationArguments {
     /// Canonical lowercase hyphenated native session UUID.
-    #[schemars(length(min = UUID_TEXT_BYTES, max = UUID_TEXT_BYTES))]
+    #[schemars(length(min = CANONICAL_UUID_TEXT_BYTES, max = CANONICAL_UUID_TEXT_BYTES))]
     pub session_id: String,
     /// Optional exclusive positive transcript position.
     #[schemars(range(min = 1))]
@@ -465,7 +465,7 @@ pub struct ReadConversationArguments {
 #[serde(deny_unknown_fields)]
 pub struct ReadImportedConversationArguments {
     /// Canonical lowercase hyphenated imported-conversation UUID.
-    #[schemars(length(min = UUID_TEXT_BYTES, max = UUID_TEXT_BYTES))]
+    #[schemars(length(min = CANONICAL_UUID_TEXT_BYTES, max = CANONICAL_UUID_TEXT_BYTES))]
     pub imported_conversation_id: String,
     /// Optional exclusive positive transcript position.
     #[schemars(range(min = 1))]
@@ -713,7 +713,9 @@ fn decode_operation(
                 decoded.max_entries,
                 decoded.max_bytes,
             )?;
-            let session = SessionId::from_uuid(decode_uuid(&decoded.session_id)?);
+            let session = SessionId::from_uuid(
+                decode_canonical_uuid(&decoded.session_id).ok_or(InvalidConversationArguments)?,
+            );
             Ok(ConversationOperation::ReadOther {
                 target_session: session,
                 bounds,
@@ -728,8 +730,10 @@ fn decode_operation(
                 decoded.max_entries,
                 decoded.max_bytes,
             )?;
-            let conversation =
-                ImportedConversationId::from_uuid(decode_uuid(&decoded.imported_conversation_id)?);
+            let conversation = ImportedConversationId::from_uuid(
+                decode_canonical_uuid(&decoded.imported_conversation_id)
+                    .ok_or(InvalidConversationArguments)?,
+            );
             Ok(ConversationOperation::ReadImported(
                 ImportedTranscriptRequest::new(
                     conversation,
@@ -745,7 +749,7 @@ fn decode_operation(
 fn decode_cursor(
     arguments: ConversationCursorArguments,
 ) -> Result<ConversationCursor, InvalidConversationArguments> {
-    let identity = decode_uuid(&arguments.id)?;
+    let identity = decode_canonical_uuid(&arguments.id).ok_or(InvalidConversationArguments)?;
     Ok(match arguments.kind {
         ConversationCursorKind::Native => {
             ConversationCursor::Native(SessionId::from_uuid(identity))
@@ -783,17 +787,6 @@ fn check_list_bound(max_results: usize) -> Result<(), InvalidConversationArgumen
         return Err(InvalidConversationArguments);
     }
     Ok(())
-}
-
-fn decode_uuid(value: &str) -> Result<uuid::Uuid, InvalidConversationArguments> {
-    if value.len() != UUID_TEXT_BYTES {
-        return Err(InvalidConversationArguments);
-    }
-    let parsed = uuid::Uuid::parse_str(value).map_err(|_| InvalidConversationArguments)?;
-    if parsed.hyphenated().to_string() != value {
-        return Err(InvalidConversationArguments);
-    }
-    Ok(parsed)
 }
 
 fn kind_for_name(name: &str) -> Option<ConversationToolKind> {
