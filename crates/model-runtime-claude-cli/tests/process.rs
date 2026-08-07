@@ -84,6 +84,14 @@ async fn normal_completion_requires_typed_terminal_result() {
 }
 
 #[tokio::test]
+async fn nonterminal_system_events_do_not_mask_the_initialized_exchange() {
+    let result = execute_scenario("nonterminal_system_events", OperationShape::Text).await;
+
+    assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn file_delivery_materializes_private_claude_settings_without_direct_child_key() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let runtime = file_delivery_runtime(temporary.path(), fixtures::FILE_DELIVERED_CREDENTIAL);

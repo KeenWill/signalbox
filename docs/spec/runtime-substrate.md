@@ -943,32 +943,38 @@ Claude Code version; any mismatch is stream-protocol boundary loss, not a
 relaxed invocation.
 
 The pinned stream establishes correlation and reported-model evidence through
-`system/init`. Assistant `text`, `thinking`, `redacted_thinking`, and `tool_use`
-blocks become typed observations and assistant parts. A tool proposal must name
-the private MCP namespace, match a declared schema name, carry a unique nonempty
-id and object arguments, and receive exactly one matching user `tool_result`
-whose sole text block is the fixed acknowledgement. Only a terminal `result`
-event can establish success or refusal; an error `result` and a nonzero process
-exit produce typed provider-error evidence. Exit zero without it is
-`BoundaryLoss(StreamEndedWithoutTerminalMarker)`; malformed or contradictory
-JSONL is `BoundaryLoss(StreamProtocolViolation)`; and prose alone never becomes
-terminal evidence. A success must satisfy the operation's any/named tool choice,
-with a structured-output contract represented as the required named MCP tool.
-Provider usage is retained only where the CLI reports it.
+`system/init`. Nonterminal `system/status`, `system/hook_started`,
+`system/hook_progress`, and `system/hook_response` lifecycle events are
+discarded, so they neither masquerade as initialization nor mask the later typed
+process-exit classification. Assistant `text`, `thinking`, `redacted_thinking`,
+and `tool_use` blocks become typed observations and assistant parts. A tool
+proposal must name the private MCP namespace, match a declared schema name,
+carry a unique nonempty id and object arguments, and receive exactly one
+matching user `tool_result` whose sole text block is the fixed acknowledgement.
+Only a terminal `result` event can establish success or refusal; an error
+`result` and a nonzero process exit produce typed provider-error evidence. Exit
+zero without it is `BoundaryLoss(StreamEndedWithoutTerminalMarker)`; malformed
+or contradictory JSONL is `BoundaryLoss(StreamProtocolViolation)`; and prose
+alone never becomes terminal evidence. A success must satisfy the operation's
+any/named tool choice, with a structured-output contract represented as the
+required named MCP tool. Provider usage is retained only where the CLI reports
+it.
 
 The adapter accepts only its configured non-secret `CredentialReference`.
 Ambient delivery leaves subscription-login resolution inside Claude Code. File
 delivery resolves the reference during cancellable preparation, rejects an
-empty, non-UTF-8, or NUL-bearing value, and writes the exact value only to the
-fixed `ANTHROPIC_API_KEY` member of a mode-0600 request-scoped `settings.json`.
-That file and the existing MCP support files share one private temporary
-directory; the adapter replaces only the already allowlisted `CLAUDE_CONFIG_DIR`
-value with that directory and still never adds `ANTHROPIC_API_KEY` itself to the
-child process environment. Dropping the prepared capability removes the
-directory. The exact value remains in the one-shot capability so
-provider-controlled observations and terminal evidence receive exact-value
-redaction in addition to the CLI credential-shape and cross-fragment discipline.
-Proxy userinfo and unusable credential-home paths still fail before spawn.
+empty, non-UTF-8, or NUL-bearing value, and writes the exact value to a
+mode-0600 credential file in a private request-scoped settings store. That
+store's mode-0600 `settings.json` configures Claude's `apiKeyHelper` to read the
+file. The credential, settings, and existing MCP support files share the
+temporary directory; the adapter replaces only the already allowlisted
+`CLAUDE_CONFIG_DIR` value with that directory and still never adds
+`ANTHROPIC_API_KEY` itself to the child process environment. Dropping the
+prepared capability removes the directory. The exact value remains in the
+one-shot capability so provider-controlled observations and terminal evidence
+receive exact-value redaction in addition to the CLI credential-shape and
+cross-fragment discipline. Proxy userinfo and unusable credential-home paths
+still fail before spawn.
 
 The output-token ceiling is enforced by the cleared child environment, while
 reasoning level and fast mode use the explicit preparation mappings owned by

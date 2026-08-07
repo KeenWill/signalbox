@@ -14,6 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write("fake-claude-prompt", &prompt)?;
     let scenario = scenario(&prompt)?;
     if scenario == "process_nonzero" {
+        system_status(None)?;
         std::io::stderr().write_all(b"authentication failed for synthetic login\n")?;
         std::process::exit(7);
     }
@@ -84,6 +85,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fixtures::MODEL,
             fixtures::DRIFTED_VERSION,
         )?;
+        return Ok(());
+    }
+    if scenario == "nonterminal_system_events" {
+        system_hook("hook_started")?;
+        system_status(None)?;
+        system_init(&arguments)?;
+        system_hook("hook_progress")?;
+        system_hook("hook_response")?;
+        system_status(Some("requesting"))?;
+        assistant_text(fixtures::ANSWER)?;
+        success("end_turn", Some(fixtures::ANSWER))?;
         return Ok(());
     }
     system_init(&arguments)?;
@@ -207,6 +219,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn system_init(arguments: &[String]) -> std::io::Result<()> {
     system_init_with_identity(arguments, fixtures::SESSION_ID, fixtures::MODEL)
+}
+
+fn system_status(status: Option<&str>) -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "system", "subtype": "status", "status": status,
+        "session_id": fixtures::SESSION_ID
+    }))
+}
+
+fn system_hook(subtype: &str) -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "system", "subtype": subtype, "session_id": fixtures::SESSION_ID
+    }))
 }
 
 fn system_init_with_identity(

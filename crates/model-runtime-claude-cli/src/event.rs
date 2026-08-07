@@ -169,7 +169,14 @@ impl<C: Clone> EventDecoder<C> {
         value: Value,
         sink: &mut RedactingSink<'_, C>,
     ) -> Result<(), DecodeFailure> {
-        if value.get("subtype").and_then(Value::as_str) != Some("init") || self.initialized {
+        let subtype = value.get("subtype").and_then(Value::as_str);
+        if matches!(
+            subtype,
+            Some("status" | "hook_started" | "hook_progress" | "hook_response")
+        ) {
+            return Ok(());
+        }
+        if subtype != Some("init") || self.initialized {
             return Err(DecodeFailure::stream_protocol(
                 "unexpected or duplicate Claude system event",
             ));
