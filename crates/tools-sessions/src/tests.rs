@@ -684,7 +684,15 @@ fn validator_rejects_empty_message_content() {
         "peer_session_id": session(10).as_uuid().to_string(),
     }));
 
-    assert!(catalog.validate_arguments(&name, &invalid).is_err());
+    assert_eq!(
+        catalog.validate_arguments(&name, &invalid),
+        Err(ToolCatalogValidationFailure::InvalidArguments {
+            detail: Some(
+                ToolExecutionErrorDetail::try_new(INVALID_ARGUMENTS_DETAIL.to_owned())
+                    .expect("static detail is admitted")
+            )
+        })
+    );
 }
 
 #[test]
