@@ -540,6 +540,24 @@ fn stage_path(root: &Path, path: &str) -> EvalResult {
     Ok(())
 }
 
+fn commit_staged_paths(root: &Path, message: &str) -> EvalResult {
+    let repository = Repository::open(root)?;
+    let mut index = repository.index()?;
+    let tree_id = index.write_tree()?;
+    let tree = repository.find_tree(tree_id)?;
+    let parent = repository.head()?.peel_to_commit()?;
+    let signature = Signature::now(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL)?;
+    repository.commit(
+        Some("HEAD"),
+        &signature,
+        &signature,
+        message,
+        &tree,
+        &[&parent],
+    )?;
+    Ok(())
+}
+
 fn git_natural_state_passed(root: &Path) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let head = repository.head()?.peel_to_commit()?;
@@ -547,6 +565,10 @@ fn git_natural_state_passed(root: &Path) -> EvalResult<bool> {
     let Ok(parent) = head.parent(0) else {
         return Ok(false);
     };
+    let seed = repository
+        .find_reference("refs/heads/switch-target")?
+        .peel_to_commit()?;
+    let exactly_one_descendant_commit = parent.id() == seed.id();
     let parent_tree = parent.tree()?;
     let head_tree = head.tree()?;
     let diff = repository.diff_tree_to_tree(Some(&parent_tree), Some(&head_tree), None)?;
@@ -557,7 +579,10 @@ fn git_natural_state_passed(root: &Path) -> EvalResult<bool> {
     let commit_changes_only_natural_path = changed_paths == [Path::new(GIT_NATURAL_PATH)];
     let natural_path_is_clean =
         repository.status_file(Path::new(GIT_NATURAL_PATH))? == Status::CURRENT;
-    Ok(message_matches && commit_changes_only_natural_path && natural_path_is_clean)
+    Ok(message_matches
+        && exactly_one_descendant_commit
+        && commit_changes_only_natural_path
+        && natural_path_is_clean)
 }
 
 #[derive(Clone, Debug)]
@@ -1147,7 +1172,25 @@ fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid
                 disposition: ProcessToolExecutionResultDisposition::Completed,
                 ..
             } => Some(request.into_uuid()),
-            _ => None,
+            ProcessTranscriptEntry::ToolExecutionResult {
+                disposition: ProcessToolExecutionResultDisposition::KnownFailed,
+                ..
+            }
+            | ProcessTranscriptEntry::DelegatedTask { .. }
+            | ProcessTranscriptEntry::DelegationMessage { .. }
+            | ProcessTranscriptEntry::DelegationResult { .. }
+            | ProcessTranscriptEntry::ModelIdentityChanged { .. }
+            | ProcessTranscriptEntry::ContextSummary { .. }
+            | ProcessTranscriptEntry::User { .. }
+            | ProcessTranscriptEntry::Assistant { .. }
+            | ProcessTranscriptEntry::AssistantToolUse { .. }
+            | ProcessTranscriptEntry::ToolDenied { .. }
+            | ProcessTranscriptEntry::ToolClosed { .. }
+            | ProcessTranscriptEntry::TurnFailed { .. }
+            | ProcessTranscriptEntry::TurnCompleted { .. }
+            | ProcessTranscriptEntry::TurnCancelled { .. }
+            | ProcessTranscriptEntry::ImportedText { .. }
+            | ProcessTranscriptEntry::Imported { .. } => None,
         })
         .collect()
 }
@@ -1182,7 +1225,10 @@ impl SnapshotTurnDisposition {
     }
 
     const fn is_completed(self) -> bool {
-        matches!(self, Self::Completed)
+        match self {
+            Self::Completed => true,
+            Self::Other => false,
+        }
     }
 
     const fn label(self) -> &'static str {
@@ -1391,20 +1437,20 @@ fn git_natural_state_rejects_a_commit_with_an_unrelated_fixture() -> EvalResult 
     seed_git_repository(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     stage_path(workspace.path(), GIT_STAGE_PATH)?;
-    let repository = Repository::open(workspace.path())?;
-    let mut index = repository.index()?;
-    let tree_id = index.write_tree()?;
-    let tree = repository.find_tree(tree_id)?;
-    let parent = repository.head()?.peel_to_commit()?;
-    let signature = Signature::now(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL)?;
-    repository.commit(
-        Some("HEAD"),
-        &signature,
-        &signature,
-        GIT_NATURAL_MESSAGE,
-        &tree,
-        &[&parent],
-    )?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+
+    assert!(!git_natural_state_passed(workspace.path())?);
+    Ok(())
+}
+
+#[test]
+fn git_natural_state_rejects_an_unrelated_earlier_commit() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    seed_git_repository(workspace.path())?;
+    stage_path(workspace.path(), GIT_STAGE_PATH)?;
+    commit_staged_paths(workspace.path(), "unrelated eval commit")?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
 
     assert!(!git_natural_state_passed(workspace.path())?);
     Ok(())

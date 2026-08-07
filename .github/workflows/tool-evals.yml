@@ -1,7 +1,8 @@
 # Report-only model-in-the-loop evaluations for daemon tool families. Each
 # matrix job drives the real PostgreSQL daemon tool loop through the direct
-# OpenAI adapter, using gpt-5-nano for both a forced per-tool tier and one
-# unforced family task. Model behavior is evidence, never a merge gate.
+# OpenAI adapter, running both a forced per-tool tier and one unforced family
+# task. Workspace and web use gpt-5-nano; Git uses gpt-5-mini after nano could
+# not call its tools even when forced. Model behavior is never a merge gate.
 #
 # Accepted trust boundary. The live exchange must execute proposed repository
 # code against the real OpenAI API. That repository-controlled test process can
