@@ -496,9 +496,12 @@ struct SpawnSessionArguments {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum BoundChildActionArgument {
+    /// Keep the child running independently.
     #[value(name = "keep_running")]
     KeepRunning,
+    /// Stop the child with typed parent-stop provenance.
     Stop,
+    /// Cancel the child with typed parent-cancel provenance.
     Cancel,
 }
 
@@ -533,7 +536,9 @@ struct AwaitSessionArguments {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum DelegationWaitModeArgument {
+    /// Hold this request open until the child result is delivered.
     Foreground,
+    /// Register result delivery and return without waiting for completion.
     Background,
 }
 
