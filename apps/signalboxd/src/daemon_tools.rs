@@ -1401,28 +1401,36 @@ mod tests {
 
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
-        let configured_target_dir = cargo_target_dir();
+        let configured_target_dir = configured_cargo_target_dir();
+        let default_target_dir = cargo_metadata_target_dir();
         let known_targets = rustc_target_names();
+        reject_unrecognized_default_target(
+            &current,
+            configured_target_dir.as_deref(),
+            &default_target_dir,
+            &known_targets,
+        );
         claude_mcp_bridge_artifact_selection_for(
             &current,
             CARGO_TEST_PROFILE,
-            Some(&configured_target_dir),
+            configured_target_dir.as_deref(),
             &known_targets,
         )
     }
 
-    fn cargo_target_dir() -> PathBuf {
-        if let Some(configured) = std::env::var_os("CARGO_TARGET_DIR") {
-            let configured = PathBuf::from(configured);
-            let absolute = if configured.is_absolute() {
-                configured
-            } else {
-                std::env::current_dir()
-                    .expect("test working directory is available")
-                    .join(configured)
-            };
-            return lexically_normalized(&absolute);
-        }
+    fn configured_cargo_target_dir() -> Option<PathBuf> {
+        let configured = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR")?);
+        let absolute = if configured.is_absolute() {
+            configured
+        } else {
+            std::env::current_dir()
+                .expect("test working directory is available")
+                .join(configured)
+        };
+        Some(lexically_normalized(&absolute))
+    }
+
+    fn cargo_metadata_target_dir() -> PathBuf {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
         let output = Command::new(cargo)
             .args(["metadata", "--no-deps", "--format-version", "1"])
@@ -1435,6 +1443,32 @@ mod tests {
             .as_str()
             .expect("Cargo target metadata names the artifact directory");
         lexically_normalized(Path::new(target_dir))
+    }
+
+    fn reject_unrecognized_default_target(
+        current: &Path,
+        configured_target_dir: Option<&Path>,
+        default_target_dir: &Path,
+        known_targets: &BTreeSet<OsString>,
+    ) {
+        if configured_target_dir.is_some() {
+            return;
+        }
+        let current = lexically_normalized(current);
+        let default_target_dir = lexically_normalized(default_target_dir);
+        let artifact_parent = current
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("test executable has a Cargo artifact parent");
+        let artifact_parent_name = artifact_parent
+            .file_name()
+            .expect("Cargo artifact parent has a name");
+        assert!(
+            artifact_parent.parent() != Some(default_target_dir.as_path())
+                || known_targets.contains(artifact_parent_name),
+            "custom Cargo target specifications are unsupported by the nested bridge build"
+        );
     }
 
     fn rustc_target_names() -> BTreeSet<OsString> {
@@ -1653,6 +1687,17 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(
+        expected = "custom Cargo target specifications are unsupported by the nested bridge build"
+    )]
+    fn bridge_artifact_selection_rejects_an_unrecognized_default_target() {
+        let target_dir = Path::new("synthetic-target");
+        let executable = target_dir.join("custom/debug/deps/daemon-tools-test");
+
+        reject_unrecognized_default_target(&executable, None, target_dir, &BTreeSet::new());
+    }
+
+    #[test]
     fn bridge_artifact_selection_normalizes_the_configured_target_directory() {
         let configured_target_dir = Path::new("synthetic-parent/../synthetic-target");
         let normalized_target_dir = Path::new("synthetic-target");
@@ -1771,6 +1816,7 @@ mod tests {
             .expect("signalboxd manifest has a workspace root")
             .to_path_buf();
         let selection = claude_mcp_bridge_artifact_selection();
+        require_direct_bridge_execution(&selection);
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
         let mut build_command = Command::new(cargo);
         build_command
@@ -1812,6 +1858,25 @@ mod tests {
             "bridge binary build produces its target"
         );
         executable
+    }
+
+    fn require_direct_bridge_execution(selection: &BridgeArtifactSelection) {
+        assert!(
+            selection.target.is_none(),
+            "target-specific bridge execution is unsupported because Cargo runner semantics cannot be preserved"
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "target-specific bridge execution is unsupported because Cargo runner semantics cannot be preserved"
+    )]
+    fn bridge_build_rejects_target_specific_execution_before_launch() {
+        require_direct_bridge_execution(&BridgeArtifactSelection {
+            profile: OsString::from(CARGO_TEST_PROFILE),
+            target: Some(OsString::from(SYNTHETIC_CARGO_TARGET)),
+            target_dir: PathBuf::from("synthetic-target"),
+        });
     }
 
     fn cargo_bridge_executable(messages: Receiver<Result<String, io::Error>>) -> PathBuf {
@@ -2290,11 +2355,11 @@ mod tests {
         );
         assert_eq!(
             web_fetch_definition.permission_default(),
-            signalbox_domain::ToolPermissionDefault::Confirm
+            ToolPermissionDefault::Confirm
         );
         assert_eq!(
             web_search_definition.permission_default(),
-            signalbox_domain::ToolPermissionDefault::Confirm
+            ToolPermissionDefault::Confirm
         );
     }
 
@@ -2576,6 +2641,11 @@ mod tests {
 
     const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
     const MCP_SERVER_NAME: &str = "signalbox-claude-cli-bridge";
+    const MCP_INITIALIZE_REQUEST_ID: u64 = 1;
+    const MCP_LIST_TOOLS_REQUEST_ID: u64 = 2;
+    const MCP_CALL_WRITE_FILE_REQUEST_ID: u64 = 3;
+    const MCP_SYNCHRONIZATION_REQUEST_ID: u64 = 4;
+    const MCP_UNDECLARED_TOOL_REQUEST_ID: u64 = 5;
     const MCP_ENVELOPE_REQUEST_ID: u64 = 7;
     const MCP_OTHER_REQUEST_ID: u64 = 8;
     const MCP_UNDECLARED_TOOL_NAME: &str = "synthetic_undeclared_tool";
@@ -2630,7 +2700,7 @@ mod tests {
                 .expect("bridge remains active")
                 .request(&serde_json::json!({
                     "jsonrpc": "2.0",
-                    "id": 1,
+                    "id": MCP_INITIALIZE_REQUEST_ID,
                     "method": "initialize",
                     "params": {
                         "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -2657,7 +2727,7 @@ mod tests {
                 .expect("bridge remains active")
                 .request(&serde_json::json!({
                     "jsonrpc": "2.0",
-                    "id": 2,
+                    "id": MCP_LIST_TOOLS_REQUEST_ID,
                     "method": "tools/list",
                     "params": {},
                 }))
@@ -2669,7 +2739,7 @@ mod tests {
                 .expect("bridge remains active")
                 .request(&serde_json::json!({
                     "jsonrpc": "2.0",
-                    "id": 4,
+                    "id": MCP_SYNCHRONIZATION_REQUEST_ID,
                     "method": "ping",
                     "params": {},
                 }));
@@ -2681,7 +2751,7 @@ mod tests {
                 .expect("bridge remains active")
                 .request(&serde_json::json!({
                     "jsonrpc": "2.0",
-                    "id": 3,
+                    "id": MCP_CALL_WRITE_FILE_REQUEST_ID,
                     "method": "tools/call",
                     "params": {
                         "name": WRITE_FILE_NAME,
@@ -2699,7 +2769,7 @@ mod tests {
                 .expect("bridge remains active")
                 .request(&serde_json::json!({
                     "jsonrpc": "2.0",
-                    "id": 5,
+                    "id": MCP_UNDECLARED_TOOL_REQUEST_ID,
                     "method": "tools/call",
                     "params": {
                         "name": MCP_UNDECLARED_TOOL_NAME,
