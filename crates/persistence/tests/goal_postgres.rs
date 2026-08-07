@@ -2831,6 +2831,215 @@ struct CascadeDeliveryFacts {
     bound_child_result_wakes: i64,
 }
 
+struct DescendantLockOrderFixture {
+    parent: SessionId,
+    child: SessionId,
+    spawning_request: ToolRequestId,
+    active_turn: TurnId,
+}
+
+async fn descendant_lock_order_fixture(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<DescendantLockOrderFixture, Box<dyn Error>> {
+    let parent = seed + 2;
+    let child = seed + 1;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(seed + 3, parent, seed + 4))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(seed + 5, child, seed + 6))
+        .await?;
+    insert_queued_delegation_fixture(
+        pool,
+        DelegationFixture {
+            spawning_request: seed + 7,
+            parent_session: parent,
+            parent_turn: seed + 8,
+            child_session: child,
+            child_turn: seed + 9,
+            task_entry: seed + 10,
+            selection: seed + 6,
+            policy_kind: "bound",
+            on_parent_stopped: Some("stop"),
+            on_parent_cancelled: Some("cancel"),
+        },
+    )
+    .await?;
+    let candidates = turn_candidates(seed + 20);
+    assert_applied_command(
+        GoalRepository::new(pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(seed + 21),
+                    session(parent),
+                    GoalUserAction::Attach(statement("exercise descendant lock ordering")),
+                ),
+                Some(candidates),
+                |_| None,
+            )
+            .await?,
+    );
+    let active_turn = activated_turn(
+        StartEligibleTurnRepository::new(pool.clone())
+            .handle(session(parent), activation_identities(seed + 30))
+            .await?,
+    );
+    Ok(DescendantLockOrderFixture {
+        parent: session(parent),
+        child: session(child),
+        spawning_request: tool_request(seed + 7),
+        active_turn,
+    })
+}
+
+async fn acquire_peer_message_suffix(
+    connection: &mut sqlx::PgConnection,
+    fixture: &DescendantLockOrderFixture,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(fixture.parent.into_uuid())
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(fixture.child.into_uuid())
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(fixture.parent.into_uuid())
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "SELECT spawning_tool_request_id
+           FROM session_delegation
+          WHERE spawning_tool_request_id = $1
+          FOR UPDATE",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+/// S19 / INV-010 / INV-012: descendant-scoped goal stop takes its canonical
+/// cascade prefix before the ordinary root lock, so an overlapping peer-message
+/// prefix cannot form the child/root inversion that PostgreSQL reports as
+/// `40P01`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s19_inv010_inv012_goal_stop_orders_cascade_before_peer_message()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let seed = 0xfb00;
+    let fixture = descendant_lock_order_fixture(&pool, seed).await?;
+    let mut peer_message = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(fixture.child.into_uuid())
+        .execute(&mut *peer_message)
+        .await?;
+    let stop = tokio::spawn({
+        let repository = GoalRepository::new(pool.clone());
+        async move {
+            repository
+                .handle_user_command(
+                    GoalUserCommand::new(
+                        command(seed + 40),
+                        fixture.parent,
+                        GoalUserAction::Stop {
+                            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                        },
+                    ),
+                    None,
+                    |_| None,
+                )
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "goal stop must wait for the lower child before taking its root lock"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        acquire_peer_message_suffix(&mut peer_message, &fixture),
+    )
+    .await??;
+    peer_message.rollback().await?;
+    assert_applied_command(stop.await??);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S19 / INV-010 / INV-012: descendant-scoped input interrupt takes the same
+/// canonical cascade prefix before its root and scheduler locks, preventing the
+/// peer-message child/root inversion.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s19_inv010_inv012_input_interrupt_orders_cascade_before_peer_message()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let seed = 0xfc00;
+    let fixture = descendant_lock_order_fixture(&pool, seed).await?;
+    let mut peer_message = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(fixture.child.into_uuid())
+        .execute(&mut *peer_message)
+        .await?;
+    let interrupt = tokio::spawn({
+        let repository = SubmitInputRepository::new(pool.clone());
+        async move {
+            repository
+                .handle_with_candidates(
+                    SubmitInput::new(
+                        command(seed + 40),
+                        fixture.parent,
+                        UserContent::try_text(String::from("interrupt descendants"))
+                            .expect("fixture input content is admitted"),
+                        DeliveryRequest::Interrupt {
+                            expected_active_turn: fixture.active_turn,
+                            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                            configuration: PerInputConfigurationChoices::new(
+                                SessionConfigurationDefaultsVersion::first(),
+                                ModelSelectionOverride::UseSessionDefault,
+                            ),
+                        },
+                    ),
+                    AcceptedInputId::from_uuid(Uuid::from_u128(seed + 41)),
+                    Some(TurnId::from_uuid(Uuid::from_u128(seed + 42))),
+                    CancelledModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 43)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 44)),
+                    ),
+                    |_| panic!("the fixture has no steering to reclassify"),
+                    |_| panic!("the fixture has no tool batch to cancel"),
+                )
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "input interrupt must wait for the lower child before taking its root lock"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        acquire_peer_message_suffix(&mut peer_message, &fixture),
+    )
+    .await??;
+    peer_message.rollback().await?;
+    assert!(matches!(
+        interrupt.await??,
+        signalbox_persistence::submit_input::SubmitInputHandlingOutcome::Recorded(
+            SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(_))
+        )
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S18 / INV-010 / INV-012 / INV-032: an applied descendant-scoped goal stop
 /// atomically records every edge, logically terminalizes active and queued
 /// bound children with exact provenance, and leaves the background child
