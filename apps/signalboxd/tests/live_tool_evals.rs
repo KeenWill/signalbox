@@ -1111,7 +1111,7 @@ impl CaseSnapshot {
             .find(|candidate| candidate.turn() == turn)
             .ok_or_else(|| io::Error::other("the eval transcript turn is missing"))?
             .state();
-        let turn_disposition = SnapshotTurnDisposition::from_process_state(turn_state)?;
+        let turn_disposition = SnapshotTurnDisposition::from_process_state(turn_state);
         let successful_requests = successful_tool_requests(transcript.entries());
         let requests = transcript
             .entries()
@@ -1307,25 +1307,22 @@ enum SnapshotTurnDisposition {
 }
 
 impl SnapshotTurnDisposition {
-    fn from_process_state(state: &ProcessTurnState) -> EvalResult<Self> {
+    fn from_process_state(state: &ProcessTurnState) -> Self {
         match state {
-            ProcessTurnState::Completed { .. } => Ok(Self::Completed),
-            ProcessTurnState::Refused { .. }
-            | ProcessTurnState::Failed { .. }
-            | ProcessTurnState::Cancelled { .. }
-            | ProcessTurnState::ActiveAwaitingToolApproval { .. } => Ok(Self::Other),
+            ProcessTurnState::Completed { .. } => Self::Completed,
             ProcessTurnState::Queued { .. }
             | ProcessTurnState::QueuedDelegated { .. }
             | ProcessTurnState::QueuedDelegationWake { .. }
             | ProcessTurnState::DelegationTerminated { .. }
             | ProcessTurnState::ActiveRunning { .. }
             | ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
+            | ProcessTurnState::Failed { .. }
+            | ProcessTurnState::Cancelled { .. }
+            | ProcessTurnState::Refused { .. }
+            | ProcessTurnState::ActiveAwaitingToolApproval { .. }
             | ProcessTurnState::ActiveAwaitingChild { .. }
             | ProcessTurnState::ActiveAwaitingToolRecovery { .. }
-            | ProcessTurnState::ReconciliationRequired { .. } => Err(io::Error::other(
-                "the eval turn did not reach a reportable model outcome",
-            )
-            .into()),
+            | ProcessTurnState::ReconciliationRequired { .. } => Self::Other,
         }
     }
 
@@ -1433,17 +1430,20 @@ fn successful_tool_requests_rejects_a_typed_known_failure() {
 }
 
 #[test]
-fn turn_snapshot_rejects_ambiguous_model_recovery() {
+fn turn_snapshot_reports_ambiguous_model_recovery_as_a_miss() {
     let state = ProcessTurnState::ActiveAwaitingModelCallRecovery {
         ended_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_TURN_ATTEMPT_ID)),
         recovery_call: ModelCallId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID)),
     };
 
-    assert!(SnapshotTurnDisposition::from_process_state(&state).is_err());
+    assert_eq!(
+        SnapshotTurnDisposition::from_process_state(&state),
+        SnapshotTurnDisposition::Other
+    );
 }
 
 #[test]
-fn turn_snapshot_reports_a_terminal_model_failure_as_a_miss() -> EvalResult {
+fn turn_snapshot_reports_a_terminal_model_failure_as_a_miss() {
     let state = ProcessTurnState::Failed {
         terminal_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(
             ARBITRARY_EVAL_FRONTIER_ID,
@@ -1453,10 +1453,9 @@ fn turn_snapshot_reports_a_terminal_model_failure_as_a_miss() -> EvalResult {
     };
 
     assert_eq!(
-        SnapshotTurnDisposition::from_process_state(&state)?,
+        SnapshotTurnDisposition::from_process_state(&state),
         SnapshotTurnDisposition::Other
     );
-    Ok(())
 }
 
 #[test]
