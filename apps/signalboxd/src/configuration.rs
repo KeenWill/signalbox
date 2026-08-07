@@ -5505,6 +5505,25 @@ members = [{ profile = "anthropic-primary", priority = 1 }]"#,
     }
 
     #[test]
+    fn configuration_rejects_a_mistyped_headroom_reserve_table() {
+        let reserved = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
+[credential_pools.headroom_reserve_percent]
+value = 10"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&reserved).err(),
+            Some(HubModelConfigurationError::InvalidField)
+        );
+    }
+
+    #[test]
     fn configuration_rejects_a_member_headroom_reserve_no_adapter_reports() {
         let reserved = configuration_with_anthropic_pool(
             r#"[[credential_pools]]
@@ -5867,6 +5886,20 @@ delivery = "ambient""#,
                 env_key: None,
             }
         );
+    }
+
+    #[test]
+    fn configuration_debug_redacts_credential_file_paths() {
+        let configured = HubModelConfiguration::parse(CONFIGURATION).expect("the fixture is valid");
+        let credential_path = configured
+            .credential_profile("anthropic-primary")
+            .expect("the fixture declares the profile")
+            .delivery()
+            .path()
+            .expect("the fixture profile uses file delivery")
+            .to_string_lossy();
+
+        assert!(!format!("{configured:?}").contains(credential_path.as_ref()));
     }
 
     #[test]

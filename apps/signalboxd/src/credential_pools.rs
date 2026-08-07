@@ -8,6 +8,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     num::NonZeroU32,
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -47,7 +48,7 @@ const PROFILE_COMMON_FIELDS: [&str; 4] = ["name", "adapter", "billing_kind", "de
 /// recognizes `codex_home` and `oauth`; parsing rejects those as undelivered so
 /// a deployment learns at startup that no surface honors them, rather than from
 /// a call that silently authenticated as some other account.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum CredentialDelivery {
     /// The adapter's own client resolves its login and the daemon supplies no
     /// credential material. The Codex CLI owns its external login this way.
@@ -59,6 +60,19 @@ pub enum CredentialDelivery {
         /// Process environment key a spawned adapter supplies the value under.
         env_key: Option<Arc<str>>,
     },
+}
+
+impl fmt::Debug for CredentialDelivery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ambient => formatter.write_str("Ambient"),
+            Self::File { env_key, .. } => formatter
+                .debug_struct("File")
+                .field("path", &"[credential file path]")
+                .field("env_key", env_key)
+                .finish(),
+        }
+    }
 }
 
 impl CredentialDelivery {
@@ -590,9 +604,8 @@ pub(crate) fn parse_credential_pools(
                 pool,
                 "on_pool_exhausted",
             )?)?,
-            headroom_reserve_percent: parse_headroom_reserve_percent(
-                pool.get("headroom_reserve_percent")
-                    .and_then(Item::as_value),
+            headroom_reserve_percent: parse_pool_headroom_reserve_percent(
+                pool.get("headroom_reserve_percent"),
             )?,
             quota_exhausted: parse_trigger_action(pool, CredentialPoolTrigger::QuotaExhausted)?,
             rate_limited: parse_trigger_action(pool, CredentialPoolTrigger::RateLimited)?,
@@ -746,6 +759,18 @@ fn parse_headroom_reserve_percent(
                 .ok_or(HubModelConfigurationError::InvalidHeadroomReserve)
         })
         .transpose()
+}
+
+fn parse_pool_headroom_reserve_percent(
+    item: Option<&Item>,
+) -> Result<Option<u8>, HubModelConfigurationError> {
+    match item {
+        None => Ok(None),
+        Some(item) => parse_headroom_reserve_percent(Some(
+            item.as_value()
+                .ok_or(HubModelConfigurationError::InvalidField)?,
+        )),
+    }
 }
 
 /// Refuses configuration whose effect depends on remaining provider capacity

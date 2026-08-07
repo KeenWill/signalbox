@@ -69,16 +69,17 @@ and checked-in example are verified through PR #376 (`agent/runner-daemon`).
 Runner credential use during provisioning or execution remains committed
 unimplemented functionality as labeled below. The credential-profile and
 credential-pool grammar, its fail-closed admission, the deliveries this build
-supplies, and the retirement of the Anthropic key-file environment channel are
-verified against this stack's parser pull request
-(`agent/credential-pools-parser`), in `apps/signalboxd/src/credential_pools.rs`
-and `apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, the
-`codex_home` and `oauth` deliveries, durable quarantine, and availability
-successor calls, together with durable session pool-policy snapshots and legacy
-family-to-reference migration, remain the foundation proposal at the bottom of
-their implementing stack and become verified only with those child pull
-requests; every other paragraph on this page describes behavior verified against
-the references above.
+supplies, the fail-closed rejection of reserved Codex deliveries, and the
+retirement of the Anthropic key-file environment channel are verified against
+this stack's parser pull request (`agent/credential-pools-parser`), in
+`apps/signalboxd/src/credential_pools.rs` and
+`apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, the
+Codex `file`, `codex_home`, and `oauth` deliveries, durable quarantine, and
+availability successor calls, together with durable session pool-policy
+snapshots and legacy family-to-reference migration, remain the foundation
+proposal at the bottom of their implementing stack and become verified only with
+those child pull requests; every other paragraph on this page describes behavior
+verified against the references above.
 
 ## Process configuration
 
@@ -672,12 +673,13 @@ Each `[[models]]` entry defines one direct selection:
 
 This build provides exactly `anthropic`, `openai`, `claude_cli`, and
 `codex_cli`. No adapter pins a profile name, and a pool may hold several
-profiles for any one adapter. Anthropic and OpenAI admit `file`; Claude CLI
-admits `ambient` and `file`; and Codex CLI admits `ambient`, `file`,
-`codex_home`, and `oauth`. OpenAI admits the reasoning levels `none` through
-`max` — `ultra` is the Codex effort value and is rejected — and the
-provider-tagged tiers `auto`, `default`, `flex`, `scale`, `priority`, and
-`fast`.
+profiles for any one adapter. Anthropic and OpenAI supply `file`; Claude CLI
+supplies `ambient` and `file`; and Codex CLI supplies only `ambient`. The
+grammar also recognizes the committed unimplemented Codex `file`, `codex_home`,
+and `oauth` deliveries, which this build rejects as undelivered. OpenAI admits
+the reasoning levels `none` through `max` — `ultra` is the Codex effort value
+and is rejected — and the provider-tagged tiers `auto`, `default`, `flex`,
+`scale`, `priority`, and `fast`.
 
 A Codex mapping also requires `[codex_cli]` with an absolute executable path
 naming an existing regular file and an absolute, existing `working_directory`;
@@ -1507,21 +1509,24 @@ deployment-side rules that code cannot enforce are stated in
 - **Resolution timing.** Each direct HTTP adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
   before send authorization — and scopes the resulting value to that request
-  (INV-002 boundary type). An ambient or credential-home CLI operation validates
-  its pinned external-login reference and prepares the process capability
-  without reading a credential value. A file-delivered Codex operation instead
-  resolves its pinned reference during capability preparation and, after the
-  common trailing-termination narrowing, admits exactly a nonempty NUL-free
-  UTF-8 value of at most 65,536 bytes. Empty, non-UTF-8, NUL-containing, or
-  oversized content fails preparation as typed `CredentialUnusable`; no child is
-  spawned. Leading and interior whitespace remain credential bytes. The shared
-  cancellation contract for preparation and execution is owned by
+  (INV-002 boundary type). An ambient CLI operation validates its pinned
+  external-login reference and prepares the process capability without reading a
+  credential value. The shared cancellation contract for preparation and
+  execution is owned by
   [model-call-execution](model-call-execution.md#staged-execution). A code-host
   tool resolves its fixed `github-primary` reference only after the durable tool
   attempt is authorized `InFlight` and immediately before its typed transport
   call; no model argument, client, or runner can select or receive the
   credential. The pull-request suite follows the same timing with its fixed
   GitHub API egress policy.
+- **Committed unimplemented functionality — Codex file resolution.** No present
+  composition or runtime delivers a Codex `file` profile; the parser rejects it
+  at startup. Its implementing child must resolve the pinned reference during
+  capability preparation and, after the common trailing-termination narrowing,
+  admit exactly a nonempty NUL-free UTF-8 value of at most 65,536 bytes. Empty,
+  non-UTF-8, NUL-containing, or oversized content must fail preparation as typed
+  `CredentialUnusable`; no child may be spawned. Leading and interior whitespace
+  remain credential bytes.
 - **Failure behavior.** A failed resolution, or a value that cannot form an HTTP
   header (empty, non-UTF-8, non-header-safe bytes), is a typed known preparation
   failure: the call ends `KnownFailed`, the attempt ends with a known failure,
