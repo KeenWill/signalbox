@@ -422,16 +422,17 @@ class BaselineAbsenceTests(unittest.TestCase):
         """A silently missing delta reads as "no change" to anyone who saw
         one last week, so the absence is stated and attributed."""
         document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+        reason = "the artifact from run 42 has expired"
 
         report = render(
             document,
             REPO_ROOT,
             0,
             "Rust coverage (report only)",
-            baseline_unavailable="the artifact from run 42 has expired",
+            baseline_unavailable=reason,
         )
 
-        self.assertIn("No baseline to compare against: the artifact from run 42 has expired.", report)
+        self.assertIn(f"No baseline to compare against: {reason}.", report)
         self.assertNotIn(" pp", report)
         self.assertNotIn("Δ vs baseline", report)
 

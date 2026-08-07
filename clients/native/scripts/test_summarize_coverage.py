@@ -362,15 +362,17 @@ class BaselineAbsenceTests(unittest.TestCase):
     def test_an_unavailable_baseline_is_stated_with_its_reason(self) -> None:
         """A silently missing delta reads as "no change" to anyone who saw
         one last week, so the absence is stated and attributed."""
+        reason = "run 42 measured no native coverage"
+
         rendered = summarize_coverage.render(
             one_target_report(executable=100, covered=60),
             REPOSITORY_ROOT,
             0,
             TITLE,
-            baseline_unavailable="run 42 measured no native coverage",
+            baseline_unavailable=reason,
         )
 
-        self.assertIn("No baseline to compare against: run 42 measured no native coverage.", rendered)
+        self.assertIn(f"No baseline to compare against: {reason}.", rendered)
         self.assertNotIn(" pp", rendered)
 
     def test_a_caller_that_asked_for_no_baseline_gets_no_baseline_line(self) -> None:
