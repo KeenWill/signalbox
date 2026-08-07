@@ -66,7 +66,6 @@ import html
 import json
 import os
 import re
-import shlex
 import string
 import subprocess
 import sys
@@ -76,6 +75,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+import postgres_integration_suites
 
 ROOT = Path(__file__).resolve().parent.parent
 INVARIANTS = Path("docs/invariants.md")
@@ -2402,18 +2403,11 @@ def rust_test_invariant_tags(
                 "::".join((*prefix, *local_name)) for prefix in module_prefixes
             )
             if not any(
-                (
-                    not selection.filters
-                    or any(
-                        test_filter in registered_name
-                        for test_filter in selection.filters
-                    )
+                not any(
+                    skipped in registered_name for skipped in selection.skips
                 )
                 for selection in ignored_test_selections
                 for registered_name in registered_names
-                if not any(
-                    skipped in registered_name for skipped in selection.skips
-                )
             ):
                 continue
         doc_comments = "\n".join(rust_doc_comments(raw_prefix))
@@ -2586,144 +2580,141 @@ def rust_module_graph(
 
 @dataclass(frozen=True)
 class IgnoredTestSelection:
-    """One libtest name selection, including explicit exclusions."""
+    """One suite's ignored-test selection: its package, minus its exclusions.
 
-    filters: tuple[str, ...]
+    A suite archives and runs every test target of its package, so membership
+    is positive by default and `skips` is the only narrowing. Each entry is a
+    test-name substring, matched the way both libtest's `--skip` and nextest's
+    `not test(...)` match one.
+    """
+
     skips: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class IgnoredTestRun:
-    """One Cargo invocation that executes ignored tests in authoritative CI."""
+    """One manifest suite that executes ignored tests in authoritative CI."""
 
     package: str
-    all_tests: bool
-    target: str | None
+    features: tuple[str, ...]
     selection: IgnoredTestSelection
 
 
-def folded_workflow_commands(root: Path) -> list[str]:
-    """Return folded `command: >-` scalar bodies from the Rust workflow."""
-    workflow = root / ".github/workflows/rust.yml"
-    if not workflow.is_file():
-        return []
-    lines = workflow.read_text(encoding="utf-8").splitlines()
-    runner_targets = {
-        match.group("target")
-        for line in lines
-        if (match := re.match(r"^[ ]*runs-on:[ ]*(?P<target>[^ #]+)", line))
-    }
-    if runner_targets and runner_targets != {"ubuntu-latest"}:
-        targets = ", ".join(sorted(runner_targets))
-        raise ValueError(f"Rust CI target changed from ubuntu-latest: {targets}")
-    commands: list[str] = []
-    index = 0
-    while index < len(lines):
-        match = re.match(r"^(?P<indent>[ ]*)command:[ ]*>-[ ]*$", lines[index])
-        if match is None:
-            index += 1
-            continue
-        indentation = len(match.group("indent"))
-        index += 1
-        body: list[str] = []
-        while index < len(lines):
-            line = lines[index]
-            if line.strip() and len(line) - len(line.lstrip(" ")) <= indentation:
-                break
-            if line.strip():
-                body.append(line.strip())
-            index += 1
-        commands.append(" ".join(body))
-    return commands
-
-
-def cargo_argument_filters(arguments: list[str]) -> tuple[str, ...]:
-    """Return Cargo/libtest positional filters from one `cargo test` command."""
-    value_options = {
-        "--bench",
-        "--bin",
-        "--color",
-        "--exclude",
-        "--example",
-        "--features",
-        "--jobs",
-        "--manifest-path",
-        "--message-format",
-        "--package",
-        "--profile",
-        "--skip",
-        "--target",
-        "--target-dir",
-        "--test",
-        "-F",
-        "-j",
-        "-p",
-    }
-    filters: list[str] = []
-    index = 0
-    while index < len(arguments):
-        argument = arguments[index]
-        if argument in value_options:
-            index += 2
-            continue
-        if argument.startswith("-"):
-            index += 1
-            continue
-        filters.append(argument)
-        index += 1
-    return tuple(filters)
-
-
-def cargo_argument_skips(arguments: list[str]) -> tuple[str, ...]:
-    """Return values named by libtest's repeatable `--skip` option."""
-    skips: list[str] = []
-    for index, argument in enumerate(arguments):
-        if argument == "--skip" and index + 1 < len(arguments):
-            skips.append(arguments[index + 1])
-        elif argument.startswith("--skip="):
-            skips.append(argument.removeprefix("--skip="))
-    return tuple(skips)
-
-
 def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
-    """Read the ignored-test selections executed by the Rust CI workflow."""
-    runs: list[IgnoredTestRun] = []
-    for command in folded_workflow_commands(root):
-        arguments = shlex.split(command)
-        if len(arguments) < 3 or arguments[:2] != ["cargo", "test"]:
-            continue
-        if "--" not in arguments:
-            continue
-        separator = arguments.index("--")
-        cargo_arguments = arguments[2:separator]
-        harness_arguments = arguments[separator + 1 :]
-        if "--ignored" not in harness_arguments:
-            continue
-        package = None
-        target = None
-        for option in ("-p", "--package"):
-            if option in cargo_arguments:
-                package = cargo_arguments[cargo_arguments.index(option) + 1]
-        if "--test" in cargo_arguments:
-            target = cargo_arguments[cargo_arguments.index("--test") + 1]
-        if package is None:
-            continue
-        cargo_filters = cargo_argument_filters(cargo_arguments)
-        harness_filters = cargo_argument_filters(harness_arguments)
-        cargo_skips = cargo_argument_skips(cargo_arguments)
-        harness_skips = cargo_argument_skips(harness_arguments)
-        runs.append(
-            IgnoredTestRun(
-                package=package,
-                all_tests="--tests" in cargo_arguments,
-                target=target,
-                selection=IgnoredTestSelection(
-                    filters=tuple(sorted(set((*cargo_filters, *harness_filters)))),
-                    skips=tuple(sorted(set((*cargo_skips, *harness_skips)))),
-                ),
-            )
+    """Read the ignored-test selections authoritative CI executes.
+
+    Ground truth is `.github/postgres-integration-suites.toml`, not the
+    workflow: a suite's package, features, and skips live in the manifest that
+    the workflow's own jobs derive their archive plan and shard matrix from.
+    Recovering this by parsing the workflow's shell commands was a coupling to
+    one particular spelling of one particular runner, and it broke silently —
+    reporting no ignored-test runs at all — the moment CI moved from `cargo
+    test` to `cargo nextest`. `check_suite_manifest` gates the two sides
+    against each other so the manifest cannot drift from what CI runs.
+
+    Each suite archives and runs the whole package's test targets, which is
+    what `--tests` selected before and what nextest's default target selection
+    does now, so the selection is the package's ignored tests minus the
+    manifest's skips.
+
+    A repository with no manifest runs no ignored tests in CI, which is the
+    same answer the workflow-parsing predecessor gave for a repository with no
+    workflow. `check_suite_manifest` is what rejects a manifest that has gone
+    missing from a repository whose CI still expects one.
+    """
+    if not (root / postgres_integration_suites.MANIFEST).is_file():
+        return []
+    return [
+        IgnoredTestRun(
+            package=suite.package,
+            features=suite.features,
+            selection=IgnoredTestSelection(skips=tuple(sorted(suite.skip))),
         )
-    return runs
+        for suite in postgres_integration_suites.load_suites(root)
+    ]
+
+
+def declared_package(package: Path) -> dict:
+    """Read one package manifest, or an empty document if it cannot be read."""
+    try:
+        return tomllib.loads((package / "Cargo.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+
+
+def enabled_package_features(package: Path, requested: tuple[str, ...]) -> set[str]:
+    """Return the features one suite actually enables for a package.
+
+    A suite names the features it adds; Cargo also enables `default` — no
+    invocation here passes `--no-default-features` — and every feature a
+    reachable feature turns on. Feature-to-feature edges are followed;
+    `dep:name` and `package/feature` entries enable something other than a
+    feature of this package and are not.
+    """
+    declared = declared_package(package).get("features")
+    table = declared if isinstance(declared, dict) else {}
+    enabled = set(requested)
+    if "default" in table:
+        enabled.add("default")
+    pending = list(enabled)
+    while pending:
+        for entry in table.get(pending.pop(), []):
+            if not isinstance(entry, str) or ":" in entry or "/" in entry:
+                continue
+            if entry not in enabled:
+                enabled.add(entry)
+                pending.append(entry)
+    return enabled
+
+
+def target_required_features(package: Path) -> dict[Path, tuple[str, ...]]:
+    """Map each explicitly declared Cargo target root to its required features.
+
+    Cargo skips a target whose `required-features` are not all enabled — it
+    builds nothing and reports success. A target skipped that way enforces
+    nothing, so the invariant index must not credit it.
+    """
+    declared = declared_package(package)
+    required: dict[Path, tuple[str, ...]] = {}
+    for table, directory in zip(CARGO_TARGET_TABLES, CARGO_TARGET_DIRECTORIES):
+        entries = declared.get(table)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            features = entry.get("required-features")
+            if not isinstance(features, list):
+                continue
+            root = declared_target_root(package, entry, directory)
+            if root is None:
+                continue
+            required[root] = tuple(
+                feature for feature in features if isinstance(feature, str)
+            )
+    return required
+
+
+def declared_target_root(package: Path, entry: dict, directory: str) -> Path | None:
+    """Resolve one declared Cargo target's root file.
+
+    `path` is optional: a target table that only names its target still binds
+    to the conventional root Cargo infers, and Cargo still skips it when its
+    `required-features` are unmet. Reading only explicit paths would let the
+    inferred spelling escape the feature check entirely.
+    """
+    relative = entry.get("path")
+    if isinstance(relative, str):
+        candidate = Path(os.path.normpath(package / relative))
+        return candidate if candidate.is_file() else None
+    name = entry.get("name")
+    if not isinstance(name, str):
+        return None
+    candidates = (
+        package / directory / f"{name}.rs",
+        package / directory / name / "main.rs",
+    )
+    return next((path for path in candidates if path.is_file()), None)
 
 
 def cargo_package_directories(root: Path) -> dict[str, Path]:
@@ -2741,29 +2732,6 @@ def cargo_package_directories(root: Path) -> dict[str, Path]:
         if isinstance(name, str):
             packages[name] = manifest.parent
     return packages
-
-
-def conventional_test_target(package: Path, name: str) -> Path | None:
-    """Resolve one conventional or explicitly declared integration target."""
-    manifest = package / "Cargo.toml"
-    try:
-        declared = tomllib.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        declared = {}
-    targets = declared.get("test")
-    if isinstance(targets, list):
-        for target in targets:
-            if not isinstance(target, dict) or target.get("name") != name:
-                continue
-            relative = target.get("path")
-            if isinstance(relative, str):
-                candidate = Path(os.path.normpath(package / relative))
-                return candidate if candidate.is_file() else None
-    candidates = [
-        package / "tests" / f"{name}.rs",
-        package / "tests" / name / "main.rs",
-    ]
-    return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
 def cargo_test_roots(package: Path) -> list[Path]:
@@ -2790,22 +2758,14 @@ def ignored_test_selections_by_target(
         package = packages.get(run.package)
         if package is None:
             continue
-        if run.all_tests:
-            targets = cargo_test_roots(package)
-        elif run.target is not None:
-            target = conventional_test_target(package, run.target)
-            targets = [] if target is None else [target]
-        else:
-            targets = []
-        for target in targets:
+        enabled = enabled_package_features(package, run.features)
+        required = target_required_features(package)
+        for target in cargo_test_roots(package):
+            if not set(required.get(target, ())) <= enabled:
+                continue
             selected.setdefault(target, set()).add(run.selection)
     return {
-        target: tuple(
-            sorted(
-                selections,
-                key=lambda selection: (selection.filters, selection.skips),
-            )
-        )
+        target: tuple(sorted(selections, key=lambda selection: selection.skips))
         for target, selections in selected.items()
     }
 
@@ -2927,10 +2887,7 @@ def rust_sources(root: Path) -> list[RustSource]:
             for selection in ignored_by_target.get(target, ())
         }
         source.ignored_test_selections = tuple(
-            sorted(
-                ignored_selections,
-                key=lambda selection: (selection.filters, selection.skips),
-            )
+            sorted(ignored_selections, key=lambda selection: selection.skips)
         )
     return prepared
 
@@ -3728,6 +3685,102 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
     return violations
 
 
+def check_suite_manifest(root: Path) -> list[Violation]:
+    """Hold the suite manifest, the Rust workflow, and the docs in agreement.
+
+    The manifest decides which `#[ignore]`d tests count as CI-enforced, so a
+    manifest that drifts from what CI actually runs corrupts `docs/invariants.md`
+    silently and in the dangerous direction: it would keep claiming enforcement
+    the workflow no longer performs. Three agreements are asserted.
+
+    *Manifest and workflow.* The workflow must still derive its archive plan
+    and its shard matrix from the manifest, must publish exactly one archive
+    artifact per declared suite, and must run no ignored tests through a
+    `cargo test` command of its own. Nothing here reconstructs a Cargo
+    invocation out of YAML — the point of the manifest was to stop doing that.
+
+    *Manifest and documentation.* Prose that teaches a reader to run a suite
+    locally names the same package and features CI archives. Drift there is
+    invisible to a reader: the documented command still succeeds, and silently
+    runs a different set of tests.
+
+    *Manifest and itself.* Every declared package must exist in the workspace,
+    and the schema is validated on load.
+
+    A repository with neither manifest nor workflow is not a violation — the
+    checker's own fixtures are such repositories. One without the other is.
+    """
+    manifest = root / postgres_integration_suites.MANIFEST
+    workflow = root / postgres_integration_suites.WORKFLOW
+    label = postgres_integration_suites.MANIFEST.as_posix()
+    if not manifest.is_file():
+        if not workflow.is_file():
+            return []
+        return [
+            Violation(
+                postgres_integration_suites.WORKFLOW.as_posix(),
+                1,
+                "suite-manifest",
+                f"the Rust workflow exists without {label}",
+            )
+        ]
+    # A malformed manifest raises out of here rather than reporting a
+    # violation. It is a broken input, not a citation defect: every other
+    # answer this checker computes about ignored tests would be derived from
+    # it, so there is nothing trustworthy left to report. `main` renders it the
+    # way it renders an unreadable file inventory.
+    text = manifest.read_text(encoding="utf-8")
+    suites = postgres_integration_suites.parse_suites(text)
+
+    failures: list[Violation] = []
+    packages = cargo_package_directories(root)
+    for suite in suites:
+        if suite.package not in packages:
+            failures.append(
+                Violation(
+                    label,
+                    postgres_integration_suites.manifest_line(text, suite.name),
+                    "suite-manifest",
+                    f"suite `{suite.name}` names package `{suite.package}`, "
+                    "which is not a package in this workspace",
+                )
+            )
+    if workflow.is_file():
+        failures.extend(
+            Violation(
+                postgres_integration_suites.WORKFLOW.as_posix(),
+                1,
+                "suite-manifest",
+                message,
+            )
+            for message in postgres_integration_suites.workflow_disagreements(
+                root, suites
+            )
+        )
+    else:
+        failures.append(
+            Violation(
+                label,
+                1,
+                "suite-manifest",
+                f"{label} exists without {postgres_integration_suites.WORKFLOW}",
+            )
+        )
+    for source in markdown_sources(root):
+        source_label = repository_path(root, source)
+        failures.extend(
+            Violation(source_label, line, "suite-manifest", message)
+            for line, message in (
+                postgres_integration_suites.documentation_disagreements(
+                    source_label,
+                    source.read_text(encoding="utf-8"),
+                    suites,
+                )
+            )
+        )
+    return failures
+
+
 def run_checks(root: Path = ROOT) -> list[Violation]:
     root = root.resolve()
     heading_anchors.cache_clear()
@@ -3739,13 +3792,17 @@ def run_checks(root: Path = ROOT) -> list[Violation]:
     failures.extend(check_relative_links(root, enforcement_links))
     failures.extend(check_spec_verification_references(root))
     failures.extend(check_rust_test_generation(sources))
+    failures.extend(check_suite_manifest(root))
     return sorted(set(failures))
 
 
 def main() -> int:
     try:
         failures = run_checks()
-    except TrackedFilesError as error:
+    except (
+        TrackedFilesError,
+        postgres_integration_suites.ManifestError,
+    ) as error:
         print(f"docs-consistency check FAILED: {error}")
         return 1
     if failures:
