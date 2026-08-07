@@ -370,10 +370,23 @@ func assertLiveScreenSnapshot(
 /// library's own vocabulary — `all`, `missing`, `failed`, `never` — rather
 /// than a second one that would have to be kept in step with it.
 func liveScreenSnapshotRecordMode() -> SnapshotTestingConfiguration.Record {
-    guard
-        let requested = ProcessInfo.processInfo.environment["SIGNALBOX_NATIVE_SNAPSHOT_RECORD"],
-        !requested.isEmpty
-    else {
+    liveScreenSnapshotRecordMode(
+        requested: ProcessInfo.processInfo.environment["SIGNALBOX_NATIVE_SNAPSHOT_RECORD"]
+    )
+}
+
+/// The same decision over an explicit value, which is what makes it testable.
+///
+/// The environment read is the only part left in the caller above, because the
+/// branch that matters is not "was the variable set" but "what is returned when
+/// it was not": every ordinary test run takes the `.never` path, and a
+/// regression that turned it into `.all` would rewrite every golden and report
+/// a pass. That default and the rejection of an unknown value are both pinned
+/// by `LiveScreenSnapshotRecordModeTests`, which a shell `case` cannot reach.
+func liveScreenSnapshotRecordMode(
+    requested: String?
+) -> SnapshotTestingConfiguration.Record {
+    guard let requested, !requested.isEmpty else {
         return .never
     }
     guard let mode = SnapshotTestingConfiguration.Record(rawValue: requested) else {
