@@ -699,6 +699,8 @@ const CREDENTIALED_STEP_LINES: &[&str] = &[
     "- name: Materialize the file-delivered credential",
     "env:",
     "ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}",
+    "SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE: >-",
+    "${{ runner.temp }}/signalbox-claude-smoke-credential",
     "run: |",
     "set -euo pipefail",
     "test -n \"${ANTHROPIC_API_KEY}\" \\",
@@ -808,6 +810,7 @@ fn the_smoke_workflow_reaches_the_credential_only_where_permitted() {
 
 #[test]
 fn the_smoke_workflow_supplies_and_cleans_one_nonsecret_credential_file_path() {
+    let path_binding = "${{ runner.temp }}/signalbox-claude-smoke-credential".to_string();
     assert!(workflow_declares(
         CLAUDE_SMOKE_WORKFLOW,
         "SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE: >-"
@@ -816,6 +819,13 @@ fn the_smoke_workflow_supplies_and_cleans_one_nonsecret_credential_file_path() {
         CLAUDE_SMOKE_WORKFLOW,
         "${{ runner.temp }}/signalbox-claude-smoke-credential"
     ));
+    assert!(
+        workflow_step_lines(
+            CLAUDE_SMOKE_WORKFLOW,
+            "Run one live exchange through the adapter"
+        )
+        .contains(&path_binding)
+    );
     assert_eq!(
         workflow_step_lines(
             CLAUDE_SMOKE_WORKFLOW,
@@ -824,6 +834,9 @@ fn the_smoke_workflow_supplies_and_cleans_one_nonsecret_credential_file_path() {
         [
             "- name: Remove the file-delivered credential",
             "if: ${{ always() }}",
+            "env:",
+            "SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE: >-",
+            "${{ runner.temp }}/signalbox-claude-smoke-credential",
             "run: rm -f \"${SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE}\"",
         ]
     );

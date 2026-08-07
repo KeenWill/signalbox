@@ -166,8 +166,6 @@ jobs:
     env:
       SIGNALBOX_CLAUDE_SMOKE_EXECUTABLE: >-
         ${{ github.workspace }}/crates/model-runtime-claude-cli/node_modules/.bin/claude
-      SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE: >-
-        ${{ runner.temp }}/signalbox-claude-smoke-credential
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -220,6 +218,8 @@ jobs:
       - name: Materialize the file-delivered credential
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE: >-
+            ${{ runner.temp }}/signalbox-claude-smoke-credential
         run: |
           set -euo pipefail
           test -n "${ANTHROPIC_API_KEY}" \
@@ -233,6 +233,8 @@ jobs:
       # store directory — never the direct credential — to the child.
       - name: Run one live exchange through the adapter
         env:
+          SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE: >-
+            ${{ runner.temp }}/signalbox-claude-smoke-credential
           # Optional, and a plain variable rather than a secret because a model
           # name is not sensitive. Which models a credential can address is
           # account-scoped, so the environment may override the code default.
@@ -253,6 +255,9 @@ jobs:
           fi
       - name: Remove the file-delivered credential
         if: ${{ always() }}
+        env:
+          SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE: >-
+            ${{ runner.temp }}/signalbox-claude-smoke-credential
         run: rm -f "${SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE}"
 
   required:
