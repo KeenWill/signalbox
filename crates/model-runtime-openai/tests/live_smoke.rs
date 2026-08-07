@@ -815,7 +815,7 @@ mod require_decoded_response_tests {
             exchange: exchange(200),
             reported_model: Some(ProviderReportedModel::new("model-exact-1")),
             finish_reported: Some(FinishReason::Unrecognized {
-                provider_token: "length".to_string(),
+                provider_token: OUTPUT_CEILING_FINISH_TOKEN.to_string(),
             }),
             usage: usage(),
         }
@@ -917,10 +917,12 @@ mod require_decoded_response_tests {
     #[test]
     #[should_panic(expected = "returned no decoded response")]
     fn an_output_ceiling_finish_without_a_reported_model_panics() {
-        // The `length` branch returns before the decoder's own end-of-stream
-        // validations, so a stream that never reported a model identity can
-        // still reach this arm carrying the token. That is a malformed
-        // envelope, not an output-ceiling stop, and must stay red.
+        // Synthetic: the decoder now rejects a missing model identity at the
+        // unrecognized-finish chunk, before assigning the finish, so no
+        // adapter-produced loss can reach this arm with both the ceiling
+        // cause/token and no reported model. Kept as defense in depth — this
+        // classifier must not start accepting that shape if the decoder's
+        // ordering ever changes back.
         let mut loss = stopped_at_ceiling();
         loss.reported_model = None;
 
