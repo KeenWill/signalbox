@@ -11,6 +11,18 @@ use serde::de::DeserializeOwned;
 use signalbox_application::{ToolDefinition, ToolInputSchema};
 use signalbox_domain::{ToolEffectClass, ToolName, ToolPermissionDefault};
 
+/// Exact UTF-8 byte length of a canonical lowercase hyphenated UUID.
+pub const CANONICAL_UUID_TEXT_BYTES: usize = 36;
+
+/// Decodes only the canonical lowercase hyphenated UUID spelling.
+pub fn decode_canonical_uuid(value: &str) -> Option<uuid::Uuid> {
+    if value.len() != CANONICAL_UUID_TEXT_BYTES {
+        return None;
+    }
+    let parsed = uuid::Uuid::parse_str(value).ok()?;
+    (parsed.hyphenated().to_string() == value).then_some(parsed)
+}
+
 /// A Rust type that owns its model-facing JSON Schema declaration.
 pub trait ToolSchema {
     /// Renders the complete JSON Schema for this type.
@@ -511,7 +523,9 @@ mod tests {
     use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
     use signalbox_domain::{ToolEffectClass, ToolPermissionDefault};
 
-    use super::{ToolContract, compile_contract_definition, rendered_contract_schema};
+    use super::{
+        ToolContract, compile_contract_definition, decode_canonical_uuid, rendered_contract_schema,
+    };
 
     /// Fixture newtype whose manual schema states a real constraint.
     #[derive(Debug, serde::Deserialize)]
@@ -595,5 +609,30 @@ mod tests {
         );
         assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
         assert_eq!(definition.effect_class(), ToolEffectClass::EffectFree);
+    }
+
+    #[test]
+    fn canonical_uuid_text_decodes_the_single_admitted_spelling() {
+        let canonical = "00000000-0000-0000-0000-000000000001";
+        let decoded = decode_canonical_uuid(canonical).expect("canonical UUID text decodes");
+
+        assert_eq!(decoded.hyphenated().to_string(), canonical);
+    }
+
+    #[test]
+    fn canonical_uuid_text_rejects_alternate_spellings() {
+        assert_eq!(
+            decode_canonical_uuid("00000000-0000-0000-0000-00000000000A"),
+            None
+        );
+        assert_eq!(
+            decode_canonical_uuid("00000000000000000000000000000001"),
+            None
+        );
+    }
+
+    #[test]
+    fn canonical_uuid_text_rejects_malformed_syntax() {
+        assert_eq!(decode_canonical_uuid("not-a-uuid"), None);
     }
 }

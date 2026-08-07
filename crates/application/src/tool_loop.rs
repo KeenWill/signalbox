@@ -386,6 +386,13 @@ impl ToolExecutionInvocation {
             evidence,
         }
     }
+
+    /// Seals a claim that the executor transaction already ended this attempt.
+    pub fn durable_completion(self) -> CorrelatedDurableToolCompletion {
+        CorrelatedDurableToolCompletion {
+            correlation: self.authority.correlation(),
+        }
+    }
 }
 
 /// Non-durable evidence returned by a tool executor.
@@ -407,6 +414,19 @@ pub enum ToolExecutorEvidence {
 pub struct CorrelatedToolExecutorEvidence {
     fence: IssuedExecutorFence,
     evidence: ToolExecutorEvidence,
+}
+
+/// Exact dispatch fence for a terminal transition already committed by an executor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CorrelatedDurableToolCompletion {
+    correlation: ToolAttemptDispatchCorrelation,
+}
+
+impl CorrelatedDurableToolCompletion {
+    /// Returns the complete issued dispatch correlation.
+    pub const fn correlation(self) -> ToolAttemptDispatchCorrelation {
+        self.correlation
+    }
 }
 
 impl CorrelatedToolExecutorEvidence {

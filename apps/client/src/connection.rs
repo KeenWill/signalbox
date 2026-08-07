@@ -210,6 +210,9 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::CompactSession { .. }
         | ClientRequest::ReadTranscript { .. }
         | ClientRequest::FollowSession { .. }
+        | ClientRequest::SpawnSession { .. }
+        | ClientRequest::AwaitSession { .. }
+        | ClientRequest::SendSessionMessage { .. }
         | ClientRequest::ListSessionMetadata { .. }
         | ClientRequest::ListConversations { .. }
         | ClientRequest::ListModelAliases {}

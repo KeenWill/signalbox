@@ -28,6 +28,7 @@ members = [
     "crates/tools-github",
     "crates/tools-git",
     "crates/tools-plan",
+    "crates/tools-sessions",
     "crates/tools-web",
     "crates/tools-workspace",
 ]
