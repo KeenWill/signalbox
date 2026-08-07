@@ -5,10 +5,9 @@ use std::{
 };
 
 use signalbox_process_protocol::{
-    AnthropicServiceTier, CodexCliServiceTier, ConversationImportRejectionClass,
-    DelegationToolRequestState, ErrorCode, ErrorDetail, FailedModelCallCause, FrameDecodeError,
-    FrameEncodeError, GoalCommandRejection, OpenAiServiceTier, ReasoningLevel, RejectionDetail,
-    ServiceTier,
+    AnthropicServiceTier, CodexCliServiceTier, ConversationImportRejectionClass, ErrorCode,
+    ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError, GoalCommandRejection,
+    OpenAiServiceTier, ReasoningLevel, RejectionDetail, ServiceTier,
 };
 
 #[derive(Debug)]
@@ -429,7 +428,7 @@ impl fmt::Display for RejectionDisplay {
             } => write!(
                 formatter,
                 "delegation_tool_request_not_executable request={tool_request_id} state={}",
-                delegation_tool_request_state_name(state)
+                state.as_str()
             ),
             RejectionDetail::DelegationSpawnConflict { tool_request_id } => write!(
                 formatter,
@@ -580,15 +579,6 @@ impl fmt::Display for RejectionDisplay {
                 record_ordinal.value()
             ),
         }
-    }
-}
-
-const fn delegation_tool_request_state_name(value: DelegationToolRequestState) -> &'static str {
-    match value {
-        DelegationToolRequestState::AwaitingApproval => "awaiting_approval",
-        DelegationToolRequestState::Denied => "denied",
-        DelegationToolRequestState::Closed => "closed",
-        DelegationToolRequestState::AttemptEnded => "attempt_ended",
     }
 }
 
