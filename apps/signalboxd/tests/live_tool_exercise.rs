@@ -633,19 +633,43 @@ fn completion_script(text: &str) -> Script {
 /// two — human-only even under the dangerous session blanket — so an exact
 /// `Confirm` comparison omits precisely the declarations that most need the
 /// gate, and the denied-gate fixture would then be expected to skip them.
+/// Whether a permission default puts a tool behind a confirm gate.
+///
+/// Exhaustive rather than `matches!`: a new `ToolPermissionDefault` must fail
+/// to compile here instead of being silently classified as ungated, which is
+/// the coverage hole this smoke exists to close.
+///
+/// Split out from `confirm_tool_names` so ordinary test runs exercise it. That
+/// function is reachable only from the ignored, token-gated smoke below, so
+/// mapping `AlwaysConfirm` to `false` would otherwise leave the whole suite
+/// green while the smoke's expected gated set quietly lost a tool.
+fn is_confirm_gated(permission_default: ToolPermissionDefault) -> bool {
+    match permission_default {
+        ToolPermissionDefault::Confirm | ToolPermissionDefault::AlwaysConfirm => true,
+        ToolPermissionDefault::Auto => false,
+    }
+}
+
+#[test]
+fn a_confirm_default_is_confirm_gated() {
+    assert!(is_confirm_gated(ToolPermissionDefault::Confirm));
+}
+
+#[test]
+fn an_always_confirm_default_is_confirm_gated() {
+    assert!(is_confirm_gated(ToolPermissionDefault::AlwaysConfirm));
+}
+
+#[test]
+fn an_auto_default_is_not_confirm_gated() {
+    assert!(!is_confirm_gated(ToolPermissionDefault::Auto));
+}
+
 fn confirm_tool_names(catalog: &impl ToolCatalog) -> Vec<String> {
     catalog
         .definitions()
         .iter()
-        .filter(|definition| {
-            // Exhaustive rather than `matches!`: a new permission default must
-            // fail to compile here instead of being silently classified as
-            // ungated, which is the coverage hole this smoke exists to close.
-            match definition.permission_default() {
-                ToolPermissionDefault::Confirm | ToolPermissionDefault::AlwaysConfirm => true,
-                ToolPermissionDefault::Auto => false,
-            }
-        })
+        .filter(|definition| is_confirm_gated(definition.permission_default()))
         .map(|definition| definition.name().as_str().to_owned())
         .collect()
 }
