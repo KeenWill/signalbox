@@ -595,7 +595,7 @@ class WorkflowAgreementTests(unittest.TestCase):
             "          echo second\n"
         )
 
-        self.assertEqual(commands, ["echo first\necho second"])
+        self.assertEqual([command for command, _ in commands], ["echo first\necho second"])
 
     def test_a_global_option_before_the_subcommand_is_reported(self) -> None:
         failures = self.disagreements(
@@ -729,9 +729,12 @@ class WorkflowAgreementTests(unittest.TestCase):
 
     def test_a_quoted_hash_is_not_a_comment(self) -> None:
         self.assertEqual(
-            workflow_shell_commands(
-                "jobs:\n  a:\n    steps:\n      - run: echo 'a # b'\n"
-            ),
+            [
+                command
+                for command, _ in workflow_shell_commands(
+                    "jobs:\n  a:\n    steps:\n      - run: echo 'a # b'\n"
+                )
+            ],
             ["echo 'a # b'"],
         )
 
@@ -759,6 +762,39 @@ class WorkflowAgreementTests(unittest.TestCase):
 
         self.assertEqual(len(failures), 1)
         self.assertIn("manifest-driven", failures[0])
+
+    def test_an_aggregate_check_that_only_mentions_the_result_is_reported(self) -> None:
+        # `echo "$RUN_RESULT was not success"` names the variable and the word
+        # and exits zero regardless.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                '          test "$RUN_RESULT" = success\n',
+                '          echo "$RUN_RESULT was not success"\n',
+            )
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("postgres-integration-run", failures[0])
+
+    def test_a_matrix_binding_in_another_step_does_not_count(self) -> None:
+        # The run step pins the partition while a decoy step keeps the binding.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                "      - env:\n          SUITE: ${{ matrix.suite }}\n",
+                "      - env:\n"
+                "          PARTITION: ${{ matrix.partition }}\n"
+                "        run: echo decoy\n"
+                "      - env:\n"
+                "          SUITE: ${{ matrix.suite }}\n",
+            ).replace(
+                "          PARTITION: ${{ matrix.partition }}\n"
+                "          PARTITIONS: ${{ matrix.partitions }}\n",
+                '          PARTITION: "1"\n'
+                "          PARTITIONS: ${{ matrix.partitions }}\n",
+            )
+        )
+
+        self.assertTrue(any("manifest-driven" in failure for failure in failures))
 
     def test_an_aggregate_check_dropping_the_run_result_is_reported(self) -> None:
         # The aggregate job carries the required check's name, so it going
@@ -842,7 +878,8 @@ class WorkflowAgreementTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            commands, ["cargo nextest run --workspace-remap .", "echo indented"]
+            [command for command, _ in commands],
+            ["cargo nextest run --workspace-remap .", "echo indented"],
         )
 
     def test_the_repository_workflow_agrees_with_its_manifest(self) -> None:

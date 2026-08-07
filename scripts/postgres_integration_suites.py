@@ -319,7 +319,41 @@ def uploaded_artifacts(text: str) -> list[tuple[str, str | None]]:
     return uploads
 
 
-def workflow_shell_commands(text: str) -> list[str]:
+def step_matrix_variables(lines: list[str], run_index: int, indent: int) -> dict[str, str]:
+    """Return the matrix bindings in scope for one `run:` scalar's own step.
+
+    Collected from the step the command belongs to, never from the file: a run
+    step pinning `PARTITION: "1"` while some other step still binds
+    `PARTITION: ${{ matrix.partition }}` would otherwise read as parameterised
+    while every shard ran the same partition.
+
+    The step is the list item enclosing the command — bounded by the nearest
+    `- ` at the command key's own indentation on either side.
+    """
+    start = 0
+    for index in range(run_index, -1, -1):
+        line = lines[index]
+        depth = len(line) - len(line.lstrip(" "))
+        if line.strip() and depth <= indent and line.lstrip().startswith("- "):
+            start = index
+            break
+    end = len(lines)
+    for index in range(run_index + 1, len(lines)):
+        line = lines[index]
+        if not line.strip():
+            continue
+        depth = len(line) - len(line.lstrip(" "))
+        if depth < indent or (depth == indent and line.lstrip().startswith("- ")):
+            end = index
+            break
+    return {
+        match.group("field"): match.group("variable")
+        for line in lines[start:end]
+        for match in MATRIX_ENV_BINDING.finditer(line)
+    }
+
+
+def workflow_shell_commands(text: str) -> list[tuple[str, dict[str, str]]]:
     """Return each `run:`/`command:` scalar in a workflow, flattened to one line.
 
     A shell command in a workflow can be spelled four ways — inline, a literal
@@ -334,7 +368,7 @@ def workflow_shell_commands(text: str) -> list[str]:
     inference the suite manifest exists to make unnecessary.
     """
     lines = text.splitlines()
-    commands: list[str] = []
+    commands: list[tuple[str, dict[str, str]]] = []
     index = 0
     while index < len(lines):
         match = SHELL_SCALAR.match(lines[index])
@@ -342,6 +376,7 @@ def workflow_shell_commands(text: str) -> list[str]:
             index += 1
             continue
         indentation = len(match.group("indent"))
+        variables = step_matrix_variables(lines, index, indentation)
         # `|`, `>-`, `|+2` and friends open a block; they are not command text.
         # Which one decides how the block's lines rejoin: a literal `|` block
         # keeps its newlines, and a newline separates commands, while a folded
@@ -372,7 +407,7 @@ def workflow_shell_commands(text: str) -> list[str]:
             joined = stripped if not joined else f"{joined}{pending}{stripped}"
             pending = " " if continues else separator
         if joined:
-            commands.append(joined)
+            commands.append((joined, variables))
     return commands
 
 
@@ -440,15 +475,16 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     # Both modes, each as a command the shell actually executes — naming the
     # reader is not running it. The modes feed different jobs: `--archive-plan`
     # the build, `--matrix` the shards, so each is asserted on its own.
-    executed = [tokens for command in commands for tokens in simple_commands(command)]
-    # Which shell variable carries each matrix field, so an archived run can be
-    # required to read the right one rather than merely to expand something.
-    matrix_variables = {
-        match.group("field"): match.group("variable")
-        for match in MATRIX_ENV_BINDING.finditer(text)
-    }
+    # Each executed command travels with the matrix bindings of its own step,
+    # so an archived run is judged against the variables it can actually see.
+    executed = [
+        (tokens, variables)
+        for command, variables in commands
+        for tokens in simple_commands(command)
+    ]
+
     for mode in REQUIRED_MODES:
-        if not any(invokes_reader(tokens, mode) for tokens in executed):
+        if not any(invokes_reader(tokens, mode) for tokens, _ in executed):
             failures.append(
                 f"{WORKFLOW} executes no `{EMITTER} {mode}` command, so its "
                 f"PostgreSQL integration jobs no longer derive from {MANIFEST}"
@@ -486,7 +522,7 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     # exists to prevent. Read from the same executed commands as above, so the
     # YAML wrapping, the shell operators, and Cargo's global options before the
     # subcommand are all already resolved.
-    for tokens in executed:
+    for tokens, variables in executed:
         arguments = cargo_test_arguments(tokens)
         if arguments is not None and runs_ignored_tests(arguments):
             failures.append(
@@ -497,7 +533,7 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
         # not the manifest-driven run: it chooses its own packages. Requiring
         # only that one archive-backed run exists would let a rogue one sit
         # beside it.
-        if nonconforming_ignored_nextest(tokens, matrix_variables):
+        if nonconforming_ignored_nextest(tokens, variables):
             failures.append(
                 f"{WORKFLOW} runs ignored tests through a `cargo nextest run` "
                 f"that is not the manifest-driven archived run, outside "
@@ -505,7 +541,7 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
             )
 
     if not any(
-        runs_archived_ignored_tests(tokens, matrix_variables) for tokens in executed
+        runs_archived_ignored_tests(tokens, variables) for tokens, variables in executed
     ):
         failures.append(
             f"{WORKFLOW} runs no archive-backed `cargo nextest run` with "
@@ -523,8 +559,7 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     for job in ("build", "run"):
         variable = asserted.get(job)
         if variable is None or not any(
-            f"${variable}" in command and "success" in command
-            for command in commands
+            asserts_success(tokens, variable) for tokens, _ in executed
         ):
             failures.append(
                 f"{WORKFLOW} does not assert "
@@ -532,8 +567,12 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
                 "aggregate check can pass without it"
             )
 
+    # A weaker, independent statement than the per-step check below: the
+    # workflow must bind every field the generated matrix supplies, whether or
+    # not any one step reads it.
+    bound = {match.group("field") for match in MATRIX_BINDING.finditer(text)}
     for field in MATRIX_FIELDS:
-        if field not in matrix_variables:
+        if field not in bound:
             failures.append(
                 f"{WORKFLOW} binds no `matrix.{field}`, so its shards no longer "
                 f"take that value from the matrix {MANIFEST} generates"
@@ -702,6 +741,24 @@ def runs_archived_ignored_tests(
             if variable is None or not references_variable(value, variable):
                 return False
     return True
+
+
+def asserts_success(tokens: list[str], variable: str) -> bool:
+    """Return whether one command fails unless `variable` equals `success`.
+
+    A real comparison, not a mention: `echo "$RUN_RESULT was not success"`
+    names the variable and the word and exits zero regardless, which would let
+    the aggregate job pass while every shard failed.
+    """
+    if not tokens or tokens[0] not in ("test", "["):
+        return False
+    words = [word for word in tokens if word != "]"]
+    return any(
+        references_variable(words[index], variable)
+        and words[index + 1] in ("=", "==")
+        and words[index + 2] == "success"
+        for index in range(len(words) - 2)
+    )
 
 
 def references_variable(value: str, variable: str) -> bool:
