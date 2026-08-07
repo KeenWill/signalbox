@@ -3,7 +3,7 @@ build/
 .build/
 xcuserdata/
 *.xcuserstate
-.derivedData/
-.derivedData-macos/
-.derivedData-real-server/
+# Any DerivedData tree, whatever suffix a build script gives it. Enumerating
+# these one at a time let `.derivedDataRelease/` slip past the list.
+.derivedData*/
 .tart-results/

@@ -1,3 +1,6 @@
+// Release builds must not ship the mock fixture payloads; they are reachable
+// only through Debug (and therefore test) configurations.
+#if DEBUG
 import Foundation
 
 enum MockSignalboxFixtures {
@@ -440,3 +443,4 @@ enum MockSignalboxFixtures {
         """
     }
 }
+#endif
