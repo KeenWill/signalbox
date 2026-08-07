@@ -94,6 +94,7 @@ opentelemetry_sdk = { version = "0.32.0", default-features = false, features = [
     "testing",
     "trace",
 ] }
+signalbox-test-bin = { path = "../../crates/test-bin" }
 testcontainers-modules = { version = "0.15.0", default-features = false, features = [
     "postgres",
     "ring",

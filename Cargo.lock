@@ -3178,6 +3178,7 @@ dependencies = [
  "signalbox-model-runtime-anthropic",
  "signalbox-persistence",
  "signalbox-process-protocol",
+ "signalbox-test-bin",
  "signalboxd",
  "sqlx",
  "tempfile",
@@ -3300,6 +3301,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-model-runtime",
+ "signalbox-test-bin",
  "tempfile",
  "tokio",
 ]
@@ -3313,6 +3315,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-model-runtime",
+ "signalbox-test-bin",
  "tempfile",
  "tokio",
 ]
@@ -3389,6 +3392,10 @@ dependencies = [
  "signalbox-domain",
  "uuid",
 ]
+
+[[package]]
+name = "signalbox-test-bin"
+version = "0.0.0"
 
 [[package]]
 name = "signalbox-tool-contract"
@@ -3478,6 +3485,7 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
+ "signalbox-test-bin",
  "signalbox-tool-contract",
  "tokio",
  "toml",
@@ -3630,6 +3638,7 @@ dependencies = [
  "signalbox-persistence",
  "signalbox-process-protocol",
  "signalbox-runner-wire",
+ "signalbox-test-bin",
  "signalbox-tools-basic",
  "signalbox-tools-code-host",
  "signalbox-tools-conversations",
