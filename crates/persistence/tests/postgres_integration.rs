@@ -20090,6 +20090,570 @@ async fn authorize_delegated_model_call_fixture(
     })
 }
 
+struct AuthorizedDelegatedSuccessorFixture {
+    child: SessionId,
+    selection: DirectModelSelection,
+    repository: PostgresModelCallRepository,
+    authorized: AuthorizedModelCall,
+}
+
+async fn authorize_delegated_successor_model_call_fixture(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<AuthorizedDelegatedSuccessorFixture, Box<dyn Error>> {
+    let (_parent, child, _delegated_turn, _spawning_request, selection) =
+        activate_delegated_result_fixture(pool, seed).await?;
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 20));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one delegated successor target forms a catalog");
+    complete_text_turn(
+        pool,
+        child,
+        targets.clone(),
+        model_credential_reference(),
+        seed + 0x100,
+        "complete the delegated initial turn",
+    )
+    .await?;
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x201));
+    let submitted = SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x202,
+                child.as_uuid().as_u128(),
+                "continue after delegated completion",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x203)),
+            Some(successor),
+        )
+        .await?;
+    assert!(matches!(
+        submitted,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    activate_earliest_queued_turn(
+        pool,
+        EarliestQueuedTurnActivation {
+            session: child.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 0x204),
+            starting_frontier: Uuid::from_u128(seed + 0x205),
+            initial_attempt: Uuid::from_u128(seed + 0x206),
+        },
+    )
+    .await?;
+
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x207));
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                child,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x208)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x209)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x20a)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x20b)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 0x20c)),
+                    )
+                },
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
+    ));
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(child, call).await?
+    else {
+        panic!("the accepted-input successor authorizes its exact call")
+    };
+    Ok(AuthorizedDelegatedSuccessorFixture {
+        child,
+        selection,
+        repository,
+        authorized: *authorized,
+    })
+}
+
+async fn reclassify_successor_as_delegated_wake(
+    pool: &PgPool,
+    fixture: &AuthorizedDelegatedSuccessorFixture,
+) -> Result<(), Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;
+         ALTER TABLE session_pending_delivery DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wake_turn_origin DISABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET origin_kind = 'delegation', origin_accepted_input_id = NULL
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.child.into_uuid())
+    .bind(fixture.authorized.turn().into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_pending_delivery
+            (recipient_session_id, delivery_sequence, delivery_kind)
+         VALUES ($1, 1, 'background_result')",
+    )
+    .bind(fixture.child.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wake_turn_origin
+            (turn_id, recipient_session_id, admission_position,
+             first_delivery_sequence, through_delivery_sequence,
+             defaults_version, requested_model_kind,
+             requested_direct_model_selection_id, frozen_model_kind,
+             frozen_direct_model_selection_id)
+         SELECT lifecycle.turn_id, lifecycle.session_id,
+                lifecycle.acceptance_position, 1, 1, 1,
+                'direct', $3, 'direct', $3
+           FROM turn_lifecycle AS lifecycle
+          WHERE lifecycle.session_id = $1 AND lifecycle.turn_id = $2",
+    )
+    .bind(fixture.child.into_uuid())
+    .bind(fixture.authorized.turn().into_uuid())
+    .bind(fixture.selection.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL;
+         ALTER TABLE session_pending_delivery ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wake_turn_origin ENABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// S18 / INV-006 / INV-010: a retained child relationship does not make a
+/// later accepted-input turn subject to delegated initial-result closure.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_successor_completion_rereads_without_delegated_result()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xeb00;
+    let fixture = authorize_delegated_successor_model_call_fixture(&pool, seed).await?;
+    let observation = fixture
+        .authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![
+                AssistantText::try_new(String::from("ordinary successor result"))
+                    .expect("fixture successor result is admitted"),
+            ],
+        });
+    fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            observation.clone(),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x210,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x211)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x212)),
+            )),
+            |_| panic!("the successor completion fixture has no steering"),
+        )
+        .await?;
+
+    assert_eq!(
+        fixture
+            .repository
+            .reread_terminal_observation(fixture.child, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-006 / INV-010: nonterminal observation reread likewise scopes
+/// delegated-result absence to the exact delegation-origin turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_successor_tool_round_rereads_without_delegated_result()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xec00;
+    let fixture = authorize_delegated_successor_model_call_fixture(&pool, seed).await?;
+    let request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x210));
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from("current_time")).expect("valid fixture tool name"),
+                NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                    .expect("bounded fixture arguments"),
+            ),
+        )])
+        .expect("the proposal forms a tool-using response");
+    let observation = fixture
+        .authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            observation.clone(),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x211)),
+                    request,
+                    InitialToolApproval::Confirm,
+                )],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x212)),
+                None,
+            )),
+            |_| panic!("the successor tool-round fixture has no steering"),
+        )
+        .await?;
+
+    assert_eq!(
+        fixture
+            .repository
+            .reread_terminal_observation(fixture.child, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: a terminal background-delivery wake
+/// authenticates its model-call closure without initial-child result evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_wake_completion_rereads_without_child_result()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xed00;
+    let fixture = authorize_delegated_successor_model_call_fixture(&pool, seed).await?;
+    let observation = fixture
+        .authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![
+                AssistantText::try_new(String::from("background wake result"))
+                    .expect("fixture wake result is admitted"),
+            ],
+        });
+    fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            observation.clone(),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x210,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x211)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x212)),
+            )),
+            |_| panic!("the wake completion fixture has no steering"),
+        )
+        .await?;
+    reclassify_successor_as_delegated_wake(&pool, &fixture).await?;
+
+    assert_eq!(
+        fixture
+            .repository
+            .reread_terminal_observation(fixture.child, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: a continuing background-delivery wake
+/// authenticates absence of initial-child result evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_wake_tool_round_rereads_without_child_result()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xee00;
+    let fixture = authorize_delegated_successor_model_call_fixture(&pool, seed).await?;
+    let request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x210));
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from("current_time")).expect("valid fixture tool name"),
+                NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                    .expect("bounded fixture arguments"),
+            ),
+        )])
+        .expect("the proposal forms a tool-using response");
+    let observation = fixture
+        .authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            observation.clone(),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x211)),
+                    request,
+                    InitialToolApproval::Confirm,
+                )],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x212)),
+                None,
+            )),
+            |_| panic!("the wake tool-round fixture has no steering"),
+        )
+        .await?;
+    reclassify_successor_as_delegated_wake(&pool, &fixture).await?;
+
+    assert_eq!(
+        fixture
+            .repository
+            .reread_terminal_observation(fixture.child, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-006 / INV-010: a historical wake between accepted-input turns is
+/// not the baseline that precedes the session's earliest accepted input.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_historical_wake_does_not_replace_accepted_baseline()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xef00;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 2));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 3));
+    let first_turn = TurnId::from_uuid(Uuid::from_u128(seed + 4));
+    let first_accepted = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 5));
+    let second_turn = TurnId::from_uuid(Uuid::from_u128(seed + 6));
+    let second_accepted = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 7));
+    let wake_turn = TurnId::from_uuid(Uuid::from_u128(seed + 8));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(seed + 9, seed + 1, direct(seed + 2)))
+        .await?;
+    let input_repository = SubmitInputRepository::new(pool.clone());
+    assert!(matches!(
+        input_repository
+            .handle(
+                start_input(
+                    seed + 10,
+                    seed + 1,
+                    "first accepted input",
+                    1,
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+                first_accepted,
+                Some(first_turn),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 11),
+            starting_frontier: Uuid::from_u128(seed + 12),
+            initial_attempt: Uuid::from_u128(seed + 13),
+        },
+    )
+    .await?;
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one historical-wake target forms a catalog");
+    complete_text_turn(
+        &pool,
+        session,
+        targets,
+        model_credential_reference(),
+        seed + 0x20,
+        "first accepted result",
+    )
+    .await?;
+    assert!(matches!(
+        input_repository
+            .handle(
+                start_input(
+                    seed + 0x40,
+                    seed + 1,
+                    "second accepted input",
+                    1,
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+                second_accepted,
+                Some(second_turn),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE accepted_input DISABLE TRIGGER ALL;
+         ALTER TABLE queued_input_origin DISABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;
+         ALTER TABLE session_pending_delivery DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wake_turn_origin DISABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE accepted_input SET acceptance_position = 3
+          WHERE session_id = $1 AND accepted_input_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(second_accepted.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE queued_input_origin SET acceptance_position = 3
+          WHERE session_id = $1 AND accepted_input_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(second_accepted.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle SET acceptance_position = 3
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(second_turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_lifecycle
+         SELECT (jsonb_populate_record(
+                    NULL::turn_lifecycle,
+                    to_jsonb(source) || jsonb_build_object(
+                        'turn_id', $3,
+                        'origin_kind', 'delegation',
+                        'origin_accepted_input_id', NULL,
+                        'acceptance_position', 2,
+                        'start_lineage_kind', 'after',
+                        'immediate_predecessor_turn_id', $2
+                    )
+                )).*
+           FROM turn_lifecycle AS source
+          WHERE source.session_id = $1 AND source.turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(first_turn.into_uuid())
+    .bind(wake_turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_pending_delivery
+            (recipient_session_id, delivery_sequence, delivery_kind)
+         VALUES ($1, 1, 'background_result')",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wake_turn_origin
+            (turn_id, recipient_session_id, admission_position,
+             first_delivery_sequence, through_delivery_sequence,
+             defaults_version, requested_model_kind,
+             requested_direct_model_selection_id, frozen_model_kind,
+             frozen_direct_model_selection_id)
+         VALUES ($1, $2, 2, 1, 1, 1, 'direct', $3, 'direct', $3)",
+    )
+    .bind(wake_turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(selection.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE accepted_input ENABLE TRIGGER ALL;
+         ALTER TABLE queued_input_origin ENABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL;
+         ALTER TABLE session_pending_delivery ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wake_turn_origin ENABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    let prior_position: i64 = sqlx::query_scalar(
+        "SELECT max(acceptance_position)::bigint
+           FROM turn_lifecycle
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let third_turn = TurnId::from_uuid(Uuid::from_u128(seed + 0x50));
+    let third = input_repository
+        .handle(
+            start_input(
+                seed + 0x51,
+                seed + 1,
+                "third accepted input",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x52)),
+            Some(third_turn),
+        )
+        .await?;
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(applied),
+    )) = third
+    else {
+        panic!("the historical wake leaves the third accepted input schedulable")
+    };
+    assert_eq!(
+        applied.acceptance_position().as_u64(),
+        u64::try_from(prior_position)? + 1
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn attach_delegation_relationship_fixture(
     pool: &PgPool,
     child: SessionId,
@@ -20313,6 +20877,43 @@ async fn delegated_capability_failure_fixture(
         call,
         spawning_request,
     })
+}
+
+/// S18 / INV-006 / INV-010: a failed delegated initial turn remains a complete
+/// semantic subject when the child accepts its next user turn, even though the
+/// failed call produced no assistant entry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_failed_delegated_subject_allows_successor_input()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xed00;
+    let fixture = delegated_capability_failure_fixture(&pool, seed).await?;
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x100));
+    let outcome = SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x101,
+                fixture.child.as_uuid().as_u128(),
+                "continue after delegated failure",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x102)),
+            Some(successor),
+        )
+        .await?;
+
+    assert!(matches!(
+        outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

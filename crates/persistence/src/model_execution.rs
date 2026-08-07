@@ -1355,16 +1355,37 @@ async fn delegated_terminal_result_matches(
                AND relation.child_session_id = task.child_session_id
              WHERE task.child_session_id = $1
                AND task.turn_id = $2
+        ),
+        origin AS (
+            SELECT EXISTS (
+                       SELECT 1
+                         FROM turn_lifecycle
+                        WHERE session_id = $1
+                          AND turn_id = $2
+                          AND origin_kind = 'delegation'
+                   ) AS delegated,
+                   EXISTS (
+                       SELECT 1
+                         FROM session_delegation_initial_task
+                        WHERE child_session_id = $1
+                          AND turn_id = $2
+                   ) AS initial_task,
+                   EXISTS (
+                       SELECT 1
+                         FROM session_delegation_wake_turn_origin
+                        WHERE recipient_session_id = $1
+                          AND turn_id = $2
+                   ) AS wake
         )
-        SELECT NOT EXISTS (
-                    SELECT 1
-                      FROM session_delegation
-                     WHERE child_session_id = $1
-               )
+        SELECT NOT origin.delegated
+            OR (origin.wake AND NOT origin.initial_task)
             OR (
-                SELECT count(*) = 1
-                  FROM delegated
-                  JOIN session_child_result AS result
+                origin.initial_task
+                AND NOT origin.wake
+                AND (
+                    SELECT count(*) = 1
+                      FROM delegated
+                      JOIN session_child_result AS result
                     ON result.spawning_tool_request_id =
                        delegated.spawning_tool_request_id
                    AND result.event_kind = 'outcome_recorded'
@@ -1473,7 +1494,9 @@ async fn delegated_terminal_result_matches(
                            delegated.spawning_tool_request_id
                        AND wait.awaiting_tool_request_id IS NULL
                  )
-            )",
+                )
+            )
+          FROM origin",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
@@ -1498,14 +1521,34 @@ async fn delegated_nonterminal_result_absent(
                AND task.child_session_id = relation.child_session_id
                AND task.turn_id = $2
              WHERE relation.child_session_id = $1
+        ),
+        origin AS (
+            SELECT EXISTS (
+                       SELECT 1
+                         FROM turn_lifecycle
+                        WHERE session_id = $1
+                          AND turn_id = $2
+                          AND origin_kind = 'delegation'
+                   ) AS delegated,
+                   EXISTS (
+                       SELECT 1
+                         FROM session_delegation_initial_task
+                        WHERE child_session_id = $1
+                          AND turn_id = $2
+                   ) AS initial_task,
+                   EXISTS (
+                       SELECT 1
+                         FROM session_delegation_wake_turn_origin
+                        WHERE recipient_session_id = $1
+                          AND turn_id = $2
+                   ) AS wake
         )
-        SELECT NOT EXISTS (
-                    SELECT 1
-                      FROM session_delegation
-                     WHERE child_session_id = $1
-               )
+        SELECT NOT origin.delegated
+            OR (origin.wake AND NOT origin.initial_task)
             OR (
-                (SELECT count(*) = 1 FROM delegated)
+                origin.initial_task
+                AND NOT origin.wake
+                AND (SELECT count(*) = 1 FROM delegated)
                 AND NOT EXISTS (
                     SELECT 1
                       FROM delegated
@@ -1534,7 +1577,8 @@ async fn delegated_nonterminal_result_absent(
                         ON delivery.spawning_tool_request_id =
                            delegated.spawning_tool_request_id
                 )
-            )",
+            )
+          FROM origin",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
