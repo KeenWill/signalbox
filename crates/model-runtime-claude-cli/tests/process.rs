@@ -120,7 +120,7 @@ async fn file_delivery_materializes_private_claude_settings_without_direct_child
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
-            .expect("the test working directory is owner-accessible under any process umask");
+            .expect("the test working directory is user-accessible under any process umask");
     }
     let runtime = file_delivery_runtime(temporary.path(), fixtures::FILE_DELIVERED_CREDENTIAL);
     let prepared = prepare(
