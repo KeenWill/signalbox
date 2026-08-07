@@ -39,20 +39,21 @@ scopes, delegated transcript origins, foreground-result closure, pre-outbox
 cascade locks, typed delegation wake origins, and exact delegation update and
 wake obligations were verified through this PR
 (`agent/delegation-persistence-schema`); the delegated child-input, await,
-peer-message, and terminal-observation locks plus wait/message replay satellites
-were verified through this PR (`agent/delegation-runtime-persistence-v2`); the
-model-settings command fields, immutable evidence, snapshot projection, and
-typed outbox records were verified through this PR
-(`agent/model-settings-persistence`); the defaults-replacement pointer-lock
-admission is verified through this PR (`agent/model-settings-execution`). This
-page covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+peer-message, terminal-observation, and restart-recovery locks plus wait/message
+replay satellites and headers were verified through this PR
+(`agent/delegation-runtime-persistence-v2`); the model-settings command fields,
+immutable evidence, snapshot projection, and typed outbox records were verified
+through this PR (`agent/model-settings-persistence`); the defaults-replacement
+pointer-lock admission is verified through this PR
+(`agent/model-settings-execution`). This page covers the Postgres representation
+in `crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -659,6 +660,15 @@ Locks per transaction, in acquisition order:
   prevents either side from holding an endpoint session while waiting for a
   scheduler held by the other.
 
+- **Delegated restart-recovery transactions**: a nonlocking read selects the
+  candidate active child turn. Recovery then takes the same canonical endpoint
+  sessions, endpoint schedulers, and relationship prefix as terminal observation
+  before it rechecks the active turn and classifies any model-call or
+  tool-attempt loss. If the candidate changed while the prefix was acquired, the
+  transaction rolls back for a later scheduler pass. Known tool-crash failure
+  and its typed parent result therefore commit under the same acyclic endpoint
+  order as peer messages.
+
 - **Delegated await transactions**: await first locks its issuing delivery
   session row `FOR NO KEY UPDATE`, then that session's `session_scheduler` row
   `FOR UPDATE`, and only then the exact `session_delegation` row `FOR UPDATE`.
@@ -1096,32 +1106,36 @@ turn's `awaiting_child` phase; a background row cannot and instead requires the
 exact completed effect-free attempt and normalized registration receipt for its
 awaiting request. Equal wait replay independently authenticates that exact
 terminal attempt: the foreground arm requires its typed child-wait evidence and
-the background arm requires its normalized receipt. `session_message` is
+the background arm requires its normalized receipt; both arms also authenticate
+the exact update satellite and global outbox header. `session_message` is
 append-only, uniquely orders messages per relationship, and requires exact
 parent/child sender and recipient plus the sending tool request with its
 complete session, turn, and request provenance. Equal message replay
 authenticates both that provenance and the exact completed external-effect
-attempt carrying its normalized receipt. A concurrent global `message_id` claim
-loser is a typed message-identity collision, not an unclassified database
-failure. `session_child_result` has at most one row per spawning request and
-carries exactly one returned-text, failed, stopped, or cancelled shape with
-child turn provenance for returned, failed, result-unavailable, and
-child-originated terminal outcomes, or one of the same exclusive
-parent-turn-command and parent-goal-command provenance arms for a policy-driven
-stop or cancellation. Delivery satellites bind messages/results to their exact
-semantic entries; no transcript query supplies result content. Every pending
-message and background result delivery additionally receives one positive
-recipient-wide `delivery_sequence` under the recipient session lock. That
-sequence is unique and gap-free per recipient across both kinds; relationship
-ordinals remain relationship-local evidence and never order two different
-relationships. Foreground results stay ordered by their exact awaiting request
-and do not consume an inbox sequence. Their semantic entry repeats that awaiting
-request as the ordinary logical tool-result correlation, so the unchanged
-proposal-order and single-result checks admit it as the `await_session` result
-without admitting a second result for the same request. Tool-batch outbox
-decoding and context-compaction evidence count that foreground correlation as
-one tool result; a background result has no tool-result correlation and counts
-as neither one.
+attempt carrying its normalized receipt, plus the exact update/wake satellites
+and their global outbox headers. A concurrent global `message_id` claim loser is
+a typed message-identity collision, not an unclassified database failure.
+`session_child_result` has at most one row per spawning request and carries
+exactly one returned-text, failed, stopped, or cancelled shape with child turn
+provenance for returned, failed, result-unavailable, and child-originated
+terminal outcomes, or one of the same exclusive parent-turn-command and
+parent-goal-command provenance arms for a policy-driven stop or cancellation. A
+known provider failure, a pre-send capability failure, or a known effect-free
+tool-crash closure publishes the same typed failed child result in its terminal
+transaction. Delivery satellites bind messages/results to their exact semantic
+entries; no transcript query supplies result content. Every pending message and
+background result delivery additionally receives one positive recipient-wide
+`delivery_sequence` under the recipient session lock. That sequence is unique
+and gap-free per recipient across both kinds; relationship ordinals remain
+relationship-local evidence and never order two different relationships.
+Foreground results stay ordered by their exact awaiting request and do not
+consume an inbox sequence. Their semantic entry repeats that awaiting request as
+the ordinary logical tool-result correlation, so the unchanged proposal-order
+and single-result checks admit it as the `await_session` result without
+admitting a second result for the same request. Tool-batch outbox decoding and
+context-compaction evidence count that foreground correlation as one tool
+result; a background result has no tool-result correlation and counts as neither
+one.
 
 `session_delegation_wake_turn_origin` distinguishes an idle-recipient wake from
 the delegated child's initial task. It binds the queued turn to one contiguous

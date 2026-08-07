@@ -2926,6 +2926,10 @@ impl AcceptedInputSchedulingReconstitutionInput {
         self,
         consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
     ) -> Self;
+    pub fn with_delegated_turn_facts(
+        self,
+        delegated_turns: Vec<TurnId>,
+    ) -> Self;
     pub fn with_steering_continuation_rounds(
         self,
         steering_continuation_rounds: Vec<SteeringContinuationRoundReconstitutionInput>,
@@ -2948,6 +2952,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
     // accessors: session(), imported_session(), turns(), semantic_entries(),
     // snapshots(), pinned_targets(), model_calls(), compaction_calls(),
     // compactions(), consumed_steering(), delegated_consumed_steering(),
+    // delegated_turns(),
     // steering_continuation_rounds(), continuation_rounds(),
     // active_acceptance_tail()
 }
@@ -2971,6 +2976,7 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     SemanticEntrySubjectMissing { entry: SemanticTranscriptEntryId },
     SemanticEntryStateMismatch { entry: SemanticTranscriptEntryId },
     DuplicateSemanticEntryForSubject { entry: SemanticTranscriptEntryId },
+    DelegatedTurnFactMismatch { turn: TurnId },
     ConsumedSteeringSessionMismatch { accepted_input: AcceptedInputId },
     DuplicateConsumedSteering { accepted_input: AcceptedInputId },
     SteeringSemanticEntryMismatch { entry: SemanticTranscriptEntryId },

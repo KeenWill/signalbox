@@ -360,12 +360,12 @@ impl SessionDelegationRepository {
                     DelegationOperationRejection::RelationshipNotFound,
                 ));
             }
+            if dispatch.request() != request.request() {
+                return Ok(RecordDelegationMessageOutcome::Rejected(
+                    DelegationOperationRejection::StaleDispatch,
+                ));
+            }
             if let Some(receipt) = load_message_replay(&mut transaction, &request).await? {
-                if dispatch.request() != request.request() {
-                    return Ok(RecordDelegationMessageOutcome::Rejected(
-                        DelegationOperationRejection::StaleDispatch,
-                    ));
-                }
                 validate_message_replay_attempt(&mut transaction, dispatch, receipt).await?;
                 return Ok(RecordDelegationMessageOutcome::Recorded(receipt));
             }
@@ -739,12 +739,19 @@ async fn validate_wait_replay_update(
     wait: DelegationWait,
 ) -> Result<(), SessionDelegationRepositoryError> {
     let row = sqlx::query(
-        "SELECT event_kind, storage_version, session_id, update_kind,
-                spawning_tool_request_id, child_session_id,
-                awaiting_tool_request_id, wait_mode
-           FROM delegation_update_outbox_event
-          WHERE update_kind = 'child_waiting'
-            AND awaiting_tool_request_id = $1",
+        "SELECT update.event_sequence, update.event_kind,
+                update.storage_version, update.session_id, update.update_kind,
+                update.spawning_tool_request_id, update.child_session_id,
+                update.awaiting_tool_request_id, update.wait_mode,
+                header.event_sequence AS header_event_sequence,
+                header.event_kind AS header_event_kind,
+                header.storage_version AS header_storage_version,
+                header.session_id AS header_session_id
+           FROM delegation_update_outbox_event AS update
+           LEFT JOIN delegation_outbox_event AS header
+             ON header.event_sequence = update.event_sequence
+          WHERE update.update_kind = 'child_waiting'
+            AND update.awaiting_tool_request_id = $1",
     )
     .bind(tool_request_id_to_uuid(wait.awaiting_request()))
     .fetch_optional(connection)
@@ -752,9 +759,17 @@ async fn validate_wait_replay_update(
     .ok_or(SessionDelegationCorruption::Missing(
         "wait update outbox satellite",
     ))?;
-    if required::<String>(&row, "event_kind")? != "delegation_update"
-        || required::<i16>(&row, "storage_version")? != STORAGE_VERSION
-        || session_id_from_uuid(required(&row, "session_id")?) != wait.parent()
+    let event_sequence: Decimal = required(&row, "event_sequence")?;
+    let event_kind: String = required(&row, "event_kind")?;
+    let storage_version: i16 = required(&row, "storage_version")?;
+    let session_id: Uuid = required(&row, "session_id")?;
+    if event_kind != "delegation_update"
+        || storage_version != STORAGE_VERSION
+        || session_id_from_uuid(session_id) != wait.parent()
+        || required::<Decimal>(&row, "header_event_sequence")? != event_sequence
+        || required::<String>(&row, "header_event_kind")? != event_kind
+        || required::<i16>(&row, "header_storage_version")? != storage_version
+        || required::<Uuid>(&row, "header_session_id")? != session_id
         || required::<String>(&row, "update_kind")? != "child_waiting"
         || tool_request_id_from_uuid(required(&row, "spawning_tool_request_id")?)
             != wait.spawning_request()
@@ -1616,7 +1631,17 @@ async fn load_message_replay(
                 wake_event.session_id AS wake_session_id,
                 wake_event.spawning_tool_request_id AS wake_spawning_request_id,
                 wake_event.subject_kind AS wake_subject_kind,
-                wake_event.message_id AS wake_message_id
+                wake_event.message_id AS wake_message_id,
+                update_event.event_sequence AS update_event_sequence,
+                update_header.event_sequence AS update_header_event_sequence,
+                update_header.event_kind AS update_header_event_kind,
+                update_header.storage_version AS update_header_storage_version,
+                update_header.session_id AS update_header_session_id,
+                wake_event.event_sequence AS wake_event_sequence,
+                wake_header.event_sequence AS wake_header_event_sequence,
+                wake_header.event_kind AS wake_header_event_kind,
+                wake_header.storage_version AS wake_header_storage_version,
+                wake_header.session_id AS wake_header_session_id
            FROM session_delegation_event AS event
            LEFT JOIN session_delegation AS relation
              ON relation.spawning_tool_request_id = event.spawning_tool_request_id
@@ -1633,9 +1658,13 @@ async fn load_message_replay(
            LEFT JOIN delegation_update_outbox_event AS update_event
              ON update_event.update_kind = 'session_message'
             AND update_event.message_id = message.message_id
+           LEFT JOIN delegation_outbox_event AS update_header
+             ON update_header.event_sequence = update_event.event_sequence
            LEFT JOIN delegation_wake_outbox_event AS wake_event
              ON wake_event.subject_kind = 'message'
             AND wake_event.message_id = message.message_id
+           LEFT JOIN delegation_outbox_event AS wake_header
+             ON wake_header.event_sequence = wake_event.event_sequence
           WHERE event.event_kind = 'message_delivered'
             AND event.provenance_tool_request_id = $1",
     )
@@ -1663,6 +1692,10 @@ async fn load_message_replay(
     let message_id = required::<Uuid>(&row, "message_id")?;
     let message_ordinal = decode_ordinal(required(&row, "event_ordinal")?)?;
     let spawning_request = required::<Uuid>(&row, "message_spawning_request_id")?;
+    let update_event_kind: String = required(&row, "update_event_kind")?;
+    let wake_event_kind: String = required(&row, "wake_event_kind")?;
+    let update_event_sequence: Decimal = required(&row, "update_event_sequence")?;
+    let wake_event_sequence: Decimal = required(&row, "wake_event_sequence")?;
     let endpoints = RelationEndpoints { parent, child };
     let recipient = message_recipient(direction, endpoints);
     if content != request.content().as_str()
@@ -1671,9 +1704,13 @@ async fn load_message_replay(
         || pending_sequence != delivery_sequence
         || delivery_kind != "message"
         || pending_kind != delivery_kind
-        || required::<String>(&row, "update_event_kind")? != "delegation_update"
+        || update_event_kind != "delegation_update"
         || required::<i16>(&row, "update_storage_version")? != STORAGE_VERSION
         || session_id_from_uuid(required(&row, "update_session_id")?) != recipient
+        || required::<Decimal>(&row, "update_header_event_sequence")? != update_event_sequence
+        || required::<String>(&row, "update_header_event_kind")? != "delegation_update"
+        || required::<i16>(&row, "update_header_storage_version")? != STORAGE_VERSION
+        || session_id_from_uuid(required(&row, "update_header_session_id")?) != recipient
         || required::<String>(&row, "update_kind")? != "session_message"
         || required::<Uuid>(&row, "update_spawning_request_id")? != spawning_request
         || required::<Uuid>(&row, "update_message_id")? != message_id
@@ -1682,9 +1719,13 @@ async fn load_message_replay(
         || session_id_from_uuid(required(&row, "update_recipient_session_id")?) != recipient
         || decode_ordinal(required(&row, "update_message_ordinal")?)? != message_ordinal
         || required::<String>(&row, "update_content_text")? != content
-        || required::<String>(&row, "wake_event_kind")? != "delegation_wake"
+        || wake_event_kind != "delegation_wake"
         || required::<i16>(&row, "wake_storage_version")? != STORAGE_VERSION
         || session_id_from_uuid(required(&row, "wake_session_id")?) != recipient
+        || required::<Decimal>(&row, "wake_header_event_sequence")? != wake_event_sequence
+        || required::<String>(&row, "wake_header_event_kind")? != "delegation_wake"
+        || required::<i16>(&row, "wake_header_storage_version")? != STORAGE_VERSION
+        || session_id_from_uuid(required(&row, "wake_header_session_id")?) != recipient
         || required::<Uuid>(&row, "wake_spawning_request_id")? != spawning_request
         || required::<String>(&row, "wake_subject_kind")? != "message"
         || required::<Uuid>(&row, "wake_message_id")? != message_id
