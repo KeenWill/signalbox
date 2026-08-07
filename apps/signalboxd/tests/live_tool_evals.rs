@@ -53,8 +53,11 @@ use signalbox_model_runtime::{
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiPreparedRequest, OpenAiRuntime};
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, local_test_connection_options, migrate,
-    model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
-    start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
+    model_execution::PostgresModelCallRepository,
+    process_read::{ProcessReadRepository, ProcessTranscriptEntry, ProcessTurnState},
+    scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository,
+    submit_input::SubmitInputRepository,
     tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_tools_exec::{
@@ -126,6 +129,7 @@ const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
 const ARBITRARY_EVAL_SELECTION_ID: u128 = 0x9101;
 const ARBITRARY_EVAL_PROVIDER_ID: u128 = 0x9102;
 const ARBITRARY_EVAL_APPROVAL_COMMAND_ID: u128 = 0x9103;
+const ARBITRARY_EVAL_REQUEST_ID: u128 = 0x9104;
 const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
 
 type EvalResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -542,7 +546,8 @@ impl FamilySuite {
 
     fn natural_state_passed(&self, snapshot: &CaseSnapshot) -> EvalResult<bool> {
         match self.family {
-            EvalFamily::Git => git_natural_state_passed(self.workspace.path()),
+            EvalFamily::Git => Ok(git_natural_state_passed(self.workspace.path())?
+                && snapshot.git_natural_requests_passed()?),
             EvalFamily::Workspace => {
                 let bytes_match = fs::read(self.workspace.path().join(WORKSPACE_ANSWER_PATH))
                     .ok()
@@ -614,10 +619,18 @@ fn git_natural_state_passed(root: &Path) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let head = repository.head()?.peel_to_commit()?;
     let message_matches = head.message()? == GIT_NATURAL_MESSAGE;
-    let tree_contains_path = head.tree()?.get_path(Path::new(GIT_NATURAL_PATH)).is_ok();
+    let parent = head.parent(0)?;
+    let parent_tree = parent.tree()?;
+    let head_tree = head.tree()?;
+    let diff = repository.diff_tree_to_tree(Some(&parent_tree), Some(&head_tree), None)?;
+    let changed_paths = diff
+        .deltas()
+        .filter_map(|delta| delta.new_file().path())
+        .collect::<Vec<_>>();
+    let commit_changes_only_natural_path = changed_paths == [Path::new(GIT_NATURAL_PATH)];
     let natural_path_is_clean =
         repository.status_file(Path::new(GIT_NATURAL_PATH))? == Status::CURRENT;
-    Ok(message_matches && tree_contains_path && natural_path_is_clean)
+    Ok(message_matches && commit_changes_only_natural_path && natural_path_is_clean)
 }
 
 #[derive(Clone, Debug)]
@@ -1215,16 +1228,18 @@ const fn default_configuration() -> PerInputConfigurationChoices {
 }
 
 struct CaseSnapshot {
-    turn_disposition: Option<String>,
+    turn_disposition: SnapshotTurnDisposition,
     requests: Vec<RequestSnapshot>,
     model_calls: i64,
 }
 
 #[derive(sqlx::FromRow)]
 struct RequestSnapshot {
+    request_id: Uuid,
     name: String,
     arguments_text: String,
-    attempt_disposition: Option<String>,
+    #[sqlx(skip)]
+    attempt_completed: bool,
 }
 
 impl RequestSnapshot {
@@ -1235,22 +1250,32 @@ impl RequestSnapshot {
 
 impl CaseSnapshot {
     async fn read(pool: &PgPool, session: SessionId, turn: TurnId) -> EvalResult<Self> {
-        let turn_disposition = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT terminal_disposition_kind
-               FROM turn_lifecycle
-              WHERE session_id = $1 AND turn_id = $2",
-        )
-        .bind(session.into_uuid())
-        .bind(turn.into_uuid())
-        .fetch_one(pool)
-        .await?;
-        let requests = sqlx::query_as::<_, RequestSnapshot>(
-            "SELECT request.tool_name AS name,
-                    request.arguments_text,
-                    attempt.terminal_disposition_kind AS attempt_disposition
+        let transcript = ProcessReadRepository::new(pool.clone())
+            .read_transcript(session)
+            .await?
+            .ok_or_else(|| io::Error::other("the eval transcript session is missing"))?;
+        let turn_state = transcript
+            .turns()
+            .iter()
+            .find(|candidate| candidate.turn() == turn)
+            .ok_or_else(|| io::Error::other("the eval transcript turn is missing"))?
+            .state();
+        let turn_disposition = SnapshotTurnDisposition::from_process_state(turn_state)?;
+        let completed_requests = transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ProcessTranscriptEntry::ToolExecutionResult { request, .. } => {
+                    Some(request.into_uuid())
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let mut requests = sqlx::query_as::<_, RequestSnapshot>(
+            "SELECT request.request_id,
+                    request.tool_name AS name,
+                    request.arguments_text
                FROM tool_request AS request
-               LEFT JOIN tool_attempt AS attempt
-                 ON attempt.request_id = request.request_id
               WHERE request.session_id = $1 AND request.turn_id = $2
               ORDER BY request.producing_model_call_id, request.request_ordinal",
         )
@@ -1258,6 +1283,9 @@ impl CaseSnapshot {
         .bind(turn.into_uuid())
         .fetch_all(pool)
         .await?;
+        for request in &mut requests {
+            request.attempt_completed = completed_requests.contains(&request.request_id);
+        }
         let model_calls = sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM model_call WHERE session_id = $1 AND turn_id = $2",
         )
@@ -1300,6 +1328,20 @@ impl CaseSnapshot {
         read.zip(write).is_some_and(|(read, write)| read < write)
     }
 
+    fn git_natural_requests_passed(&self) -> EvalResult<bool> {
+        let expected_stage = normalized_arguments_text(r#"{"paths":["eval.txt"]}"#)?;
+        let expected_commit = normalized_arguments_text(r#"{"message":"tool eval commit"}"#)?;
+        let stage = self.requests.iter().position(|request| {
+            request.name == GIT_STAGE_NAME && request.arguments_text == expected_stage
+        });
+        let commit = self.requests.iter().position(|request| {
+            request.name == GIT_CREATE_COMMIT_NAME && request.arguments_text == expected_commit
+        });
+        Ok(stage
+            .zip(commit)
+            .is_some_and(|(stage, commit)| stage < commit))
+    }
+
     fn web_natural_requests_passed(&self) -> EvalResult<bool> {
         let expected_query = normalized_arguments_text(r#"{"query":"Signalbox tool evaluation"}"#)?;
         let expected_url = normalized_arguments_text(r#"{"url":"https://example.com/eval"}"#)?;
@@ -1312,6 +1354,38 @@ impl CaseSnapshot {
         Ok(search
             .zip(fetch)
             .is_some_and(|(search, fetch)| search < fetch))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SnapshotTurnDisposition {
+    Completed,
+    Other,
+}
+
+impl SnapshotTurnDisposition {
+    fn from_process_state(state: &ProcessTurnState) -> EvalResult<Self> {
+        match state {
+            ProcessTurnState::Completed { .. } => Ok(Self::Completed),
+            ProcessTurnState::Failed {
+                terminal_model_call: Some(call),
+                ..
+            } if call.provider_failure_cause().is_some() => {
+                Err(io::Error::other("the eval model provider committed a known failure").into())
+            }
+            _ => Ok(Self::Other),
+        }
+    }
+
+    const fn is_completed(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Other => "not completed",
+        }
     }
 }
 
@@ -1333,13 +1407,13 @@ impl CaseOutcome {
         };
         EvalDisposition::from_passed(
             self.execution_completed
-                && self.snapshot.turn_disposition.as_deref() == Some("completed")
+                && self.snapshot.turn_disposition.is_completed()
                 && self.snapshot.model_calls >= MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP
                 && self.forced_result_passed(target)
                 && self.snapshot.requests.len() == 1
                 && self.snapshot.requests[0].name == target
                 && self.snapshot.requests[0].arguments_text == expected_arguments
-                && self.snapshot.requests[0].attempt_disposition.as_deref() == Some("completed"),
+                && self.snapshot.requests[0].attempt_completed,
         )
     }
 
@@ -1352,7 +1426,7 @@ impl CaseOutcome {
         };
         EvalDisposition::from_passed(
             self.execution_completed
-                && self.snapshot.turn_disposition.as_deref() == Some("completed")
+                && self.snapshot.turn_disposition.is_completed()
                 && !self.tool_results.is_empty()
                 && required_names.iter().all(|required| {
                     self.snapshot
@@ -1364,7 +1438,7 @@ impl CaseOutcome {
                     .snapshot
                     .requests
                     .iter()
-                    .all(|request| request.attempt_disposition.as_deref() == Some("completed"))
+                    .all(|request| request.attempt_completed)
                 && (family != EvalFamily::Exec
                     || (self.snapshot.requests.len() == 1
                         && self.snapshot.requests[0].name == SANDBOXED_EXEC_NAME)),
@@ -1412,11 +1486,12 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
             is_error: false,
         }],
         snapshot: CaseSnapshot {
-            turn_disposition: Some(String::from("completed")),
+            turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
-                attempt_disposition: Some(String::from("completed")),
+                attempt_completed: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -1434,11 +1509,12 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
         execution_completed: true,
         tool_results: Vec::new(),
         snapshot: CaseSnapshot {
-            turn_disposition: Some(String::from("completed")),
+            turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
-                attempt_disposition: Some(String::from("completed")),
+                attempt_completed: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -1458,11 +1534,12 @@ fn unforced_git_tier_requires_both_task_tools() {
             is_error: false,
         }],
         snapshot: CaseSnapshot {
-            turn_disposition: Some(String::from("completed")),
+            turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(GIT_STAGE_NAME),
                 arguments_text: String::from(r#"{"paths":["eval.txt"]}"#),
-                attempt_disposition: Some(String::from("completed")),
+                attempt_completed: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -1472,6 +1549,31 @@ fn unforced_git_tier_requires_both_task_tools() {
         outcome.natural_loop_disposition(EvalFamily::Git),
         EvalDisposition::Miss
     );
+}
+
+#[test]
+fn git_natural_state_rejects_a_commit_with_an_unrelated_fixture() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    seed_git_repository(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    stage_path(workspace.path(), GIT_STAGE_PATH)?;
+    let repository = Repository::open(workspace.path())?;
+    let mut index = repository.index()?;
+    let tree_id = index.write_tree()?;
+    let tree = repository.find_tree(tree_id)?;
+    let parent = repository.head()?.peel_to_commit()?;
+    let signature = Signature::now(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL)?;
+    repository.commit(
+        Some("HEAD"),
+        &signature,
+        &signature,
+        GIT_NATURAL_MESSAGE,
+        &tree,
+        &[&parent],
+    )?;
+
+    assert!(!git_natural_state_passed(workspace.path())?);
+    Ok(())
 }
 
 #[test]
@@ -1498,11 +1600,12 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
             is_error: false,
         }],
         snapshot: CaseSnapshot {
-            turn_disposition: Some(String::from("completed")),
+            turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(target),
                 arguments_text: String::from(r#"{"unexpected":true}"#),
-                attempt_disposition: Some(String::from("completed")),
+                attempt_completed: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -1544,13 +1647,14 @@ fn forced_exec_tier_rejects_a_nonzero_process_result() {
             is_error: false,
         }],
         snapshot: CaseSnapshot {
-            turn_disposition: Some(String::from("completed")),
+            turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(target),
                 arguments_text: String::from(
                     r#"{"program":"printf","arguments":["forced sandboxed eval\n"],"working_directory":".","timeout_seconds":30}"#,
                 ),
-                attempt_disposition: Some(String::from("completed")),
+                attempt_completed: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -1570,17 +1674,19 @@ fn unforced_exec_tier_rejects_an_additional_tool_call() {
             is_error: false,
         }],
         snapshot: CaseSnapshot {
-            turn_disposition: Some(String::from("completed")),
+            turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![
                 RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                     name: String::from(SANDBOXED_EXEC_NAME),
                     arguments_text: String::from("{}"),
-                    attempt_disposition: Some(String::from("completed")),
+                    attempt_completed: true,
                 },
                 RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                     name: String::from(CARGO_DIAGNOSTICS_NAME),
                     arguments_text: String::from("{}"),
-                    attempt_disposition: Some(String::from("completed")),
+                    attempt_completed: true,
                 },
             ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -1596,19 +1702,21 @@ fn unforced_exec_tier_rejects_an_additional_tool_call() {
 #[test]
 fn workspace_natural_state_requires_the_read_before_the_write() {
     let snapshot = CaseSnapshot {
-        turn_disposition: Some(String::from("completed")),
+        turn_disposition: SnapshotTurnDisposition::Completed,
         requests: vec![
             RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(WRITE_FILE_NAME),
                 arguments_text: String::from(
                     r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
                 ),
-                attempt_disposition: Some(String::from("completed")),
+                attempt_completed: true,
             },
             RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(READ_FILE_NAME),
                 arguments_text: String::from(r#"{"path":"brief.txt"}"#),
-                attempt_disposition: Some(String::from("completed")),
+                attempt_completed: true,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -1620,17 +1728,19 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
 #[test]
 fn web_natural_state_requires_the_exact_query() -> EvalResult {
     let snapshot = CaseSnapshot {
-        turn_disposition: Some(String::from("completed")),
+        turn_disposition: SnapshotTurnDisposition::Completed,
         requests: vec![
             RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(WEB_SEARCH_NAME),
                 arguments_text: String::from(r#"{"query":"different query"}"#),
-                attempt_disposition: Some(String::from("completed")),
+                attempt_completed: true,
             },
             RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(WEB_FETCH_NAME),
                 arguments_text: String::from(r#"{"url":"https://example.com/eval"}"#),
-                attempt_disposition: Some(String::from("completed")),
+                attempt_completed: true,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -1685,11 +1795,7 @@ fn write_report(report: &FamilyReport) -> EvalResult {
     for outcome in &report.forced {
         let target = outcome.target.as_deref().unwrap_or("missing target");
         let result = outcome.forced_disposition().label();
-        let turn = outcome
-            .snapshot
-            .turn_disposition
-            .as_deref()
-            .unwrap_or("not terminal");
+        let turn = outcome.snapshot.turn_disposition.label();
         markdown.push_str(&format!(
             "| `{target}` | {result} | {} | {} | `{turn}` |\n",
             outcome.snapshot.called_names(),
