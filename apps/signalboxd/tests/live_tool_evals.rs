@@ -506,6 +506,7 @@ impl FamilySuite {
         Ok(Self {
             family: EvalFamily::Exec,
             workspace,
+            git_seed: None,
             catalog: MergedCatalog::try_new([
                 sandboxed_catalog,
                 unsandboxed_catalog,
