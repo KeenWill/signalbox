@@ -5265,6 +5265,20 @@ pub enum DelegationToolRequestState {
     AttemptEnded,
 }
 
+impl DelegationToolRequestState {
+    /// Returns the stable wire spelling used by diagnostics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Denied => "denied",
+            Self::Approved => "approved",
+            Self::Prepared => "prepared",
+            Self::Closed => "closed",
+            Self::AttemptEnded => "attempt_ended",
+        }
+    }
+}
+
 /// Closed relationship outcome carried by delegation updates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -6900,6 +6914,7 @@ impl ServerMessage {
                 entry,
                 ..
             } => validate_delegation_transcript_entry(*source_session_id, entry)?,
+            Self::SessionSpawned { .. } => {}
             _ => {}
         }
         Ok(())
@@ -12753,10 +12768,9 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_receipt_shapes_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_child_result_rejects_repeated_spawn_and_await_request_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
         const REPEATED_REQUEST_FRAME_REQUEST: u64 = 48;
-        const ZERO_DELIVERY_FRAME_REQUEST: u64 = 49;
-        const FOREGROUND_REGISTRATION_FRAME_REQUEST: u64 = 50;
         let ids = delegation_wire_identities();
         let repeated_request = ServerFrame::try_new(
             request(REPEATED_REQUEST_FRAME_REQUEST)?,
@@ -12773,6 +12787,16 @@ mod tests {
                 },
             },
         );
+
+        assert_eq!(repeated_request, Err(FrameValidationError::DelegationShape));
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_message_receipt_rejects_zero_delivery_sequence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const ZERO_DELIVERY_FRAME_REQUEST: u64 = 49;
+        let ids = delegation_wire_identities();
         let zero_delivery = ServerFrame::try_new(
             request(ZERO_DELIVERY_FRAME_REQUEST)?,
             ServerMessage::SessionMessageSent {
@@ -12783,6 +12807,16 @@ mod tests {
                 delivery_sequence: CanonicalU64::new(0),
             },
         );
+
+        assert_eq!(zero_delivery, Err(FrameValidationError::DelegationShape));
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_await_registration_rejects_foreground_mode() -> Result<(), Box<dyn std::error::Error>>
+    {
+        const FOREGROUND_REGISTRATION_FRAME_REQUEST: u64 = 50;
+        let ids = delegation_wire_identities();
         let foreground_registration = ServerFrame::try_new(
             request(FOREGROUND_REGISTRATION_FRAME_REQUEST)?,
             ServerMessage::SessionAwaitRegistered {
@@ -12792,8 +12826,6 @@ mod tests {
             },
         );
 
-        assert_eq!(repeated_request, Err(FrameValidationError::DelegationShape));
-        assert_eq!(zero_delivery, Err(FrameValidationError::DelegationShape));
         assert_eq!(
             foreground_registration,
             Err(FrameValidationError::DelegationShape)

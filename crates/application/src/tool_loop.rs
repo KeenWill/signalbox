@@ -856,6 +856,32 @@ where
     TransactionError: Error + 'static,
     ExecutorError: Error + 'static,
 {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Load(error)
+            | Self::Prepare(error)
+            | Self::Authorize(error)
+            | Self::AuthorizationReconciliation(error)
+            | Self::PreflightCommit(error)
+            | Self::ExecutorCorrelationMismatchCrashClassification(error)
+            | Self::ObservationCommit(error)
+            | Self::ObservationReconciliation(error)
+            | Self::DurableCompletionReconciliation(error)
+            | Self::ChildWaitReconciliation(error)
+            | Self::CrashClassification(error)
+            | Self::Continuation(error) => Some(error),
+            Self::AuthorizationReread { reread_error, .. } => Some(reread_error),
+            Self::Executor(error) => Some(error),
+            Self::ExecutorCrashClassification {
+                classification_error,
+                ..
+            } => Some(classification_error),
+            Self::ExecutorCorrelationMismatch
+            | Self::DurableCompletionMismatch
+            | Self::ChildWaitMismatch
+            | Self::CatalogDrift => None,
+        }
+    }
 }
 
 impl<TransactionError, ExecutorError> ClassifyOperatorFailure
@@ -2089,6 +2115,31 @@ mod tests {
                 Self::CommitAmbiguous => "fake commit-ambiguous tool-loop failure",
             })
         }
+    }
+
+    #[test]
+    fn durable_completion_reconciliation_exposes_transaction_source() {
+        let error =
+            ToolExecutionServiceError::<FakeError, FakeError>::DurableCompletionReconciliation(
+                FakeError::Ordinary,
+            );
+
+        assert_eq!(
+            error.source().map(ToString::to_string),
+            Some(String::from("fake tool-loop failure"))
+        );
+    }
+
+    #[test]
+    fn child_wait_reconciliation_exposes_transaction_source() {
+        let error = ToolExecutionServiceError::<FakeError, FakeError>::ChildWaitReconciliation(
+            FakeError::Ordinary,
+        );
+
+        assert_eq!(
+            error.source().map(ToString::to_string),
+            Some(String::from("fake tool-loop failure"))
+        );
     }
 
     impl Error for FakeError {}

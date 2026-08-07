@@ -18,7 +18,7 @@ use signalbox_application::{
     InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
     ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolCatalog, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
+    SubmitInputService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
     ToolExecutorEvidence, ToolInputSchema, UuidV7SessionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator,
     UuidV7ToolLoopIdGenerator,
@@ -783,12 +783,63 @@ fn assert_commissioned_catalog(operation: &ModelOperation<ModelCallId>, expected
     assert_eq!(names, expected_names);
 }
 
-fn commissioned_catalog_names(catalog: &impl ToolCatalog) -> Vec<String> {
-    catalog
-        .definitions()
-        .iter()
-        .map(|definition| definition.name().as_str().to_owned())
-        .collect()
+fn commissioned_catalog_names() -> Vec<String> {
+    [
+        "apply_patch",
+        "await_session",
+        "cargo_diagnostics",
+        "change_request_changed_files",
+        "change_request_checks_status",
+        "change_request_ci_job_log",
+        "change_request_comment",
+        "change_request_convergence_state",
+        "change_request_file_patch",
+        "change_request_rerun_failed_jobs",
+        "change_request_review_threads",
+        "change_request_stack_state",
+        "change_request_summary",
+        "change_request_thread_inventory",
+        "change_request_thread_reply",
+        "change_request_thread_resolve",
+        "current_time",
+        "echo",
+        "edit_file",
+        "git_branch_create",
+        "git_branch_switch",
+        "git_create_commit",
+        "git_diff",
+        "git_log",
+        "git_stage",
+        "git_status",
+        "github_pull_request_diff",
+        "github_pull_request_metadata",
+        "github_pull_request_publish_review",
+        "github_pull_request_review_threads",
+        "glob_files",
+        "list_conversations",
+        "list_directory",
+        "plan_read",
+        "plan_write",
+        "read_conversation",
+        "read_file",
+        "read_imported_conversation",
+        "read_own_conversation",
+        "repository_list_directory",
+        "repository_read_file",
+        "review_gate_check",
+        "sandboxed_exec",
+        "search_files",
+        "send_session_message",
+        "session_status_update",
+        "spawn_session",
+        "unsandboxed_exec",
+        "web_fetch",
+        "web_search",
+        "write_file",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn expected_tool_call(request: ToolRequestId, name: &str, arguments_json: &str) -> MessagePart {
@@ -2558,7 +2609,7 @@ async fn s10_composed_github_read_executes_offline() -> Result<(), Box<dyn Error
         workspace.path(),
     )?
     .into_parts();
-    let expected_catalog_names = commissioned_catalog_names(&tool_catalog);
+    let expected_catalog_names = commissioned_catalog_names();
     let arguments = serde_json::json!({
         "repository": "KeenWill/signalbox",
         "number": 17
@@ -2605,7 +2656,7 @@ async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Er
         workspace.path(),
     )?
     .into_parts();
-    let expected_catalog_names = commissioned_catalog_names(&tool_catalog);
+    let expected_catalog_names = commissioned_catalog_names();
     let arguments = serde_json::json!({"path": relative_path, "max_bytes": 1024}).to_string();
     let (execution, runtime) = fixture.execution(
         [
@@ -2651,7 +2702,7 @@ async fn s10_composed_local_git_status_executes_offline() -> Result<(), Box<dyn 
         workspace.path(),
     )?
     .into_parts();
-    let expected_catalog_names = commissioned_catalog_names(&tool_catalog);
+    let expected_catalog_names = commissioned_catalog_names();
     let arguments = serde_json::json!({}).to_string();
     let (execution, runtime) = fixture.execution(
         [
@@ -2686,7 +2737,7 @@ async fn s10_composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Er
         workspace.path(),
     )?
     .into_parts();
-    let expected_catalog_names = commissioned_catalog_names(&tool_catalog);
+    let expected_catalog_names = commissioned_catalog_names();
     let arguments = serde_json::json!({"program": "cargo"}).to_string();
     let (execution, runtime) = fixture.execution(
         [
@@ -2728,7 +2779,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
         workspace.path(),
     )?
     .into_parts();
-    let expected_catalog_names = commissioned_catalog_names(&tool_catalog);
+    let expected_catalog_names = commissioned_catalog_names();
     let arguments = serde_json::json!({
         "after_position": null,
         "max_entries": 100,

@@ -1,6 +1,6 @@
 //! Daemon adapter for atomic delegated-session await and message effects.
 
-use std::{error::Error, fmt, future::Future};
+use std::{error::Error, fmt, future::Future, time::Duration};
 
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
 use signalbox_domain::{
@@ -67,6 +67,8 @@ impl PostgresSessionDelegationPort {
                         tracing::error!(
                             diagnostic = "delegation_foreground_delivery_reread_failed",
                             cause_code = error.operator_failure_cause_code(),
+                            session_id = %request.request().session().as_uuid(),
+                            turn_id = %request.request().turn().as_uuid(),
                             "foreground delegation delivery reread failed after wait commit"
                         );
                     }
@@ -147,8 +149,8 @@ impl PostgresSessionDelegationPort {
             .load_foreground_delivery(wait)
             .await?
             .map(|delivery| {
-                DeliveredChildResult::try_new(wait, delivery.relation(), delivery.event())
-                    .map_err(|_| PostgresSessionDelegationPortError::Contract)
+                DeliveredChildResult::from_stored_outcome(wait, delivery.outcome().clone())
+                    .ok_or(PostgresSessionDelegationPortError::Contract)
             })
             .transpose()
     }
@@ -290,6 +292,9 @@ impl SessionDelegationPort for PostgresSessionDelegationPort {
             RecordDelegationMessageOutcome::Rejected(_) => {
                 Ok(SessionDelegationPortOutcome::Rejected)
             }
+            RecordDelegationMessageOutcome::DurablyRejected(_) => {
+                Ok(SessionDelegationPortOutcome::DurablyRejected)
+            }
         }
     }
 }
@@ -306,12 +311,16 @@ where
         Err(SessionDelegationRepositoryError::CommitAmbiguous(_)) => {}
         decided => return decided,
     }
+    let mut retry_delay = Duration::from_millis(10);
     loop {
+        tokio::time::sleep(retry_delay).await;
         match retry().await {
             Err(
                 SessionDelegationRepositoryError::CommitAmbiguous(_)
                 | SessionDelegationRepositoryError::Database(_),
-            ) => {}
+            ) => {
+                retry_delay = retry_delay.saturating_mul(2).min(Duration::from_secs(1));
+            }
             decided => return decided,
         }
     }
@@ -358,6 +367,10 @@ impl SessionDelegationPort for DaemonSessionDelegationPort {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[tokio::test]
     async fn commit_ambiguous_delegation_effect_retries_its_exact_replay() {
@@ -398,6 +411,30 @@ mod tests {
         .expect("the decided result is preserved");
 
         assert_eq!(decided, 11);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_backoff_remains_cancellation_safe() {
+        let retries = Arc::new(AtomicUsize::new(0));
+        let observed_retries = Arc::clone(&retries);
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(25),
+            reconcile_commit_ambiguous::<u8, _, _>(
+                Err(SessionDelegationRepositoryError::CommitAmbiguous(
+                    sqlx::Error::PoolClosed,
+                )),
+                move || {
+                    observed_retries.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Err(SessionDelegationRepositoryError::Database(
+                        sqlx::Error::PoolClosed,
+                    )))
+                },
+            ),
+        )
+        .await;
+
+        assert!(outcome.is_err());
+        assert_eq!(retries.load(Ordering::SeqCst), 1);
     }
 
     #[test]

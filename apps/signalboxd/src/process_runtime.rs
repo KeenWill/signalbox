@@ -2166,6 +2166,7 @@ where
                 request_id,
                 &port,
                 wait,
+                turn,
                 &mut subscription,
                 shutdown,
             )
@@ -2253,6 +2254,7 @@ async fn wait_for_foreground_child_result<Reader, Writer>(
     request_id: RequestId,
     port: &PostgresSessionDelegationPort,
     wait: DelegationWait,
+    turn: TurnId,
     subscription: &mut broadcast::Receiver<ProcessUpdate>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
@@ -2276,6 +2278,8 @@ where
                 tracing::error!(
                     diagnostic = "delegation_foreground_delivery_reread_failed",
                     cause_code = error.operator_failure_cause_code(),
+                    session_id = %wait.parent().as_uuid(),
+                    turn_id = %turn.as_uuid(),
                     "foreground process delivery reread failed after wait commit"
                 );
                 tokio::select! {
@@ -2333,21 +2337,41 @@ where
 }
 
 fn update_signals_child_result(update: &ProcessUpdate, wait: DelegationWait) -> bool {
-    matches!(
-        update,
-        ProcessUpdate::Durable {
-            session,
-            event:
-                ProcessUpdateEvent::DelegationUpdate(DispatchedDelegationUpdate::ChildResult {
+    match update {
+        ProcessUpdate::Durable { session, event, .. } => match event {
+            ProcessUpdateEvent::DelegationUpdate(delegation) => match delegation {
+                DispatchedDelegationUpdate::ChildResult {
                     spawning_request,
                     child,
                     ..
-                }),
-            ..
-        } if *session == wait.parent()
-            && *spawning_request == wait.spawning_request()
-            && *child == wait.child()
-    )
+                } => {
+                    *session == wait.parent()
+                        && *spawning_request == wait.spawning_request()
+                        && *child == wait.child()
+                }
+                DispatchedDelegationUpdate::ChildSpawned { .. }
+                | DispatchedDelegationUpdate::ChildWaiting { .. }
+                | DispatchedDelegationUpdate::ChildLifecycleDisposition { .. }
+                | DispatchedDelegationUpdate::SessionMessage { .. } => false,
+            },
+            ProcessUpdateEvent::SessionCreated
+            | ProcessUpdateEvent::SessionModelSettingsChanged(_)
+            | ProcessUpdateEvent::TurnModelSettingsResolved(_)
+            | ProcessUpdateEvent::InputAccepted { .. }
+            | ProcessUpdateEvent::GoalTurnRetired { .. }
+            | ProcessUpdateEvent::TurnActivated { .. }
+            | ProcessUpdateEvent::ModelCallTransition { .. }
+            | ProcessUpdateEvent::ToolBatchTransition { .. }
+            | ProcessUpdateEvent::ToolApprovalDecided { .. }
+            | ProcessUpdateEvent::ContextCompacted { .. }
+            | ProcessUpdateEvent::TurnCompleted { .. }
+            | ProcessUpdateEvent::TurnFailed { .. }
+            | ProcessUpdateEvent::TurnRefused { .. }
+            | ProcessUpdateEvent::TurnCancelled { .. }
+            | ProcessUpdateEvent::TurnReconciliationRequired { .. } => false,
+        },
+        ProcessUpdate::ProviderTextDelta(_) => false,
+    }
 }
 
 #[expect(
@@ -2599,14 +2623,17 @@ fn wire_child_result(
 fn wire_domain_delegation_provenance(
     provenance: DomainDelegationProvenance,
 ) -> Result<WireDelegationProvenance, ProcessConnectionError> {
-    if let Some((session, turn)) = provenance.child_turn() {
-        return Ok(WireDelegationProvenance::ChildTurn {
-            child_session_id: wire_uuid(session.into_uuid()),
-            child_turn_id: wire_uuid(turn.into_uuid()),
-        });
-    }
-    let Some(authority) = provenance.parent_command() else {
-        return Err(ProcessConnectionError::EncodeInvariant);
+    let authority = match provenance.projection() {
+        signalbox_domain::DelegationProvenanceProjection::ChildTurn { terminal } => {
+            return Ok(WireDelegationProvenance::ChildTurn {
+                child_session_id: wire_uuid(terminal.session().into_uuid()),
+                child_turn_id: wire_uuid(terminal.turn().into_uuid()),
+            });
+        }
+        signalbox_domain::DelegationProvenanceProjection::ParentCommand { authority } => authority,
+        signalbox_domain::DelegationProvenanceProjection::ToolRequest { .. } => {
+            return Err(ProcessConnectionError::EncodeInvariant);
+        }
     };
     let descendant_scope = match authority.scope() {
         DescendantTerminationScope::ParentAlone => WireDescendantTerminationScope::ParentAlone,

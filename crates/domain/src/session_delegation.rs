@@ -603,6 +603,22 @@ pub struct DelegationProvenance {
     kind: DelegationProvenanceKind,
 }
 
+/// Closed public projection of one event's typed authority.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DelegationProvenanceProjection {
+    ToolRequest {
+        source_session: SessionId,
+        source_turn: TurnId,
+        request: ToolRequestId,
+    },
+    ChildTurn {
+        terminal: TerminalChildTurn,
+    },
+    ParentCommand {
+        authority: ParentTerminationAuthority,
+    },
+}
+
 impl DelegationProvenance {
     pub fn from_spawn(request: &DelegatedSpawnRequest) -> Self {
         Self::from_request(request.request(), DelegationToolRequestPurpose::Spawn)
@@ -636,6 +652,28 @@ impl DelegationProvenance {
     pub const fn from_parent_termination(authority: ParentTerminationAuthority) -> Self {
         Self {
             kind: DelegationProvenanceKind::ParentCommand { authority },
+        }
+    }
+
+    /// Projects every closed provenance variant without optional probing.
+    pub const fn projection(self) -> DelegationProvenanceProjection {
+        match self.kind {
+            DelegationProvenanceKind::ToolRequest {
+                source_session,
+                source_turn,
+                request,
+                ..
+            } => DelegationProvenanceProjection::ToolRequest {
+                source_session,
+                source_turn,
+                request,
+            },
+            DelegationProvenanceKind::ChildTurn { terminal } => {
+                DelegationProvenanceProjection::ChildTurn { terminal }
+            }
+            DelegationProvenanceKind::ParentCommand { authority } => {
+                DelegationProvenanceProjection::ParentCommand { authority }
+            }
         }
     }
 
@@ -1264,6 +1302,7 @@ impl DelegationWait {
         mode: DelegationWaitMode,
     ) -> Option<Self> {
         (awaiting_request.request().session() == parent
+            && parent != child
             && awaiting_request.request().id() != spawning_request
             && awaiting_request.child() == child
             && awaiting_request.mode() == mode)
@@ -1692,7 +1731,19 @@ impl SessionDelegation {
             ));
         }
         let ordinal = match self.next_ordinal() {
-            Ok(ordinal) => ordinal,
+            Ok(ordinal)
+                if self.lifecycle == DelegationLifecycle::Terminal || ordinal.get() < u64::MAX =>
+            {
+                ordinal
+            }
+            Ok(_) => {
+                return Err(Self::reject_message(
+                    self,
+                    sending_request,
+                    id,
+                    DelegationTransitionFailure::EventOrdinalExhausted,
+                ));
+            }
             Err(failure) => return Err(Self::reject_message(self, sending_request, id, failure)),
         };
         let event = DelegationEvent::MessageDelivered {
@@ -2388,6 +2439,43 @@ mod tests {
         assert_eq!(request.task(), &content(TEST_TASK));
         assert_eq!(request.policy(), ChildRelationshipPolicy::Background);
         assert_eq!(provenance.tool_request(), Some(expected_identity));
+    }
+
+    #[test]
+    fn provenance_projection_exposes_each_closed_authority_variant() {
+        let spawn = DelegatedSpawnRequest::parse(
+            named_request(
+                1,
+                SPAWN_SESSION_TOOL_NAME,
+                serde_json::json!({
+                    "relationship": { "kind": "background" },
+                    "task": TEST_TASK,
+                }),
+            ),
+            TEST_TASK.into(),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("canonical spawn request");
+        let terminal = TerminalChildTurn::from_failed(&failed_turn_fixture());
+        let authority =
+            parent_termination_authority(DescendantTerminationScope::ParentAndDescendants);
+
+        assert_eq!(
+            DelegationProvenance::from_spawn(&spawn).projection(),
+            DelegationProvenanceProjection::ToolRequest {
+                source_session: spawn.request().session(),
+                source_turn: spawn.request().turn(),
+                request: spawn.request().id(),
+            }
+        );
+        assert_eq!(
+            DelegationProvenance::from_terminal_child(terminal).projection(),
+            DelegationProvenanceProjection::ChildTurn { terminal }
+        );
+        assert_eq!(
+            DelegationProvenance::from_parent_termination(authority).projection(),
+            DelegationProvenanceProjection::ParentCommand { authority }
+        );
     }
 
     #[test]
@@ -3260,6 +3348,28 @@ mod aggregate_tests {
         assert_eq!(reconstituted, recorded);
     }
 
+    /// S18 / INV-010: stored waits cannot reconstitute a self relationship.
+    #[test]
+    fn s18_inv010_wait_reconstitution_rejects_same_session_endpoints() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let awaiting = await_request(
+            RequestFixture::Await,
+            relation.parent(),
+            DelegationWaitMode::Foreground,
+        );
+
+        assert_eq!(
+            DelegationWait::reconstitute_stored(
+                &awaiting,
+                relation.spawning_request(),
+                relation.parent(),
+                relation.parent(),
+                DelegationWaitMode::Foreground,
+            ),
+            None
+        );
+    }
+
     /// S18 / INV-010 / INV-012: immutable endpoint facts reconstitute an exact
     /// wait without loading the relationship event stream.
     #[test]
@@ -3768,6 +3878,35 @@ mod aggregate_tests {
 
         assert_eq!(first.ordinal().get(), 2);
         assert_eq!(second.ordinal().get(), 3);
+    }
+
+    /// S18 / INV-005 / INV-012: nonterminal messages preserve the final
+    /// relationship ordinal for a typed terminal outcome.
+    #[test]
+    fn s18_inv005_inv012_message_reserves_terminal_event_ordinal() {
+        let policy = ChildRelationshipPolicy::Background;
+        let spawning = spawn_request(policy);
+        let mut relation = relation(policy);
+        relation.events = vec![DelegationEvent::Spawned {
+            ordinal: DelegationEventOrdinal::new(
+                NonZeroU64::new(u64::MAX - 1).expect("fixture ordinal is positive"),
+            ),
+            provenance: DelegationProvenance::from_spawn(&spawning),
+        }];
+        let request = message_request(
+            RequestFixture::ParentMessage,
+            relation.child(),
+            "reserved terminal position",
+        );
+        let dispatch = dispatch_for(request.request());
+        let error = relation
+            .deliver_message(request, delegation_message_id(5), &dispatch)
+            .expect_err("the final ordinal remains reserved for terminal evidence");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::EventOrdinalExhausted
+        );
     }
 
     /// S18 / INV-010: a typed message for another peer returns exact inputs.

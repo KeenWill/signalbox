@@ -57,7 +57,7 @@ use crate::{
         durable_command_id_from_uuid, durable_command_id_to_uuid, input_position_from_numeric,
         positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
         tool_approval_decision_source_to_str, tool_approval_posture_to_str,
-        tool_request_id_to_uuid, turn_id_to_uuid,
+        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -800,8 +800,7 @@ impl PostgresModelCallRepository {
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
-            lock_session(&mut transaction, session).await?;
+            lock_model_call_terminal_frontier(&mut transaction, session, call).await?;
             let execution = require_exact_call(
                 require_live_execution(&mut transaction, session, &self.targets).await?,
                 call,
@@ -1215,8 +1214,7 @@ impl PostgresModelCallRepository {
     ) -> Result<ModelCallTerminalOutcome, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
-            lock_session(&mut transaction, session).await?;
+            lock_model_call_terminal_frontier(&mut transaction, session, call).await?;
             let execution = require_exact_call(
                 require_live_execution_for_restart(&mut transaction, session).await?,
                 call,
@@ -1546,6 +1544,20 @@ async fn locked_delegation_logical_terminal(
     session: SessionId,
     call: ModelCallId,
 ) -> Result<bool, ModelCallRepositoryError> {
+    if lock_model_call_terminal_frontier(connection, session, call)
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    model_call_is_delegation_logically_terminal(connection, session, call).await
+}
+
+async fn lock_model_call_terminal_frontier(
+    connection: &mut PgConnection,
+    session: SessionId,
+    call: ModelCallId,
+) -> Result<Option<TurnId>, ModelCallRepositoryError> {
     let turn: Option<Uuid> = sqlx::query_scalar(
         "SELECT turn_id
            FROM model_call
@@ -1558,18 +1570,28 @@ async fn locked_delegation_logical_terminal(
     .await?;
     let Some(turn) = turn else {
         lock_session(connection, session).await?;
-        return Ok(false);
+        return Ok(None);
     };
+    let turn = turn_id_from_uuid(turn);
+    lock_delegated_turn_terminal_frontier(connection, session, turn).await?;
+    Ok(Some(turn))
+}
+
+pub(crate) async fn lock_delegated_turn_terminal_frontier(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), ModelCallRepositoryError> {
     let relation = load_delegation_terminal_relation(
         connection,
         crate::lock_inventory::DELEGATION_TERMINAL_RELATION_IDENTITY,
         session_id_to_uuid(session),
-        turn,
+        turn_id_to_uuid(turn),
     )
     .await?;
     let Some(relation) = relation else {
         lock_session(connection, session).await?;
-        return Ok(false);
+        return Ok(());
     };
     let parent = session_id_from_uuid(relation.parent_session_id);
     let (first, second) = crate::lock_inventory::ordered_session_pair(session, parent);
@@ -1585,7 +1607,7 @@ async fn locked_delegation_logical_terminal(
         connection,
         crate::lock_inventory::DELEGATION_TERMINAL_RELATION,
         session_id_to_uuid(session),
-        turn,
+        turn_id_to_uuid(turn),
     )
     .await?;
     if locked != Some(relation) {
@@ -1594,7 +1616,7 @@ async fn locked_delegation_logical_terminal(
         )
         .into());
     }
-    model_call_is_delegation_logically_terminal(connection, session, call).await
+    Ok(())
 }
 
 #[derive(Debug, Eq, PartialEq)]

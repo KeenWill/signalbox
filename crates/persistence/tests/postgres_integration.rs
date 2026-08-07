@@ -37,17 +37,18 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities,
-    ActivatedAcceptedInputTurn, ActiveTurnPhase, AmbiguousModelCallTurnIdentities,
-    AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurnIdentities,
-    CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
-    CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
-    DecideToolRequestResult, DelegateApprovalRecommendation, DelegationAwaitRequest,
-    DelegationContent, DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest,
-    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, FailedModelCallTurnIdentities, FastModeOverlay, FastModeSupport,
-    FrozenModelSelection, InitialToolApproval, ModelAlias, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition, ModelSelectionOverride,
+    AcceptedInputTurnFailureIdentities, ActivatedAcceptedInputTurn, ActiveTurnPhase,
+    AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText, AuthorizedModelCall,
+    CancelledModelCallTurnIdentities, CompletedModelCallIdentities, ContextFrontierId,
+    CorrelatedModelCallTerminalObservation, CreateSession, CurrentToolAttemptState,
+    CurrentTurnAttemptState, DecideToolRequest, DecideToolRequestResult,
+    DelegateApprovalRecommendation, DelegationAwaitRequest, DelegationContent,
+    DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationWaitMode,
+    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, FastModeOverlay, FastModeSupport, FrozenModelSelection,
+    InitialToolApproval, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelCapabilities,
+    ModelCapabilityCatalog, ModelCapabilityDefinition, ModelSelectionOverride,
     ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence, ModelTargetCatalog,
     ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
     PhysicalCancellationModelCallTurnIdentities, PreparedCreateSession, PreparedModelCallRequest,
@@ -1075,6 +1076,9 @@ fn message_race_disposition(outcome: RecordDelegationMessageOutcome) -> MessageR
         }) => {
             panic!("message race reached an invalid transition")
         }
+        RecordDelegationMessageOutcome::DurablyRejected(_) => {
+            panic!("issued message race cannot observe a process-owned durable rejection")
+        }
     }
 }
 
@@ -1253,13 +1257,30 @@ async fn s18_inv010_process_wait_reports_prepared_attempt_without_ending_it()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_PREPARED_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let absent_child = SessionId::from_uuid(Uuid::from_u128(seed + 0x501));
+    let arguments = serde_json::json!({
+        "child_session_id": absent_child.as_uuid().to_string(),
+        "mode": "background",
+    })
+    .to_string();
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER tool_request_is_append_only")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE tool_request SET arguments_text = $1 WHERE request_id = $2")
+        .bind(arguments)
+        .bind(fixture.awaiting_request.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER tool_request_is_append_only")
+        .execute(&pool)
+        .await?;
     prepare_repository_wait_attempt(&pool, fixture, seed).await?;
     let outcome = SessionDelegationRepository::new(pool.clone())
         .record_process_wait(
             fixture.parent,
             fixture.parent_turn,
             fixture.awaiting_request,
-            fixture.child,
+            absent_child,
             DelegationWaitMode::Background,
         )
         .await?;
@@ -1271,6 +1292,65 @@ async fn s18_inv010_process_wait_reports_prepared_attempt_without_ending_it()
                 state: DelegationRequestExecutionState::Prepared,
             },
         ))
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-005 / INV-010: a background process wait reserves its future
+/// result delivery or terminalizes the executable attempt with typed evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv005_inv010_background_wait_delivery_exhaustion_terminalizes_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    sqlx::query("ALTER TABLE session_pending_delivery DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_pending_delivery
+            (recipient_session_id, delivery_sequence, delivery_kind)
+         VALUES ($1, $2, 'message')",
+    )
+    .bind(fixture.parent.into_uuid())
+    .bind(Decimal::from(u64::MAX))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_pending_delivery ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let _dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let outcome = SessionDelegationRepository::new(pool.clone())
+        .record_process_wait(
+            fixture.parent,
+            fixture.parent_turn,
+            fixture.awaiting_request,
+            fixture.child,
+            DelegationWaitMode::Background,
+        )
+        .await?;
+    let attempt_state: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM tool_attempt
+          WHERE request_id = $1",
+    )
+    .bind(fixture.awaiting_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        outcome,
+        ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::DeliverySequenceExhausted,
+        ))
+    );
+    assert_eq!(
+        attempt_state,
+        (String::from("terminal"), Some(String::from("known_failed")))
     );
 
     pool.close().await;
@@ -1622,6 +1702,53 @@ async fn s17_inv010_inv012_wait_replay_requires_update_outbox_satellite()
     assert_eq!(
         delegation_corruption(error),
         SessionDelegationCorruption::Missing("wait update outbox satellite")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-010 / INV-012: equal wait replay authenticates the global outbox
+/// header paired with its durable parent update.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv010_inv012_wait_replay_requires_update_outbox_header() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository.record_wait(request.clone(), &dispatch).await?;
+    sqlx::query("ALTER TABLE delegation_outbox_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM delegation_outbox_event
+          WHERE event_sequence = (
+                SELECT event_sequence
+                  FROM delegation_update_outbox_event
+                 WHERE update_kind = 'child_waiting'
+                   AND awaiting_tool_request_id = $1
+          )",
+    )
+    .bind(fixture.awaiting_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = repository
+        .record_wait(request, &dispatch)
+        .await
+        .expect_err("wait replay requires its update outbox header");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Missing("header_event_sequence")
     );
 
     pool.close().await;
@@ -2406,6 +2533,63 @@ async fn s18_inv010_inv012_message_replay_requires_update_outbox_satellite()
     Ok(())
 }
 
+/// S18 / INV-010 / INV-012: equal message replay authenticates the global
+/// outbox header paired with its recipient update.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_message_replay_requires_update_outbox_header()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationMessageRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository
+        .record_message(
+            request.clone(),
+            DelegationMessageId::from_uuid(fixture.message_id),
+            &dispatch,
+        )
+        .await?;
+    sqlx::query("ALTER TABLE delegation_outbox_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM delegation_outbox_event
+          WHERE event_sequence = (
+                SELECT event_sequence
+                  FROM delegation_update_outbox_event
+                 WHERE update_kind = 'session_message'
+                   AND message_id = $1
+          )",
+    )
+    .bind(fixture.message_id)
+    .execute(&pool)
+    .await?;
+    let error = repository
+        .record_message(
+            request,
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x401)),
+            &dispatch,
+        )
+        .await
+        .expect_err("message replay requires its update outbox header");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Missing("update_header_event_sequence")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S18 / INV-010 / INV-012: equal message replay requires the durable wake
 /// satellite emitted by the original transaction.
 #[tokio::test(flavor = "multi_thread")]
@@ -2448,6 +2632,63 @@ async fn s18_inv010_inv012_message_replay_requires_wake_outbox_satellite()
     assert_eq!(
         delegation_corruption(error),
         SessionDelegationCorruption::Missing("wake_event_kind")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-010 / INV-012: equal message replay authenticates the global
+/// outbox header paired with its recipient wake.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_message_replay_requires_wake_outbox_header() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationMessageRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository
+        .record_message(
+            request.clone(),
+            DelegationMessageId::from_uuid(fixture.message_id),
+            &dispatch,
+        )
+        .await?;
+    sqlx::query("ALTER TABLE delegation_outbox_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM delegation_outbox_event
+          WHERE event_sequence = (
+                SELECT event_sequence
+                  FROM delegation_wake_outbox_event
+                 WHERE subject_kind = 'message'
+                   AND message_id = $1
+          )",
+    )
+    .bind(fixture.message_id)
+    .execute(&pool)
+    .await?;
+    let error = repository
+        .record_message(
+            request,
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x401)),
+            &dispatch,
+        )
+        .await
+        .expect_err("message replay requires its wake outbox header");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Missing("wake_header_event_sequence")
     );
 
     pool.close().await;
@@ -2628,8 +2869,14 @@ async fn s18_inv005_inv010_process_message_absent_peer_terminalizes_attempt()
     sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER tool_request_is_append_only")
         .execute(&pool)
         .await?;
-    let _dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
-    let outcome = SessionDelegationRepository::new(pool.clone())
+    let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
+    let logical = DelegationMessageRequest::parse(
+        dispatch.request().clone(),
+        absent_peer,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    let outcome = repository
         .record_process_message(
             fixture.parent,
             fixture.parent_turn,
@@ -2637,6 +2884,13 @@ async fn s18_inv005_inv010_process_message_absent_peer_terminalizes_attempt()
             absent_peer,
             RAW_DELEGATED_MESSAGE.to_owned(),
             DelegationMessageId::from_uuid(fixture.message_id),
+        )
+        .await?;
+    let model_replay = repository
+        .record_message(
+            logical,
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x501)),
+            &dispatch,
         )
         .await?;
     let attempt_state: (String, Option<String>) = sqlx::query_as(
@@ -2657,6 +2911,12 @@ async fn s18_inv005_inv010_process_message_absent_peer_terminalizes_attempt()
     assert_eq!(
         attempt_state,
         (String::from("terminal"), Some(String::from("known_failed")))
+    );
+    assert_eq!(
+        model_replay,
+        RecordDelegationMessageOutcome::DurablyRejected(
+            DelegationOperationRejection::RelationshipNotFound,
+        )
     );
 
     pool.close().await;
@@ -20355,6 +20615,202 @@ async fn attach_delegation_relationship_fixture(
     .await?;
     fixture.commit().await?;
     Ok((parent, spawning_request))
+}
+
+#[derive(Clone, Copy)]
+struct DelegatedToolCrashFixture {
+    parent: SessionId,
+    child: SessionId,
+    spawning_request: ToolRequestId,
+}
+
+async fn prepare_delegated_tool_crash_fixture(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<DelegatedToolCrashFixture, Box<dyn Error>> {
+    let fixture = authorize_delegated_model_call_fixture(pool, seed).await?;
+    let request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x40));
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from("current_time")).expect("valid fixture tool name"),
+                NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                    .expect("bounded fixture arguments"),
+            ),
+        )])
+        .expect("the proposal forms a tool-using response");
+    let observation = fixture
+        .authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    let outcome = fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            observation,
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x80)),
+                    request,
+                    InitialToolApproval::Confirm,
+                )],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xc0)),
+                None,
+            )),
+            |_| panic!("the delegated fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::ToolRound(_) = outcome else {
+        panic!("the delegated fixture reaches a tool round")
+    };
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x100)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x101)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x102));
+    repository
+        .prepare_next_attempt(
+            fixture.child,
+            fixture.authorized.turn(),
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    repository
+        .authorize_attempt(fixture.child, fixture.authorized.turn(), attempt)
+        .await?;
+    Ok(DelegatedToolCrashFixture {
+        parent: fixture.parent,
+        child: fixture.child,
+        spawning_request: fixture.spawning_request,
+    })
+}
+
+fn delegated_tool_crash_scan_ids(seed: u128) -> FixedStartupScanIds {
+    FixedStartupScanIds::new(
+        [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+            seed + 0x110,
+        ))],
+        [ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x111))],
+    )
+}
+
+fn delegated_tool_crash_failure_ids(seed: u128) -> AcceptedInputTurnFailureIdentities {
+    AcceptedInputTurnFailureIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x112)),
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x113)),
+    )
+}
+
+/// S17 / INV-010 / INV-032: known delegated tool-crash recovery publishes the
+/// typed failed child result, parent update, and parent wake atomically.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv010_inv032_delegated_tool_crash_publishes_failed_result()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xe000;
+    let fixture = prepare_delegated_tool_crash_fixture(&pool, seed).await?;
+    let mut ids = delegated_tool_crash_scan_ids(seed);
+    let recovered = PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.child,
+            delegated_tool_crash_failure_ids(seed),
+            &mut ids,
+        )
+        .await?;
+    let evidence: (String, String, i64, i64) = sqlx::query_as(
+        "SELECT result.outcome_kind, event.reason_kind,
+                (SELECT count(*) FROM delegation_update_outbox_event AS update
+                  WHERE update.result_spawning_request_id = $1
+                    AND update.session_id = $2),
+                (SELECT count(*) FROM delegation_wake_outbox_event AS wake
+                  WHERE wake.result_spawning_request_id = $1
+                    AND wake.session_id = $2)
+           FROM session_child_result AS result
+           JOIN session_delegation_event AS event
+             ON event.spawning_tool_request_id = result.spawning_tool_request_id
+            AND event.event_ordinal = result.event_ordinal
+          WHERE result.spawning_tool_request_id = $1",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .bind(fixture.parent.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    let StartupScanSessionOutcome::RecoveredToolAttempt(outcome) = recovered else {
+        panic!("the delegated tool crash is recovered")
+    };
+    assert!(matches!(*outcome, ToolAttemptCrashOutcome::KnownFailed(_)));
+    assert_eq!(
+        evidence,
+        ("child_failed".into(), "child_execution_failed".into(), 1, 1)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-010 / INV-032: delegated startup crash recovery takes the parent
+/// endpoint prefix before the child scheduler.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv010_inv032_delegated_tool_crash_locks_parent_before_child_scheduler()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xe200;
+    let fixture = prepare_delegated_tool_crash_fixture(&pool, seed).await?;
+    let mut parent_lock = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(fixture.parent.into_uuid())
+        .execute(&mut *parent_lock)
+        .await?;
+    let recovery_pool = pool.clone();
+    let recovery = tokio::spawn(async move {
+        let mut ids = delegated_tool_crash_scan_ids(seed);
+        PostgresStartupScanRepository::new(recovery_pool)
+            .recover(
+                fixture.child,
+                delegated_tool_crash_failure_ids(seed),
+                &mut ids,
+            )
+            .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "delegated recovery waits on the parent endpoint lock"
+    );
+    sqlx::query("SET LOCAL lock_timeout = '250ms'")
+        .execute(&mut *parent_lock)
+        .await?;
+    let locked_child: Uuid = sqlx::query_scalar(
+        "SELECT session_id
+           FROM session_scheduler
+          WHERE session_id = $1
+          FOR UPDATE",
+    )
+    .bind(fixture.child.into_uuid())
+    .fetch_one(&mut *parent_lock)
+    .await?;
+    assert_eq!(locked_child, fixture.child.into_uuid());
+    parent_lock.rollback().await?;
+    let recovered = recovery.await??;
+    let StartupScanSessionOutcome::RecoveredToolAttempt(outcome) = recovered else {
+        panic!("the delegated tool crash is recovered")
+    };
+    assert!(matches!(*outcome, ToolAttemptCrashOutcome::KnownFailed(_)));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 /// S17 / INV-032: completing a delegated initial task atomically creates its

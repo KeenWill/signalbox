@@ -39,9 +39,10 @@ scopes, delegated transcript origins, foreground-result closure, pre-outbox
 cascade locks, typed delegation wake origins, and exact delegation update and
 wake obligations were verified through this PR
 (`agent/delegation-persistence-schema`); the delegated child-input, await,
-peer-message, and terminal-observation locks plus wait/message replay satellites
-were verified through this PR (`agent/delegation-runtime-persistence-v2`), and
-the broader child-terminal endpoint locks were verified through this PR
+peer-message, terminal-observation, and restart-recovery locks plus wait/message
+replay satellites and headers were verified through this PR
+(`agent/delegation-runtime-persistence-v2`), and the broader child-terminal
+endpoint locks were verified through this PR
 (`agent/delegation-runtime-daemon-v2`); the model-settings command fields,
 immutable evidence, snapshot projection, and typed outbox records were verified
 through this PR (`agent/model-settings-persistence`); the defaults-replacement
@@ -665,6 +666,15 @@ Locks per transaction, in acquisition order:
   prevents either side from holding an endpoint session while waiting for a
   scheduler held by the other.
 
+- **Delegated restart-recovery transactions**: a nonlocking read selects the
+  candidate active child turn. Recovery then takes the same canonical endpoint
+  sessions, endpoint schedulers, and relationship prefix as terminal observation
+  before it rechecks the active turn and classifies any model-call or
+  tool-attempt loss. If the candidate changed while the prefix was acquired, the
+  transaction rolls back for a later scheduler pass. Known tool-crash failure
+  and its typed parent result therefore commit under the same acyclic endpoint
+  order as peer messages.
+
 - **Delegated await transactions**: await first locks its issuing delivery
   session row `FOR NO KEY UPDATE`, then that session's `session_scheduler` row
   `FOR UPDATE`, and only then the exact `session_delegation` row `FOR UPDATE`.
@@ -1105,22 +1115,26 @@ turn's `awaiting_child` phase; a background row cannot and instead requires the
 exact completed effect-free attempt and normalized registration receipt for its
 awaiting request. Equal wait replay independently authenticates that exact
 terminal attempt: the foreground arm requires its typed child-wait evidence and
-the background arm requires its normalized receipt. `session_message` is
+the background arm requires its normalized receipt; both arms also authenticate
+the exact update satellite and global outbox header. `session_message` is
 append-only, uniquely orders messages per relationship, and requires exact
 parent/child sender and recipient plus the sending tool request with its
 complete session, turn, and request provenance. Equal message replay
 authenticates both that provenance and the exact completed external-effect
-attempt carrying its normalized receipt. A concurrent global `message_id` claim
-loser is a typed message-identity collision, not an unclassified database
-failure. A definitive process-message rejection stores its closed rejection
-kind, transition evidence when applicable, and originally minted message
-identity beside the exact terminal attempt; exact replay returns that typed
-outcome before classifying the request as non-executable. `session_child_result`
-has at most one row per spawning request and carries exactly one returned-text,
-failed, stopped, or cancelled shape with child turn provenance for returned,
-failed, result-unavailable, and child-originated terminal outcomes, or one of
-the same exclusive parent-turn-command and parent-goal-command provenance arms
-for a policy-driven stop or cancellation. Delivery satellites bind
+attempt carrying its normalized receipt, plus the exact update/wake satellites
+and their global outbox headers. A concurrent global `message_id` claim loser is
+a typed message-identity collision, not an unclassified database failure. A
+definitive process-message rejection stores its closed rejection kind,
+transition evidence when applicable, and originally minted message identity
+beside the exact terminal attempt; exact replay returns that typed outcome
+before classifying the request as non-executable. `session_child_result` has at
+most one row per spawning request and carries exactly one returned-text, failed,
+stopped, or cancelled shape with child turn provenance for returned, failed,
+result-unavailable, and child-originated terminal outcomes, or one of the same
+exclusive parent-turn-command and parent-goal-command provenance arms for a
+policy-driven stop or cancellation. A known provider failure, a pre-send
+capability failure, or a known effect-free tool-crash closure publishes the same
+typed failed child result in its terminal transaction. Delivery satellites bind
 messages/results to their exact semantic entries; no transcript query supplies
 result content. Every pending message and background result delivery
 additionally receives one positive recipient-wide `delivery_sequence` under the
@@ -1134,6 +1148,14 @@ as the `await_session` result without admitting a second result for the same
 request. Tool-batch outbox decoding and context-compaction evidence count that
 foreground correlation as one tool result; a background result has no
 tool-result correlation and counts as neither one.
+
+An accepted background wait reserves one future recipient delivery position
+until its child result exists. Message and later-wait admission under the same
+recipient lock preserve all outstanding reservations; exhausted capacity is a
+typed definitive rejection, and a reconstituted executable process request
+commits its known-failed attempt end in that same transaction. Thus a child
+terminal transaction cannot be rolled back merely because unrelated messages
+consumed the result delivery's final position.
 
 `session_delegation_wake_turn_origin` distinguishes an idle-recipient wake from
 the delegated child's initial task. It binds the queued turn to one contiguous

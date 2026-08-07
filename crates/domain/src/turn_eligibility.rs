@@ -1325,6 +1325,7 @@ pub struct AcceptedInputSchedulingReconstitutionInput {
     compactions: Vec<crate::ContextCompactionReconstitutionInput>,
     consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
     delegated_consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+    delegated_turns: Vec<TurnId>,
     steering_continuation_rounds: Vec<SteeringContinuationRoundReconstitutionInput>,
     continuation_rounds: Vec<ContinuationRoundReconstitutionInput>,
     active_acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
@@ -1353,6 +1354,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
             compactions: Vec::new(),
             consumed_steering: Vec::new(),
             delegated_consumed_steering: Vec::new(),
+            delegated_turns: Vec::new(),
             steering_continuation_rounds: Vec::new(),
             continuation_rounds: Vec::new(),
             active_acceptance_tail,
@@ -1423,6 +1425,13 @@ impl AcceptedInputSchedulingReconstitutionInput {
         self
     }
 
+    /// Supplies delegation-origin turns outside this accepted-input projection
+    /// whose semantic entries and completed model calls remain in its frontiers.
+    pub fn with_delegated_turn_facts(mut self, delegated_turns: Vec<TurnId>) -> Self {
+        self.delegated_turns = delegated_turns;
+        self
+    }
+
     /// Supplies the complete tool-round result evidence for every
     /// steering-consuming call prepared at a continuation boundary.
     pub fn with_steering_continuation_rounds(
@@ -1486,6 +1495,11 @@ impl AcceptedInputSchedulingReconstitutionInput {
     /// Returns consumed steering owned by delegation-origin turns.
     pub fn delegated_consumed_steering(&self) -> &[ConsumedSteeringReconstitutionInput] {
         &self.delegated_consumed_steering
+    }
+
+    /// Returns delegation-origin turns represented only by semantic facts.
+    pub fn delegated_turns(&self) -> &[TurnId] {
+        &self.delegated_turns
     }
 
     /// Returns every steering continuation-round evidence fact supplied.
@@ -1595,6 +1609,12 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     DuplicateSemanticEntryForSubject {
         /// The later duplicate entry.
         entry: SemanticTranscriptEntryId,
+    },
+    /// A supplied delegation-origin turn duplicates another fact or belongs to
+    /// the accepted-input projection.
+    DelegatedTurnFactMismatch {
+        /// The affected delegation-origin turn.
+        turn: TurnId,
     },
     /// A consumed-steering subject fact belongs to another session.
     ConsumedSteeringSessionMismatch {
@@ -3659,6 +3679,14 @@ fn reconstitute_inner(
         .iter()
         .map(|record| (record.turn, record))
         .collect::<BTreeMap<_, _>>();
+    let mut delegated_turns = BTreeSet::new();
+    for turn in input.delegated_turns.iter().copied() {
+        if records_by_turn.contains_key(&turn) || !delegated_turns.insert(turn) {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::DelegatedTurnFactMismatch { turn },
+            );
+        }
+    }
     for record in records_by_turn.values() {
         if !origin_delivery_matches_record(record.origin_delivery, record, &records_by_turn) {
             return Err(
@@ -3773,6 +3801,9 @@ fn reconstitute_inner(
                 selected,
             } => {
                 let Some(record) = records_by_turn.get(turn) else {
+                    if delegated_turns.contains(turn) {
+                        continue;
+                    }
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
                             entry: candidate.identity(),
@@ -3809,6 +3840,9 @@ fn reconstitute_inner(
             }
             InitialSemanticTranscriptEntryPayload::TurnFailed { turn } => {
                 let Some(record) = records_by_turn.get(turn) else {
+                    if delegated_turns.contains(turn) {
+                        continue;
+                    }
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
                             entry: candidate.identity(),
@@ -3848,6 +3882,9 @@ fn reconstitute_inner(
             | InitialSemanticTranscriptEntryPayload::DelegationResult { .. } => {}
             InitialSemanticTranscriptEntryPayload::TurnCompleted { turn } => {
                 let Some(record) = records_by_turn.get(turn) else {
+                    if delegated_turns.contains(turn) {
+                        continue;
+                    }
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
                             entry: candidate.identity(),
@@ -3874,6 +3911,9 @@ fn reconstitute_inner(
             }
             InitialSemanticTranscriptEntryPayload::TurnCancelled { turn } => {
                 let Some(record) = records_by_turn.get(turn) else {
+                    if delegated_turns.contains(turn) {
+                        continue;
+                    }
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
                             entry: candidate.identity(),
@@ -4686,49 +4726,51 @@ fn reconstitute_inner(
                 },
             );
         };
-        let Some(record) = records_by_turn.get(&ended.turn()).copied() else {
-            return Err(
-                AcceptedInputSchedulingReconstitutionFailure::SemanticEntryCallMismatch {
-                    entry: first_entry.entry(),
-                    call: *call,
-                },
-            );
-        };
-        let starting_frontier = match record.state {
-            AcceptedInputTurnSchedulingRecordState::Queued => None,
-            AcceptedInputTurnSchedulingRecordState::Active {
-                starting_frontier, ..
-            }
-            | AcceptedInputTurnSchedulingRecordState::TerminalFailed {
-                starting_frontier, ..
-            }
-            | AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
-                starting_frontier, ..
-            }
-            | AcceptedInputTurnSchedulingRecordState::TerminalRefused {
-                starting_frontier, ..
-            }
-            | AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
-                starting_frontier, ..
-            }
-            | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
-                starting_frontier,
-                ..
-            }
-            | AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
-                starting_frontier,
-                ..
-            } => Some(starting_frontier),
-        };
         let call_snapshot = snapshots.get(&ended.frontier().snapshot());
+        let accepted_turn_matches =
+            records_by_turn
+                .get(&ended.turn())
+                .copied()
+                .is_some_and(|record| {
+                    let starting_frontier = match record.state {
+                        AcceptedInputTurnSchedulingRecordState::Queued => None,
+                        AcceptedInputTurnSchedulingRecordState::Active {
+                            starting_frontier, ..
+                        }
+                        | AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                            starting_frontier, ..
+                        }
+                        | AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
+                            starting_frontier, ..
+                        }
+                        | AcceptedInputTurnSchedulingRecordState::TerminalRefused {
+                            starting_frontier, ..
+                        }
+                        | AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
+                            starting_frontier, ..
+                        }
+                        | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
+                            starting_frontier,
+                            ..
+                        }
+                        | AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
+                            starting_frontier,
+                            ..
+                        } => Some(starting_frontier),
+                    };
+                    ended.selection() == *record.origin_configuration.effective().model()
+                        && starting_frontier
+                            .and_then(|starting| snapshots.get(&starting))
+                            .zip(call_snapshot)
+                            .is_some_and(|(starting, call_snapshot)| {
+                                starting.is_semantic_prefix_of(call_snapshot)
+                            })
+                });
+        let delegated_turn_matches = delegated_turns.contains(&ended.turn())
+            && !records_by_turn.contains_key(&ended.turn())
+            && call_snapshot.is_some();
         if ended.disposition() != ModelCallDisposition::Completed
-            || ended.selection() != *record.origin_configuration.effective().model()
-            || starting_frontier
-                .and_then(|starting| snapshots.get(&starting))
-                .zip(call_snapshot)
-                .is_none_or(|(starting, call_snapshot)| {
-                    !starting.is_semantic_prefix_of(call_snapshot)
-                })
+            || (!accepted_turn_matches && !delegated_turn_matches)
         {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::SemanticEntryCallMismatch {
@@ -14939,6 +14981,44 @@ mod tests {
             failure,
             AcceptedInputSchedulingReconstitutionFailure::DuplicateAcceptedInput {
                 accepted_input: first.accepted_input(),
+            }
+        );
+    }
+
+    /// S03 / INV-009: a delegation-origin turn fact cannot also be represented
+    /// by an accepted-input lifecycle record.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_delegated_accepted_turn_fact() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let input = queued_input(&session, queued).with_delegated_turn_facts(vec![queued.turn()]);
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::DelegatedTurnFactMismatch {
+                turn: queued.turn(),
+            }
+        );
+    }
+
+    /// S03 / INV-009: complete delegation-origin turn facts cannot duplicate
+    /// the same stored turn identity.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_duplicate_delegated_turn_fact() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let delegated = turn_id(99);
+        let input =
+            queued_input(&session, queued).with_delegated_turn_facts(vec![delegated, delegated]);
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::DelegatedTurnFactMismatch {
+                turn: delegated,
             }
         );
     }

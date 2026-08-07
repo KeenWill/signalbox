@@ -1069,12 +1069,22 @@ impl TerminalChildTurn {
 }
 
 pub struct DelegationProvenance { /* private typed authority */ }
+pub enum DelegationProvenanceProjection {
+    ToolRequest {
+        source_session: SessionId,
+        source_turn: TurnId,
+        request: ToolRequestId,
+    },
+    ChildTurn { terminal: TerminalChildTurn },
+    ParentCommand { authority: ParentTerminationAuthority },
+}
 impl DelegationProvenance {
     pub fn from_spawn(request: &DelegatedSpawnRequest) -> Self;
     pub fn from_await(request: &DelegationAwaitRequest) -> Self;
     pub fn from_message(request: &DelegationMessageRequest) -> Self;
     pub const fn from_terminal_child(terminal: TerminalChildTurn) -> Self;
     pub const fn from_parent_termination(authority: ParentTerminationAuthority) -> Self;
+    pub const fn projection(self) -> DelegationProvenanceProjection;
     // accessors: tool_request(), child_turn(), parent_command() returning the sealed authority
 }
 
@@ -2933,6 +2943,10 @@ impl AcceptedInputSchedulingReconstitutionInput {
         self,
         consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
     ) -> Self;
+    pub fn with_delegated_turn_facts(
+        self,
+        delegated_turns: Vec<TurnId>,
+    ) -> Self;
     pub fn with_steering_continuation_rounds(
         self,
         steering_continuation_rounds: Vec<SteeringContinuationRoundReconstitutionInput>,
@@ -2955,6 +2969,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
     // accessors: session(), imported_session(), turns(), semantic_entries(),
     // snapshots(), pinned_targets(), model_calls(), compaction_calls(),
     // compactions(), consumed_steering(), delegated_consumed_steering(),
+    // delegated_turns(),
     // steering_continuation_rounds(), continuation_rounds(),
     // active_acceptance_tail()
 }
@@ -2978,6 +2993,7 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     SemanticEntrySubjectMissing { entry: SemanticTranscriptEntryId },
     SemanticEntryStateMismatch { entry: SemanticTranscriptEntryId },
     DuplicateSemanticEntryForSubject { entry: SemanticTranscriptEntryId },
+    DelegatedTurnFactMismatch { turn: TurnId },
     ConsumedSteeringSessionMismatch { accepted_input: AcceptedInputId },
     DuplicateConsumedSteering { accepted_input: AcceptedInputId },
     SteeringSemanticEntryMismatch { entry: SemanticTranscriptEntryId },
@@ -9744,7 +9760,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_template                           | 6                     |
 | domain: session_placement                          | 18                    |
 | domain: session                                    | 22                    |
-| domain: session_delegation                         | 36 (+3 free fn)       |
+| domain: session_delegation                         | 37 (+3 free fn)       |
 | domain: imported_session                           | 18                    |
 | domain: configuration                              | 24                    |
 | domain: model_settings                             | 25                    |
@@ -9774,7 +9790,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 63                    |
-| **signalbox-domain total**                         | **749 (+10 free fn)** |
+| **signalbox-domain total**                         | **750 (+10 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

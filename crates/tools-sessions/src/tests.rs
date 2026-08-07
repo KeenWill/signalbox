@@ -229,6 +229,16 @@ fn durably_completed_text(disposition: UnboundExecutionDisposition) -> String {
     result
 }
 
+#[track_caller]
+fn assert_durably_rejected(disposition: UnboundExecutionDisposition) {
+    assert!(matches!(
+        disposition,
+        UnboundExecutionDisposition::DurableCompletion(ToolExecutorEvidence::KnownFailed {
+            detail: Some(_),
+        })
+    ));
+}
+
 fn foreground_result(disposition: UnboundExecutionDisposition) -> DeliveredChildResult {
     let UnboundExecutionDisposition::ForegroundDelivered(result) = disposition else {
         panic!("fixture operation delivers one typed foreground result")
@@ -334,6 +344,17 @@ impl FakePort {
             spawn_result: None,
             await_result: None,
             message_result: Some(SessionDelegationPortOutcome::Applied(delivery)),
+            spawn_requests: Vec::new(),
+            await_requests: Vec::new(),
+            message_requests: Vec::new(),
+        }
+    }
+
+    fn durably_rejecting_message() -> Self {
+        Self {
+            spawn_result: None,
+            await_result: None,
+            message_result: Some(SessionDelegationPortOutcome::DurablyRejected),
             spawn_requests: Vec::new(),
             await_requests: Vec::new(),
             message_requests: Vec::new(),
@@ -1003,4 +1024,19 @@ fn message_executor_rejects_a_delivery_for_another_tool_request() {
     let authority = dispatch(&raw, ToolEffectClass::ExternalEffect);
 
     assert_port_contract(run_ready(executor.execute_operation(operation, authority)));
+}
+
+#[test]
+fn stored_message_rejection_is_reported_as_already_durable() {
+    let raw = message_request(32, session(33));
+    let (_catalog, mut executor) =
+        SessionDelegationTools::try_new(FakePort::durably_rejecting_message())
+            .expect("fixture tools compile")
+            .into_parts();
+    let operation = decode_operation(&raw).expect("fixture message request is canonical");
+    let authority = dispatch(&raw, ToolEffectClass::ExternalEffect);
+    let disposition = run_ready(executor.execute_operation(operation, authority))
+        .expect("stored rejection remains trustworthy");
+
+    assert_durably_rejected(disposition);
 }

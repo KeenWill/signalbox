@@ -3003,6 +3003,8 @@ pub(crate) async fn load_scheduling_projection(
             call.context_frontier_id,
             call.state_kind,
             call.terminal_disposition_kind,
+            lifecycle.origin_kind AS turn_origin_kind,
+            lifecycle.pinned_provider_model_identity_id,
             (attempt.continued_from_attempt_id IS NOT NULL)
                 AS continues_prior_attempt
            FROM model_call AS call
@@ -3010,6 +3012,9 @@ pub(crate) async fn load_scheduling_projection(
              ON attempt.turn_attempt_id = call.turn_attempt_id
             AND attempt.turn_id = call.turn_id
             AND attempt.session_id = call.session_id
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.turn_id = call.turn_id
+            AND lifecycle.session_id = call.session_id
           WHERE call.session_id = $1
             AND call.model_call_id = ANY($2)
           ORDER BY call.model_call_id",
@@ -3036,6 +3041,7 @@ pub(crate) async fn load_scheduling_projection(
     let mut pinned_targets = Vec::with_capacity(model_call_rows.len());
     let mut loaded_pinned_turns = BTreeSet::new();
     let mut loaded_model_calls = BTreeSet::new();
+    let mut delegated_turns = BTreeSet::new();
     let mut consuming_call_facts = Vec::new();
     let mut named_gate_call_facts = Vec::new();
     for row in model_call_rows {
@@ -3046,10 +3052,19 @@ pub(crate) async fn load_scheduling_projection(
         let frontier_uuid: Uuid = required(&row, "context_frontier_id")?;
         let turn_uuid: Uuid = required(&row, "turn_id")?;
         let turn = turn_id_from_uuid(turn_uuid);
-        let pinned_identity = pinned_target_identities
-            .get(&turn)
-            .copied()
-            .ok_or(SubmitInputCorruption::Missing("model call turn target pin"))?;
+        let turn_origin_kind: String = required(&row, "turn_origin_kind")?;
+        if turn_origin_kind == "delegation" {
+            delegated_turns.insert(turn);
+        }
+        let pinned_identity = match pinned_target_identities.get(&turn).copied() {
+            Some(identity) => identity,
+            None if turn_origin_kind == "delegation" => {
+                required(&row, "pinned_provider_model_identity_id")?
+            }
+            None => {
+                return Err(SubmitInputCorruption::Missing("model call turn target pin").into());
+            }
+        };
         if loaded_pinned_turns.insert(turn) {
             pinned_targets.push(PinnedProviderTargetReconstitutionInput::new(
                 turn,
@@ -3307,7 +3322,8 @@ pub(crate) async fn load_scheduling_projection(
     .bind(session_id_to_uuid(session_id))
     .fetch_optional(&mut *connection)
     .await?;
-    if let Some((_, terminal_frontier, _)) = preceding_non_accepted_terminal {
+    if let Some((turn, terminal_frontier, _)) = preceding_non_accepted_terminal {
+        delegated_turns.insert(turn_id_from_uuid(turn));
         required_frontiers.insert(terminal_frontier);
     }
 
@@ -4246,6 +4262,7 @@ pub(crate) async fn load_scheduling_projection(
         .with_context_compaction_facts(compaction_calls, compactions)
         .with_consumed_steering_facts(consumed_steering)
         .with_delegated_consumed_steering_facts(delegated_consumed_steering)
+        .with_delegated_turn_facts(delegated_turns.into_iter().collect())
         .with_steering_continuation_rounds(steering_continuation_rounds)
         .with_continuation_rounds(continuation_rounds)
         .reconstitute()
