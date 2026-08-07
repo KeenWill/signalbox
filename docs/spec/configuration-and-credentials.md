@@ -54,10 +54,11 @@ static model-to-adapter mapping and append-only session credential history are
 verified through PR #373 (`agent/adapter-wiring`); the `claude_cli` mapping and
 process paths are verified against this PR (`agent/wire-claude-cli-adapter`),
 and its file-delivery mapping against this PR
-(`agent/claude-cli-credential-delivery`). The `openai` mapping with its pinned
-profile and conditional key path is verified against this PR
-(`agent/wire-openai-adapter`). The composed code-host, pull-request, workspace,
-and conversation tool families are verified through PR #377
+(`agent/claude-cli-credential-delivery`). The `openai` mapping is verified
+against this PR (`agent/wire-openai-adapter`), and its complete adapter-scoped
+file-profile catalog is verified against this PR
+(`agent/credential-pools-parser`). The composed code-host, pull-request,
+workspace, and conversation tool families are verified through PR #377
 (`agent/tools-daemon-wiring`). The mapped local Git identity and repository-root
 requirements are verified through this PR (`agent/daemon-wiring`).
 Placement-scoped native conversation reads are verified through PR #400

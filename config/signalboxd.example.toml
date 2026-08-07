@@ -137,6 +137,9 @@ credential_pool = "anthropic-main"
 # refreshing again, so the residual race is narrow and its consequence is a
 # quarantine the pool fails over from. Set max_concurrent_invocations to trade
 # throughput for avoiding it. Two profiles may not name the same directory.
+# This build has no runtime delivery for this committed syntax, so uncommenting
+# either profile remains a typed startup error until the codex_home delivery
+# slice lands.
 # [[credential_profiles]]
 # name = "codex-local-a"
 # adapter = "codex_cli"
