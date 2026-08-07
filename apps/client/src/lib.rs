@@ -8562,11 +8562,17 @@ mod tests {
     const DELEGATION_BACKGROUND_AWAIT_REQUEST: &str = "00000000-0000-0000-0000-000000000009";
     const DELEGATION_FOREIGN_PARENT: &str = "00000000-0000-0000-0000-00000000000a";
 
+    struct DelegationVerbResult {
+        exit: ExitCode,
+        stdout: String,
+        stderr: String,
+    }
+
     async fn run_delegation_verb(
         command: &[&str],
         expected: ClientRequest,
         response: ServerMessage,
-    ) -> Result<(ExitCode, String, String), Box<dyn Error>> {
+    ) -> Result<DelegationVerbResult, Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let listener = UnixListener::bind(&socket)?;
@@ -8586,7 +8592,11 @@ mod tests {
         )
         .await;
         server.await??;
-        Ok((exit, String::from_utf8(stdout)?, String::from_utf8(stderr)?))
+        Ok(DelegationVerbResult {
+            exit,
+            stdout: String::from_utf8(stdout)?,
+            stderr: String::from_utf8(stderr)?,
+        })
     }
 
     #[tokio::test]
@@ -8599,7 +8609,7 @@ mod tests {
             on_parent_stopped: BoundChildAction::Stop,
             on_parent_cancelled: BoundChildAction::Cancel,
         };
-        let (exit, stdout, stderr) = run_delegation_verb(
+        let result = run_delegation_verb(
             &[
                 "session",
                 "spawn",
@@ -8629,14 +8639,14 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(exit, ExitCode::SUCCESS);
+        assert_eq!(result.exit, ExitCode::SUCCESS);
         assert_eq!(
-            stdout,
+            result.stdout,
             format!(
                 "spawn_request={request_id} child_session={child_id} relationship=bound on_parent_stopped=stop on_parent_cancelled=cancel\n"
             )
         );
-        assert_eq!(stderr, "");
+        assert_eq!(result.stderr, "");
         Ok(())
     }
 
@@ -8649,7 +8659,7 @@ mod tests {
             on_parent_stopped: BoundChildAction::Stop,
             on_parent_cancelled: BoundChildAction::Cancel,
         };
-        let (exit, stdout, stderr) = run_delegation_verb(
+        let result = run_delegation_verb(
             &[
                 "session",
                 "spawn",
@@ -8679,9 +8689,9 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(exit, ExitCode::FAILURE);
-        assert_eq!(stdout, "");
-        assert!(!stderr.is_empty());
+        assert_eq!(result.exit, ExitCode::FAILURE);
+        assert_eq!(result.stdout, "");
+        assert!(!result.stderr.is_empty());
         Ok(())
     }
 
@@ -8694,7 +8704,7 @@ mod tests {
         let spawn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SPAWN_REQUEST)?);
         let child_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD)?);
         let child_turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD_TURN)?);
-        let (exit, stdout, stderr) = run_delegation_verb(
+        let result = run_delegation_verb(
             &[
                 "session",
                 "await",
@@ -8727,14 +8737,14 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(exit, ExitCode::SUCCESS);
+        assert_eq!(result.exit, ExitCode::SUCCESS);
         assert_eq!(
-            stdout,
+            result.stdout,
             format!(
                 "await_request={request_id} spawning_request={spawn_id} child_session={child_id} delivery=foreground outcome=returned reason=child_completed provenance=child_turn:{child_id}:{child_turn_id} content=done\\u{{a}}now\n"
             )
         );
-        assert_eq!(stderr, "");
+        assert_eq!(result.stderr, "");
         Ok(())
     }
 
@@ -8748,7 +8758,7 @@ mod tests {
         let spawn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SPAWN_REQUEST)?);
         let child_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD)?);
         let command_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_MESSAGE)?);
-        let (exit, stdout, stderr) = run_delegation_verb(
+        let result = run_delegation_verb(
             &[
                 "session",
                 "await",
@@ -8783,9 +8793,9 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(exit, ExitCode::FAILURE);
-        assert_eq!(stdout, "");
-        assert!(!stderr.is_empty());
+        assert_eq!(result.exit, ExitCode::FAILURE);
+        assert_eq!(result.stdout, "");
+        assert!(!result.stderr.is_empty());
         Ok(())
     }
 
@@ -8797,7 +8807,7 @@ mod tests {
         let request_id =
             CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_BACKGROUND_AWAIT_REQUEST)?);
         let child_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD)?);
-        let (exit, stdout, stderr) = run_delegation_verb(
+        let result = run_delegation_verb(
             &[
                 "session",
                 "await",
@@ -8823,12 +8833,12 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(exit, ExitCode::SUCCESS);
+        assert_eq!(result.exit, ExitCode::SUCCESS);
         assert_eq!(
-            stdout,
+            result.stdout,
             format!("await_request={request_id} child_session={child_id} mode=background\n")
         );
-        assert_eq!(stderr, "");
+        assert_eq!(result.stderr, "");
         Ok(())
     }
 
@@ -8840,7 +8850,7 @@ mod tests {
         let request_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_MESSAGE_REQUEST)?);
         let child_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD)?);
         let message_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_MESSAGE)?);
-        let (exit, stdout, stderr) = run_delegation_verb(
+        let result = run_delegation_verb(
             &[
                 "session",
                 "message",
@@ -8868,14 +8878,14 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(exit, ExitCode::SUCCESS);
+        assert_eq!(result.exit, ExitCode::SUCCESS);
         assert_eq!(
-            stdout,
+            result.stdout,
             format!(
                 "message_request={request_id} peer_session={child_id} message={message_id} direction=parent_to_child ordinal=2 delivery_sequence=1\n"
             )
         );
-        assert_eq!(stderr, "");
+        assert_eq!(result.stderr, "");
         Ok(())
     }
 
@@ -8885,7 +8895,7 @@ mod tests {
         let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_TURN)?);
         let request_id =
             CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_BACKGROUND_AWAIT_REQUEST)?);
-        let (exit, stdout, stderr) = run_delegation_verb(
+        let result = run_delegation_verb(
             &[
                 "session",
                 "await",
@@ -8911,9 +8921,9 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(exit, ExitCode::FAILURE);
-        assert_eq!(stdout, "");
-        assert!(!stderr.is_empty());
+        assert_eq!(result.exit, ExitCode::FAILURE);
+        assert_eq!(result.stdout, "");
+        assert!(!result.stderr.is_empty());
         Ok(())
     }
 
@@ -8924,7 +8934,7 @@ mod tests {
         let request_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_AWAIT_REQUEST)?);
         let spawn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SPAWN_REQUEST)?);
         let child_turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD_TURN)?);
-        let (exit, stdout, stderr) = run_delegation_verb(
+        let result = run_delegation_verb(
             &[
                 "session",
                 "await",
@@ -8957,9 +8967,9 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(exit, ExitCode::FAILURE);
-        assert_eq!(stdout, "");
-        assert!(!stderr.is_empty());
+        assert_eq!(result.exit, ExitCode::FAILURE);
+        assert_eq!(result.stdout, "");
+        assert!(!result.stderr.is_empty());
         Ok(())
     }
 
@@ -8969,7 +8979,7 @@ mod tests {
         let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_TURN)?);
         let request_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_MESSAGE_REQUEST)?);
         let message_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_MESSAGE)?);
-        let (exit, stdout, stderr) = run_delegation_verb(
+        let result = run_delegation_verb(
             &[
                 "session",
                 "message",
@@ -8997,9 +9007,9 @@ mod tests {
         )
         .await?;
 
-        assert_eq!(exit, ExitCode::FAILURE);
-        assert_eq!(stdout, "");
-        assert!(!stderr.is_empty());
+        assert_eq!(result.exit, ExitCode::FAILURE);
+        assert_eq!(result.stdout, "");
+        assert!(!result.stderr.is_empty());
         Ok(())
     }
 
