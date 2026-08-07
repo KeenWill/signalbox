@@ -1298,18 +1298,26 @@ impl HubModelConfiguration {
         })
     }
 
-    /// Iterates every file-delivered profile and its deployment-owned path.
+    /// Iterates every file-delivered profile for one adapter and its path.
     ///
     /// The catalog is deliberately not narrowed to currently preferred pool
     /// members: an existing session may still pin any declared profile after a
-    /// configuration edit or restart.
-    pub fn file_credential_profiles(&self) -> impl Iterator<Item = (&str, &Path)> {
-        self.credential_profiles.values().filter_map(|profile| {
-            profile
-                .delivery()
-                .path()
-                .map(|path| (profile.name(), path.as_path()))
-        })
+    /// configuration edit or restart. It is narrowed to the declared adapter
+    /// so a historical reference cannot deliver one provider's secret to
+    /// another provider after an adapter remap.
+    pub fn file_credential_profiles(
+        &self,
+        adapter: ModelAdapter,
+    ) -> impl Iterator<Item = (&str, &Path)> {
+        self.credential_profiles
+            .values()
+            .filter(move |profile| profile.adapter() == adapter)
+            .filter_map(|profile| {
+                profile
+                    .delivery()
+                    .path()
+                    .map(|path| (profile.name(), path.as_path()))
+            })
     }
 
     /// Returns a configuration-owned compatibility fallback for persistence
@@ -3306,6 +3314,7 @@ async fn read_bounded_credential_file(path: &Path, maximum_bytes: usize) -> io::
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         path::{Path, PathBuf},
         sync::Arc,
         time::Duration,
@@ -3339,6 +3348,7 @@ mod tests {
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
+    const ANTHROPIC_OVERFLOW_PROFILE: &str = "anthropic-overflow";
 
     /// The exact pool block [`CONFIGURATION`] declares, so a test that cares
     /// about pool shape states its own replacement in full.
@@ -5689,18 +5699,24 @@ delivery = "ambient""#,
     }
 
     #[test]
-    fn file_profile_catalog_includes_the_path_its_profile_declares() {
-        let configured = HubModelConfiguration::parse(CONFIGURATION).expect("the fixture is valid");
+    fn file_profile_catalog_is_complete_within_and_closed_across_adapters() {
+        let configured =
+            HubModelConfiguration::parse(&format!("{CONFIGURATION}\n{OPENAI_MAPPING_AND_MODEL}"))
+                .expect("the combined fixture is valid");
+        let anthropic_profiles = configured
+            .file_credential_profiles(ModelAdapter::Anthropic)
+            .map(|(reference, _)| reference)
+            .collect::<HashSet<_>>();
+        let openai_profiles = configured
+            .file_credential_profiles(ModelAdapter::OpenAi)
+            .map(|(reference, _)| reference)
+            .collect::<HashSet<_>>();
 
         assert_eq!(
-            configured
-                .file_credential_profiles()
-                .find(|(reference, _)| *reference == "anthropic-primary"),
-            Some((
-                "anthropic-primary",
-                Path::new("/run/secrets/anthropic-primary")
-            ))
+            anthropic_profiles,
+            HashSet::from([ANTHROPIC_CREDENTIAL_REFERENCE, ANTHROPIC_OVERFLOW_PROFILE,])
         );
+        assert_eq!(openai_profiles, HashSet::from([OPENAI_PROFILE]));
     }
 
     #[test]
@@ -5748,7 +5764,12 @@ context_window_tokens = 200000
         ))
         .expect("a Codex-only configuration is valid");
 
-        assert_eq!(configured.file_credential_profiles().next(), None);
+        assert_eq!(
+            configured
+                .file_credential_profiles(ModelAdapter::Anthropic)
+                .next(),
+            None
+        );
     }
 
     #[test]

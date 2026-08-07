@@ -49,8 +49,8 @@ use signalbox_process_protocol::{
 };
 use signalboxd::{
     ActivatedTurnExecution, ActivatedTurnPass, FatalExecutionSupervisor, FileCredentialAccess,
-    HubModelConfiguration, LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime,
-    ProcessRuntimeError, SessionTemplateConfiguration,
+    HubModelConfiguration, LocalProcessListener, ModelAdapter, PostgresProviderModelExecution,
+    ProcessRuntime, ProcessRuntimeError, SessionTemplateConfiguration,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -2943,7 +2943,7 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
         .to_owned();
     let credential_access = FileCredentialAccess::from_files(
         model_configuration
-            .file_credential_profiles()
+            .file_credential_profiles(ModelAdapter::Anthropic)
             .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
     );
     let credential_reference = ModelCallCredentialReference::new(credential_profile);

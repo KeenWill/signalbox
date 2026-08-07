@@ -54,7 +54,7 @@ use signalboxd::{
     DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
     FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
     HubModelConfigurationError, LocalProcessListener, LocalSocketError,
-    MappedDaemonCredentialInputs, OtlpRuntime, PostgresGoalPassDisposition,
+    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
     RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
     SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
@@ -1067,17 +1067,22 @@ async fn run_hub(
                 )
             })?;
     }
-    let model_credentials = FileCredentialAccess::from_files(
+    let anthropic_model_credentials = FileCredentialAccess::from_files(
         model_configuration
-            .file_credential_profiles()
+            .file_credential_profiles(ModelAdapter::Anthropic)
+            .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
+    );
+    let openai_model_credentials = FileCredentialAccess::from_files(
+        model_configuration
+            .file_credential_profiles(ModelAdapter::OpenAi)
             .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
     );
     let anthropic_credential_access = model_configuration
         .uses_anthropic_adapter()
-        .then(|| model_credentials.clone());
+        .then(|| anthropic_model_credentials.clone());
     let openai_credential_access = model_configuration
         .uses_openai_adapter()
-        .then(|| model_credentials.clone());
+        .then(|| openai_model_credentials.clone());
     let credential_reference =
         ModelCallCredentialReference::new(model_configuration.fallback_credential_profile());
     let code_host_credentials = FileCredentialAccess::new(
@@ -1112,7 +1117,7 @@ async fn run_hub(
     let openai_model_capabilities = model_configuration.runtime_model_capability_catalog();
     let anthropic = model_configuration
         .uses_anthropic_adapter()
-        .then(|| model_credentials.clone())
+        .then(|| anthropic_model_credentials.clone())
         .map(|credential_access| {
             let mut adapter_configuration = AnthropicConfig::new();
             adapter_configuration.model_capabilities = anthropic_model_capabilities;
