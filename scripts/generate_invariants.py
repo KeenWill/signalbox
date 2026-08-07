@@ -16,6 +16,7 @@ from check_docs_consistency import (
     rust_invariant_test_files,
     rust_sources,
 )
+from postgres_integration_suites import ManifestError
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = Path("docs/invariants.md")
@@ -112,10 +113,13 @@ def main() -> int:
     )
     arguments = parser.parse_args()
 
+    # The suite manifest decides which ignored tests count as CI-enforced, so a
+    # malformed one would otherwise surface here as an unexplained "stale
+    # index" rather than as the input error it is.
     try:
         orphans = orphan_invariant_references(ROOT)
         expected = render(ROOT)
-    except TrackedFilesError as error:
+    except (TrackedFilesError, ManifestError) as error:
         print(f"invariant index check FAILED: {error}", file=sys.stderr)
         return 1
     if orphans:

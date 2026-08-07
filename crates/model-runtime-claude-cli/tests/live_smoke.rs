@@ -58,6 +58,7 @@ use signalbox_model_runtime_claude_cli::{
     CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY, ClaudeCliConfig, ClaudeCliPreparedRequest,
     ClaudeCliRuntime, SUPPORTED_CLAUDE_CLI_VERSION,
 };
+use signalbox_test_bin::test_bin_path;
 
 /// Overrides the executable under test. The default resolves through `PATH`;
 /// CI points it at the binary `npm ci` unpacked from the pin manifest.
@@ -237,7 +238,7 @@ async fn assert_pre_spend_contract(executable: &std::path::Path) {
 /// Production supplies this path from configuration; the smoke must exercise
 /// the same bridge the adapter ships rather than a stand-in.
 fn mcp_bridge_executable() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-claude-mcp-bridge"))
+    test_bin_path!("signalbox-claude-mcp-bridge")
 }
 
 /// `ClaudeCliPreparedRequest` deliberately implements no diagnostic formatting,

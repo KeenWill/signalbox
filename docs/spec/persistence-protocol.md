@@ -622,10 +622,15 @@ Locks per transaction, in acquisition order:
   (session existence is checked with a bare `EXISTS`). Credential-pool call
   preparation additionally locks every potentially selected bounded profile's
   shared capacity row `FOR UPDATE`, in profile-reference byte order, after the
-  scheduler lock and before reading reservation counts. No other path may take a
-  scheduler lock while holding a capacity-row lock. The session row is locked
-  only `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
-  `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
+  scheduler lock and before reading reservation counts. When `round_robin`
+  decides among the first admitted priority's members, preparation next locks
+  that immutable-policy-and-priority cursor row `FOR UPDATE` before reading the
+  cursor, choosing a member, or advancing it with `Prepared`. It rereads the
+  protected selection facts after acquiring the lock. No other path may take a
+  scheduler lock while holding a capacity-row lock, or take a capacity-row lock
+  while holding a cursor-row lock. The session row is locked only `KEY SHARE`,
+  implicitly, by the inserts' foreign keys, and the candidate `turn_lifecycle`
+  row is locked by the guarded `UPDATE` itself.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -1417,7 +1422,19 @@ uniqueness constraint covers the complete canonical structural value. The
 surrogate identity is reused only after full relational equality succeeds; a
 digest is not identity. Cursor rows key that identity and priority, so an
 unchanged policy retains its cursor across restart and an edited policy cannot
-inherit one.
+inherit one. Selection locks the exact cursor row `FOR UPDATE` before reading it
+and commits the chosen call and successor cursor together.
+
+Legacy family-to-reference entries are rewritten only by a post-schema backfill
+running with the validated profile registry. For each locked entry it requires
+the referenced profile registration, copies that registration's adapter and
+delivery kind, and never consults the current family mapping or pool table. It
+interns the deterministic `legacy/<session-uuid>/<event-ordinal>/<model-family>`
+singleton policy defined by the configuration contract: one priority-1 member,
+no headroom reserve, `first`, `fail`, and `stay` for every trigger. The policy
+insert and entry rewrite are atomic and idempotent; a missing registration
+aborts before any rewrite. Thus the migration has an authoritative source for
+its two profile-owned fields and canonical values for every policy-owned field.
 
 Every pool-selected model call stores the immutable policy identity beside its
 credential reference as an insert-only authorization fact. Observation commit

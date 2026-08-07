@@ -47,6 +47,7 @@ use signalbox_process_protocol::{
     CanonicalUuid, ClientFrame, ClientRequest, CommandId, ProtocolVersion, RequestId,
     ServerMessage, SessionMetadata, decode_server_line, encode_client_line,
 };
+use signalbox_test_bin::test_bin_path;
 use signalboxd::{
     ActivatedTurnExecution, ActivatedTurnPass, FatalExecutionSupervisor, FileCredentialAccess,
     HubModelConfiguration, LocalProcessListener, ModelAdapter, PostgresProviderModelExecution,
@@ -183,7 +184,7 @@ async fn spawn_client(
     arguments: Vec<String>,
     input: Option<String>,
 ) -> Result<tokio::process::Child, Box<dyn Error>> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_signalbox"));
+    let mut command = Command::new(test_bin_path!("signalbox"));
     command
         .kill_on_drop(true)
         .env_remove("SIGNALBOX_SOCKET_PATH")
