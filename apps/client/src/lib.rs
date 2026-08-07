@@ -1392,7 +1392,13 @@ async fn session_delegation(
                         && recorded_request == tool_request_id
                         && recorded_child == child_session_id
                         && session_id != child_session_id
-                        && delegation_provenance_matches(session_id, child_session_id, provenance)
+                        && delegation_provenance_matches(
+                            DelegationProvenanceExpectation {
+                                parent_session_id: session_id,
+                                child_session_id,
+                            },
+                            provenance,
+                        )
                     {
                         output.child_result(ChildResultPresentation {
                             await_request_id: tool_request_id,
@@ -1524,21 +1530,25 @@ async fn session_delegation(
     }
 }
 
+struct DelegationProvenanceExpectation {
+    parent_session_id: CanonicalUuid,
+    child_session_id: CanonicalUuid,
+}
+
 fn delegation_provenance_matches(
-    parent: CanonicalUuid,
-    child: CanonicalUuid,
+    expectation: DelegationProvenanceExpectation,
     provenance: DelegationProvenance,
 ) -> bool {
     match provenance {
         DelegationProvenance::ChildTurn {
             child_session_id, ..
-        } => child_session_id == child,
+        } => child_session_id == expectation.child_session_id,
         DelegationProvenance::ParentTurnCommand {
             parent_session_id, ..
         }
         | DelegationProvenance::ParentGoalCommand {
             parent_session_id, ..
-        } => parent_session_id == parent,
+        } => parent_session_id == expectation.parent_session_id,
     }
 }
 
