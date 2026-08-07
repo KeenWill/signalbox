@@ -19,6 +19,7 @@ members = [
     "crates/persistence",
     "crates/process-protocol",
     "crates/runner-wire",
+    "crates/test-bin",
     "crates/tool-contract",
     "crates/tool-schema-derive",
     "crates/tools-basic",
