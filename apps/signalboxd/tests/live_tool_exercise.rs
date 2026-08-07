@@ -631,11 +631,9 @@ fn confirm_tool_names(catalog: &impl ToolCatalog) -> Vec<String> {
     catalog
         .definitions()
         .iter()
-        .filter(|definition| {
-            matches!(
-                definition.permission_default(),
-                ToolPermissionDefault::Confirm | ToolPermissionDefault::AlwaysConfirm
-            )
+        .filter(|definition| match definition.permission_default() {
+            ToolPermissionDefault::Auto => false,
+            ToolPermissionDefault::Confirm | ToolPermissionDefault::AlwaysConfirm => true,
         })
         .map(|definition| definition.name().as_str().to_owned())
         .collect()
