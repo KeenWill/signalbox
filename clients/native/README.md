@@ -95,11 +95,19 @@ Record and verify through the two scripts below and nothing else:
 `scripts/record-snapshots.sh` and `scripts/test-snapshots.sh` take the suite and
 the simulator from `scripts/lib/snapshots.sh`, which is what CI runs, while a
 bare `scripts/test-xcode.sh` resolves whichever compatible phone is booted.
-Nine of the ten goldens are byte-identical across iPhone simulators, but the
-regular-layout canvas is wider than a phone screen, so the window's corner mask
-and the glass materials composite against the device: that one golden can fail
-on a destination other than CI's, and re-recording it there would commit a
-rendering the pinned simulator then rejects.
+Ten of the twelve goldens are byte-identical across iPhone simulators. The two
+recorded on the regular canvas are the exception, and for one reason: it is
+wider than a phone screen, so the window's corner mask and the glass materials
+composite against the device. Those two can fail on a destination other than
+CI's, and re-recording them there would commit a rendering the pinned simulator
+then rejects.
+
+Reduce Transparency is refused rather than pinned. Every other appearance input
+these goldens depend on is a trait the canvas overrides, but that one is not a
+trait at all — UIKit exposes it only as `UIAccessibility`, and SwiftUI derives
+its environment value from that as read-only — so a run on a simulator with it
+switched on stops and names the setting instead of comparing against references
+recorded without it.
 
 The suite runs as a report-only step in CI, which uploads the reference, the
 failed rendering, and their difference as an artifact when a comparison fails.

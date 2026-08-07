@@ -6,6 +6,12 @@ import XCTest
 
 /// Goldens for the screens `RootView` reaches.
 ///
+/// Every section it can select is here: Sessions, Monitor, Runners, Templates,
+/// and Settings, along with the transport gate that stands in front of all of
+/// them and the session transcript a selected session pushes. Each is
+/// snapshotted on the canvas that reaches it, which is why Templates is the one
+/// gate recorded on the regular canvas — the compact tab bar has no tab for it.
+///
 /// `ScreenshotScenario` is the determinism seam, unchanged: each case selects
 /// a fixture set that the shipping mock coordinator installs behind the real
 /// encoder, decoder, and framing, so this suite states which screen in which
@@ -54,8 +60,34 @@ final class LiveScreenSnapshotTests: XCTestCase {
         await assertLiveScreenSnapshot(of: rootView(for: .settings), canvas: .compact)
     }
 
+    /// The three capability gates are one view with three different messages,
+    /// and each is snapshotted, because the message is the screen: a reader
+    /// who reaches one of these sections is told what the process protocol does
+    /// not expose, and nothing else on the screen distinguishes it.
     func testMonitorCapabilityGate() async {
         await assertLiveScreenSnapshot(of: rootView(for: .monitor), canvas: .compact)
+    }
+
+    func testRunnersCapabilityGate() async {
+        await assertLiveScreenSnapshot(of: rootView(for: .runners), canvas: .compact)
+    }
+
+    /// Selected rather than named, and regular rather than compact, because
+    /// that is the only way `RootView` reaches this screen: the compact tab bar
+    /// has no Templates tab, and no `ScreenshotScenario` resolves to the
+    /// section. Assigning it is what the sidebar row does, so this enters the
+    /// screen the way the application does; the scenario still selects the
+    /// fixtures, which keeps the determinism seam where the others have it.
+    func testTemplatesCapabilityGate() async {
+        let coordinator = AppCoordinator(
+            isMockMode: ScreenshotScenario.sessions.requiresMockService,
+            screenshotScenario: .sessions
+        )
+        coordinator.selectedSection = .templates
+        await assertLiveScreenSnapshot(
+            of: RootView().environmentObject(coordinator),
+            canvas: .regular
+        )
     }
 
     /// The sheet is snapshotted as its own screen. Compositing it onto the

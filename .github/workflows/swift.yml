@@ -126,7 +126,7 @@ jobs:
       # already holds the build this step reuses, which is also why it sets
       # code coverage the same way the step above does. Instrumentation changes
       # the built products, so a step that disagreed about it would rebuild
-      # everything to run ten tests. Its result bundle is separate so it cannot
+      # everything to run the goldens. Its result bundle is separate so it cannot
       # overwrite the one the coverage report reads.
       - name: Run native snapshot suite (report only)
         id: snapshots

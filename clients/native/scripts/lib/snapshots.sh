@@ -13,11 +13,11 @@ SIGNALBOX_NATIVE_SNAPSHOT_SUITE="SignalboxAppTests/LiveScreenSnapshotTests"
 # Named rather than resolved, and this is the whole reason the file exists.
 # `simulator_resolve_iphone_ids` returns booted devices first, so the newest
 # model is what a fresh runner picks and whatever the developer happens to have
-# open is what a laptop picks. Nine of the ten goldens do not care; the
-# regular-layout canvas is wider than a phone screen, so the window's corner
-# mask and the glass materials composite against the device, and recording it
-# against a different model than CI checks it against would report a difference
-# nobody introduced.
+# open is what a laptop picks. Ten of the twelve goldens do not care; the two
+# on the regular-layout canvas do, because it is wider than a phone screen, so
+# the window's corner mask and the glass materials composite against the
+# device, and recording them against a different model than CI checks them
+# against would report a difference nobody introduced.
 SIGNALBOX_NATIVE_SNAPSHOT_DEVICE_NAME="${SIGNALBOX_NATIVE_SNAPSHOT_DEVICE_NAME:-iPhone 17 Pro}"
 
 # The runtime, for the same reason and with less evidence. A model resolves to

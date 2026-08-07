@@ -136,14 +136,17 @@ enum SnapshotCanvas: String {
 /// The second cost is the destination, and it is bounded rather than absent.
 /// Everything a layout resolves against is pinned below — size, scale, size
 /// class, interface style, content-size category, layout direction, and safe
-/// area — and with those pinned, nine of the ten goldens were verified
-/// byte-identical across three different iPhone simulators. The tenth is the
+/// area — and with those pinned, ten of the twelve goldens were verified
+/// byte-identical across different iPhone simulators. The other two are the
 /// regular canvas, which is wider than a phone screen: the window's corner mask
-/// and the glass materials composite against the device there, so that one
-/// golden still resolves differently on a different phone. CI pins its
+/// and the glass materials composite against the device there, so those two
+/// goldens still resolve differently on a different phone. CI pins its
 /// simulator, and `scripts/test-xcode.sh` resolves the newest one locally, so
 /// the suite is reproducible where it runs; a destination that is not CI's can
-/// legitimately fail that golden alone.
+/// legitimately fail those two alone.
+///
+/// One appearance input is refused rather than pinned, because it is not a
+/// trait and nothing can override it; see `liveScreenSnapshotUnsupportedState`.
 @MainActor
 enum LiveScreenRenderer {
     /// The renderer re-renders on this interval while waiting for the screen
@@ -343,6 +346,14 @@ func assertLiveScreenSnapshot(
     testName: String = #function,
     line: UInt = #line
 ) async {
+    // Before the render rather than after it: a refused state has no golden to
+    // compare against, so there is nothing to spend a settle on.
+    if let unsupported = liveScreenSnapshotUnsupportedState(
+        reduceTransparency: UIAccessibility.isReduceTransparencyEnabled
+    ) {
+        XCTFail(unsupported, file: file, line: line)
+        return
+    }
     let rendering = await LiveScreenRenderer.render(view, canvas: canvas, file: file, line: line)
     // The record mode is passed per assertion rather than installed around the
     // suite: `withSnapshotTesting` carries it in a task local, and XCTest runs
@@ -361,6 +372,43 @@ func assertLiveScreenSnapshot(
         testName: testName,
         line: line
     )
+}
+
+/// The one appearance input these goldens depend on that no canvas can pin.
+///
+/// Everything else the rendering resolves against is a trait, and
+/// `overrideTraits` pins each of them: interface style, content-size category,
+/// Bold Text, Increased Contrast. Reduce Transparency is not a trait.
+/// `UITraitCollection` has no property for it, so there is nothing for an
+/// override to set, and SwiftUI derives
+/// `EnvironmentValues.accessibilityReduceTransparency` from
+/// `UIAccessibility.isReduceTransparencyEnabled` as a get-only value, so
+/// `.environment(_:_:)` does not accept its key path — pinning it on the hosted
+/// view does not compile, let alone work.
+///
+/// It is worth refusing rather than ignoring because it changes these
+/// particular goldens: the screens here render `.thinMaterial` and `.bar`
+/// backgrounds, which resolve to opaque fills when it is on. Left unchecked, a
+/// verifying run on such a machine fails every golden for a reason none of them
+/// names, and a recording run silently rewrites them all to match one
+/// simulator's accessibility state. The refusal is what a pin would have been:
+/// a run under an appearance these references do not describe stops, and says
+/// which one.
+///
+/// Returns the diagnostic, or `nil` when the state is one a golden can be
+/// recorded and compared under. Split from the `UIAccessibility` read so the
+/// decision is reachable by a test, for the same reason the record mode is.
+func liveScreenSnapshotUnsupportedState(reduceTransparency: Bool) -> String? {
+    guard reduceTransparency else {
+        return nil
+    }
+    return """
+        This simulator has Reduce Transparency on, and it repaints the material \
+        backgrounds these goldens record. It is not a trait, so the canvas \
+        cannot pin it the way it pins Bold Text and Increased Contrast: turn it \
+        off under Settings > Accessibility > Display & Text Size, or run against \
+        a simulator that has it off.
+        """
 }
 
 /// The record mode the suite runs under.

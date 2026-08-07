@@ -10,7 +10,7 @@ import XCTest
 ///
 /// The safety-critical case is the one with no configuration at all: that is
 /// every ordinary run, including CI's blocking step, and a regression turning
-/// it into `.all` would rewrite all ten references and report a pass.
+/// it into `.all` would rewrite every reference and report a pass.
 final class LiveScreenSnapshotRecordModeTests: XCTestCase {
     func testAnAbsentVariableRecordsNothing() {
         XCTAssertEqual(liveScreenSnapshotRecordMode(requested: nil), .never)

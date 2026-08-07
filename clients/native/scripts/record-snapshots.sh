@@ -149,10 +149,20 @@ python3 - "$summary" "$SNAPSHOT_DIRECTORY" <<'PY'
 import json
 import sys
 
-# The sentence the library reports a written reference with. A comparison
-# failure, a crash, and a precondition failure each say something else, which is
-# what makes this the seam between "recorded" and "failed to record".
-RECORDED = "Record mode is on. Automatically recorded snapshot"
+# The clause the library reports a written reference with. It writes one under
+# two different sentences — "Record mode is on." when the mode forced a
+# rewrite, "No reference was found on disk." when there was nothing to compare
+# against — so the shared clause is the seam, not either sentence. Matching
+# only the first is what made `missing` report every reference it correctly
+# wrote as a failure that had recorded nothing.
+#
+# The clause rather than the second sentence's opening, because a missing
+# reference has a third outcome: under a mode that records nothing the library
+# says "No reference was found on disk. New snapshot was not recorded because
+# recording is disabled", which wrote no file and must stay a failure. That is
+# the case `never` exists for, and it is the one this check must not accept.
+# A comparison failure and a crash each say something else again.
+RECORDED = "Automatically recorded snapshot"
 
 summary, snapshot_directory = json.loads(sys.argv[1]), sys.argv[2]
 executed = summary.get("totalTestCount", 0)
