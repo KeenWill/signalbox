@@ -147,6 +147,12 @@ WRAPPED_GAP = rf"(?:{MARKUP}(?:[ \t]+|[ \t]*\r?\n[ \t]*(?:>[ \t]*)*){MARKUP})"
 # is skipped rather than misreported as a different number.
 NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 
+# A number that is the upper bound of a range written in words states no total.
+# Each alternative is its own fixed-width lookbehind because Python requires
+# that; `and` is deliberately absent, being ordinary conjunction far more often
+# than a range terminus.
+NOT_RANGE_SUFFIX = r"(?<!\bto )(?<!\bthrough )(?<!\bthru )"
+
 # A number sitting directly before the noun: "50 invariants", "1 scenario".
 # The lookbehind refuses a digit run glued to a preceding word, decimal point,
 # or hyphen; the lookahead refuses one glued to a following word or hyphen (so
@@ -158,6 +164,11 @@ NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 # checker fails on the very references it exists to protect. The cost is that a
 # range written "5-10 scenarios" no longer matches, which is correct — a range
 # states no total.
+#
+# A range can also be written in words, and "5 to 37 scenarios" would otherwise
+# match at `37` — again *agreeing* with a 37-scenario catalog and passing in
+# silence. Only unambiguous range termini are excluded: `and` is not one, since
+# "3 sessions and 37 scenarios" states a real total.
 #
 # The Unicode dashes U+2010-U+2015 join the ASCII hyphen for the same reason.
 # This repository writes ranges with an en dash — "1-64 ASCII letters" in
@@ -177,7 +188,8 @@ NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 # snake_case identifier written as bare prose, which this repository formats as
 # inline code — masked above before any of these patterns run.
 NUMBER_BEFORE_NOUN = re.compile(
-    rf"(?<![0-9A-Za-z.,\u2010-\u2015-])(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}{WRAPPED_GAP}"
+    rf"(?<![0-9A-Za-z.,\u2010-\u2015-]){NOT_RANGE_SUFFIX}"
+    rf"(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}{WRAPPED_GAP}"
     rf"(?P<noun>invariants?|scenarios?)(?![0-9A-Za-z-])",
     re.IGNORECASE,
 )

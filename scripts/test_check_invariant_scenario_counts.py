@@ -683,6 +683,32 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
     def test_an_em_dash_range_is_not_read_as_its_upper_bound(self) -> None:
         self.assert_no_count_read_from(f"There are 5\u2014{SCENARIO_COUNT} scenarios")
 
+    def test_a_textual_range_is_not_read_as_its_upper_bound(self) -> None:
+        """"5 to 37 scenarios" states a range, not a total — and 37 *agrees*
+        with the catalog, so reading it would pass in silence."""
+        self.assert_no_count_read_from(f"There are 5 to {SCENARIO_COUNT} scenarios")
+
+    def test_a_through_range_is_not_read_as_its_upper_bound(self) -> None:
+        self.assert_no_count_read_from(f"There are 5 through {SCENARIO_COUNT} scenarios")
+
+    def test_a_conjunction_is_still_read_as_a_total(self) -> None:
+        """`and` is ordinary conjunction far more often than a range terminus,
+        so it stays in scope: this really does state the scenario total."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {
+                    "docs/spec/example.md": (
+                        f"There are 3 sessions and {STALE_SCENARIO_COUNT} scenarios.\n"
+                    )
+                },
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(f"current scenario catalog has {SCENARIO_COUNT}", result.stdout)
+
     def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
         """A tracked path can vanish between `git ls-files` and the read.
 
