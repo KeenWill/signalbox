@@ -765,6 +765,34 @@ impl<C: Clone> EventDecoder<C> {
         }
     }
 
+    /// The tool fact for a loss raised by an event that never decoded.
+    ///
+    /// Unlike [`Self::tool_calls_at_loss`], the negative case here is withheld:
+    /// the line that failed UTF-8, nesting, duplicate-member, JSON, or typed-event
+    /// decoding was never classified, so it could itself have been the `tool_use`
+    /// event, and "none opened" would claim a negative about material the adapter
+    /// never read. A tool call an earlier event already established still stands.
+    fn tool_calls_at_decode_failure(&self) -> ToolCallsAtLoss {
+        if self.opened_tool_calls {
+            ToolCallsAtLoss::Opened
+        } else {
+            ToolCallsAtLoss::Unobserved
+        }
+    }
+
+    /// Boundary-loss evidence for a line that never decoded.
+    pub(crate) fn loss_at_decode_failure(self, cause: LossCause) -> TerminalEvidence {
+        let tool_calls = self.tool_calls_at_decode_failure();
+        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause,
+            exchange: self.exchange,
+            reported_model: self.reported_model,
+            finish_reported: self.finish_reported,
+            tool_calls,
+            usage: self.usage,
+        })
+    }
+
     fn loss(self, cause: LossCause) -> TerminalEvidence {
         let tool_calls = self.tool_calls_at_loss();
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
@@ -895,7 +923,9 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
     }
 
     fn decode_failure(self, _class: CliDecodeFailureClass, detail: String) -> TerminalEvidence {
-        self.boundary_loss(LossCause::StreamProtocolViolation { detail })
+        // Not `boundary_loss`: the failing line was never classified, so the
+        // tool fact is withheld rather than stated negative.
+        EventDecoder::loss_at_decode_failure(self, LossCause::StreamProtocolViolation { detail })
     }
 
     fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {

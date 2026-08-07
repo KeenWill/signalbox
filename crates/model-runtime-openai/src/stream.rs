@@ -104,6 +104,22 @@ impl StreamDecoder {
                 return self.violation(format!("malformed stream chunk payload: {error}"));
             }
         };
+        // Recorded the moment the chunk deserializes, before any of the checks
+        // below can end the stream, and never cleared: a decoded tool-call delta
+        // is the provider demonstrably opening a call, whatever else about the
+        // chunk is then rejected. Every validation between here and the choice
+        // loop returns early — the conflicting-id, reported-model, final-usage,
+        // object-type, choice-count, missing-id, post-finish, and choice-index
+        // checks — so a flag set inside that loop would report "none opened" for
+        // a chunk whose own bytes carry the announcement.
+        if chunk.choices.iter().any(|choice| {
+            choice
+                .delta
+                .as_ref()
+                .is_some_and(|delta| !delta.tool_calls.is_empty())
+        }) {
+            self.opened_tool_calls = true;
+        }
         if chunk.error.is_some()
             && let (Some(existing), Some(reported)) = (&self.completion_id, &chunk.id)
             && existing != reported
@@ -184,17 +200,11 @@ impl StreamDecoder {
                 ));
             }
             if let Some(delta) = choice.delta {
-                if !delta.tool_calls.is_empty() {
-                    // Recorded here, before any of the checks below can end the
-                    // stream, and never cleared: this is the earliest point the
-                    // provider has demonstrably opened a tool call, and the
-                    // decoder's own tool state cannot answer for it later.
-                    // `tool_builders` is emptied by `finalize_tools`, and an
-                    // entry is created only after the index and type checks
-                    // pass, so a loss raised by one of those checks would see
-                    // no tool state at all.
-                    self.opened_tool_calls = true;
-                }
+                // The tool fact for this delta was already recorded by the
+                // chunk-level pre-scan above; the decoder's own tool state
+                // cannot answer for it later, since `tool_builders` is emptied
+                // by `finalize_tools` and an entry is created only after the
+                // index and type checks below pass.
                 let mut known_indices: BTreeSet<u32> = self.tool_builders.keys().copied().collect();
                 let Ok(mut next_index) = u32::try_from(known_indices.len()) else {
                     return self.violation("stream carries too many tool-call indices");
@@ -774,6 +784,31 @@ mod tests {
         ]);
 
         assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// The choice-index check rejects the chunk before the choice loop reaches
+    /// its delta, so a flag set inside that loop would miss a tool announcement
+    /// the chunk's own bytes carry. The pre-scan runs at deserialization.
+    #[test]
+    fn a_chunk_rejected_for_its_choice_index_still_reports_the_tool_call_it_carried() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":7,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n",
+        ]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// The same rejection with no tool material still states the negative, so
+    /// the pre-scan reports the chunk rather than defaulting to `Opened`.
+    #[test]
+    fn a_chunk_rejected_for_its_choice_index_without_tool_material_reports_none_opened() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":7,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        ]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::NoneOpened);
     }
 
     /// A stream that simply stops carries the negative fact, not an absence.

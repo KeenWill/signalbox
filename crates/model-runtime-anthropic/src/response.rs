@@ -76,6 +76,30 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
     }
 }
 
+/// The tool fact for a buffered decode that stopped before classifying every
+/// content block.
+///
+/// The provider streams content blocks as opaque JSON values that this adapter
+/// classifies one at a time, so a decode that aborted mid-list proves only what
+/// it already classified: a decoded tool call is a fact, while the blocks the
+/// loop never reached cannot support "none opened".
+fn partial_tool_calls(opened: bool) -> ToolCallsAtLoss {
+    if opened {
+        ToolCallsAtLoss::Opened
+    } else {
+        ToolCallsAtLoss::Unobserved
+    }
+}
+
+/// The tool fact for a buffered decode that classified every content block.
+fn classified_tool_calls(opened: bool) -> ToolCallsAtLoss {
+    if opened {
+        ToolCallsAtLoss::Opened
+    } else {
+        ToolCallsAtLoss::NoneOpened
+    }
+}
+
 /// Decodes a complete success-status response body into terminal evidence,
 /// emitting the facts it learns as observations along the way.
 ///
@@ -86,30 +110,6 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
 /// evidence (per `docs/spec/runtime-substrate.md`, a success status without
 /// valid completion material is not definitive), with the facts observed
 /// before the defect retained.
-/// The tool fact for a buffered decode that stopped before classifying every
-/// content block.
-///
-/// The provider streams content blocks as opaque JSON values that this adapter
-/// classifies one at a time, so a decode that aborted mid-list proves only what
-/// it already classified: a decoded tool call is a fact, while the blocks the
-/// loop never reached cannot support "none opened".
-fn partial_tool_calls(tool_call_ids: &BTreeSet<String>) -> ToolCallsAtLoss {
-    if tool_call_ids.is_empty() {
-        ToolCallsAtLoss::Unobserved
-    } else {
-        ToolCallsAtLoss::Opened
-    }
-}
-
-/// The tool fact for a buffered decode that classified every content block.
-fn classified_tool_calls(tool_call_ids: &BTreeSet<String>) -> ToolCallsAtLoss {
-    if tool_call_ids.is_empty() {
-        ToolCallsAtLoss::NoneOpened
-    } else {
-        ToolCallsAtLoss::Opened
-    }
-}
-
 pub(crate) fn decode_buffered_response<C: Clone>(
     body: &[u8],
     exchange: ExchangeFacts,
@@ -198,6 +198,12 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     }
     let mut content = Vec::new();
     let mut tool_call_ids = BTreeSet::new();
+    // Sticky, and deliberately not derived from `tool_call_ids`: that set holds
+    // only the proposals that survived validation, but `convert_block` rejects a
+    // `tool_use` block with a non-object `input` after its identity and name are
+    // already decoded. Reading the set would report "none opened" for exactly
+    // the malformed proposals this fact exists to distinguish.
+    let mut opened_tool_calls = false;
     for raw_block in response.content {
         let block = match parse_response_block(&raw_block) {
             Ok(block) => block,
@@ -211,7 +217,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                     exchange,
                     reported_model,
                     finish_reported: None,
-                    tool_calls: partial_tool_calls(&tool_call_ids),
+                    tool_calls: partial_tool_calls(opened_tool_calls),
                     usage,
                 });
             }
@@ -238,9 +244,15 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 exchange,
                 reported_model,
                 finish_reported: None,
-                tool_calls: partial_tool_calls(&tool_call_ids),
+                tool_calls: partial_tool_calls(opened_tool_calls),
                 usage,
             });
+        }
+        if matches!(block, WireResponseBlock::ToolUse { .. }) {
+            // Set before the conversion below, which can reject this block for a
+            // non-object `input` and return `None` indistinguishably from an
+            // unrecognized block type. The call demonstrably opened either way.
+            opened_tool_calls = true;
         }
         match convert_block(block) {
             Some(part)
@@ -261,7 +273,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                     exchange,
                     reported_model,
                     finish_reported: None,
-                    tool_calls: partial_tool_calls(&tool_call_ids),
+                    tool_calls: partial_tool_calls(opened_tool_calls),
                     usage,
                 });
             }
@@ -278,7 +290,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                             exchange,
                             reported_model,
                             finish_reported: None,
-                            tool_calls: partial_tool_calls(&tool_call_ids),
+                            tool_calls: partial_tool_calls(opened_tool_calls),
                             usage,
                         });
                     }
@@ -298,7 +310,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                     exchange,
                     reported_model,
                     finish_reported: None,
-                    tool_calls: partial_tool_calls(&tool_call_ids),
+                    tool_calls: partial_tool_calls(opened_tool_calls),
                     usage,
                 });
             }
@@ -316,7 +328,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: None,
-            tool_calls: classified_tool_calls(&tool_call_ids),
+            tool_calls: classified_tool_calls(opened_tool_calls),
             usage,
         });
     };
@@ -329,7 +341,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: None,
-            tool_calls: classified_tool_calls(&tool_call_ids),
+            tool_calls: classified_tool_calls(opened_tool_calls),
             usage,
         });
     }
@@ -346,7 +358,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: None,
-            tool_calls: classified_tool_calls(&tool_call_ids),
+            tool_calls: classified_tool_calls(opened_tool_calls),
             usage,
         });
     }
@@ -359,7 +371,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: Some(finish),
-            tool_calls: classified_tool_calls(&tool_call_ids),
+            tool_calls: classified_tool_calls(opened_tool_calls),
             usage,
         });
     }
@@ -378,7 +390,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: Some(finish),
-            tool_calls: classified_tool_calls(&tool_call_ids),
+            tool_calls: classified_tool_calls(opened_tool_calls),
             usage,
         });
     }
@@ -635,6 +647,42 @@ mod tests {
             panic!("an unclassifiable content block is not definitive completion material");
         };
         assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// A `tool_use` block whose `input` is not an object is rejected by
+    /// `convert_block` *after* its identity and name are decoded, and never
+    /// reaches `tool_call_ids`. Reading the surviving-proposal set would report
+    /// the malformed proposal as no tool call at all — the exact distinction
+    /// this fact exists to carry.
+    #[test]
+    fn a_tool_call_rejected_for_a_non_object_input_still_reports_as_opened() {
+        let (evidence, observations) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": "not-an-object"}
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a tool_use block with a non-object input is not completion material");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+        // The rejected proposal reaches no observation, so the evidence field is
+        // the only channel carrying the fact that a call opened.
+        assert!(
+            !observations.iter().any(|observation| matches!(
+                observation.fact,
+                ObservationFact::ToolCallProposed(_)
+            )),
+            "a rejected proposal is never emitted as an observation"
+        );
     }
 
     /// A tool call already classified is a fact the same abandoned decode can

@@ -37,10 +37,13 @@ mappings and advisory exceptions are verified against PR #437
 composition is verified against this PR (`agent/wire-claude-cli-adapter`), and
 the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). The
 Anthropic compatibility smoke was verified through PR #465
-(`agent/anthropic-api-smoke`). This page covers the provider-neutral operation,
-observation, and evidence vocabulary; SSE framing; structured-output and tool
-decode; `ScriptedModel`; the four provider adapters; and their credential
-boundaries. Layer-2 authorization and evidence classification
+(`agent/anthropic-api-smoke`). The cross-adapter `ToolCallsAtLoss` fact carried
+in boundary-loss evidence was verified through PR #490
+(`agent/typed-loss-cause`), against every streamed and buffered loss path in the
+four adapters. This page covers the provider-neutral operation, observation, and
+evidence vocabulary; SSE framing; structured-output and tool decode;
+`ScriptedModel`; the four provider adapters; and their credential boundaries.
+Layer-2 authorization and evidence classification
 ([model-call-execution](model-call-execution.md)), credential channels,
 delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the

@@ -458,7 +458,8 @@ async fn truncated_stream_is_boundary_loss() {
 /// The CLI announces a `tool_use` block for a tool this operation never
 /// declared. The decoder refuses it before `proposal_indexes` or any
 /// observation records it, so the loss evidence is the only place the fact can
-/// survive.
+/// survive. The refusal is itself a decode failure, so this also pins that an
+/// established `Opened` outranks the withholding the next test asserts.
 #[tokio::test]
 async fn a_rejected_tool_use_still_reports_the_opened_call() {
     let result = execute_scenario("undeclared_tool_use", OperationShape::Text).await;
@@ -471,16 +472,37 @@ async fn a_rejected_tool_use_still_reports_the_opened_call() {
     assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
 }
 
-/// The same loss shape without any tool call carries the negative fact, so the
-/// two are told apart by type rather than by the rendered detail.
+/// A loss raised from a decoded prefix carries the negative fact, so it is told
+/// apart from the case above by type rather than by the rendered detail.
+///
+/// The stream here ends without its terminal marker after events the decoder
+/// read and classified in full — unlike a decode failure, nothing about this
+/// response went unexamined, so "none opened" is a fact the adapter can state.
 #[tokio::test]
-async fn a_protocol_loss_without_tool_calls_reports_none_opened() {
-    let result = execute_scenario("malformed_stream", OperationShape::Text).await;
+async fn a_loss_from_a_decoded_prefix_without_tool_calls_reports_none_opened() {
+    let result = execute_scenario("truncated_stream", OperationShape::Text).await;
 
     assert_eq!(
         boundary_loss(&result.evidence).tool_calls,
         ToolCallsAtLoss::NoneOpened
     );
+}
+
+/// A line that never decoded withholds the fact instead of stating a negative.
+///
+/// The failing line was never classified, so it could itself have carried the
+/// `tool_use` block. Reporting "none opened" would claim a negative about
+/// material the adapter never read.
+#[tokio::test]
+async fn a_line_that_never_decodes_withholds_the_tool_fact() {
+    let result = execute_scenario("malformed_stream", OperationShape::Text).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
 }
 
 #[tokio::test]
