@@ -1265,60 +1265,76 @@ mod tests {
 
     fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
         git2::Repository::init(workspace).expect("fixture repository initializes");
-        let mut catalog = DaemonTools::try_new(
-            || SystemTime::UNIX_EPOCH,
-            OfflineTransport,
-            MappedDaemonCredentialInputs {
-                web_search: OfflineCredentials,
-                code_host: OfflineCredentials,
-                github: OfflineCredentials,
-            },
+        let web_fetch = WebFetchTool::try_new(OfflineTransport, WebFetchEgressPolicy::deny_all())
+            .expect("offline web-fetch tool compiles");
+        let web_search = WebSearchTool::try_new(
+            OfflineCredentials,
             OfflineSearchTransport,
-            OfflineWriter,
-            OfflineCodeHostTransport,
+            WebSearchConfiguration::new(WebSearchProvider::Brave),
+        )
+        .expect("offline web-search tool compiles");
+        let status =
+            SessionStatusTool::try_new(OfflineWriter).expect("offline status tool compiles");
+        let code_host = CodeHostTools::try_new(OfflineCredentials, OfflineCodeHostTransport)
+            .expect("offline code-host tools compile");
+        let github = GitHubTools::try_new(
+            OfflineCredentials,
             OfflineGitHubTransport,
             GitHubEgressPolicy::github_api_only(),
-            LocalWorkspaceFileSystem,
-            workspace,
-            git_identity(),
-            TokioProcessRunner::try_new(
-                std::env::current_exe().expect("test executable path is available"),
-            )
-            .expect("test executable can stand in for the unused supervisor"),
-            OfflineConversationPort,
-            OfflineConversationPort,
-            WebFetchEgressPolicy::deny_all(),
         )
-        .expect("static daemon tools compile")
-        .into_parts()
-        .0;
+        .expect("offline GitHub tools compile");
+        let workspace_read = WorkspaceReadTools::try_new(LocalWorkspaceFileSystem, workspace)
+            .expect("workspace-read tools compile");
+        let workspace_mutation =
+            WorkspaceMutationTools::try_new(LocalWorkspaceFileSystem, workspace)
+                .expect("workspace-mutation tools compile");
+        let local_git = LocalGitTools::try_new(LocalWorkspaceFileSystem, workspace, git_identity())
+            .expect("local-git tools compile");
+        let process_runner = TokioProcessRunner::try_new(
+            std::env::current_exe().expect("test executable path is available"),
+        )
+        .expect("test executable can stand in for the unused supervisor");
+        let sandboxed_exec = SandboxedExecTool::try_new(process_runner.clone(), workspace)
+            .expect("sandboxed-exec tool compiles");
+        let unsandboxed_exec = UnsandboxedExecTool::try_new(process_runner.clone(), workspace)
+            .expect("unsandboxed-exec tool compiles");
+        let cargo_diagnostics = CargoDiagnosticsTool::try_new(process_runner, workspace)
+            .expect("cargo-diagnostics tool compiles");
+        let conversations = ConversationTools::try_new(OfflineConversationPort)
+            .expect("offline conversation tools compile");
+        let plan = PlanTools::try_new(OfflineConversationPort).expect("offline plan tools compile");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("fixture runtime builds");
-        let goal_catalog = runtime.block_on(async {
-            let pool = sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy("postgresql://signalbox:synthetic@127.0.0.1/signalbox")
-                .expect("synthetic lazy goal pool is valid");
-            let (goal_catalog, goal_executor) = GoalDeclarationTool::try_new(pool)
-                .expect("static goal tool compiles")
-                .into_parts();
-            drop(goal_executor);
-            goal_catalog
-        });
-        let goal_definitions = goal_catalog.definitions();
-        let [goal_definition] = goal_definitions.as_ref() else {
-            panic!("goal tool catalog contains exactly one definition");
-        };
-        let replaced = catalog.entries.insert(
-            goal_definition.name().clone(),
-            DaemonToolCatalogEntry {
-                definition: goal_definition.clone(),
-                catalog: goal_catalog,
+        let _runtime_guard = runtime.enter();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://signalbox:synthetic@127.0.0.1/signalbox")
+            .expect("synthetic lazy goal pool is valid");
+        let goal = GoalDeclarationTool::try_new(pool).expect("static goal tool compiles");
+
+        DaemonTools::try_new_with_tools(
+            || SystemTime::UNIX_EPOCH,
+            ComposedToolFamilies {
+                web_fetch,
+                web_search,
+                status,
+                code_host,
+                github: Some(github),
+                workspace_read: Some(workspace_read),
+                workspace_mutation: Some(workspace_mutation),
+                local_git: Some(local_git),
+                sandboxed_exec: Some(sandboxed_exec),
+                unsandboxed_exec: Some(unsandboxed_exec),
+                cargo_diagnostics: Some(cargo_diagnostics),
+                conversations: Some(conversations),
+                plan,
+                goal: Some(goal),
             },
-        );
-        assert!(replaced.is_none(), "goal tool name is unique");
-        catalog
+        )
+        .expect("static daemon tools compile")
+        .into_parts()
+        .0
     }
 
     fn bridge_catalog(definitions: &[ToolDefinition]) -> serde_json::Value {
@@ -1385,20 +1401,40 @@ mod tests {
 
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
-        let configured_target_dir = absolute_cargo_target_dir();
+        let configured_target_dir = cargo_target_dir();
         let known_targets = rustc_target_names();
         claude_mcp_bridge_artifact_selection_for(
             &current,
             CARGO_TEST_PROFILE,
-            configured_target_dir.as_deref(),
+            Some(&configured_target_dir),
             &known_targets,
         )
     }
 
-    fn absolute_cargo_target_dir() -> Option<PathBuf> {
-        let configured = std::env::var_os("CARGO_TARGET_DIR")?;
-        let configured = PathBuf::from(configured);
-        configured.is_absolute().then_some(configured)
+    fn cargo_target_dir() -> PathBuf {
+        if let Some(configured) = std::env::var_os("CARGO_TARGET_DIR") {
+            let configured = PathBuf::from(configured);
+            let absolute = if configured.is_absolute() {
+                configured
+            } else {
+                std::env::current_dir()
+                    .expect("test working directory is available")
+                    .join(configured)
+            };
+            return lexically_normalized(&absolute);
+        }
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+        let output = Command::new(cargo)
+            .args(["metadata", "--no-deps", "--format-version", "1"])
+            .output()
+            .expect("Cargo target metadata is available");
+        assert!(output.status.success(), "Cargo target metadata succeeds");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("Cargo target metadata is valid JSON");
+        let target_dir = metadata["target_directory"]
+            .as_str()
+            .expect("Cargo target metadata names the artifact directory");
+        lexically_normalized(Path::new(target_dir))
     }
 
     fn rustc_target_names() -> BTreeSet<OsString> {
@@ -1415,12 +1451,32 @@ mod tests {
             .collect()
     }
 
+    fn lexically_normalized(path: &Path) -> PathBuf {
+        path.components()
+            .fold(PathBuf::new(), |mut result, component| {
+                match component {
+                    std::path::Component::Prefix(prefix) => result.push(prefix.as_os_str()),
+                    std::path::Component::RootDir => result.push(component.as_os_str()),
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        if !result.pop() {
+                            result.push(component.as_os_str());
+                        }
+                    }
+                    std::path::Component::Normal(part) => result.push(part),
+                }
+                result
+            })
+    }
+
     fn claude_mcp_bridge_artifact_selection_for(
         current: &Path,
         debug_profile: &str,
         configured_target_dir: Option<&Path>,
         known_targets: &BTreeSet<OsString>,
     ) -> BridgeArtifactSelection {
+        let current = lexically_normalized(current);
+        let configured_target_dir = configured_target_dir.map(lexically_normalized);
         let profile_dir = current
             .parent()
             .and_then(Path::parent)
@@ -1439,7 +1495,7 @@ mod tests {
         let artifact_parent_name = artifact_parent
             .file_name()
             .expect("Cargo artifact parent has a name");
-        let (target_dir, target) = if let Some(target_dir) = configured_target_dir {
+        let (target_dir, target) = if let Some(target_dir) = configured_target_dir.as_deref() {
             if artifact_parent == target_dir {
                 (target_dir.to_path_buf(), None)
             } else {
@@ -1447,6 +1503,10 @@ mod tests {
                     artifact_parent.parent(),
                     Some(target_dir),
                     "Cargo target-specific profile is directly below the configured target directory"
+                );
+                assert!(
+                    known_targets.contains(artifact_parent_name),
+                    "custom Cargo target specifications are unsupported by the nested bridge build"
                 );
                 (
                     target_dir.to_path_buf(),
@@ -1567,6 +1627,45 @@ mod tests {
             expected_profile: CARGO_TEST_PROFILE,
             expected_target: Some(SYNTHETIC_CARGO_TARGET),
             recognized_target: Some(SYNTHETIC_CARGO_TARGET),
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "custom Cargo target specifications are unsupported by the nested bridge build"
+    )]
+    fn bridge_artifact_selection_rejects_a_custom_target_specification() {
+        let custom_target = "synthetic-custom-target";
+        let target_dir = Path::new("synthetic-target");
+        let executable = target_dir
+            .join(custom_target)
+            .join("debug/deps/daemon-tools-test");
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir,
+            configured_target_dir: Some(target_dir),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: None,
+        });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_normalizes_the_configured_target_directory() {
+        let configured_target_dir = Path::new("synthetic-parent/../synthetic-target");
+        let normalized_target_dir = Path::new("synthetic-target");
+        let executable = normalized_target_dir.join("debug/deps/daemon-tools-test");
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: normalized_target_dir,
+            configured_target_dir: Some(configured_target_dir),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: None,
         });
     }
 
@@ -2476,8 +2575,10 @@ mod tests {
     }
 
     const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+    const MCP_SERVER_NAME: &str = "signalbox-claude-cli-bridge";
     const MCP_ENVELOPE_REQUEST_ID: u64 = 7;
     const MCP_OTHER_REQUEST_ID: u64 = 8;
+    const MCP_UNDECLARED_TOOL_NAME: &str = "synthetic_undeclared_tool";
     const MCP_PROPOSAL_PATH: &str = "bridge-must-not-write.txt";
     const MCP_PROPOSAL_CONTENT: &str = "proposal only\n";
     const MCP_PROPOSAL_ACKNOWLEDGEMENT: &str =
@@ -2592,6 +2693,21 @@ mod tests {
                 }))
         }
 
+        fn call_undeclared_tool(&mut self) -> serde_json::Value {
+            self.bridge
+                .as_mut()
+                .expect("bridge remains active")
+                .request(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/call",
+                    "params": {
+                        "name": MCP_UNDECLARED_TOOL_NAME,
+                        "arguments": {},
+                    },
+                }))
+        }
+
         fn finish(&mut self) {
             self.bridge.take().expect("bridge remains active").finish();
         }
@@ -2610,6 +2726,13 @@ mod tests {
         assert_eq!(
             initialized["result"]["capabilities"]["tools"],
             serde_json::json!({"listChanged": false})
+        );
+        assert_eq!(
+            initialized["result"]["serverInfo"],
+            serde_json::json!({
+                "name": MCP_SERVER_NAME,
+                "version": env!("CARGO_PKG_VERSION"),
+            })
         );
     }
 
@@ -2673,5 +2796,22 @@ mod tests {
         fixture.finish();
 
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn claude_mcp_bridge_rejects_an_undeclared_tool_call() {
+        let mut fixture = McpBridgeFixture::start();
+        fixture.initialize();
+        fixture.list_tools();
+        let called = fixture.call_undeclared_tool();
+        fixture.finish();
+
+        assert_eq!(
+            called["error"],
+            serde_json::json!({
+                "code": -32602,
+                "message": "undeclared tool or non-object arguments",
+            })
+        );
     }
 }
