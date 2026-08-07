@@ -447,13 +447,22 @@ impl<C: Clone> EventDecoder<C> {
                 );
             }
         };
+        // Derived from the parsed envelope alone, so it is a fact from here on
+        // and every loss below retains it — a finish observed before a loss is
+        // retained per docs/spec/runtime-substrate.md, and these losses were
+        // discarding one the adapter had already decoded.
+        let reported_finish = match envelope.outcome {
+            EnvelopeOutcome::Refused => FinishReason::Refusal,
+            EnvelopeOutcome::Completed if envelope.tool_calls.is_empty() => FinishReason::EndTurn,
+            EnvelopeOutcome::Completed => FinishReason::ToolUse,
+        };
         let mut content = match self.decode_content(&envelope, &mut *sink) {
             Ok(content) => content,
             Err(detail) => {
                 return boundary_loss_after_envelope(
                     self.exchange,
                     self.usage,
-                    None,
+                    Some(reported_finish.clone()),
                     &envelope,
                     LossCause::ResponseUnintelligible { detail },
                 );
@@ -481,11 +490,6 @@ impl<C: Clone> EventDecoder<C> {
                 sanitized
             }
         });
-        let reported_finish = match envelope.outcome {
-            EnvelopeOutcome::Refused => FinishReason::Refusal,
-            EnvelopeOutcome::Completed if envelope.tool_calls.is_empty() => FinishReason::EndTurn,
-            EnvelopeOutcome::Completed => FinishReason::ToolUse,
-        };
         if self.delivery == DeliveryMode::Streamed {
             sink.begin_streaming_terminal_text_capture();
         }
@@ -498,7 +502,7 @@ impl<C: Clone> EventDecoder<C> {
             return boundary_loss_after_envelope(
                 self.exchange,
                 self.usage,
-                None,
+                Some(reported_finish.clone()),
                 &envelope,
                 LossCause::ResponseUnintelligible { detail },
             );

@@ -722,7 +722,10 @@ async fn execute_hanging_scenario(scenario: &str) -> TerminalEvidence {
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
     );
-    config.exchange_timeout = Duration::from_millis(300);
+    // The deadline starts before environment setup and spawn, so it has to
+    // cover both and still fire well inside the scenario's own 60s hang. A
+    // tighter bound races process startup under load.
+    config.exchange_timeout = Duration::from_secs(3);
     config.interrupt_grace = Duration::from_millis(100);
     let runtime = ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid");
     let prepared = prepare(&runtime, operation(scenario, OperationShape::Text)).await;

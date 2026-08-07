@@ -23,6 +23,23 @@ use signalbox_model_runtime::{
     ToolCallsAtLoss, ToolName, validate_provider_json_nesting,
 };
 
+/// The violation detail the deferred unrecognized-finish verdict reports.
+///
+/// Identifies *which* violation this is, and nothing more. Whether a tool call
+/// was involved rides `BoundaryLossEvidence::tool_calls`, so this string is no
+/// longer varied and no caller reads a suffix off it.
+///
+/// It is still a rendered string, which the terminal-evidence rule in
+/// `docs/spec/runtime-substrate.md` would rather no caller classified on. It
+/// survives because the loss vocabulary has no typed way to say *this*
+/// violation: `LossCause::StreamProtocolViolation` covers every stream defect,
+/// and a stream that reports `length` and then trips a different defect before
+/// `[DONE]` reaches identical typed evidence — same cause, same retained
+/// finish, same tool fact. Closing that needs a `LossCause` variant of its own
+/// and the durable operator-facing token that comes with it, which is a
+/// deliberate vocabulary decision rather than a detail of this change.
+pub const OUTPUT_CEILING_VIOLATION_DETAIL: &str = "stream carries an unrecognized finish_reason";
+
 use crate::response::{StopSequences, convert_usage, map_finish};
 use crate::status::classify_error_envelope;
 use crate::translate::is_valid_function_name;
@@ -64,6 +81,7 @@ pub(crate) struct StreamDecoder {
     /// (populated only there) survives every loss path.
     opened_tool_calls: bool,
     discarded_unexamined_bytes: bool,
+    unapplied_records_follow: bool,
     final_usage_reported: bool,
     /// The violation an unrecognized finish will report at `[DONE]`. Held
     /// rather than returned so records following that finish are still
@@ -87,6 +105,7 @@ impl StreamDecoder {
             completed_tools: Vec::new(),
             opened_tool_calls: false,
             discarded_unexamined_bytes: false,
+            unapplied_records_follow: false,
             final_usage_reported: false,
             pending_unrecognized_finish: None,
         }
@@ -425,7 +444,7 @@ impl StreamDecoder {
                     // stays a rendered diagnostic no caller classifies on.
                     self.finish = Some(finish);
                     self.pending_unrecognized_finish =
-                        Some("stream carries an unrecognized finish_reason".to_string());
+                        Some(OUTPUT_CEILING_VIOLATION_DETAIL.to_string());
                     return StreamStep::Continue;
                 }
                 if !self.refusal_text.is_empty() {
@@ -462,7 +481,7 @@ impl StreamDecoder {
     fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
         if self.opened_tool_calls {
             ToolCallsAtLoss::Opened
-        } else if self.discarded_unexamined_bytes {
+        } else if self.discarded_unexamined_bytes || self.unapplied_records_follow {
             ToolCallsAtLoss::Unobserved
         } else {
             ToolCallsAtLoss::NoneOpened
@@ -475,6 +494,16 @@ impl StreamDecoder {
     /// point the decoder can no longer state that no tool call opened.
     pub(crate) fn note_discarded_unexamined_bytes(&mut self) {
         self.discarded_unexamined_bytes = true;
+    }
+
+    /// Records whether this chunk framed records the caller has not applied yet.
+    ///
+    /// Not sticky: it is true only while such records exist. A terminal built
+    /// during the apply below discards them, and the evidence is constructed
+    /// inside `apply`, so the decoder has to know before it is called rather
+    /// than be corrected afterwards.
+    pub(crate) fn note_unapplied_records_follow(&mut self, follow: bool) {
+        self.unapplied_records_follow = follow;
     }
 
     /// The tool fact for a violation raised by a record that never decoded.
@@ -977,9 +1006,6 @@ mod tests {
         assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Unobserved);
     }
 
-    /// A loss raised while the framer still holds bytes discards material the
-    /// decoder never saw, so the fact is withheld even though every record that
-    /// did reach the decoder was scanned.
     /// Frames exactly one record from `chunk` and applies it, asserting both
     /// the record count and that the decoder kept going.
     ///
@@ -1002,6 +1028,9 @@ mod tests {
         ));
     }
 
+    /// A loss raised while the framer still holds bytes discards material the
+    /// decoder never saw, so the fact is withheld even though every record that
+    /// did reach the decoder was scanned.
     #[test]
     fn a_loss_with_unframed_bytes_held_withholds_the_tool_fact() {
         let mut framing = SseFraming::new(1024 * 1024);

@@ -1231,8 +1231,9 @@ enum InputStep {
 enum LineProgress {
     /// No byte of a next line has been consumed.
     AtLineBoundary,
-    /// Bytes of a line the reader has not delivered have been consumed; losing
-    /// the future here discards them unexamined.
+    /// Bytes no decoder has seen are held — a line the reader consumed but has
+    /// not delivered, or a suffix left buffered behind a line it did deliver.
+    /// Losing them here discards them unexamined.
     PartialLineHeld,
 }
 
@@ -1275,8 +1276,9 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
             }
             deferred_carriage_return = false;
         }
+        let available_len = available.len();
         let newline = available.iter().position(|byte| *byte == b'\n');
-        let take = newline.map_or(available.len(), |index| index + 1);
+        let take = newline.map_or(available_len, |index| index + 1);
         // Only the payload counts toward the event limit — the line delimiter
         // (`\n`, or a `\r\n` pair) is stripped before decoding, so including it
         // would reject an exactly-`limit`-byte event in ordinary
@@ -1309,7 +1311,13 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
             while matches!(line.last(), Some(b'\n' | b'\r')) {
                 line.pop();
             }
-            *progress = LineProgress::AtLineBoundary;
+            // `consume` released only this line. Anything the same batch held
+            // behind it stays buffered in the reader, unseen by any decoder, so
+            // the caller is still holding undelivered bytes even though this
+            // call is returning a complete line.
+            if take == available_len {
+                *progress = LineProgress::AtLineBoundary;
+            }
             return Ok(Some(line));
         }
     }
@@ -2302,6 +2310,37 @@ mod tests {
                 "/parent-working-root/relative-home"
             ))
         );
+    }
+
+    /// `consume` releases only the delivered line, so a batch carrying two
+    /// events leaves the second buffered in the reader where no decoder has
+    /// seen it. Losing the stream there discards it.
+    #[tokio::test]
+    async fn a_batch_with_a_second_event_leaves_bytes_held() {
+        let mut reader = std::io::Cursor::new(b"one\ntwo\n".to_vec());
+        let mut progress = LineProgress::AtLineBoundary;
+
+        let line = read_bounded_line(&mut reader, 16, TEST_LABELS, &mut progress)
+            .await
+            .expect("the first line is within the bound");
+
+        assert_eq!(line.as_deref(), Some(b"one".as_slice()));
+        assert_eq!(progress, LineProgress::PartialLineHeld);
+    }
+
+    /// The same read with nothing behind it leaves the caller at a boundary, so
+    /// the state above is about the suffix rather than about delivering a line.
+    #[tokio::test]
+    async fn a_batch_with_one_event_leaves_nothing_held() {
+        let mut reader = std::io::Cursor::new(b"one\n".to_vec());
+        let mut progress = LineProgress::AtLineBoundary;
+
+        let line = read_bounded_line(&mut reader, 16, TEST_LABELS, &mut progress)
+            .await
+            .expect("the only line is within the bound");
+
+        assert_eq!(line.as_deref(), Some(b"one".as_slice()));
+        assert_eq!(progress, LineProgress::AtLineBoundary);
     }
 
     #[tokio::test]

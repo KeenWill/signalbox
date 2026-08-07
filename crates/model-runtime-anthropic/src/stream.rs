@@ -77,6 +77,7 @@ pub(crate) struct StreamDecoder {
     declared_stop_sequences: Vec<String>,
     tool_call_ids: BTreeSet<String>,
     discarded_unexamined_bytes: bool,
+    unapplied_records_follow: bool,
     open_blocks: BTreeMap<u32, BlockBuilder>,
     closed: BTreeMap<u32, AssistantPart>,
 }
@@ -98,6 +99,7 @@ impl StreamDecoder {
             declared_stop_sequences,
             tool_call_ids: BTreeSet::new(),
             discarded_unexamined_bytes: false,
+            unapplied_records_follow: false,
             open_blocks: BTreeMap::new(),
             closed: BTreeMap::new(),
         }
@@ -144,7 +146,7 @@ impl StreamDecoder {
     fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
         if !self.tool_call_ids.is_empty() {
             ToolCallsAtLoss::Opened
-        } else if self.discarded_unexamined_bytes {
+        } else if self.discarded_unexamined_bytes || self.unapplied_records_follow {
             ToolCallsAtLoss::Unobserved
         } else {
             ToolCallsAtLoss::NoneOpened
@@ -157,6 +159,16 @@ impl StreamDecoder {
     /// point the decoder can no longer state that no tool call opened.
     pub(crate) fn note_discarded_unexamined_bytes(&mut self) {
         self.discarded_unexamined_bytes = true;
+    }
+
+    /// Records whether this chunk framed records the caller has not applied yet.
+    ///
+    /// Not sticky: it is true only while such records exist. A terminal built
+    /// during the apply below discards them, and the evidence is constructed
+    /// inside `apply`, so the decoder has to know before it is called rather
+    /// than be corrected afterwards.
+    pub(crate) fn note_unapplied_records_follow(&mut self, follow: bool) {
+        self.unapplied_records_follow = follow;
     }
 
     /// The tool fact for a violation raised by material that never decoded.

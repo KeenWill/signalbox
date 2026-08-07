@@ -113,6 +113,19 @@ fn classified_tool_calls(opened: bool) -> ToolCallsAtLoss {
     examined_block_tool_calls(opened, false)
 }
 
+/// The tool fact where the envelope decoded but its content was never walked.
+///
+/// An empty content list is a decoded fact: the provider sent no blocks, so no
+/// tool call opened and the negative is established without classifying
+/// anything. A non-empty list is opaque until the loop reaches it.
+fn unwalked_content_tool_calls(content: &[Box<serde_json::value::RawValue>]) -> ToolCallsAtLoss {
+    if content.is_empty() {
+        ToolCallsAtLoss::NoneOpened
+    } else {
+        ToolCallsAtLoss::Unobserved
+    }
+}
+
 /// Decodes a complete success-status response body into terminal evidence,
 /// emitting the facts it learns as observations along the way.
 ///
@@ -169,7 +182,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model: None,
             finish_reported: None,
-            tool_calls: ToolCallsAtLoss::Unobserved,
+            tool_calls: unwalked_content_tool_calls(&response.content),
             usage: TokenUsage::unreported(),
         });
     }
@@ -205,7 +218,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             exchange,
             reported_model,
             finish_reported: None,
-            tool_calls: ToolCallsAtLoss::Unobserved,
+            tool_calls: unwalked_content_tool_calls(&response.content),
             usage,
         });
     }
@@ -729,6 +742,51 @@ mod tests {
             panic!("a rejected content block is not definitive completion material");
         };
         assert_eq!(loss.tool_calls, expected);
+    }
+
+    /// An envelope that decoded with no content blocks establishes the negative
+    /// without walking anything: the provider sent nothing that could open a
+    /// call.
+    #[test]
+    fn an_empty_decoded_content_list_states_the_negative() {
+        let (evidence, _) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "quasar",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a bad envelope discriminator is not completion material");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// The same exit with blocks present withholds: they are opaque until the
+    /// loop reaches them, and it never runs.
+    #[test]
+    fn an_unwalked_non_empty_content_list_withholds() {
+        let (evidence, _) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "quasar",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [{"type": "text", "text": "hi"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a bad envelope discriminator is not completion material");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
     }
 
     /// A sole fallback marker is classified and known not to be a tool call,

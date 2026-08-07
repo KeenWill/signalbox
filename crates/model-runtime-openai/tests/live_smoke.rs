@@ -70,7 +70,9 @@ use signalbox_model_runtime::{
     ObservationFact, PreparationOutcome, ProviderErrorKind, ProviderReportedModel, RequestedTarget,
     ResolvedTarget, TerminalEvidence, TokenUsage, ToolCallsAtLoss,
 };
-use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
+use signalbox_model_runtime_openai::{
+    OUTPUT_CEILING_VIOLATION_DETAIL, OpenAiConfig, OpenAiRuntime,
+};
 
 /// The environment variable this smoke reads its API key from. Configured in
 /// CI via the `openai-smoke` environment; see
@@ -438,13 +440,16 @@ fn is_the_refusal_downgrade_kind(kind: ProviderErrorKind) -> bool {
 /// Whether this loss is the plain output-ceiling stop rather than some other
 /// protocol violation that reached the same evidence variant.
 ///
-/// Three typed conjuncts, no rendered text. The cause narrows to a protocol
-/// violation; `finish_reported` supplies the provider's own ceiling token; and
-/// `tool_calls` separates the benign stop from a truncation mid-tool-call,
-/// which the finish token cannot do because it is legitimately retained for
-/// both. The detail string is deliberately not read — it is a rendered
-/// diagnostic, and the terminal-evidence rule in
-/// `docs/spec/runtime-substrate.md` forbids classifying on one.
+/// Two questions, answered separately. *Which* violation is this — still the
+/// detail, because the loss vocabulary has no typed way to name the deferred
+/// unrecognized-finish verdict; see `OUTPUT_CEILING_VIOLATION_DETAIL`. And *was
+/// a tool call involved* — now `tool_calls`, which is what this PR added and
+/// what the suffix on that detail used to encode.
+///
+/// Both are needed. Dropping the detail admits any stream defect that follows a
+/// `length` finish before `[DONE]` — a record after the final usage chunk, a
+/// conflicting completion id — since those reach identical typed evidence and
+/// would pass this merge-gating check as a benign ceiling stop.
 ///
 /// The tool conjunct is `NoneOpened` rather than `!= Opened`: `Unobserved`
 /// means the adapter could not establish that no call opened, which is not a
@@ -454,7 +459,7 @@ fn is_the_refusal_downgrade_kind(kind: ProviderErrorKind) -> bool {
 /// this decision to be reconsidered.
 fn is_the_output_ceiling_violation(loss: &BoundaryLossEvidence) -> bool {
     let cause_admits = match &loss.cause {
-        LossCause::StreamProtocolViolation { .. } => true,
+        LossCause::StreamProtocolViolation { detail } => detail == OUTPUT_CEILING_VIOLATION_DETAIL,
         LossCause::CancellationRequested
         | LossCause::TimedOut(_)
         | LossCause::TransportFailed(_)
@@ -818,12 +823,8 @@ mod require_decoded_response_tests {
     /// deferred verdict outright if that chunk never arrived.
     fn stopped_at_ceiling() -> BoundaryLossEvidence {
         BoundaryLossEvidence {
-            // Mirrors what the decoder renders, but nothing reads it: the
-            // classifier is keyed entirely on typed fields, which
-            // `an_output_ceiling_stop_classifies_whatever_the_detail_says`
-            // pins.
             cause: LossCause::StreamProtocolViolation {
-                detail: "stream carries an unrecognized finish_reason".to_string(),
+                detail: OUTPUT_CEILING_VIOLATION_DETAIL.to_string(),
             },
             exchange: exchange(200),
             reported_model: Some(ProviderReportedModel::new("model-exact-1")),
@@ -852,20 +853,23 @@ mod require_decoded_response_tests {
         assert_eq!(decoded.usage, expected.usage);
     }
 
-    /// The detail is a rendered diagnostic, so the classifier must not depend
-    /// on its wording. This is the property the typed `tool_calls` field exists
-    /// to make possible — before it, the two ceiling cases were told apart by a
-    /// suffix on exactly this string.
+    /// A different stream defect reaching the same typed evidence must not pass
+    /// as a benign ceiling stop.
+    ///
+    /// A stream that reports `length` and then trips another defect before
+    /// `[DONE]` keeps HTTP 200, the model identity, the retained `length`
+    /// finish, and `NoneOpened` — every typed conjunct — so only the violation
+    /// identity separates them. This is the merge-gating hole that dropping the
+    /// detail comparison opens.
     #[test]
-    fn an_output_ceiling_stop_classifies_whatever_the_detail_says() {
+    #[should_panic(expected = "returned no decoded response")]
+    fn another_violation_after_a_length_finish_panics() {
         let mut loss = stopped_at_ceiling();
         loss.cause = LossCause::StreamProtocolViolation {
-            detail: "some future rewording of the same violation".to_string(),
+            detail: "stream record follows the requested final usage chunk".to_string(),
         };
 
-        let decoded = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
-
-        assert_well_formed_response(&decoded);
+        let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
     }
 
     /// A stop the adapter could not establish as tool-free is not a basis for

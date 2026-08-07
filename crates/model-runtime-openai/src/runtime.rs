@@ -562,6 +562,7 @@ fn process_streamed_chunk<C: Clone>(
     // framing or aggregate-size failure. A terminal marker in that prefix
     // must not be lost because trailing bytes share its transport chunk.
     let outcome = framing.push(&bytes[..accepted]);
+    let framed_records = outcome.records.len();
     for (index, record) in outcome.records.into_iter().enumerate() {
         if index > 0 && cancellation.is_cancelled() {
             // The records this chunk framed but the loop has not applied are
@@ -570,11 +571,16 @@ fn process_streamed_chunk<C: Clone>(
             decoder.note_discarded_unexamined_bytes();
             return Some(decoder.cancelled());
         }
+        // A terminal raised by this record discards everything behind it, and
+        // `apply` builds that evidence itself, so the fact has to be in place
+        // before the call rather than patched onto its result.
+        decoder.note_unapplied_records_follow(index + 1 < framed_records);
         match decoder.apply(&record, correlation, sink) {
             StreamStep::Continue => {}
             StreamStep::Terminal(evidence) => return Some(*evidence),
         }
     }
+    decoder.note_unapplied_records_follow(false);
     if let Some(error) = outcome.error {
         return Some(decoder.undecoded_violation_evidence(error.to_string()));
     }
