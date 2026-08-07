@@ -3310,7 +3310,13 @@ pub(crate) async fn load_scheduling_projection(
         ));
     }
 
-    let preceding_non_accepted_terminal = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+    #[derive(sqlx::FromRow)]
+    struct PrecedingNonAcceptedTerminalRow {
+        turn_id: Uuid,
+        terminal_frontier_id: Uuid,
+        direct_selection_id: Uuid,
+    }
+    let preceding_non_accepted_terminal = sqlx::query_as::<_, PrecedingNonAcceptedTerminalRow>(
         "WITH earliest_accepted AS (
             SELECT queued.turn_id
               FROM queued_input_origin AS queued
@@ -3321,11 +3327,11 @@ pub(crate) async fn load_scheduling_projection(
              ORDER BY queued.acceptance_position
              LIMIT 1
         )
-        SELECT terminal.turn_id,
+        SELECT terminal.turn_id AS turn_id,
                 turn_lifecycle_effective_terminal_frontier(
                     terminal.session_id, terminal.turn_id
-                ),
-                effective.direct_selection_id
+                ) AS terminal_frontier_id,
+                effective.direct_selection_id AS direct_selection_id
            FROM earliest_accepted AS earliest
            JOIN turn_lifecycle AS terminal
              ON terminal.session_id = $1
@@ -3347,9 +3353,9 @@ pub(crate) async fn load_scheduling_projection(
     .bind(session_id_to_uuid(session_id))
     .fetch_optional(&mut *connection)
     .await?;
-    if let Some((turn, terminal_frontier, _)) = preceding_non_accepted_terminal {
-        delegated_turns.insert(turn_id_from_uuid(turn));
-        required_frontiers.insert(terminal_frontier);
+    if let Some(preceding) = preceding_non_accepted_terminal.as_ref() {
+        delegated_turns.insert(turn_id_from_uuid(preceding.turn_id));
+        required_frontiers.insert(preceding.terminal_frontier_id);
     }
 
     let semantic_delegated_turns = sqlx::query_scalar::<_, Uuid>(
@@ -4358,12 +4364,12 @@ pub(crate) async fn load_scheduling_projection(
     if let Some(imported_session) = imported_session {
         input = input.with_imported_session(imported_session);
     }
-    if let Some((turn, terminal_frontier, selected)) = preceding_non_accepted_terminal {
+    if let Some(preceding) = preceding_non_accepted_terminal {
         input = input.with_preceding_non_accepted_terminal(
             session_id,
-            TurnId::from_uuid(turn),
-            ContextFrontierId::from_uuid(terminal_frontier),
-            DirectModelSelection::from_uuid(selected),
+            TurnId::from_uuid(preceding.turn_id),
+            ContextFrontierId::from_uuid(preceding.terminal_frontier_id),
+            DirectModelSelection::from_uuid(preceding.direct_selection_id),
         );
     }
     input
