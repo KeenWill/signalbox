@@ -1117,6 +1117,45 @@ pub enum RepoWatchDispatchContextShape {
 }
 
 impl RepoWatchEventKindNameV1 {
+    /// Every event-kind name, in an inventory the compiler keeps complete.
+    ///
+    /// The chain below is the guard: each arm names its successor, so adding a
+    /// variant makes the `match` non-exhaustive and the crate stops compiling
+    /// until the new name is slotted into it — at which point it is in the
+    /// returned list, and any test driven from that list gains its case.
+    ///
+    /// This is the repository's idiom for inventories over owned enums, and it
+    /// is deliberately dependency-free: no `strum`, no `EnumIter` derive. A
+    /// hand-written `vec![..]` is what `docs/style.md` forbids, because it goes
+    /// stale silently; this cannot, because the list is produced *by* the
+    /// exhaustive match rather than kept alongside it.
+    #[must_use]
+    pub fn all() -> Vec<Self> {
+        let mut names = Vec::new();
+        let mut next = Some(Self::PullRequestOpened);
+        while let Some(current) = next {
+            next = match current {
+                Self::PullRequestOpened => Some(Self::PullRequestClosed),
+                Self::PullRequestClosed => Some(Self::PullRequestMerged),
+                Self::PullRequestMerged => Some(Self::HeadChanged),
+                Self::HeadChanged => Some(Self::MergeableStateChanged),
+                Self::MergeableStateChanged => Some(Self::ChecksCompleted),
+                Self::ChecksCompleted => Some(Self::CheckRunCompleted),
+                Self::CheckRunCompleted => Some(Self::BranchWorkflowRunCompleted),
+                Self::BranchWorkflowRunCompleted => Some(Self::ReviewSubmitted),
+                Self::ReviewSubmitted => Some(Self::ThreadOpened),
+                Self::ThreadOpened => Some(Self::ThreadResolved),
+                Self::ThreadResolved => Some(Self::Labeled),
+                Self::Labeled => Some(Self::Unlabeled),
+                Self::Unlabeled => Some(Self::BaseAdvanced),
+                Self::BaseAdvanced => Some(Self::ReactionChanged),
+                Self::ReactionChanged => None,
+            };
+            names.push(current);
+        }
+        names
+    }
+
     const fn dispatch_context_shape(self) -> RepoWatchDispatchContextShape {
         match self {
             Self::PullRequestOpened

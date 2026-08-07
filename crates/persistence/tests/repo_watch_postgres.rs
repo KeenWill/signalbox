@@ -4,7 +4,11 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::{error::Error, num::NonZeroU16};
+use std::{
+    collections::{BTreeSet, HashSet},
+    error::Error,
+    num::NonZeroU16,
+};
 
 use signalbox_application::{
     RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
@@ -16,8 +20,8 @@ use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
     MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
     PullRequestNumber, PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindV1, RepositorySlug,
-    ReviewState, ReviewThreadId, WorkflowName,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
+    RepoWatchEventKindV1, RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
 };
 use signalbox_persistence::{
     local_test_connection_options, migrate,
@@ -56,6 +60,13 @@ const CHECK_RUN_NAME: &str = "required";
 const WORKFLOW_NAME: &str = "required checks";
 const REVIEW_THREAD: &str = "review-thread-1";
 const REACTION_CONTENT: &str = "+1";
+// Distinct from the context's `author` and `head_sha` on purpose. Reusing those
+// would let a decoder that read `author` where it should read `review_reviewer`
+// — or `head_sha` where it should read `review_commit` — still satisfy the
+// round trip, so a cross-wired durable column would be invisible here.
+const REVIEW_REVIEWER: &str = "fixture-reviewer";
+const REVIEW_COMMIT: &str = "3333333333333333333333333333333333333333";
+const REACTOR: &str = "fixture-reactor";
 const PULL_REQUEST: u64 = 41;
 const CHECK_SUITE_ID: u64 = 51;
 const CHECK_RUN_ID: u64 = 52;
@@ -1363,7 +1374,7 @@ fn reaction_event(
         ids,
         RepoWatchEventKindV1::ReactionChanged {
             subject,
-            reactor: RepoWatchAuthorLogin::try_new(AUTHOR.to_owned())?,
+            reactor: RepoWatchAuthorLogin::try_new(REACTOR.to_owned())?,
             content: ReactionContent::try_new(REACTION_CONTENT.to_owned())?,
             change: ReactionChange::Added,
         },
@@ -1404,25 +1415,28 @@ async fn committed_event_fixture(
     Ok((container, store, repository))
 }
 
-/// Loads `expected` back through the closed event decoder and requires the
-/// durable fact to equal the one that was committed. A decode that drops, or
-/// silently rewrites, any field of a kind stalls repository-watch dispatch on
-/// that event forever, because the evaluation row is only written after a
-/// successful dispatch.
-async fn assert_event_round_trips(
+/// Loads one committed event back through the closed event decoder.
+///
+/// The comparison is deliberately *not* made here. `#[track_caller]` does not
+/// carry through an `async fn`, so a shared assertion would report all fifteen
+/// round trips from this one line; testing-style rule 16 requires a failure to
+/// name its call site, so each caller asserts for itself and this helper only
+/// hides the load.
+///
+/// A decode that drops, or silently rewrites, any field of a kind stalls
+/// repository-watch dispatch on that event forever, because the evaluation row
+/// is only written after a successful dispatch.
+async fn loaded_event(
     store: &PostgresRepoWatchStore,
     repository: &RepositorySlug,
     expected: &RepoWatchEvent,
-) -> Result<(), Box<dyn Error>> {
-    let loaded = store.load_event(repository, expected.id()).await?;
+) -> Result<Option<RepoWatchEvent>, Box<dyn Error>> {
+    Ok(store.load_event(repository, expected.id()).await?)
+}
 
-    assert_eq!(
-        loaded.as_ref(),
-        Some(expected),
-        "a committed repository-watch event must load back unchanged: {:?}",
-        expected.kind()
-    );
-    Ok(())
+/// Every event kind the committed samples cover, for the inventory assertion.
+fn covered_kind_names(events: &[&RepoWatchEvent]) -> BTreeSet<RepoWatchEventKindNameV1> {
+    events.iter().map(|event| event.kind().name()).collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1461,9 +1475,9 @@ async fn every_event_kind_survives_a_commit_and_load_round_trip() -> Result<(), 
     let review_submitted = unlabeled_event(
         &mut ids,
         RepoWatchEventKindV1::ReviewSubmitted {
-            reviewer: RepoWatchAuthorLogin::try_new(AUTHOR.to_owned())?,
+            reviewer: RepoWatchAuthorLogin::try_new(REVIEW_REVIEWER.to_owned())?,
             state: ReviewState::ChangesRequested,
-            commit: CommitSha::try_new(CHANGED_HEAD.to_owned())?,
+            commit: CommitSha::try_new(REVIEW_COMMIT.to_owned())?,
         },
     )?;
     let thread_opened = unlabeled_event(
@@ -1516,22 +1530,167 @@ async fn every_event_kind_survives_a_commit_and_load_round_trip() -> Result<(), 
     ])
     .await?;
 
-    assert_event_round_trips(&store, &repository, &opened).await?;
-    assert_event_round_trips(&store, &repository, &closed).await?;
-    assert_event_round_trips(&store, &repository, &merged).await?;
-    assert_event_round_trips(&store, &repository, &head_changed).await?;
-    assert_event_round_trips(&store, &repository, &mergeable_state_changed).await?;
-    assert_event_round_trips(&store, &repository, &checks_completed).await?;
-    assert_event_round_trips(&store, &repository, &check_run_completed).await?;
-    assert_event_round_trips(&store, &repository, &review_submitted).await?;
-    assert_event_round_trips(&store, &repository, &thread_opened).await?;
-    assert_event_round_trips(&store, &repository, &thread_resolved).await?;
-    assert_event_round_trips(&store, &repository, &labeled).await?;
-    assert_event_round_trips(&store, &repository, &unlabeled).await?;
-    assert_event_round_trips(&store, &repository, &base_advanced).await?;
-    assert_event_round_trips(&store, &repository, &reaction_changed).await?;
-    assert_event_round_trips(&store, &repository, &branch_workflow_run_completed).await?;
+    // The inventory is the compiler's, not this file's: `all()` is produced by
+    // an exhaustive match, so a new `RepoWatchEventKindV1` variant fails to
+    // compile there, and once it is added this assertion fails until a sample
+    // of that kind is committed above. Without it the "every event kind"
+    // guarantee in this test's name was only as good as the list below.
+    assert_eq!(
+        covered_kind_names(&[
+            &opened,
+            &closed,
+            &merged,
+            &head_changed,
+            &mergeable_state_changed,
+            &checks_completed,
+            &check_run_completed,
+            &review_submitted,
+            &thread_opened,
+            &thread_resolved,
+            &labeled,
+            &unlabeled,
+            &base_advanced,
+            &reaction_changed,
+            &branch_workflow_run_completed,
+        ]),
+        RepoWatchEventKindNameV1::all().into_iter().collect(),
+        "every event kind must have a committed round trip"
+    );
+
+    assert_eq!(
+        loaded_event(&store, &repository, &opened).await?.as_ref(),
+        Some(&opened),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &closed).await?.as_ref(),
+        Some(&closed),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &merged).await?.as_ref(),
+        Some(&merged),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &head_changed)
+            .await?
+            .as_ref(),
+        Some(&head_changed),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &mergeable_state_changed)
+            .await?
+            .as_ref(),
+        Some(&mergeable_state_changed),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &checks_completed)
+            .await?
+            .as_ref(),
+        Some(&checks_completed),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &check_run_completed)
+            .await?
+            .as_ref(),
+        Some(&check_run_completed),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &review_submitted)
+            .await?
+            .as_ref(),
+        Some(&review_submitted),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &thread_opened)
+            .await?
+            .as_ref(),
+        Some(&thread_opened),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &thread_resolved)
+            .await?
+            .as_ref(),
+        Some(&thread_resolved),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &labeled).await?.as_ref(),
+        Some(&labeled),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &unlabeled)
+            .await?
+            .as_ref(),
+        Some(&unlabeled),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &base_advanced)
+            .await?
+            .as_ref(),
+        Some(&base_advanced),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &reaction_changed)
+            .await?
+            .as_ref(),
+        Some(&reaction_changed),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &branch_workflow_run_completed)
+            .await?
+            .as_ref(),
+        Some(&branch_workflow_run_completed),
+        "a committed repository-watch event must load back unchanged"
+    );
     Ok(())
+}
+
+/// Every reaction subject, in an inventory the compiler keeps complete.
+///
+/// Each arm names its successor, so adding a variant makes this `match`
+/// non-exhaustive and the test crate stops compiling until the new subject is
+/// slotted into the chain — at which point it is in the returned list and the
+/// coverage assertion below demands a committed sample for it.
+///
+/// The same idiom as `RepoWatchEventKindNameV1::all()`, and deliberately
+/// dependency-free: no `strum`, no `EnumIter`. A hand-written `vec![..]` is
+/// what `docs/style.md` forbids, because it goes stale in silence.
+fn every_subject() -> Result<Vec<ReactionSubject>, Box<dyn Error>> {
+    let mut subjects = Vec::new();
+    let mut next = Some(ReactionSubject::PullRequestBody);
+    while let Some(current) = next {
+        next = match current {
+            ReactionSubject::PullRequestBody => Some(ReactionSubject::IssueComment {
+                id: GitHubObjectId::new(ISSUE_COMMENT_ID.try_into()?),
+            }),
+            ReactionSubject::IssueComment { .. } => Some(ReactionSubject::ReviewComment {
+                id: GitHubObjectId::new(REVIEW_COMMENT_ID.try_into()?),
+            }),
+            ReactionSubject::ReviewComment { .. } => None,
+        };
+        subjects.push(current);
+    }
+    Ok(subjects)
+}
+
+/// The subject one reaction event carries, for the inventory assertion.
+fn reacted_subject(event: &RepoWatchEvent) -> Result<ReactionSubject, Box<dyn Error>> {
+    match event.kind() {
+        RepoWatchEventKindV1::ReactionChanged { subject, .. } => Ok(*subject),
+        other => Err(format!("expected a reaction event, got {other:?}").into()),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1552,6 +1711,19 @@ async fn every_reaction_subject_survives_a_commit_and_load_round_trip() -> Resul
             id: GitHubObjectId::new(REVIEW_COMMENT_ID.try_into()?),
         },
     )?;
+    // Same guard as the event-kind test, one level down. `every_subject` is
+    // produced by an exhaustive match, so a new `ReactionSubject` variant fails
+    // to compile there; it lives here rather than in the domain crate because
+    // its variants carry object ids that only this fixture can supply.
+    assert_eq!(
+        [&pull_request_body, &issue_comment, &review_comment]
+            .into_iter()
+            .map(reacted_subject)
+            .collect::<Result<HashSet<_>, _>>()?,
+        every_subject()?.into_iter().collect(),
+        "every reaction subject must have a committed round trip"
+    );
+
     let (_container, store, repository) = committed_event_fixture(vec![
         pull_request_body.clone(),
         issue_comment.clone(),
@@ -1559,8 +1731,26 @@ async fn every_reaction_subject_survives_a_commit_and_load_round_trip() -> Resul
     ])
     .await?;
 
-    assert_event_round_trips(&store, &repository, &pull_request_body).await?;
-    assert_event_round_trips(&store, &repository, &issue_comment).await?;
-    assert_event_round_trips(&store, &repository, &review_comment).await?;
+    assert_eq!(
+        loaded_event(&store, &repository, &pull_request_body)
+            .await?
+            .as_ref(),
+        Some(&pull_request_body),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &issue_comment)
+            .await?
+            .as_ref(),
+        Some(&issue_comment),
+        "a committed repository-watch event must load back unchanged"
+    );
+    assert_eq!(
+        loaded_event(&store, &repository, &review_comment)
+            .await?
+            .as_ref(),
+        Some(&review_comment),
+        "a committed repository-watch event must load back unchanged"
+    );
     Ok(())
 }
