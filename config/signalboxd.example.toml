@@ -32,123 +32,30 @@ version = 1
 # name = "deliberate"
 # reasoning_level = "high"
 
-# One profile is one provider account. Names are opaque to code — call them
-# whatever the deployment calls them. billing_kind states how calls through this
-# account are billed: api_metered produces real dollar cost, subscription
-# produces metered-equivalent cost. Keep a name's billing meaning stable, and use
-# a new name when an authentication update changes it. `delivery` states how the
-# secret reaches the provider and which further fields the profile carries;
-# Anthropic and OpenAI admit "file", Claude CLI admits "ambient", and Codex CLI
-# admits "ambient", "file", "codex_home", and "oauth". No credential path is
-# opened and no provider is contacted at startup.
+# Every model credential profile declares how calls authenticated through that
+# profile are billed. api_metered produces real dollar cost; subscription
+# produces metered-equivalent cost. Keep a profile name's billing meaning
+# stable, and use a new name when an authentication update changes that meaning.
 [[credential_profiles]]
 name = "anthropic-primary"
-adapter = "anthropic"
 billing_kind = "api_metered"
-delivery = "file"
-file = "/run/secrets/anthropic-primary"
 
-# A second account for the same provider. Pointing two profiles at one secret
-# does not create a second account; it gives one account two names and two
-# independent judgments about the same remaining quota.
 [[credential_profiles]]
-name = "anthropic-overflow"
-adapter = "anthropic"
-billing_kind = "api_metered"
-delivery = "file"
-file = "/run/secrets/anthropic-overflow"
-
-# A pool is the set of profiles that may substitute for one another. Priority
-# lives on the membership, not the profile, so one account can rank differently
-# in different pools; equal priorities are resolved by tie_break, and gaps let a
-# later profile take an intermediate rank without renumbering.
-#
-# Omitted trigger keys select "stay", which is the pre-pool behavior: record the
-# failure honestly and do not move. switch_now is admitted only for the three
-# availability causes, because only those prove the request was not accepted.
-[[credential_pools]]
-name = "anthropic-main"
-tie_break = "first_listed"        # first_listed | round_robin | least_used
-on_pool_exhausted = "park"        # park | fail
-members = [
-  { profile = "anthropic-primary", priority = 1 },
-  { profile = "anthropic-overflow", priority = 2 },
-]
-on_quota_exhausted = "switch_now"
-on_rate_limited = "switch_now"
-on_overloaded = "switch_next_turn"
-on_credential_rejected = "quarantine"
-
-# least_used and headroom_reserve_percent need an adapter that reports remaining
-# capacity. No adapter in this build does, so configuring either fails startup
-# rather than sitting inert.
+name = "codex-subscription-primary"
+billing_kind = "subscription"
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_pool = "anthropic-main"
+credential_profile = "anthropic-primary"
 
-# To serve a Codex model family, add profiles, a pool, this mapping, and the
-# codex_cli table. Codex admits four deliveries; pick one per profile.
-#
-# delivery = "oauth" — the daemon owns a rotating authorization it provisioned
-# itself, and hands each invocation a scratch home holding only an access token.
-# This is the delivery that supports several subscription accounts in one pool:
-# nothing is shared or written back, so concurrent invocations cannot collide.
-# The OAuth client and endpoints are yours to choose; nothing here is a
-# build-provided constant. Provision with:
-#   signalbox credential provision --profile codex-subscription-primary
-# [[credential_profiles]]
-# name = "codex-subscription-primary"
-# adapter = "codex_cli"
-# billing_kind = "subscription"
-# delivery = "oauth"
-# client_id = "<the OAuth client this deployment presents>"
-# token_url = "https://<provider>/oauth/token"
-# device_authorization_url = "https://<provider>/deviceauth/usercode"
-# scopes = ["<scope>"]
-#
-# delivery = "codex_home" — the daemon uses a login an operator established by
-# hand. Concurrent invocations are allowed by default; that store has no file
-# locking, but the CLI adopts a token another process wrote rather than
-# refreshing again, so the residual race is narrow and its consequence is a
-# quarantine the pool fails over from. Set max_concurrent_invocations to trade
-# throughput for avoiding it. Two profiles may not name the same directory.
-# [[credential_profiles]]
-# name = "codex-local-a"
-# adapter = "codex_cli"
-# billing_kind = "subscription"
-# delivery = "codex_home"
-# codex_home = "/var/lib/signalbox/codex/account-a"
-#
-# [[credential_profiles]]
-# name = "codex-local-b"
-# adapter = "codex_cli"
-# billing_kind = "subscription"
-# delivery = "codex_home"
-# codex_home = "/var/lib/signalbox/codex/account-b"
-#
-# delivery = "file" — an API key, read per preparation and supplied to the fresh
-# process under env_key. Metered rather than subscription, and the one Codex
-# delivery the ordinary rotation policy covers end to end.
-# [[credential_profiles]]
-# name = "codex-api"
-# adapter = "codex_cli"
-# billing_kind = "api_metered"
-# delivery = "file"
-# file = "/run/secrets/codex-api"
-# env_key = "OPENAI_API_KEY"
-#
-# [[credential_pools]]
-# name = "codex-main"
-# tie_break = "first_listed"
-# on_pool_exhausted = "fail"
-# members = [{ profile = "codex-subscription-primary", priority = 1 }]
-#
+# To serve a Codex model family, add this mapping and process configuration,
+# then uncomment the Codex CLI catalog rows below.
+
 # [[adapter_mappings]]
 # model_family = "codex"
 # adapter = "codex_cli"
-# credential_pool = "codex-main"
+# credential_profile = "codex-subscription-primary"
 #
 # [codex_cli]
 # executable = "/absolute/path/to/codex"
@@ -171,46 +78,32 @@ credential_pool = "anthropic-main"
 
 # [[credential_profiles]]
 # name = "claude-subscription-primary"
-# adapter = "claude_cli"
 # billing_kind = "subscription"
-# delivery = "ambient"
-#
-# [[credential_pools]]
-# name = "claude-main"
-# tie_break = "first_listed"
-# on_pool_exhausted = "fail"
-# members = [{ profile = "claude-subscription-primary", priority = 1 }]
 #
 # [[adapter_mappings]]
 # model_family = "claude_code"
 # adapter = "claude_cli"
-# credential_pool = "claude-main"
+# credential_profile = "claude-subscription-primary"
 #
 # [claude_cli]
 # executable = "/absolute/path/to/claude"
 # mcp_bridge_executable = "signalbox-claude-mcp-bridge"
 # working_directory = "/absolute/path/to/workspace"
 
-# To serve an OpenAI model family, add this file-delivered profile, its pool,
-# and mapping. Uncomment the OpenAI catalog rows below with it.
+# To serve an OpenAI model family, add this profile and mapping and set
+# OPENAI_API_KEY_FILE to the file holding the current key. Like the Anthropic
+# mapping, an openai mapping must name the openai-primary profile, because the
+# daemon binds its key file to that exact non-secret reference. Uncomment the
+# OpenAI catalog rows below with it.
 
 # [[credential_profiles]]
 # name = "openai-primary"
-# adapter = "openai"
 # billing_kind = "api_metered"
-# delivery = "file"
-# file = "/run/secrets/openai-primary"
-#
-# [[credential_pools]]
-# name = "openai-main"
-# tie_break = "first_listed"
-# on_pool_exhausted = "fail"
-# members = [{ profile = "openai-primary", priority = 1 }]
 #
 # [[adapter_mappings]]
 # model_family = "openai"
 # adapter = "openai"
-# credential_pool = "openai-main"
+# credential_profile = "openai-primary"
 
 # A provider that implements fast mode through a distinct serving identity
 # declares that identity here without a selection_id. A selectable [[models]]
