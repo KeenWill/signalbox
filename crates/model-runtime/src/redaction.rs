@@ -1747,25 +1747,35 @@ mod tests {
         sink.flush();
         drop(sink);
 
-        assert_eq!(
-            observed,
-            vec![
-                Observation {
-                    correlation: "call-1".to_string(),
-                    fact: ObservationFact::ToolArgumentsDelta {
-                        index: 0,
-                        fragment: r#"{"path":""#.to_string(),
-                    },
-                },
-                Observation {
-                    correlation: "call-1".to_string(),
-                    fact: ObservationFact::ToolArgumentsDelta {
-                        index: 0,
-                        fragment: r#"[redacted]"}"#.to_string(),
-                    },
-                },
-            ]
+        let arguments = joined_arguments(&observed, "call-1", 0);
+        assert_eq!(arguments, r#"{"path":"[redacted]"}"#);
+        assert!(
+            !arguments.contains("secret"),
+            "the credential must not survive reassembly: {arguments}"
         );
+    }
+
+    /// The reconstructed arguments for one tool index, as a reader of the
+    /// stream would see them.
+    ///
+    /// INV-035 constrains the *content* a consumer reassembles — safe bytes
+    /// preserved, credential absent — not how the scrubber chops it into
+    /// deltas. Asserting exact fragment boundaries would fail a
+    /// behaviour-preserving change that buffered the safe prefix or coalesced
+    /// it with the replacement, while producing identical secure output.
+    fn joined_arguments(observed: &[Observation<String>], correlation: &str, index: u32) -> String {
+        observed
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::ToolArgumentsDelta {
+                    index: observed_index,
+                    fragment,
+                } if observation.correlation == correlation && *observed_index == index => {
+                    Some(fragment.as_str())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// INV-035: a credential spelled as a surrogate pair survives a boundary
@@ -1792,24 +1802,11 @@ mod tests {
         sink.flush();
         drop(sink);
 
-        assert_eq!(
-            observed,
-            vec![
-                Observation {
-                    correlation: "call-1".to_string(),
-                    fact: ObservationFact::ToolArgumentsDelta {
-                        index: 0,
-                        fragment: r#"{"emoji":""#.to_string(),
-                    },
-                },
-                Observation {
-                    correlation: "call-1".to_string(),
-                    fact: ObservationFact::ToolArgumentsDelta {
-                        index: 0,
-                        fragment: r#"[redacted]"}"#.to_string(),
-                    },
-                },
-            ]
+        let arguments = joined_arguments(&observed, "call-1", 0);
+        assert_eq!(arguments, r#"{"emoji":"[redacted]"}"#);
+        assert!(
+            !arguments.contains("loop"),
+            "the credential must not survive reassembly: {arguments}"
         );
     }
 
@@ -1838,32 +1835,15 @@ mod tests {
         sink.flush();
         drop(sink);
 
-        assert_eq!(
-            observed,
-            vec![
-                Observation {
-                    correlation: "call-1".to_string(),
-                    fact: ObservationFact::ToolArgumentsDelta {
-                        index: 0,
-                        fragment: r#"{"path":""#.to_string(),
-                    },
-                },
-                Observation {
-                    correlation: "call-1".to_string(),
-                    fact: ObservationFact::ToolArgumentsDelta {
-                        index: 0,
-                        fragment: "[redacted]".to_string(),
-                    },
-                },
-                Observation {
-                    correlation: "call-1".to_string(),
-                    fact: ObservationFact::ToolArgumentsDelta {
-                        index: 1,
-                        fragment: r#"{"other":1}"#.to_string(),
-                    },
-                },
-            ]
+        let held = joined_arguments(&observed, "call-1", 0);
+        assert_eq!(held, r#"{"path":"[redacted]"#);
+        assert!(
+            !held.contains("fixture"),
+            "the held prefix must be replaced, not forwarded: {held}"
         );
+        // The other index is untouched, and — the point of this case — no
+        // later observation can reassemble the credential across the boundary.
+        assert_eq!(joined_arguments(&observed, "call-1", 1), r#"{"other":1}"#);
     }
 
     /// Escapes the scrubber decodes but never matches are re-emitted from the

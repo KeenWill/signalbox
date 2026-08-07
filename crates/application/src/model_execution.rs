@@ -3212,10 +3212,24 @@ mod tests {
         }
     }
 
+    /// One `fail_prepared` invocation, as its caller addressed it.
+    ///
+    /// Recorded rather than discarded: a fake that only counts calls proves
+    /// the commit was attempted and nothing about *what* was committed, so a
+    /// retry reusing the colliding identities, or a failure written against an
+    /// unrelated session, would satisfy the tests below unchanged.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct FailPreparedCall {
+        session: SessionId,
+        call: ModelCallId,
+        identities: FailedModelCallTurnIdentities,
+    }
+
     #[derive(Debug)]
     struct ScriptedFailure {
         results: VecDeque<Result<FailedModelCallTurn, FakeError>>,
         calls: usize,
+        recorded: Vec<FailPreparedCall>,
     }
 
     impl FailPreparedModelCallTransaction for ScriptedFailure {
@@ -3223,15 +3237,20 @@ mod tests {
 
         async fn fail_prepared<NextTurn>(
             &mut self,
-            _session: SessionId,
-            _call: ModelCallId,
-            _identities: FailedModelCallTurnIdentities,
+            session: SessionId,
+            call: ModelCallId,
+            identities: FailedModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
         ) -> Result<FailedModelCallTurn, Self::Error>
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         {
             self.calls += 1;
+            self.recorded.push(FailPreparedCall {
+                session,
+                call,
+                identities,
+            });
             self.results
                 .pop_front()
                 .expect("one scripted failure-commit result")
@@ -4732,6 +4751,7 @@ mod tests {
             ScriptedFailure {
                 results: [Ok(failed.clone())].into(),
                 calls: 0,
+                recorded: Vec::new(),
             },
             UnusedAuthorization,
             UnusedObservation,
@@ -4749,6 +4769,16 @@ mod tests {
         let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
+        // The failure must belong to the saturated turn's own session. Counting
+        // the call alone would accept a terminal turn written against an
+        // unrelated fixture session.
+        let [committed] = failure.recorded.as_slice() else {
+            panic!(
+                "expected exactly one failure-commit attempt, got {}",
+                failure.recorded.len()
+            )
+        };
+        assert_eq!(committed.session, session);
         assert_eq!(provider.interaction_count(), 0);
         assert!(retained.is_none());
     }
@@ -4770,6 +4800,7 @@ mod tests {
             ScriptedFailure {
                 results: [Err(FakeError::IdentityCollision), Ok(failed.clone())].into(),
                 calls: 0,
+                recorded: Vec::new(),
             },
             UnusedAuthorization,
             UnusedObservation,
@@ -4786,6 +4817,22 @@ mod tests {
         );
         let (_, _, failure, _, _, provider, _, _, retained) = service.into_parts();
         assert_eq!(failure.calls, 2);
+        // Both attempts must address the same failure — otherwise the retry
+        // terminalized something else — and the second must carry *fresh*
+        // identities, which is the whole point of retrying a collision. A
+        // retry reusing the colliding identities would collide again forever.
+        let [first, second] = failure.recorded.as_slice() else {
+            panic!(
+                "expected exactly two failure-commit attempts, got {}",
+                failure.recorded.len()
+            )
+        };
+        assert_eq!(first.session, second.session);
+        assert_eq!(first.call, second.call);
+        assert_ne!(
+            first.identities, second.identities,
+            "a retried identity collision must be retried with fresh identities"
+        );
         assert_eq!(provider.capability_preparation_count(), 1);
         assert!(retained.is_none());
     }
@@ -4810,6 +4857,7 @@ mod tests {
             ScriptedFailure {
                 results: [Ok(failed.clone())].into(),
                 calls: 0,
+                recorded: Vec::new(),
             },
             UnusedAuthorization,
             UnusedObservation,

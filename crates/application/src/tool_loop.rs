@@ -2315,14 +2315,29 @@ mod tests {
         transaction_events: Vec<&'static str>,
     }
 
-    /// Prepares one attempt whose durable authorization froze
-    /// `prepared_effect`, then executes it against a live catalog declaring
-    /// the same tool `catalog_effect` — the daemon-restart shape in which a
-    /// rebuilt catalog can disagree with a parked approval.
-    async fn execute_under_catalog_effect_class(
+    /// The two effect classes one drift execution puts in disagreement.
+    ///
+    /// A struct rather than two positional arguments: both fields are
+    /// `ToolEffectClass`, the two tests below deliberately pass them in
+    /// opposite orders, and a transposition would compile while silently
+    /// reversing which side is the drifted one — leaving the assertion
+    /// describing a case it no longer covers.
+    struct CatalogDrift {
+        /// What the durable authorization froze when the attempt was prepared.
         prepared_effect: ToolEffectClass,
+        /// What the live, rebuilt catalog declares for the same tool.
         catalog_effect: ToolEffectClass,
-    ) -> ExecutionUnderCatalog {
+    }
+
+    /// Prepares one attempt whose durable authorization froze
+    /// `drift.prepared_effect`, then executes it against a live catalog
+    /// declaring the same tool `drift.catalog_effect` — the daemon-restart
+    /// shape in which a rebuilt catalog can disagree with a parked approval.
+    async fn execute_under_catalog_effect_class(drift: CatalogDrift) -> ExecutionUnderCatalog {
+        let CatalogDrift {
+            prepared_effect,
+            catalog_effect,
+        } = drift;
         let (batch, _) = prepared_batch("{}", prepared_effect);
         let events = Arc::new(Mutex::new(Vec::new()));
         let transaction = FakeTransaction {
@@ -2368,10 +2383,10 @@ mod tests {
     /// ever covered.
     #[tokio::test]
     async fn drifted_catalog_effect_class_never_reaches_authorization_or_the_executor() {
-        let drifted = execute_under_catalog_effect_class(
-            ToolEffectClass::EffectFree,
-            ToolEffectClass::ExternalEffect,
-        )
+        let drifted = execute_under_catalog_effect_class(CatalogDrift {
+            prepared_effect: ToolEffectClass::EffectFree,
+            catalog_effect: ToolEffectClass::ExternalEffect,
+        })
         .await;
 
         assert!(matches!(
@@ -2390,10 +2405,10 @@ mod tests {
     /// adapter detail.
     #[tokio::test]
     async fn drifted_catalog_effect_class_reports_its_declared_operator_failure() {
-        let drifted = execute_under_catalog_effect_class(
-            ToolEffectClass::ExternalEffect,
-            ToolEffectClass::EffectFree,
-        )
+        let drifted = execute_under_catalog_effect_class(CatalogDrift {
+            prepared_effect: ToolEffectClass::ExternalEffect,
+            catalog_effect: ToolEffectClass::EffectFree,
+        })
         .await;
         let error = drifted
             .result
