@@ -44,10 +44,12 @@ compaction-call evidence were verified through PR #312
 preparation machinery, configured prompt, and provider-native input-counting
 implementation were verified through PR #314
 (`agent/context-compaction-protocol`). The daemon does not schedule that
-automatic machinery. The runner-placement rendering and executable session-tool
-snapshot paragraphs are the foundation proposal at the bottom of their
-implementing stack and become verified only with those child pull requests.
-Invariant tags cite [docs/invariants.md](../invariants.md).
+automatic machinery. Session-delegation semantic rendering and its
+provider-neutral bridge were verified against this PR (`agent/delegation`). The
+runner-placement rendering and executable session-tool snapshot paragraphs are
+the foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests. Invariant tags cite
+[docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -226,9 +228,7 @@ messages:
   assistant tool calls and user tool results after resolving their referenced
   request, attempt, and decision records through [tool-loop](tool-loop.md).
 
-**Committed unimplemented functionality (session-delegation foundation
-proposal).** No present renderer admits the delegation semantic variants. The
-implementing delegation child pull requests add these mappings:
+The renderer admits the delegation semantic variants with these mappings:
 
 - `DelegatedTask` renders as a structured provider-neutral delegated-task
   message retaining the child, parent session and turn, and exact spawning
@@ -426,6 +426,16 @@ cancellation reaches provider invocation. Capability preparation reports this
 signal as `Cancelled`, and the application returns `NoWork`; it never converts
 authoritative cancellation into the guarded known-failure closure for a call
 that may already be terminal (INV-037).
+
+**SPEC PROPOSAL — parent-cascade cancellation.** The same poll treats an exact
+delegation logical-terminal proof as authoritative cancellation even though the
+retained model-call row may still say `Prepared` or `InFlight`. Capability work
+then returns `NoWork`; invocation cancellation reaches the provider. If a
+provider response wins physically but its observation transaction reloads after
+the parent cascade committed, the transaction discards that response and the
+application returns `NoWork`. It never derives a second turn outcome, overwrites
+the delivered child result, or substitutes provider provenance for the parent
+command. This proposal is accepted with the implementing stack's merge.
 
 1. **Prepare transaction.** Locks the session, reconstitutes the aggregate, and
    either: reports no runnable work; creates and commits the exact `Prepared`

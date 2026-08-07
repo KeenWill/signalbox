@@ -915,10 +915,17 @@ async fn prepare_in_transaction(
             ));
         }
     }
+    // A cascade-terminalized delegated child keeps its physical `active` row and
+    // carries the logical terminal instead, so only runtime-relevant active
+    // turns own the boundary. The retained row's effective terminal frontier is
+    // the logical terminal's frontier, which the source selection below reads
+    // through `turn_lifecycle_effective_terminal_frontier`.
     let busy: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1 FROM turn_lifecycle
-              WHERE session_id = $1 AND state_kind = 'active'
+              WHERE session_id = $1
+                AND state_kind = 'active'
+                AND NOT delegation_runtime_terminal
          ) OR EXISTS (
              SELECT 1 FROM context_compaction_model_call
               WHERE session_id = $1 AND state_kind <> 'terminal'
@@ -932,9 +939,10 @@ async fn prepare_in_transaction(
     }
     let source = sqlx::query(
         "WITH candidate (frontier_id) AS (
-            SELECT terminal_frontier_id
+            SELECT turn_lifecycle_effective_terminal_frontier(session_id, turn_id)
               FROM turn_lifecycle
-             WHERE session_id = $1 AND state_kind = 'terminal'
+             WHERE session_id = $1
+               AND (state_kind = 'terminal' OR delegation_runtime_terminal)
             UNION ALL
             SELECT seed_context_frontier_id
               FROM imported_session_seed

@@ -11,6 +11,8 @@ use std::time::Duration;
 /// (`docs/spec/configuration-and-credentials.md`).
 #[derive(Debug, Clone)]
 pub struct AnthropicConfig {
+    /// Exact per-model reasoning, fast-mode, and service-tier capabilities.
+    pub model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog,
     /// Base URL of the API; the adapter appends `/v1/messages`. The scheme
     /// must be `https`, except that `http` is admitted for a literal
     /// loopback IP host. User information, query, and fragment are rejected.
@@ -37,6 +39,7 @@ impl AnthropicConfig {
     /// limit.
     pub fn new() -> Self {
         Self {
+            model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog::empty(),
             base_url: "https://api.anthropic.com".to_string(),
             anthropic_version: "2023-06-01".to_string(),
             connect_timeout: None,

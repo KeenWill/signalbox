@@ -441,6 +441,8 @@ pub trait ToolApprovalIdGenerator {
 
 /// Supplies UUIDv7 candidates for tool dispatch and continuation.
 pub trait ToolExecutionIdGenerator {
+    /// Generates a fresh turn-attempt candidate after a durable child wait.
+    fn next_tool_turn_attempt_id(&mut self) -> TurnAttemptId;
     /// Generates a fresh physical tool-attempt candidate.
     fn next_tool_attempt_id(&mut self) -> ToolAttemptId;
     /// Generates a fresh semantic result/steering entry candidate.
@@ -464,6 +466,10 @@ impl ToolApprovalIdGenerator for UuidV7ToolLoopIdGenerator {
 }
 
 impl ToolExecutionIdGenerator for UuidV7ToolLoopIdGenerator {
+    fn next_tool_turn_attempt_id(&mut self) -> TurnAttemptId {
+        TurnAttemptId::from_uuid(uuid::Uuid::now_v7())
+    }
+
     fn next_tool_attempt_id(&mut self) -> ToolAttemptId {
         ToolAttemptId::from_uuid(uuid::Uuid::now_v7())
     }
@@ -595,6 +601,8 @@ pub enum ToolExecutionServiceOutcome {
     AwaitingApproval(ToolRequestId),
     /// Exact ambiguity remains parked for user recovery.
     AwaitingRecovery(ToolAttemptId),
+    /// A delivered foreground child result reopened serialized execution.
+    ChildWaitResumed(TurnAttemptId),
     /// A fresh attempt checkpoint committed; execution waits for another pass.
     AttemptCheckpointed(ToolAttemptId),
     /// Pure preflight closed one attempt with typed error evidence.
@@ -988,6 +996,23 @@ where
             ToolBatchPhase::AwaitingRecovery { attempt } => {
                 Ok(ToolExecutionServiceOutcome::AwaitingRecovery(attempt))
             }
+            ToolBatchPhase::AwaitingChild { .. } => loop {
+                let continuation = self.ids.next_tool_turn_attempt_id();
+                match self
+                    .transaction
+                    .resume_child_wait(session, turn, continuation)
+                    .await
+                {
+                    Err(error)
+                        if error.operator_failure_class()
+                            == OperatorFailureClass::IdentityCollision => {}
+                    Ok(true) => {
+                        return Ok(ToolExecutionServiceOutcome::ChildWaitResumed(continuation));
+                    }
+                    Ok(false) => return Ok(ToolExecutionServiceOutcome::NoWork),
+                    Err(error) => return Err(ToolExecutionServiceError::Prepare(error)),
+                }
+            },
             ToolBatchPhase::Executing { .. } => self.execute_batch(batch).await,
         }
     }
@@ -1783,6 +1808,15 @@ mod tests {
                 .unwrap_or_else(|| Some(self.batch.clone())))
         }
 
+        async fn resume_child_wait(
+            &mut self,
+            _session: SessionId,
+            _turn: TurnId,
+            _continuation: TurnAttemptId,
+        ) -> Result<bool, Self::Error> {
+            panic!("ordinary tool fixture never resumes a child wait")
+        }
+
         async fn prepare_next_attempt(
             &mut self,
             _session: SessionId,
@@ -1946,6 +1980,10 @@ mod tests {
     }
 
     impl ToolExecutionIdGenerator for FixedIds {
+        fn next_tool_turn_attempt_id(&mut self) -> TurnAttemptId {
+            TurnAttemptId::from_uuid(Uuid::from_u128(19))
+        }
+
         fn next_tool_attempt_id(&mut self) -> ToolAttemptId {
             self.attempts.pop_front().expect("fixture attempt identity")
         }

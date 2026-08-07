@@ -10,6 +10,8 @@ use std::time::Duration;
 /// receives a credential value.
 #[derive(Debug, Clone)]
 pub struct ClaudeCliConfig {
+    /// Exact per-model reasoning, fast-mode, and service-tier capabilities.
+    pub model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog,
     /// Absolute path to the locally installed Claude Code executable.
     pub executable: PathBuf,
     /// Absolute path to the adapter-owned MCP bridge executable.
@@ -38,6 +40,7 @@ impl ClaudeCliConfig {
         credential_reference: signalbox_model_runtime::CredentialReference,
     ) -> Self {
         Self {
+            model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog::empty(),
             executable: executable.into(),
             mcp_bridge_executable: mcp_bridge_executable.into(),
             working_directory: working_directory.into(),

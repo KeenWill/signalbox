@@ -11,7 +11,6 @@ use std::{
 };
 
 use git2::Repository;
-use rustix::fs::{CWD, Mode, mkfifoat};
 use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 
 use crate::arguments::{GitStageArguments, LocalOperation};
@@ -21,8 +20,8 @@ use crate::limits::MAX_INDEX_ENTRIES;
 use crate::tests::planting::{plant_maximum_index, plant_over_budget_index};
 use crate::tests::support::{
     CHANGED_CONTENT, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE, ObservingIndexLockFileSystem,
-    RENAMED_TRACKED_PATH, TRACKED_PATH, UNTRACKED_CONTENT, UNTRACKED_PATH, commit_all, execute,
-    identity, index_extension, install_deleted_conflict,
+    RENAMED_TRACKED_PATH, TRACKED_PATH, UNTRACKED_CONTENT, UNTRACKED_PATH, commit_all, create_fifo,
+    execute, identity, index_extension, install_deleted_conflict,
 };
 
 #[test]
@@ -285,8 +284,7 @@ fn stage_records_exact_descriptor_bytes_without_attribute_filtering() {
 fn stage_never_opens_a_worktree_attribute_fifo() {
     let fixture = Fixture::new();
     let attributes_path = fixture.root().join(".gitattributes");
-    mkfifoat(CWD, &attributes_path, Mode::RUSR | Mode::WUSR)
-        .expect("worktree attributes FIFO constructs");
+    create_fifo(&attributes_path).expect("worktree attributes FIFO constructs");
     fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
         .expect("fixture content change writes");
     let executor = fixture.executor();
@@ -312,8 +310,7 @@ fn stage_rejects_a_repository_attribute_fifo_without_opening_it() {
     let fixture = Fixture::new();
     let executor = fixture.executor();
     let attributes_path = fixture.root().join(".git/info/attributes");
-    mkfifoat(CWD, &attributes_path, Mode::RUSR | Mode::WUSR)
-        .expect("repository attributes FIFO constructs");
+    create_fifo(&attributes_path).expect("repository attributes FIFO constructs");
     fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
         .expect("fixture content change writes");
 

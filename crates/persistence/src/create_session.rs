@@ -3,6 +3,7 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use serde_json::Value;
 use signalbox_application::{CreateSessionOutcome, CreateSessionTransaction};
 use signalbox_domain::{
     CreateSessionAppliedResult, CreateSessionReconstitutionFailure,
@@ -23,19 +24,19 @@ use crate::command_registry::{
 use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
     dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
-    defaults_version_to_numeric, durable_command_id_to_uuid, session_id_from_uuid,
+    defaults_version_to_numeric, durable_command_id_to_uuid, model_settings_from_json,
+    model_settings_to_json, session_creation_cause_to_str, session_id_from_uuid,
     session_id_to_uuid, session_placement_event_kind_from_str, session_placement_event_kind_to_str,
 };
 use crate::outbox;
 
 const COMMAND_KIND: &str = "create_session";
-const WRITTEN_STORAGE_VERSION: i16 = 6;
+const WRITTEN_STORAGE_VERSION: i16 = 7;
 const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
 const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
 const TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION: i16 = 4;
 const PLACEMENT_FROM_STORAGE_VERSION: i16 = 6;
-// Applied migrations freeze this legacy storage spelling.
-const USER_INITIATED: &str = "owner_initiated";
+pub(crate) const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 7;
 const NO_ANCESTRY: &str = "none";
 const APPLIED: &str = "applied";
 
@@ -350,6 +351,34 @@ fn existing_outcome(
     }
 }
 
+pub(crate) async fn insert_fresh_prepared(
+    connection: &mut PgConnection,
+    prepared: PreparedCreateSession,
+    credential_pin: &crate::SessionCredentialPin,
+) -> Result<(), CreateSessionRepositoryError> {
+    let command_id = prepared.command().command_id();
+    let claimed = sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, $2, $3, transaction_timestamp())
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(durable_command_id_to_uuid(command_id))
+    .bind(COMMAND_KIND)
+    .bind(WRITTEN_STORAGE_VERSION)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected()
+        == 1;
+    if !claimed {
+        return Err(CreateSessionCorruption::Inconsistent(
+            "fresh repository-watch command identity collided",
+        )
+        .into());
+    }
+    insert_prepared(connection, prepared, credential_pin).await
+}
+
 async fn insert_prepared(
     connection: &mut PgConnection,
     prepared: PreparedCreateSession,
@@ -368,7 +397,9 @@ async fn insert_prepared(
          VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(session_id_to_uuid(session.id()))
-    .bind(USER_INITIATED)
+    .bind(session_creation_cause_to_str(
+        &SessionCreationCause::UserInitiated,
+    ))
     .bind(NO_ANCESTRY)
     .bind(
         session
@@ -428,8 +459,8 @@ async fn insert_prepared(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
              direct_model_selection_id, model_alias_id,
-             dangerous_tool_auto_approval, system_prompt)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+             dangerous_tool_auto_approval, system_prompt, model_settings)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(session_id_to_uuid(session.id()))
     .bind(defaults_version_to_numeric(defaults.version()))
@@ -445,6 +476,7 @@ async fn insert_prepared(
             .system_prompt()
             .map(signalbox_domain::SessionSystemPrompt::as_str),
     )
+    .bind(model_settings_to_json(defaults.defaults().model_settings()))
     .execute(&mut *connection)
     .await?;
 
@@ -462,16 +494,18 @@ async fn insert_prepared(
             (command_id, command_kind, storage_version,
              creation_cause, ancestry_kind, initial_defaults_version,
              model_selection_kind, direct_model_selection_id, model_alias_id,
-             dangerous_tool_auto_approval, system_prompt,
+             dangerous_tool_auto_approval, system_prompt, model_settings,
              template_name, template_content_digest,
              placement_path, root_global_read_intent,
              result_kind, created_session_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
     .bind(WRITTEN_STORAGE_VERSION)
-    .bind(USER_INITIATED)
+    .bind(session_creation_cause_to_str(
+        &SessionCreationCause::UserInitiated,
+    ))
     .bind(NO_ANCESTRY)
     .bind(defaults_version_to_numeric(defaults.version()))
     .bind(command_selection.kind)
@@ -488,6 +522,9 @@ async fn insert_prepared(
             .system_prompt()
             .map(signalbox_domain::SessionSystemPrompt::as_str),
     )
+    .bind(model_settings_to_json(
+        command.initial_configuration_defaults().model_settings(),
+    ))
     .bind(
         command
             .template_provenance()
@@ -556,6 +593,7 @@ async fn load_from_connection(
             c.model_alias_id AS command_alias_id,
             c.dangerous_tool_auto_approval AS command_tool_auto_approval,
             c.system_prompt AS command_system_prompt,
+            c.model_settings AS command_model_settings,
             c.template_name AS command_template_name,
             c.template_content_digest AS command_template_digest,
             c.placement_path AS command_placement_path,
@@ -565,6 +603,7 @@ async fn load_from_connection(
             s.session_id AS stored_session_id,
             s.creation_cause AS stored_cause,
             s.ancestry_kind AS stored_ancestry,
+            s.spawning_tool_request_id AS stored_spawning_request_id,
             s.template_name AS stored_template_name,
             s.template_content_digest AS stored_template_digest,
             v.session_id AS defaults_session_id,
@@ -573,7 +612,8 @@ async fn load_from_connection(
             v.direct_model_selection_id AS stored_direct_id,
             v.model_alias_id AS stored_alias_id,
             v.dangerous_tool_auto_approval AS stored_tool_auto_approval,
-            v.system_prompt AS stored_system_prompt
+            v.system_prompt AS stored_system_prompt,
+            v.model_settings AS stored_model_settings
             ,pe.version AS stored_placement_version
             ,pe.prior_version AS stored_placement_prior_version
             ,pe.event_kind AS stored_placement_event_kind
@@ -628,6 +668,7 @@ fn decode_complete(
     let command_provenance = decode_provenance(
         required(&row, "command_cause")?,
         required(&row, "command_ancestry")?,
+        None,
     )?;
     let initial_version = decode_ordinal(&row, "initial_defaults_version")?;
     if initial_version != SessionConfigurationDefaultsVersion::first() {
@@ -635,13 +676,17 @@ fn decode_complete(
             CreateSessionCorruption::Inconsistent("command initial defaults version").into(),
         );
     }
+    let command_model_settings: Value = required(&row, "command_model_settings")?;
     let command_defaults = decode_selection(
         required(&row, "command_model_kind")?,
         row.try_get("command_direct_id")?,
         row.try_get("command_alias_id")?,
-        required(&row, "command_tool_auto_approval")?,
-        row.try_get("command_system_prompt")?,
-        typed_version,
+        StoredConfigurationFields {
+            dangerous_tool_auto_approval: required(&row, "command_tool_auto_approval")?,
+            system_prompt: row.try_get("command_system_prompt")?,
+            model_settings: command_model_settings,
+            storage_version: typed_version,
+        },
         "command model selection",
     )?;
     let command_template_provenance = decode_template_provenance(
@@ -692,6 +737,7 @@ fn decode_complete(
     let stored_provenance = decode_provenance(
         required(&row, "stored_cause")?,
         required(&row, "stored_ancestry")?,
+        row.try_get("stored_spawning_request_id")?,
     )?;
     let stored_template_provenance = decode_template_provenance(
         row.try_get("stored_template_name")?,
@@ -710,13 +756,17 @@ fn decode_complete(
         return Err(CreateSessionCorruption::Inconsistent("session/defaults ownership").into());
     }
     let stored_version = decode_ordinal(&row, "stored_defaults_version")?;
+    let stored_model_settings: Value = required(&row, "stored_model_settings")?;
     let stored_defaults = decode_selection(
         required(&row, "stored_model_kind")?,
         row.try_get("stored_direct_id")?,
         row.try_get("stored_alias_id")?,
-        required(&row, "stored_tool_auto_approval")?,
-        row.try_get("stored_system_prompt")?,
-        typed_version,
+        StoredConfigurationFields {
+            dangerous_tool_auto_approval: required(&row, "stored_tool_auto_approval")?,
+            system_prompt: row.try_get("stored_system_prompt")?,
+            model_settings: stored_model_settings,
+            storage_version: typed_version,
+        },
         "stored model selection",
     )?;
     let stored_placement_version = placement_version_from_numeric(
@@ -908,8 +958,9 @@ fn decode_ordinal(
 fn decode_provenance(
     cause: String,
     ancestry: String,
+    spawning_request: Option<Uuid>,
 ) -> Result<SessionCreationProvenance, CreateSessionRepositoryError> {
-    if cause != USER_INITIATED {
+    if cause != session_creation_cause_to_str(&SessionCreationCause::UserInitiated) {
         return Err(CreateSessionCorruption::Unsupported {
             field: "creation cause",
             value: cause,
@@ -923,19 +974,27 @@ fn decode_provenance(
         }
         .into());
     }
+    if spawning_request.is_some() {
+        return Err(CreateSessionCorruption::Inconsistent("creation cause provenance").into());
+    }
     Ok(SessionCreationProvenance::new(
         SessionCreationCause::UserInitiated,
         TranscriptAncestry::None,
     ))
 }
 
+struct StoredConfigurationFields {
+    dangerous_tool_auto_approval: String,
+    system_prompt: Option<String>,
+    model_settings: Value,
+    storage_version: i16,
+}
+
 fn decode_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
-    dangerous_tool_auto_approval: String,
-    system_prompt: Option<String>,
-    storage_version: i16,
+    stored: StoredConfigurationFields,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, CreateSessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
@@ -950,14 +1009,16 @@ fn decode_selection(
             return Err(CreateSessionCorruption::Unsupported { field, value: kind }.into());
         }
     };
-    let dangerous_tool_auto_approval =
-        dangerous_tool_auto_approval_from_str(&dangerous_tool_auto_approval).ok_or_else(|| {
-            CreateSessionRepositoryError::from(CreateSessionCorruption::Unsupported {
-                field: "dangerous tool auto approval",
-                value: dangerous_tool_auto_approval,
-            })
-        })?;
-    if storage_version < DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION
+    let dangerous_tool_auto_approval = dangerous_tool_auto_approval_from_str(
+        &stored.dangerous_tool_auto_approval,
+    )
+    .ok_or_else(|| {
+        CreateSessionRepositoryError::from(CreateSessionCorruption::Unsupported {
+            field: "dangerous tool auto approval",
+            value: stored.dangerous_tool_auto_approval,
+        })
+    })?;
+    if stored.storage_version < DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION
         && dangerous_tool_auto_approval != signalbox_domain::DangerousToolAutoApproval::Disabled
     {
         return Err(CreateSessionCorruption::Inconsistent(
@@ -965,22 +1026,40 @@ fn decode_selection(
         )
         .into());
     }
-    if storage_version < SYSTEM_PROMPT_FROM_STORAGE_VERSION && system_prompt.is_some() {
+    if stored.storage_version < SYSTEM_PROMPT_FROM_STORAGE_VERSION && stored.system_prompt.is_some()
+    {
         return Err(
             CreateSessionCorruption::Inconsistent("storage version without system prompt").into(),
         );
     }
-    let system_prompt = system_prompt
+    let system_prompt = stored
+        .system_prompt
         .map(|value| {
             signalbox_domain::SessionSystemPrompt::try_new(value)
                 .map_err(|_| CreateSessionCorruption::Inconsistent("system prompt admission"))
         })
         .transpose()?;
-    Ok(SessionConfigurationDefaults::complete(
+    let model_settings = model_settings_from_json(stored.model_settings)
+        .map_err(|_| CreateSessionCorruption::Inconsistent("model settings"))?;
+    if stored.storage_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
+        && model_settings != signalbox_domain::ValidatedModelSettings::provider_defaults()
+    {
+        return Err(CreateSessionCorruption::Inconsistent(
+            "storage version without model settings",
+        )
+        .into());
+    }
+    SessionConfigurationDefaults::complete_with_model_settings(
         model,
         dangerous_tool_auto_approval,
         system_prompt,
-    ))
+        model_settings,
+    )
+    .ok_or_else(|| {
+        CreateSessionRepositoryError::from(CreateSessionCorruption::Inconsistent(
+            "model settings validation selection",
+        ))
+    })
 }
 
 const fn storage_version_supports_template_provenance(storage_version: i16) -> bool {
@@ -1026,10 +1105,40 @@ fn map_registry_error(error: RegistryInspectionError) -> CreateSessionRepository
 mod tests {
     use std::io;
 
+    use signalbox_domain::SessionCreationCause;
+    use sqlx::types::Uuid;
+
     use super::{
-        CreateSessionRepositoryError, WRITTEN_STORAGE_VERSION,
-        storage_version_supports_template_provenance,
+        CreateSessionCorruption, CreateSessionRepositoryError, NO_ANCESTRY,
+        WRITTEN_STORAGE_VERSION, decode_provenance, storage_version_supports_template_provenance,
     };
+    use crate::mapping::session_creation_cause_to_str;
+
+    fn corruption(error: CreateSessionRepositoryError) -> CreateSessionCorruption {
+        let CreateSessionRepositoryError::Corruption(corruption) = error else {
+            panic!("the mapping failure is durable corruption")
+        };
+        corruption
+    }
+
+    /// S01 / INV-003: the ordinary creation reader cannot silently discard a
+    /// delegated spawning identity from a user-initiated session row.
+    #[test]
+    fn s01_inv003_user_initiated_creation_rejects_spawning_request() {
+        let error = decode_provenance(
+            String::from(session_creation_cause_to_str(
+                &SessionCreationCause::UserInitiated,
+            )),
+            String::from(NO_ANCESTRY),
+            Some(Uuid::from_u128(1)),
+        )
+        .expect_err("user-initiated creation cannot carry a spawning request");
+
+        assert_eq!(
+            corruption(error),
+            CreateSessionCorruption::Inconsistent("creation cause provenance")
+        );
+    }
 
     /// Version four rows carrying template provenance remain valid after the
     /// writer advances to a later storage version.

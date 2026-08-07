@@ -8,7 +8,6 @@ use std::{
 };
 
 use git2::Repository;
-use rustix::fs::{CWD, Mode, mkfifoat};
 use signalbox_application::ToolCatalog;
 use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 
@@ -20,7 +19,7 @@ use crate::limits::MAX_REPOSITORY_CONFIG_BYTES;
 use crate::names::LOCAL_GIT_TOOL_NAMES;
 use crate::tests::support::{
     CHANGED_CONTENT, ConcurrentRootOpenFileSystem, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE,
-    ReplacingRootFileSystem, TRACKED_PATH, commit_all, identity,
+    ReplacingRootFileSystem, TRACKED_PATH, commit_all, create_fifo, identity,
     repository_uses_pinned_config_without_fifo_wait,
 };
 
@@ -148,8 +147,7 @@ fn fifo_repository_config_is_rejected_without_blocking() {
     let fixture = Fixture::new();
     let config_path = fixture.root().join(".git/config");
     fs::remove_file(&config_path).expect("repository config removes for fixture");
-    mkfifoat(CWD, &config_path, Mode::RUSR | Mode::WUSR)
-        .expect("repository config FIFO constructs");
+    create_fifo(&config_path).expect("repository config FIFO constructs");
 
     let error = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
         .expect_err("repository config FIFO rejects");
@@ -164,8 +162,7 @@ fn pinned_config_rejects_a_live_replacement_fifo_without_opening_it() {
     let config_path = fixture.root().join(".git/config");
     fs::rename(&config_path, fixture.root().join(".git/config.pinned"))
         .expect("validated config retires");
-    mkfifoat(CWD, &config_path, Mode::RUSR | Mode::WUSR)
-        .expect("replacement config FIFO constructs");
+    create_fifo(&config_path).expect("replacement config FIFO constructs");
 
     let opened_without_wait =
         repository_uses_pinned_config_without_fifo_wait(executor, config_path);
@@ -221,7 +218,7 @@ fn nonregular_administrative_entry_is_rejected_without_blocking() {
     let fixture = Fixture::new();
     let head_path = fixture.root().join(".git/HEAD");
     fs::remove_file(&head_path).expect("repository HEAD removes for fixture");
-    mkfifoat(CWD, &head_path, Mode::RUSR | Mode::WUSR).expect("repository HEAD FIFO constructs");
+    create_fifo(&head_path).expect("repository HEAD FIFO constructs");
 
     let error = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
         .expect_err("nonregular administrative entry rejects");

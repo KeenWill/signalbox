@@ -40,6 +40,7 @@
 //! remains a Layer-1 interface: application and domain crates neither import
 //! these types nor delegate lifecycle policy to them.
 
+mod capability;
 #[cfg(feature = "cli-process")]
 mod cli_process;
 mod cli_redaction;
@@ -62,11 +63,15 @@ mod target;
 mod tool;
 mod usage;
 
+pub use capability::{
+    FastModeTarget, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityCatalogError,
+    ModelCapabilityDefinition, ModelCapabilityError,
+};
 #[cfg(feature = "cli-process")]
 pub use cli_process::{
     CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CliDecodeFailure, CliDecodeFailureClass,
-    CliEnvironmentVariable, CliProcessLabels, CliProcessRequest, CliSession,
-    CliTerminalTextCapture, execute_cli_process,
+    CliEnvironmentOverride, CliEnvironmentVariable, CliProcessLabels, CliProcessRequest,
+    CliSession, CliTerminalTextCapture, execute_cli_process,
 };
 pub use cli_redaction::{
     REDACTED, RedactingSink, TerminalTextCapture, redact_json, redact_text,
@@ -107,7 +112,10 @@ pub use provider_support::{
 pub use redaction::{CredentialRedactingSink, redact_evidence};
 pub use runtime::{CancellationSignal, ModelRuntime};
 pub use scripted::{Script, ScriptedModel, ScriptedPrepared};
-pub use settings::ModelSettings;
+pub use settings::{
+    AnthropicServiceTier, CodexCliServiceTier, FastMode, ModelSettings, OpenAiServiceTier,
+    ReasoningLevel, ServiceTier,
+};
 pub use sse::{SseFraming, SseFramingError, SsePushOutcome, SseRecord, SseTermination};
 pub use target::{ProviderReportedModel, RequestedTarget, ResolvedTarget};
 pub use tool::{

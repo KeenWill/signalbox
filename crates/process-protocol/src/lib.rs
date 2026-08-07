@@ -104,6 +104,9 @@ pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
 /// Maximum entries in one deployment model-alias catalog.
 pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
+/// Maximum entries in one deployment model-capability catalog.
+pub const MAX_MODEL_CAPABILITY_CATALOG_ENTRIES: usize = 10_000;
+
 /// Maximum canonical decimal USD amount text.
 pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 30;
 
@@ -184,6 +187,12 @@ impl CommandId {
     /// Returns the UUID for explicit application-boundary mapping.
     pub const fn into_uuid(self) -> Uuid {
         self.0.into_uuid()
+    }
+}
+
+impl fmt::Display for CommandId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
     }
 }
 
@@ -1349,6 +1358,549 @@ pub enum ModelSelection {
     },
 }
 
+/// Provider-neutral reasoning effort at the process boundary.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningLevel {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
+    Ultra,
+}
+
+/// Whether fast serving is selected.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FastMode {
+    Disabled,
+    Enabled,
+}
+
+/// Anthropic Messages service tier.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicServiceTier {
+    Auto,
+    StandardOnly,
+}
+
+/// OpenAI service tier.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiServiceTier {
+    Auto,
+    Default,
+    Flex,
+    Scale,
+    Priority,
+    Fast,
+}
+
+/// Codex CLI service tier.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexCliServiceTier {
+    Default,
+    Priority,
+    Flex,
+}
+
+/// Provider-tagged service tier.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(
+    tag = "provider",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ServiceTier {
+    Anthropic(AnthropicServiceTier),
+    OpenAi(OpenAiServiceTier),
+    CodexCli(CodexCliServiceTier),
+}
+
+/// One precedence-layer contribution for a setting.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum SettingOverlay<ValueT> {
+    Inherit,
+    ProviderDefault,
+    Value(ValueT),
+}
+
+/// One fast-mode contribution at a precedence layer.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum FastModeOverlay {
+    Inherit,
+    Value(FastMode),
+}
+
+/// Three provenance-preserving setting contributions at one layer.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSettingsOverlay {
+    pub reasoning_level: SettingOverlay<ReasoningLevel>,
+    pub fast_mode: FastModeOverlay,
+    pub service_tier: SettingOverlay<ServiceTier>,
+}
+
+impl ModelSettingsOverlay {
+    /// Constructs an overlay that inherits every setting.
+    pub const fn inherit_all() -> Self {
+        Self {
+            reasoning_level: SettingOverlay::Inherit,
+            fast_mode: FastModeOverlay::Inherit,
+            service_tier: SettingOverlay::Inherit,
+        }
+    }
+}
+
+impl Default for ModelSettingsOverlay {
+    fn default() -> Self {
+        Self::inherit_all()
+    }
+}
+
+/// Complete effective setting values.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveModelSettings {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub reasoning_level: Option<ReasoningLevel>,
+    pub fast_mode: FastMode,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub service_tier: Option<ServiceTier>,
+}
+
+/// Precedence layer that supplied one effective value.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSettingSource {
+    PerCall,
+    Session,
+    Profile,
+    GlobalDefault,
+}
+
+/// Exact four-layer setting contributions.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSettingsPrecedence {
+    pub per_call: ModelSettingsOverlay,
+    pub session: ModelSettingsOverlay,
+    pub profile: ModelSettingsOverlay,
+    pub global_default: ModelSettingsOverlay,
+}
+
+/// Complete resolved settings and their validation provenance.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSettingsSnapshot {
+    pub precedence: ModelSettingsPrecedence,
+    pub effective: EffectiveModelSettings,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub reasoning_source: Option<ModelSettingSource>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub fast_mode_source: Option<ModelSettingSource>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub service_tier_source: Option<ModelSettingSource>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub validated_for_selection_id: Option<CanonicalUuid>,
+}
+
+/// Complete frozen settings evidence for one transcript turn.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnModelSettingsSnapshot {
+    /// Turn that owns this frozen settings evidence.
+    pub turn_id: CanonicalUuid,
+    /// Accepted input that originated the turn.
+    pub accepted_input_id: CanonicalUuid,
+    /// Session-defaults epoch resolved for the origin.
+    pub defaults_version: CanonicalU64,
+    /// Model request before alias freezing.
+    pub requested_model: ModelSelection,
+    /// Direct model selected for execution.
+    pub selected_direct_id: CanonicalUuid,
+    /// Exact per-call settings contribution.
+    pub per_call_override: ModelSettingsOverlay,
+    /// Complete validated settings frozen for execution.
+    pub settings: ModelSettingsSnapshot,
+    /// Prior direct selection adjusted by a model change, or null.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub adjusted_from_selection_id: Option<CanonicalUuid>,
+    /// Ordered automatic model-change adjustments.
+    pub adjustments: Vec<ModelChangeAdjustment>,
+}
+
+impl ModelSettingsSnapshot {
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        let resolved = resolve_wire_settings(self.precedence);
+        if resolved.effective != self.effective
+            || resolved.reasoning_source != self.reasoning_source
+            || resolved.fast_mode_source != self.fast_mode_source
+            || resolved.service_tier_source != self.service_tier_source
+            || (self.validated_for_selection_id.is_none()
+                && !self.is_model_independent_provider_defaults())
+        {
+            return Err(FrameValidationError::ModelSettingsShape);
+        }
+        Ok(())
+    }
+
+    fn validate_defaults(&self) -> Result<(), FrameValidationError> {
+        self.validate()?;
+        if self.precedence.per_call != ModelSettingsOverlay::inherit_all() {
+            return Err(FrameValidationError::ModelSettingsShape);
+        }
+        Ok(())
+    }
+
+    /// Reports whether this snapshot can belong to the supplied model selection.
+    pub fn matches_model(&self, model: &ModelSelection) -> bool {
+        snapshot_matches_model(model, self)
+    }
+
+    fn is_model_independent_provider_defaults(&self) -> bool {
+        self.precedence
+            == (ModelSettingsPrecedence {
+                per_call: ModelSettingsOverlay::inherit_all(),
+                session: ModelSettingsOverlay::inherit_all(),
+                profile: ModelSettingsOverlay::inherit_all(),
+                global_default: ModelSettingsOverlay::inherit_all(),
+            })
+            && self.effective
+                == (EffectiveModelSettings {
+                    reasoning_level: None,
+                    fast_mode: FastMode::Disabled,
+                    service_tier: None,
+                })
+            && self.reasoning_source.is_none()
+            && self.fast_mode_source.is_none()
+            && self.service_tier_source.is_none()
+    }
+}
+
+impl TurnModelSettingsSnapshot {
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        validate_turn_settings_payload(
+            self.defaults_version,
+            &self.requested_model,
+            self.selected_direct_id,
+            self.per_call_override,
+            &self.settings,
+            self.adjusted_from_selection_id,
+            &self.adjustments,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WireResolvedModelSettings {
+    effective: EffectiveModelSettings,
+    reasoning_source: Option<ModelSettingSource>,
+    fast_mode_source: Option<ModelSettingSource>,
+    service_tier_source: Option<ModelSettingSource>,
+}
+
+fn resolve_wire_settings(precedence: ModelSettingsPrecedence) -> WireResolvedModelSettings {
+    let layers = [
+        (ModelSettingSource::PerCall, precedence.per_call),
+        (ModelSettingSource::Session, precedence.session),
+        (ModelSettingSource::Profile, precedence.profile),
+        (ModelSettingSource::GlobalDefault, precedence.global_default),
+    ];
+    let (reasoning_level, reasoning_source) =
+        resolve_wire_nullable(layers.map(|(source, settings)| (source, settings.reasoning_level)));
+    let (fast_mode, fast_mode_source) =
+        resolve_wire_fast(layers.map(|(source, settings)| (source, settings.fast_mode)));
+    let (service_tier, service_tier_source) =
+        resolve_wire_nullable(layers.map(|(source, settings)| (source, settings.service_tier)));
+    WireResolvedModelSettings {
+        effective: EffectiveModelSettings {
+            reasoning_level,
+            fast_mode,
+            service_tier,
+        },
+        reasoning_source,
+        fast_mode_source,
+        service_tier_source,
+    }
+}
+
+fn resolve_wire_nullable<ValueT: Copy>(
+    layers: impl IntoIterator<Item = (ModelSettingSource, SettingOverlay<ValueT>)>,
+) -> (Option<ValueT>, Option<ModelSettingSource>) {
+    for (source, setting) in layers {
+        match setting {
+            SettingOverlay::Inherit => {}
+            SettingOverlay::ProviderDefault => return (None, Some(source)),
+            SettingOverlay::Value(value) => return (Some(value), Some(source)),
+        }
+    }
+    (None, None)
+}
+
+fn resolve_wire_fast(
+    layers: impl IntoIterator<Item = (ModelSettingSource, FastModeOverlay)>,
+) -> (FastMode, Option<ModelSettingSource>) {
+    for (source, setting) in layers {
+        match setting {
+            FastModeOverlay::Inherit => {}
+            FastModeOverlay::Value(value) => return (value, Some(source)),
+        }
+    }
+    (FastMode::Disabled, None)
+}
+
+fn overlay_inheriting_from(
+    overlay: ModelSettingsOverlay,
+    prior: ModelSettingsOverlay,
+) -> ModelSettingsOverlay {
+    ModelSettingsOverlay {
+        reasoning_level: match overlay.reasoning_level {
+            SettingOverlay::Inherit => prior.reasoning_level,
+            SettingOverlay::ProviderDefault | SettingOverlay::Value(_) => overlay.reasoning_level,
+        },
+        fast_mode: match overlay.fast_mode {
+            FastModeOverlay::Inherit => prior.fast_mode,
+            FastModeOverlay::Value(_) => overlay.fast_mode,
+        },
+        service_tier: match overlay.service_tier {
+            SettingOverlay::Inherit => prior.service_tier,
+            SettingOverlay::ProviderDefault | SettingOverlay::Value(_) => overlay.service_tier,
+        },
+    }
+}
+
+fn with_wire_effective_adjustment(
+    mut precedence: ModelSettingsPrecedence,
+    prior: WireResolvedModelSettings,
+    adjusted: EffectiveModelSettings,
+) -> ModelSettingsPrecedence {
+    if prior.effective.reasoning_level != adjusted.reasoning_level {
+        let value = match adjusted.reasoning_level {
+            Some(value) => SettingOverlay::Value(value),
+            None => SettingOverlay::ProviderDefault,
+        };
+        match prior.reasoning_source {
+            Some(ModelSettingSource::PerCall) => precedence.per_call.reasoning_level = value,
+            Some(ModelSettingSource::Session) => precedence.session.reasoning_level = value,
+            Some(ModelSettingSource::Profile) => precedence.profile.reasoning_level = value,
+            Some(ModelSettingSource::GlobalDefault) => {
+                precedence.global_default.reasoning_level = value;
+            }
+            None => {}
+        }
+    }
+    if prior.effective.fast_mode != adjusted.fast_mode {
+        let value = FastModeOverlay::Value(adjusted.fast_mode);
+        match prior.fast_mode_source {
+            Some(ModelSettingSource::PerCall) => precedence.per_call.fast_mode = value,
+            Some(ModelSettingSource::Session) => precedence.session.fast_mode = value,
+            Some(ModelSettingSource::Profile) => precedence.profile.fast_mode = value,
+            Some(ModelSettingSource::GlobalDefault) => precedence.global_default.fast_mode = value,
+            None => {}
+        }
+    }
+    if prior.effective.service_tier != adjusted.service_tier {
+        let value = match adjusted.service_tier {
+            Some(value) => SettingOverlay::Value(value),
+            None => SettingOverlay::ProviderDefault,
+        };
+        match prior.service_tier_source {
+            Some(ModelSettingSource::PerCall) => precedence.per_call.service_tier = value,
+            Some(ModelSettingSource::Session) => precedence.session.service_tier = value,
+            Some(ModelSettingSource::Profile) => precedence.profile.service_tier = value,
+            Some(ModelSettingSource::GlobalDefault) => {
+                precedence.global_default.service_tier = value;
+            }
+            None => {}
+        }
+    }
+    precedence
+}
+
+fn apply_wire_adjustments(
+    precedence: ModelSettingsPrecedence,
+    adjustments: &[ModelChangeAdjustment],
+) -> Option<ModelSettingsPrecedence> {
+    validate_adjustments(adjustments).ok()?;
+    let prior = resolve_wire_settings(precedence);
+    let mut effective = prior.effective;
+    for adjustment in adjustments {
+        effective = match adjustment {
+            ModelChangeAdjustment::ReasoningLevelClamped { from, to }
+                if prior.reasoning_source != Some(ModelSettingSource::PerCall)
+                    && effective.reasoning_level == Some(*from)
+                    && from != to =>
+            {
+                EffectiveModelSettings {
+                    reasoning_level: Some(*to),
+                    ..effective
+                }
+            }
+            ModelChangeAdjustment::ReasoningLevelCleared { from }
+                if prior.reasoning_source != Some(ModelSettingSource::PerCall)
+                    && effective.reasoning_level == Some(*from) =>
+            {
+                EffectiveModelSettings {
+                    reasoning_level: None,
+                    ..effective
+                }
+            }
+            ModelChangeAdjustment::FastModeDisabled {}
+                if prior.fast_mode_source != Some(ModelSettingSource::PerCall)
+                    && effective.fast_mode == FastMode::Enabled =>
+            {
+                EffectiveModelSettings {
+                    fast_mode: FastMode::Disabled,
+                    ..effective
+                }
+            }
+            ModelChangeAdjustment::ServiceTierCleared { from }
+                if prior.service_tier_source != Some(ModelSettingSource::PerCall)
+                    && effective.service_tier == Some(*from) =>
+            {
+                EffectiveModelSettings {
+                    service_tier: None,
+                    ..effective
+                }
+            }
+            ModelChangeAdjustment::ReasoningLevelClamped { .. }
+            | ModelChangeAdjustment::ReasoningLevelCleared { .. }
+            | ModelChangeAdjustment::FastModeDisabled {}
+            | ModelChangeAdjustment::ServiceTierCleared { .. } => return None,
+        };
+    }
+    Some(with_wire_effective_adjustment(precedence, prior, effective))
+}
+
+fn unapply_wire_adjustments(
+    settings: &ModelSettingsSnapshot,
+    adjustments: &[ModelChangeAdjustment],
+) -> Option<ModelSettingsPrecedence> {
+    let settled = resolve_wire_settings(settings.precedence);
+    let mut prior = settled.effective;
+    for adjustment in adjustments {
+        prior = match adjustment {
+            ModelChangeAdjustment::ReasoningLevelClamped { from, to }
+                if settled.reasoning_source != Some(ModelSettingSource::PerCall)
+                    && settled.effective.reasoning_level == Some(*to) =>
+            {
+                EffectiveModelSettings {
+                    reasoning_level: Some(*from),
+                    ..prior
+                }
+            }
+            ModelChangeAdjustment::ReasoningLevelCleared { from }
+                if settled.reasoning_source != Some(ModelSettingSource::PerCall)
+                    && settled.effective.reasoning_level.is_none() =>
+            {
+                EffectiveModelSettings {
+                    reasoning_level: Some(*from),
+                    ..prior
+                }
+            }
+            ModelChangeAdjustment::FastModeDisabled {}
+                if settled.fast_mode_source != Some(ModelSettingSource::PerCall)
+                    && settled.effective.fast_mode == FastMode::Disabled =>
+            {
+                EffectiveModelSettings {
+                    fast_mode: FastMode::Enabled,
+                    ..prior
+                }
+            }
+            ModelChangeAdjustment::ServiceTierCleared { from }
+                if settled.service_tier_source != Some(ModelSettingSource::PerCall)
+                    && settled.effective.service_tier.is_none() =>
+            {
+                EffectiveModelSettings {
+                    service_tier: Some(*from),
+                    ..prior
+                }
+            }
+            ModelChangeAdjustment::ReasoningLevelClamped { .. }
+            | ModelChangeAdjustment::ReasoningLevelCleared { .. }
+            | ModelChangeAdjustment::FastModeDisabled {}
+            | ModelChangeAdjustment::ServiceTierCleared { .. } => return None,
+        };
+    }
+    Some(with_wire_effective_adjustment(
+        settings.precedence,
+        settled,
+        prior,
+    ))
+}
+
+fn snapshot_matches_model(model: &ModelSelection, settings: &ModelSettingsSnapshot) -> bool {
+    match (model, settings.validated_for_selection_id) {
+        (ModelSelection::Direct { selection_id }, Some(validated)) => *selection_id == validated,
+        (ModelSelection::Direct { .. }, None) | (ModelSelection::Alias { .. }, _) => true,
+    }
+}
+
+/// One automatic compatibility adjustment caused by a model change.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelChangeAdjustment {
+    ReasoningLevelClamped {
+        from: ReasoningLevel,
+        to: ReasoningLevel,
+    },
+    ReasoningLevelCleared {
+        from: ReasoningLevel,
+    },
+    FastModeDisabled {},
+    ServiceTierCleared {
+        from: ServiceTier,
+    },
+}
+
+/// Client-visible exact capabilities for one direct selection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCapabilities {
+    pub reasoning_levels: Vec<ReasoningLevel>,
+    pub fast_mode_supported: bool,
+    pub service_tiers: Vec<ServiceTier>,
+}
+
+impl ModelCapabilities {
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        let reasoning = self
+            .reasoning_levels
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let tiers = self.service_tiers.iter().copied().collect::<BTreeSet<_>>();
+        if reasoning.len() != self.reasoning_levels.len()
+            || tiers.len() != self.service_tiers.len()
+            || !self.reasoning_levels.is_sorted()
+            || !self.service_tiers.is_sorted()
+        {
+            return Err(FrameValidationError::ModelSettingsShape);
+        }
+        Ok(())
+    }
+}
+
 /// Explicit acknowledgement carried by a root-placement creation or update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2338,6 +2890,16 @@ fn validate_goal_event(event: &GoalHistoryEvent) -> Result<(), FrameValidationEr
     }
 }
 
+/// Explicit delegated-child scope selected by a parent termination request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DescendantTerminationScope {
+    /// Apply the stop only to the named parent session.
+    ParentAlone,
+    /// Evaluate every reachable delegated-child relationship.
+    ParentAndDescendants,
+}
+
 /// Closed versioned request family.
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2349,6 +2911,8 @@ pub enum ClientRequest {
         command_id: CommandId,
         /// Initial session model-selection defaults.
         initial_model_selection: ModelSelection,
+        /// Initial session-layer settings contribution.
+        model_settings: ModelSettingsOverlay,
         /// Optional initial system prompt; required null-or-text member.
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
@@ -2407,6 +2971,8 @@ pub enum ClientRequest {
         command_id: CommandId,
         /// Target session.
         session_id: CanonicalUuid,
+        /// Explicit delegated-child scope.
+        descendant_scope: DescendantTerminationScope,
     },
     /// Atomically replace the active immutable statement.
     SupersedeGoal {
@@ -2429,6 +2995,8 @@ pub enum ClientRequest {
         /// steering.
         #[serde(deserialize_with = "deserialize_required_nullable")]
         expected_defaults_version: Option<CanonicalU64>,
+        /// Per-call settings contribution; steering must inherit every knob.
+        model_settings: ModelSettingsOverlay,
         /// Optional delivery treatment; absence selects the start-when-idle default.
         #[serde(
             default,
@@ -2491,6 +3059,8 @@ pub enum ClientRequest {
     },
     /// Read the deployment's complete configured model-alias catalog.
     ListModelAliases {},
+    /// Read the deployment's complete per-model capability catalog.
+    ListModelCapabilities {},
     /// Read one complete current metadata snapshot.
     ReadSessionMetadata {
         /// Target session.
@@ -2515,6 +3085,8 @@ pub enum ClientRequest {
         expected_defaults_version: CanonicalU64,
         /// Complete replacement model selection.
         model_selection: ModelSelection,
+        /// Complete replacement session-layer settings contribution.
+        model_settings: ModelSettingsOverlay,
         /// Complete replacement dangerous-tool blanket-auto posture.
         dangerous_tool_auto_approval: bool,
         /// Complete replacement system prompt; required null-or-text member.
@@ -2572,6 +3144,8 @@ pub enum ClientRequest {
         relationship: ImportedSessionRelationship,
         /// Initial session model-selection defaults.
         initial_model_selection: ModelSelection,
+        /// Initial session-layer settings contribution.
+        model_settings: ModelSettingsOverlay,
     },
     /// Reconcile the exact active turn parked on an ambiguous model call.
     ///
@@ -2590,6 +3164,8 @@ pub enum ClientRequest {
         content: InputContent,
         /// Caller-observed defaults version.
         expected_defaults_version: CanonicalU64,
+        /// Per-call settings contribution for the immediate successor origin.
+        model_settings: ModelSettingsOverlay,
     },
     /// Register one immutable external review target snapshot.
     CreateReviewTarget {
@@ -2765,6 +3341,10 @@ pub enum ClientRequest {
         content: InputContent,
         /// Caller-observed defaults version.
         expected_defaults_version: CanonicalU64,
+        /// Explicit delegated-child scope.
+        descendant_scope: DescendantTerminationScope,
+        /// Per-call settings contribution for the immediate successor origin.
+        model_settings: ModelSettingsOverlay,
     },
     /// Supply the user decision for one pending tool request.
     DecideToolRequest {
@@ -2820,6 +3400,7 @@ impl ClientRequest {
             | Self::ListSessionMetadata { .. }
             | Self::ListConversations { .. }
             | Self::ListModelAliases {}
+            | Self::ListModelCapabilities {}
             | Self::ReadSessionMetadata { .. }
             | Self::ReplaceSessionMetadata { .. }
             | Self::ReplaceSessionDefaults { .. }
@@ -2875,6 +3456,7 @@ impl ClientRequest {
         if let Self::SubmitInput {
             expected_defaults_version,
             delivery,
+            model_settings,
             ..
         } = self
         {
@@ -2886,6 +3468,11 @@ impl ClientRequest {
             );
             if !valid {
                 return Err(FrameValidationError::InputDeliveryShape);
+            }
+            if matches!(delivery, Some(InputDelivery::Steer { .. }))
+                && *model_settings != ModelSettingsOverlay::inherit_all()
+            {
+                return Err(FrameValidationError::ModelSettingsShape);
             }
         }
         if let Self::AppendConversationImport { chunk } = self
@@ -3256,6 +3843,18 @@ pub enum ErrorCode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RejectionDetail {
+    /// An explicit reasoning value is unsupported by the selected model.
+    UnsupportedReasoningLevel {
+        selection_id: CanonicalUuid,
+        requested: ReasoningLevel,
+    },
+    /// Enabled fast mode is unsupported by the selected model.
+    UnsupportedFastMode { selection_id: CanonicalUuid },
+    /// An explicit service tier is unsupported by the selected model.
+    UnsupportedServiceTier {
+        selection_id: CanonicalUuid,
+        requested: ServiceTier,
+    },
     /// The target session did not exist at command handling.
     SessionNotFound {
         /// Absent target.
@@ -3460,6 +4059,9 @@ impl RejectionDetail {
             | Self::ConversationImportSourceSizeMismatch { .. }
             | Self::ConversationImportConversionFailed { .. } => true,
             Self::SessionNotFound { .. }
+            | Self::UnsupportedReasoningLevel { .. }
+            | Self::UnsupportedFastMode { .. }
+            | Self::UnsupportedServiceTier { .. }
             | Self::SessionPlacementCurrentVersionMismatch { .. }
             | Self::SessionPlacementVersionExhausted { .. }
             | Self::GoalCommandRejected { .. }
@@ -3723,6 +4325,36 @@ pub enum TurnState {
         /// Exact accepted user text.
         content: InputContent,
     },
+    /// Delegated work has not activated.
+    QueuedDelegated {
+        /// Tool request that spawned the delegated session.
+        spawning_request_id: CanonicalUuid,
+        /// Parent session that issued the spawn request.
+        parent_session_id: CanonicalUuid,
+        /// Parent turn that issued the spawn request.
+        parent_turn_id: CanonicalUuid,
+        /// Exact delegated task text.
+        content: InputContent,
+    },
+    /// Delivered delegation content is queued to wake an idle recipient.
+    QueuedDelegationWake {
+        /// First recipient-wide delivery sequence included by the wake.
+        first_delivery_sequence: CanonicalU64,
+        /// Last recipient-wide delivery sequence included by the wake.
+        through_delivery_sequence: CanonicalU64,
+    },
+    /// A parent command logically terminalized delegated work while retained
+    /// physical execution evidence remains inert.
+    DelegationTerminated {
+        /// Tool request that spawned the child.
+        spawning_request_id: CanonicalUuid,
+        /// Typed stopped or cancelled outcome.
+        outcome: DelegationOutcome,
+        /// Exact parent terminal reason.
+        reason: DelegationReason,
+        /// Exact parent-command provenance.
+        provenance: DelegationProvenance,
+    },
     /// The turn is running its current attempt.
     ActiveRunning {
         /// Current live attempt.
@@ -3742,6 +4374,15 @@ pub enum TurnState {
     ActiveAwaitingToolApproval {
         /// Earliest undecided tool request.
         tool_request_id: CanonicalUuid,
+    },
+    /// The turn is parked on a foreground delegated-child result.
+    ActiveAwaitingChild {
+        /// Tool request that issued the await.
+        await_request_id: CanonicalUuid,
+        /// Spawn request naming the relationship.
+        spawning_request_id: CanonicalUuid,
+        /// Exact child whose result releases the turn.
+        child_session_id: CanonicalUuid,
     },
     /// The turn is parked on an ambiguous tool attempt.
     ActiveAwaitingToolRecovery {
@@ -3814,6 +4455,22 @@ enum RawTurnState {
         accepted_input_id: CanonicalUuid,
         content: InputContent,
     },
+    QueuedDelegated {
+        spawning_request_id: CanonicalUuid,
+        parent_session_id: CanonicalUuid,
+        parent_turn_id: CanonicalUuid,
+        content: InputContent,
+    },
+    QueuedDelegationWake {
+        first_delivery_sequence: CanonicalU64,
+        through_delivery_sequence: CanonicalU64,
+    },
+    DelegationTerminated {
+        spawning_request_id: CanonicalUuid,
+        outcome: DelegationOutcome,
+        reason: DelegationReason,
+        provenance: DelegationProvenance,
+    },
     ActiveRunning {
         current_attempt_id: CanonicalUuid,
         #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -3825,6 +4482,11 @@ enum RawTurnState {
     },
     ActiveAwaitingToolApproval {
         tool_request_id: CanonicalUuid,
+    },
+    ActiveAwaitingChild {
+        await_request_id: CanonicalUuid,
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
     },
     ActiveAwaitingToolRecovery {
         ended_attempt_id: CanonicalUuid,
@@ -3878,6 +4540,53 @@ impl<'de> Deserialize<'de> for TurnState {
                 accepted_input_id,
                 content,
             },
+            RawTurnState::QueuedDelegated {
+                spawning_request_id,
+                parent_session_id,
+                parent_turn_id,
+                content,
+            } => Self::QueuedDelegated {
+                spawning_request_id,
+                parent_session_id,
+                parent_turn_id,
+                content,
+            },
+            RawTurnState::QueuedDelegationWake {
+                first_delivery_sequence,
+                through_delivery_sequence,
+            } => {
+                if first_delivery_sequence.value() == 0
+                    || first_delivery_sequence > through_delivery_sequence
+                {
+                    return Err(serde::de::Error::custom(
+                        "delegation wake requires a positive ordered delivery range",
+                    ));
+                }
+                Self::QueuedDelegationWake {
+                    first_delivery_sequence,
+                    through_delivery_sequence,
+                }
+            }
+            RawTurnState::DelegationTerminated {
+                spawning_request_id,
+                outcome,
+                reason,
+                provenance,
+            } => {
+                if !delegation_terminal_outcome_reason_is_admissible(outcome, reason)
+                    || !parent_delegation_provenance_has_cascade(&provenance)
+                {
+                    return Err(serde::de::Error::custom(
+                        "delegation terminal requires parent cascade authority",
+                    ));
+                }
+                Self::DelegationTerminated {
+                    spawning_request_id,
+                    outcome,
+                    reason,
+                    provenance,
+                }
+            }
             RawTurnState::ActiveRunning {
                 current_attempt_id,
                 current_model_call,
@@ -3895,6 +4604,15 @@ impl<'de> Deserialize<'de> for TurnState {
             RawTurnState::ActiveAwaitingToolApproval { tool_request_id } => {
                 Self::ActiveAwaitingToolApproval { tool_request_id }
             }
+            RawTurnState::ActiveAwaitingChild {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+            } => Self::ActiveAwaitingChild {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+            },
             RawTurnState::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
                 recovery_tool_attempt_id,
@@ -3970,11 +4688,31 @@ impl<'de> Deserialize<'de> for TurnState {
 
 impl TurnState {
     fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::QueuedDelegationWake {
+            first_delivery_sequence,
+            through_delivery_sequence,
+        } = self
+            && (first_delivery_sequence.value() == 0
+                || first_delivery_sequence > through_delivery_sequence)
+        {
+            return Err(FrameValidationError::TurnStateShape);
+        }
         if let Self::Failed {
             terminal_attempt_id: None,
             terminal_model_call: Some(_),
             ..
         } = self
+        {
+            return Err(FrameValidationError::TurnStateShape);
+        }
+        if let Self::DelegationTerminated {
+            outcome,
+            reason,
+            provenance,
+            ..
+        } = self
+            && (!delegation_terminal_outcome_reason_is_admissible(*outcome, *reason)
+                || !parent_delegation_provenance_has_cascade(provenance))
         {
             return Err(FrameValidationError::TurnStateShape);
         }
@@ -4123,6 +4861,55 @@ impl ImportedTextPreview {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptEntry {
+    /// Exact delegated task that opened one child session.
+    DelegatedTask {
+        /// Tool request that spawned the child.
+        spawning_request_id: CanonicalUuid,
+        /// Parent session that issued the spawn request.
+        parent_session_id: CanonicalUuid,
+        /// Parent turn that issued the spawn request.
+        parent_turn_id: CanonicalUuid,
+        /// Exact delegated task text.
+        content: String,
+    },
+    /// Exact bidirectional delegation message delivered to this frontier.
+    DelegationMessage {
+        /// Relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Immutable message identity.
+        message_id: CanonicalUuid,
+        /// Sending session.
+        sender_session_id: CanonicalUuid,
+        /// Receiving session.
+        recipient_session_id: CanonicalUuid,
+        /// Relationship-local message ordinal.
+        ordinal: CanonicalU64,
+        /// Recipient-wide delivery sequence.
+        delivery_sequence: CanonicalU64,
+        /// Exact delivered content.
+        content: String,
+    },
+    /// Exact child result delivered through one registered wait.
+    DelegationResult {
+        /// Await request receiving this result.
+        await_request_id: CanonicalUuid,
+        /// Relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Terminal child session.
+        child_session_id: CanonicalUuid,
+        /// Foreground or background delivery mode.
+        mode: DelegationWaitMode,
+        /// Recipient-wide position for background delivery only.
+        delivery_sequence: Option<CanonicalU64>,
+        /// Typed terminal result outcome.
+        outcome: DelegationOutcome,
+        /// Delivered content for a successful result only.
+        content: Option<String>,
+        /// Typed lifecycle reason.
+        reason: DelegationReason,
+        /// Exact child-turn or parent-command proof.
+        provenance: DelegationProvenance,
+    },
     /// Injected boundary declaring the model identity newly in force.
     ModelIdentityChanged {
         /// Turn whose start first observes the new model identity.
@@ -4299,6 +5086,114 @@ pub enum ToolBatchState {
     },
 }
 
+/// Action chosen for one bound child when its parent reaches a terminal state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundChildAction {
+    /// Leave the child running.
+    KeepRunning,
+    /// Stop the child with typed parent-policy provenance.
+    Stop,
+    /// Cancel the child with typed parent-policy provenance.
+    Cancel,
+}
+
+/// Parent-chosen lifecycle policy carried by a child-spawned update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DelegationPolicy {
+    /// The child keeps working independently of parent state.
+    Background {},
+    /// The child follows the two explicit parent-state actions.
+    Bound {
+        /// Action when the parent stops.
+        on_parent_stopped: BoundChildAction,
+        /// Action when the parent is cancelled.
+        on_parent_cancelled: BoundChildAction,
+    },
+}
+
+/// Delivery behavior chosen by one await request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationWaitMode {
+    /// Keep the current parent turn open until delivery.
+    Foreground,
+    /// Return registration and deliver through a later wake.
+    Background,
+}
+
+/// Closed relationship outcome carried by delegation updates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationOutcome {
+    /// Child content is available.
+    Returned,
+    /// Child execution failed or returned unusable content.
+    Failed,
+    /// Parent policy stopped the child.
+    Stopped,
+    /// Child or parent policy cancelled the child.
+    Cancelled,
+    /// Relationship policy left the child running.
+    ContinueRunning,
+    /// Parent policy reached an already-terminal child.
+    AlreadyTerminal,
+}
+
+/// Exact reason carried alongside a delegation outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationReason {
+    /// Child completed with delivered content.
+    ChildCompleted,
+    /// Child execution failed.
+    ChildExecutionFailed,
+    /// Completed child content could not form a result.
+    ChildResultUnavailable,
+    /// Child cancelled independently.
+    ChildCancelled,
+    /// A parent stop selected descendants.
+    ParentStopped,
+    /// A parent cancellation selected descendants.
+    ParentCancelled,
+}
+
+/// Proof source retained by one lifecycle or result update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DelegationProvenance {
+    /// Exact terminal child turn.
+    ChildTurn {
+        /// Child session.
+        child_session_id: CanonicalUuid,
+        /// Terminal delegated turn.
+        child_turn_id: CanonicalUuid,
+    },
+    /// Exact parent turn command.
+    ParentTurnCommand {
+        /// Parent session.
+        parent_session_id: CanonicalUuid,
+        /// Parent turn named by the command.
+        parent_turn_id: CanonicalUuid,
+        /// Durable stop or interrupt command.
+        command_id: CanonicalUuid,
+        /// Explicit kill-time descendant choice.
+        descendant_scope: DescendantTerminationScope,
+    },
+    /// Exact parent goal-generation command.
+    ParentGoalCommand {
+        /// Parent session.
+        parent_session_id: CanonicalUuid,
+        /// One-based goal generation.
+        goal_generation: CanonicalU64,
+        /// Durable goal stop command.
+        command_id: CanonicalUuid,
+        /// Explicit kill-time descendant choice.
+        descendant_scope: DescendantTerminationScope,
+    },
+}
+
 /// Exact decision recorded for one explicit tool approval.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -4350,6 +5245,30 @@ pub struct TranscriptToolApproval {
 pub enum SessionEvent {
     /// Session creation committed.
     SessionCreated {},
+    /// One defaults replacement changed model selection or settings.
+    SessionModelSettingsChanged {
+        command_id: CommandId,
+        prior_defaults_version: CanonicalU64,
+        installed_defaults_version: CanonicalU64,
+        prior_model: ModelSelection,
+        installed_model: ModelSelection,
+        prior_settings: ModelSettingsSnapshot,
+        installed_settings: ModelSettingsSnapshot,
+        caller_override: ModelSettingsOverlay,
+        adjustments: Vec<ModelChangeAdjustment>,
+    },
+    /// One accepted origin turn froze complete model settings.
+    TurnModelSettingsResolved {
+        accepted_input_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        defaults_version: CanonicalU64,
+        requested_model: ModelSelection,
+        selected_direct_id: CanonicalUuid,
+        per_call_override: ModelSettingsOverlay,
+        settings: ModelSettingsSnapshot,
+        adjusted_from_selection_id: Option<CanonicalUuid>,
+        adjustments: Vec<ModelChangeAdjustment>,
+    },
     /// User input acceptance and its queued turn committed.
     InputAccepted {
         /// Accepted input.
@@ -4474,6 +5393,508 @@ pub enum SessionEvent {
         /// Exact terminal frontier.
         terminal_frontier_id: CanonicalUuid,
     },
+    /// A parent committed one child relationship and lifecycle policy.
+    ChildSpawned {
+        /// Exact spawning tool request and relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Spawned child session.
+        child_session_id: CanonicalUuid,
+        /// Parent-chosen relationship lifecycle policy.
+        relationship: DelegationPolicy,
+    },
+    /// A parent registered one foreground or background wait.
+    ChildWaiting {
+        /// Exact await tool request.
+        await_request_id: CanonicalUuid,
+        /// Relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Child being awaited.
+        child_session_id: CanonicalUuid,
+        /// Wait delivery mode.
+        mode: DelegationWaitMode,
+    },
+    /// One bidirectional relationship message became durable for its recipient.
+    SessionMessage {
+        /// Relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Message identity.
+        message_id: CanonicalUuid,
+        /// Sending session.
+        sender_session_id: CanonicalUuid,
+        /// Receiving session.
+        recipient_session_id: CanonicalUuid,
+        /// Relationship-local message ordinal.
+        ordinal: CanonicalU64,
+        /// Recipient-wide delivery sequence.
+        delivery_sequence: CanonicalU64,
+        /// Exact delivered content.
+        content: String,
+    },
+    /// A terminal child result became durable for its parent.
+    ChildResult {
+        /// Relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Terminal child.
+        child_session_id: CanonicalUuid,
+        /// Typed terminal result outcome.
+        outcome: DelegationOutcome,
+        /// Delivered content for a successful result only.
+        content: Option<String>,
+        /// Typed reason for the terminal result.
+        reason: DelegationReason,
+        /// Exact child-turn or parent-command provenance.
+        provenance: DelegationProvenance,
+    },
+    /// Parent termination evaluated one relationship edge.
+    ChildLifecycleDisposition {
+        /// Relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Evaluated child.
+        child_session_id: CanonicalUuid,
+        /// Typed relationship outcome.
+        outcome: DelegationOutcome,
+        /// Typed reason for evaluating this relationship edge.
+        reason: DelegationReason,
+        /// Exact parent command provenance.
+        provenance: DelegationProvenance,
+    },
+}
+
+fn validate_delegation_session_event(
+    session_id: CanonicalUuid,
+    event: &SessionEvent,
+) -> Result<(), FrameValidationError> {
+    let valid = match event {
+        SessionEvent::ChildSpawned {
+            child_session_id, ..
+        }
+        | SessionEvent::ChildWaiting {
+            child_session_id, ..
+        } => *child_session_id != session_id,
+        SessionEvent::SessionMessage {
+            sender_session_id,
+            recipient_session_id,
+            ordinal,
+            delivery_sequence,
+            content,
+            ..
+        } => {
+            *recipient_session_id == session_id
+                && sender_session_id != recipient_session_id
+                && ordinal.value() > 0
+                && delivery_sequence.value() > 0
+                && delegation_content_is_valid(content)
+        }
+        SessionEvent::ChildResult {
+            child_session_id,
+            outcome,
+            content,
+            reason,
+            provenance,
+            ..
+        } => {
+            *child_session_id != session_id
+                && child_result_shape_is_valid(
+                    session_id,
+                    *child_session_id,
+                    *outcome,
+                    content,
+                    *reason,
+                    provenance,
+                )
+        }
+        SessionEvent::ChildLifecycleDisposition {
+            child_session_id,
+            outcome,
+            reason,
+            provenance,
+            ..
+        } => {
+            matches!(
+                reason,
+                DelegationReason::ParentStopped | DelegationReason::ParentCancelled
+            ) && if *child_session_id == session_id {
+                // A descendant cascade also addresses the terminalization to
+                // the child itself so that live child followers observe it.
+                // That row carries the parent's cascade provenance, so the
+                // provenance parent is a different session than this header.
+                matches!(
+                    outcome,
+                    DelegationOutcome::Stopped | DelegationOutcome::Cancelled
+                ) && delegation_provenance_parent(provenance)
+                    .is_some_and(|parent| parent != session_id)
+                    && parent_delegation_provenance_has_cascade(provenance)
+            } else {
+                matches!(
+                    outcome,
+                    DelegationOutcome::Stopped
+                        | DelegationOutcome::Cancelled
+                        | DelegationOutcome::AlreadyTerminal
+                        | DelegationOutcome::ContinueRunning
+                ) && parent_delegation_provenance_is_cascade(session_id, provenance)
+            }
+        }
+        _ => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::DelegationShape)
+    }
+}
+
+fn child_result_shape_is_valid(
+    parent_session_id: CanonicalUuid,
+    child_session_id: CanonicalUuid,
+    outcome: DelegationOutcome,
+    content: &Option<String>,
+    reason: DelegationReason,
+    provenance: &DelegationProvenance,
+) -> bool {
+    match (outcome, reason, provenance, content) {
+        (
+            DelegationOutcome::Returned,
+            DelegationReason::ChildCompleted,
+            DelegationProvenance::ChildTurn {
+                child_session_id: provenance_child,
+                ..
+            },
+            Some(content),
+        ) => *provenance_child == child_session_id && delegation_content_is_valid(content),
+        (
+            DelegationOutcome::Failed,
+            DelegationReason::ChildExecutionFailed | DelegationReason::ChildResultUnavailable,
+            DelegationProvenance::ChildTurn {
+                child_session_id: provenance_child,
+                ..
+            },
+            None,
+        )
+        | (
+            DelegationOutcome::Cancelled,
+            DelegationReason::ChildCancelled,
+            DelegationProvenance::ChildTurn {
+                child_session_id: provenance_child,
+                ..
+            },
+            None,
+        ) => *provenance_child == child_session_id,
+        (
+            DelegationOutcome::Stopped | DelegationOutcome::Cancelled,
+            DelegationReason::ParentStopped | DelegationReason::ParentCancelled,
+            provenance,
+            None,
+        ) => parent_delegation_provenance_is_cascade(parent_session_id, provenance),
+        _ => false,
+    }
+}
+
+fn parent_delegation_provenance_is_cascade(
+    parent_session_id: CanonicalUuid,
+    provenance: &DelegationProvenance,
+) -> bool {
+    match provenance {
+        DelegationProvenance::ParentTurnCommand {
+            parent_session_id: provenance_parent,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        } => {
+            *provenance_parent == parent_session_id
+                && parent_delegation_provenance_has_cascade(provenance)
+        }
+        DelegationProvenance::ParentGoalCommand {
+            parent_session_id: provenance_parent,
+            goal_generation,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        } => {
+            *provenance_parent == parent_session_id
+                && goal_generation.value() > 0
+                && parent_delegation_provenance_has_cascade(provenance)
+        }
+        _ => false,
+    }
+}
+
+/// Reads the commanding parent session out of a cascade provenance.
+fn delegation_provenance_parent(provenance: &DelegationProvenance) -> Option<CanonicalUuid> {
+    match provenance {
+        DelegationProvenance::ParentTurnCommand {
+            parent_session_id, ..
+        }
+        | DelegationProvenance::ParentGoalCommand {
+            parent_session_id, ..
+        } => Some(*parent_session_id),
+        _ => None,
+    }
+}
+
+fn parent_delegation_provenance_has_cascade(provenance: &DelegationProvenance) -> bool {
+    match provenance {
+        DelegationProvenance::ParentTurnCommand {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        } => true,
+        DelegationProvenance::ParentGoalCommand {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            goal_generation,
+            ..
+        } => goal_generation.value() > 0,
+        _ => false,
+    }
+}
+
+/// Admits every terminal outcome a parent cascade can impose on a child.
+///
+/// A bound relationship carries its own termination policy, so the child
+/// outcome is not required to match the parent reason: a parent cancellation
+/// may map to a child `stop`, and a parent stop may map to a child `cancel`.
+/// All four crossed pairs are therefore valid, exactly as `process_read`
+/// projects them.
+fn delegation_terminal_outcome_reason_is_admissible(
+    outcome: DelegationOutcome,
+    reason: DelegationReason,
+) -> bool {
+    matches!(
+        outcome,
+        DelegationOutcome::Stopped | DelegationOutcome::Cancelled
+    ) && matches!(
+        reason,
+        DelegationReason::ParentStopped | DelegationReason::ParentCancelled
+    )
+}
+
+fn delegation_content_is_valid(content: &str) -> bool {
+    !content.is_empty() && content.len() <= MAX_CONTENT_FRAGMENT_BYTES && !content.contains('\0')
+}
+
+fn validate_delegation_transcript_entry(
+    source_session_id: CanonicalUuid,
+    entry: &TranscriptEntry,
+) -> Result<(), FrameValidationError> {
+    let valid = match entry {
+        TranscriptEntry::DelegatedTask {
+            parent_session_id,
+            content,
+            ..
+        } => *parent_session_id != source_session_id && delegation_content_is_valid(content),
+        TranscriptEntry::DelegationMessage {
+            sender_session_id,
+            recipient_session_id,
+            ordinal,
+            delivery_sequence,
+            content,
+            ..
+        } => {
+            *recipient_session_id == source_session_id
+                && *sender_session_id != *recipient_session_id
+                && ordinal.value() > 0
+                && delivery_sequence.value() > 0
+                && delegation_content_is_valid(content)
+        }
+        TranscriptEntry::DelegationResult {
+            child_session_id,
+            mode,
+            delivery_sequence,
+            outcome,
+            content,
+            reason,
+            provenance,
+            ..
+        } => {
+            *child_session_id != source_session_id
+                && match mode {
+                    DelegationWaitMode::Foreground => delivery_sequence.is_none(),
+                    DelegationWaitMode::Background => {
+                        delivery_sequence.is_some_and(|sequence| sequence.value() > 0)
+                    }
+                }
+                && child_result_shape_is_valid(
+                    source_session_id,
+                    *child_session_id,
+                    *outcome,
+                    content,
+                    *reason,
+                    provenance,
+                )
+        }
+        _ => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::DelegationShape)
+    }
+}
+
+fn validate_turn_settings_payload(
+    defaults_version: CanonicalU64,
+    requested_model: &ModelSelection,
+    selected_direct_id: CanonicalUuid,
+    per_call_override: ModelSettingsOverlay,
+    settings: &ModelSettingsSnapshot,
+    adjusted_from_selection_id: Option<CanonicalUuid>,
+    adjustments: &[ModelChangeAdjustment],
+) -> Result<(), FrameValidationError> {
+    settings.validate()?;
+    validate_adjustments(adjustments)?;
+    let direct_selection_mismatch = matches!(
+        requested_model,
+        ModelSelection::Direct { selection_id } if *selection_id != selected_direct_id
+    );
+    let validation_mismatch = match settings.validated_for_selection_id {
+        Some(selection_id) => selection_id != selected_direct_id,
+        None => !settings.is_model_independent_provider_defaults(),
+    };
+    let adjustment_provenance_mismatch = unapply_wire_adjustments(settings, adjustments)
+        .and_then(|unadjusted| apply_wire_adjustments(unadjusted, adjustments))
+        != Some(settings.precedence);
+    if defaults_version.value() == 0
+        || direct_selection_mismatch
+        || validation_mismatch
+        || settings.precedence.per_call != per_call_override
+        || match adjustments.is_empty() {
+            true => adjusted_from_selection_id.is_some(),
+            false => adjusted_from_selection_id.is_none_or(|prior| prior == selected_direct_id),
+        }
+        || adjustment_provenance_mismatch
+    {
+        return Err(FrameValidationError::ModelSettingsShape);
+    }
+    Ok(())
+}
+
+fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationError> {
+    match event {
+        SessionEvent::SessionModelSettingsChanged {
+            prior_defaults_version,
+            installed_defaults_version,
+            prior_model,
+            installed_model,
+            prior_settings,
+            installed_settings,
+            caller_override,
+            adjustments,
+            ..
+        } => {
+            prior_settings.validate_defaults()?;
+            installed_settings.validate_defaults()?;
+            validate_adjustments(adjustments)?;
+            let validation_changed = matches!(
+                (
+                    prior_settings.validated_for_selection_id,
+                    installed_settings.validated_for_selection_id,
+                ),
+                (Some(prior), Some(installed)) if prior != installed
+            );
+            let copied_precedence = ModelSettingsPrecedence {
+                per_call: prior_settings.precedence.per_call,
+                session: prior_settings.precedence.session,
+                profile: installed_settings.precedence.profile,
+                global_default: installed_settings.precedence.global_default,
+            };
+            let unadjusted_precedence = ModelSettingsPrecedence {
+                session: overlay_inheriting_from(
+                    *caller_override,
+                    prior_settings.precedence.session,
+                ),
+                ..copied_precedence
+            };
+            let provenance_matches = apply_wire_adjustments(unadjusted_precedence, adjustments)
+                .is_some_and(|expected| expected == installed_settings.precedence);
+            if prior_defaults_version.value() == 0
+                || prior_defaults_version.value().checked_add(1)
+                    != Some(installed_defaults_version.value())
+                || (prior_model == installed_model && prior_settings == installed_settings)
+                || !snapshot_matches_model(prior_model, prior_settings)
+                || !snapshot_matches_model(installed_model, installed_settings)
+                || !provenance_matches
+                || (!adjustments.is_empty() && !validation_changed)
+                || adjustments_target_explicit_overlay(*caller_override, adjustments)
+            {
+                return Err(FrameValidationError::ModelSettingsShape);
+            }
+        }
+        SessionEvent::TurnModelSettingsResolved {
+            defaults_version,
+            requested_model,
+            selected_direct_id,
+            per_call_override,
+            settings,
+            adjusted_from_selection_id,
+            adjustments,
+            ..
+        } => validate_turn_settings_payload(
+            *defaults_version,
+            requested_model,
+            *selected_direct_id,
+            *per_call_override,
+            settings,
+            *adjusted_from_selection_id,
+            adjustments,
+        )?,
+        SessionEvent::ToolApprovalDecided {
+            decision,
+            decider,
+            rationale,
+            ..
+        } => validate_tool_approval_event_shape(decision, decider, rationale)?,
+        SessionEvent::SessionCreated {}
+        | SessionEvent::InputAccepted { .. }
+        | SessionEvent::GoalTurnRetired { .. }
+        | SessionEvent::TurnActivated { .. }
+        | SessionEvent::ModelCallTransition { .. }
+        | SessionEvent::ToolBatchTransition { .. }
+        | SessionEvent::ContextCompacted { .. }
+        | SessionEvent::TurnCompleted { .. }
+        | SessionEvent::TurnFailed { .. }
+        | SessionEvent::TurnRefused { .. }
+        | SessionEvent::TurnCancelled { .. }
+        | SessionEvent::TurnReconciliationRequired { .. }
+        | SessionEvent::TurnToolReconciliationRequired { .. }
+        | SessionEvent::ChildSpawned { .. }
+        | SessionEvent::ChildWaiting { .. }
+        | SessionEvent::SessionMessage { .. }
+        | SessionEvent::ChildResult { .. }
+        | SessionEvent::ChildLifecycleDisposition { .. } => {}
+    }
+    Ok(())
+}
+
+fn adjustments_target_explicit_overlay(
+    overlay: ModelSettingsOverlay,
+    adjustments: &[ModelChangeAdjustment],
+) -> bool {
+    adjustments.iter().any(|adjustment| match adjustment {
+        ModelChangeAdjustment::ReasoningLevelClamped { .. }
+        | ModelChangeAdjustment::ReasoningLevelCleared { .. } => {
+            overlay.reasoning_level != SettingOverlay::Inherit
+        }
+        ModelChangeAdjustment::FastModeDisabled {} => overlay.fast_mode != FastModeOverlay::Inherit,
+        ModelChangeAdjustment::ServiceTierCleared { .. } => {
+            overlay.service_tier != SettingOverlay::Inherit
+        }
+    })
+}
+
+fn validate_adjustments(adjustments: &[ModelChangeAdjustment]) -> Result<(), FrameValidationError> {
+    if adjustments.len() > 3 {
+        return Err(FrameValidationError::ModelSettingsShape);
+    }
+    let mut minimum_rank = 0;
+    for adjustment in adjustments {
+        let rank = match adjustment {
+            ModelChangeAdjustment::ReasoningLevelClamped { .. }
+            | ModelChangeAdjustment::ReasoningLevelCleared { .. } => 0,
+            ModelChangeAdjustment::FastModeDisabled {} => 1,
+            ModelChangeAdjustment::ServiceTierCleared { .. } => 2,
+        };
+        if rank < minimum_rank {
+            return Err(FrameValidationError::ModelSettingsShape);
+        }
+        minimum_rank = rank + 1;
+    }
+    Ok(())
 }
 
 /// Closed versioned server message family.
@@ -4484,6 +5905,8 @@ pub enum ServerMessage {
     SessionCreated {
         /// Created session.
         session_id: CanonicalUuid,
+        /// Complete settings snapshot installed as defaults version one.
+        model_settings: ModelSettingsSnapshot,
     },
     /// One immutable placement update was appended or equally replayed.
     SessionPlacementUpdated {
@@ -4501,6 +5924,8 @@ pub enum ServerMessage {
         acceptance_position: CanonicalU64,
         /// Created origin turn.
         turn_id: CanonicalUuid,
+        /// Complete settings snapshot frozen for the origin turn.
+        model_settings: ModelSettingsSnapshot,
     },
     /// Configuration-free steering acceptance receipt.
     SteeringSubmitted {
@@ -4647,6 +6072,15 @@ pub enum ServerMessage {
         /// Number of preceding alias summaries.
         alias_count: CanonicalU64,
     },
+    /// Begins the configured model-capability sequence.
+    ModelCapabilitiesStart {},
+    /// One direct selection and its exact client-visible capabilities.
+    ModelCapabilityItem {
+        selection_id: CanonicalUuid,
+        capabilities: ModelCapabilities,
+    },
+    /// Completes the configured model-capability sequence.
+    ModelCapabilitiesEnd { capability_count: CanonicalU64 },
     /// One complete current metadata read.
     SessionMetadata {
         /// Selected session.
@@ -4674,6 +6108,8 @@ pub enum ServerMessage {
         defaults_version: CanonicalU64,
         /// Complete committed model selection.
         model_selection: ModelSelection,
+        /// Complete settings snapshot installed on the new epoch.
+        model_settings: ModelSettingsSnapshot,
         /// Complete committed dangerous-tool blanket-auto posture.
         dangerous_tool_auto_approval: bool,
         /// Complete committed system prompt; required null-or-text member.
@@ -4688,6 +6124,8 @@ pub enum ServerMessage {
         defaults_version: CanonicalU64,
         /// Complete model selection on that epoch.
         model_selection: ModelSelection,
+        /// Complete settings snapshot stored on the selected epoch.
+        model_settings: ModelSettingsSnapshot,
         /// Complete dangerous-tool blanket-auto posture on that epoch.
         dangerous_tool_auto_approval: bool,
         /// Exact optional system prompt on that epoch.
@@ -4783,6 +6221,10 @@ pub enum ServerMessage {
         turn_id: CanonicalUuid,
         /// Immutable acceptance order.
         acceptance_position: CanonicalU64,
+        /// Complete frozen settings for a settings-aware turn, or null for a
+        /// turn committed before settings evidence existed.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        model_settings: Option<TurnModelSettingsSnapshot>,
         /// Exact lifecycle state.
         state: TurnState,
     },
@@ -4985,6 +6427,48 @@ pub enum ServerMessage {
 impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
+            Self::SessionCreated { model_settings, .. } => model_settings.validate_defaults()?,
+            Self::InputSubmitted { model_settings, .. } => model_settings.validate()?,
+            Self::SessionDefaultsReplaced {
+                model_selection,
+                model_settings,
+                ..
+            }
+            | Self::SessionDefaults {
+                model_selection,
+                model_settings,
+                ..
+            } => {
+                model_settings.validate_defaults()?;
+                if !snapshot_matches_model(model_selection, model_settings) {
+                    return Err(FrameValidationError::ModelSettingsShape);
+                }
+            }
+            Self::SessionEvent {
+                session_id, event, ..
+            } => {
+                validate_settings_event(event)?;
+                validate_delegation_session_event(*session_id, event)?;
+            }
+            Self::TranscriptTurn {
+                turn_id,
+                model_settings: Some(settings),
+                state,
+                ..
+            } => {
+                settings.validate()?;
+                if settings.turn_id != *turn_id
+                    || (matches!(
+                        state,
+                        TurnState::Queued {
+                            accepted_input_id,
+                            ..
+                        } if settings.accepted_input_id != *accepted_input_id
+                    ))
+                {
+                    return Err(FrameValidationError::ModelSettingsShape);
+                }
+            }
             Self::TranscriptEntry {
                 entry:
                     TranscriptEntry::AssistantToolUse {
@@ -4997,16 +6481,6 @@ impl ServerMessage {
                 &approval.decider,
                 &approval.rationale,
             )?,
-            Self::SessionEvent {
-                event:
-                    SessionEvent::ToolApprovalDecided {
-                        decision,
-                        decider,
-                        rationale,
-                        ..
-                    },
-                ..
-            } => validate_tool_approval_event_shape(decision, decider, rationale)?,
             Self::GoalTransitionApplied {
                 event_ordinal,
                 generation,
@@ -5072,6 +6546,12 @@ impl ServerMessage {
                 }
             }
             Self::ConversationSummary { conversation } => conversation.validate()?,
+            Self::ModelCapabilityItem { capabilities, .. } => capabilities.validate()?,
+            Self::ModelCapabilitiesEnd { capability_count }
+                if capability_count.value() > MAX_MODEL_CAPABILITY_CATALOG_ENTRIES as u64 =>
+            {
+                return Err(FrameValidationError::ModelSettingsShape);
+            }
             Self::ReviewPassCompleted {
                 state: ReviewPassLifecycle::Queued | ReviewPassLifecycle::Running,
                 ..
@@ -5157,6 +6637,11 @@ impl ServerMessage {
             {
                 return Err(FrameValidationError::ModelCallUsageShape);
             }
+            Self::TranscriptEntry {
+                source_session_id,
+                entry,
+                ..
+            } => validate_delegation_transcript_entry(*source_session_id, entry)?,
             _ => {}
         }
         Ok(())
@@ -5329,6 +6814,9 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
             ..
         } => current_placement_version.value() == u64::MAX,
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::UnsupportedReasoningLevel { .. }
+        | RejectionDetail::UnsupportedFastMode { .. }
+        | RejectionDetail::UnsupportedServiceTier { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
@@ -5410,6 +6898,9 @@ fn validate_conversation_import_detail(
             }
         },
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::UnsupportedReasoningLevel { .. }
+        | RejectionDetail::UnsupportedFastMode { .. }
+        | RejectionDetail::UnsupportedServiceTier { .. }
         | RejectionDetail::SessionPlacementCurrentVersionMismatch { .. }
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
@@ -5484,6 +6975,10 @@ pub enum FrameValidationError {
     ModelCallUsageShape,
     /// A goal request, state, or event carried an invalid shape.
     GoalShape,
+    /// A delegation update carried an invalid correlated shape.
+    DelegationShape,
+    /// Model settings or capability data carried a contradictory shape.
+    ModelSettingsShape,
     /// A dotted placement or its root-global-read acknowledgement is invalid.
     PlacementShape,
 }
@@ -5516,6 +7011,8 @@ impl fmt::Display for FrameValidationError {
             Self::ReviewShape => "review workflow frame shape is inconsistent",
             Self::ModelCallUsageShape => "model-call usage frame shape is inconsistent",
             Self::GoalShape => "commissioned-goal frame shape is inconsistent",
+            Self::DelegationShape => "session-delegation frame shape is inconsistent",
+            Self::ModelSettingsShape => "model-settings frame shape is inconsistent",
             Self::PlacementShape => "session-placement frame shape is inconsistent",
         })
     }
@@ -5926,10 +7423,12 @@ mod tests {
         ClientFrame, ClientRequest, CommandId, ContentFragment, ConversationCursor,
         ConversationImportFormat, ConversationImportRejectionClass, ConversationImportSource,
         ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
-        CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallCause,
-        FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
-        FrameEncodeError, FrameValidationError, GoalBlockedProvenance, GoalBlockedReason,
-        GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
+        CurrentModelCallState, DelegationOutcome, DelegationPolicy, DelegationProvenance,
+        DelegationReason, DelegationWaitMode, DescendantTerminationScope, EffectiveModelSettings,
+        ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
+        FailedTerminalModelCall, FastMode, FastModeOverlay, FrameDecodeErrorKind, FrameEncodeError,
+        FrameValidationError, GoalBlockedProvenance, GoalBlockedReason, GoalCommandRejection,
+        GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
         ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
         ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
         MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
@@ -5938,19 +7437,22 @@ mod tests {
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
         MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost,
-        ModelCallState, ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
-        RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
-        ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
+        ModelCallState, ModelCallTokenUsage, ModelCapabilities, ModelChangeAdjustment,
+        ModelSelection, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
+        ModelSettingsSnapshot, OpenAiServiceTier, PROTOCOL_VERSION, ProtocolVersion,
+        ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
+        ReviewFindingEvent, ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
         ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
         ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject, ServerFrame,
-        ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
-        ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnState, UsageProvenance,
-        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
+        ServerMessage, ServiceTier, SessionEvent, SessionMetadata, SettingOverlay,
+        SystemPromptMember, SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
+        TurnModelSettingsSnapshot, TurnState, UsageProvenance, decode_client_line,
+        decode_server_line, encode_client_line, encode_server_line, validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
@@ -5966,6 +7468,119 @@ mod tests {
     fn uuid(value: u128) -> CanonicalUuid {
         CanonicalUuid::from_uuid(Uuid::from_u128(value))
     }
+
+    fn settings_snapshot_fixture() -> ModelSettingsSnapshot {
+        let per_call = ModelSettingsOverlay {
+            reasoning_level: SettingOverlay::Value(ReasoningLevel::High),
+            fast_mode: FastModeOverlay::Inherit,
+            service_tier: SettingOverlay::ProviderDefault,
+        };
+        let inherited = ModelSettingsOverlay::inherit_all();
+        ModelSettingsSnapshot {
+            precedence: ModelSettingsPrecedence {
+                per_call,
+                session: inherited,
+                profile: inherited,
+                global_default: inherited,
+            },
+            effective: EffectiveModelSettings {
+                reasoning_level: Some(ReasoningLevel::High),
+                fast_mode: FastMode::Disabled,
+                service_tier: None,
+            },
+            reasoning_source: Some(ModelSettingSource::PerCall),
+            fast_mode_source: None,
+            service_tier_source: Some(ModelSettingSource::PerCall),
+            validated_for_selection_id: Some(uuid(4)),
+        }
+    }
+
+    fn provider_default_settings_snapshot_fixture() -> ModelSettingsSnapshot {
+        let inherited = ModelSettingsOverlay::inherit_all();
+        ModelSettingsSnapshot {
+            precedence: ModelSettingsPrecedence {
+                per_call: inherited,
+                session: inherited,
+                profile: inherited,
+                global_default: inherited,
+            },
+            effective: EffectiveModelSettings {
+                reasoning_level: None,
+                fast_mode: FastMode::Disabled,
+                service_tier: None,
+            },
+            reasoning_source: None,
+            fast_mode_source: None,
+            service_tier_source: None,
+            validated_for_selection_id: None,
+        }
+    }
+
+    fn session_settings_snapshot_fixture() -> ModelSettingsSnapshot {
+        let inherited = ModelSettingsOverlay::inherit_all();
+        let session = ModelSettingsOverlay {
+            reasoning_level: SettingOverlay::Value(ReasoningLevel::High),
+            fast_mode: FastModeOverlay::Inherit,
+            service_tier: SettingOverlay::ProviderDefault,
+        };
+        ModelSettingsSnapshot {
+            precedence: ModelSettingsPrecedence {
+                per_call: inherited,
+                session,
+                profile: inherited,
+                global_default: inherited,
+            },
+            effective: EffectiveModelSettings {
+                reasoning_level: Some(ReasoningLevel::High),
+                fast_mode: FastMode::Disabled,
+                service_tier: None,
+            },
+            reasoning_source: Some(ModelSettingSource::Session),
+            fast_mode_source: None,
+            service_tier_source: Some(ModelSettingSource::Session),
+            validated_for_selection_id: Some(uuid(4)),
+        }
+    }
+
+    const SETTINGS_SNAPSHOT_JSON: &str = concat!(
+        "{\"precedence\":{",
+        "\"per_call\":{\"reasoning_level\":{\"kind\":\"value\",\"value\":\"high\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"provider_default\"}},",
+        "\"session\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}},",
+        "\"profile\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}},",
+        "\"global_default\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}}},",
+        "\"effective\":{\"reasoning_level\":\"high\",\"fast_mode\":\"disabled\",",
+        "\"service_tier\":null},\"reasoning_source\":\"per_call\",",
+        "\"fast_mode_source\":null,\"service_tier_source\":\"per_call\",",
+        "\"validated_for_selection_id\":\"00000000-0000-0000-0000-000000000004\"}"
+    );
+
+    const PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON: &str = concat!(
+        "{\"precedence\":{",
+        "\"per_call\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}},",
+        "\"session\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}},",
+        "\"profile\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}},",
+        "\"global_default\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}}},",
+        "\"effective\":{\"reasoning_level\":null,\"fast_mode\":\"disabled\",",
+        "\"service_tier\":null},\"reasoning_source\":null,",
+        "\"fast_mode_source\":null,\"service_tier_source\":null,",
+        "\"validated_for_selection_id\":null}"
+    );
 
     fn orchestration_snapshot_fixture(
         state: ReviewOrchestrationState,
@@ -6231,8 +7846,9 @@ mod tests {
             ClientRequest::StopGoal {
                 command_id: command(13)?,
                 session_id: uuid(3),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
             },
-            r#"{"type":"stop_goal","command_id":"00000000-0000-0000-0000-00000000000d","session_id":"00000000-0000-0000-0000-000000000003"}"#,
+            r#"{"type":"stop_goal","command_id":"00000000-0000-0000-0000-00000000000d","session_id":"00000000-0000-0000-0000-000000000003","descendant_scope":"parent_and_descendants"}"#,
         )?;
         assert_server_message_round_trip(
             request(14)?,
@@ -6330,6 +7946,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new("hello".to_owned()),
                 expected_defaults_version: Some(CanonicalU64::new(u64::MAX)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )?;
@@ -6416,6 +8033,269 @@ mod tests {
             )
         );
         assert_eq!(decode_server_line(&encoded_conservative)?, conservative);
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegated_task_entries_round_trip_in_the_single_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(0),
+            source_session_id: uuid(2),
+            entry_id: uuid(3),
+            entry: TranscriptEntry::DelegatedTask {
+                spawning_request_id: uuid(4),
+                parent_session_id: uuid(1),
+                parent_turn_id: uuid(5),
+                content: String::from("inspect the durable result"),
+            },
+        };
+
+        assert_server_message_round_trip(
+            request(10)?,
+            message,
+            r#"{"type":"transcript_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000002","entry_id":"00000000-0000-0000-0000-000000000003","entry":{"type":"delegated_task","spawning_request_id":"00000000-0000-0000-0000-000000000004","parent_session_id":"00000000-0000-0000-0000-000000000001","parent_turn_id":"00000000-0000-0000-0000-000000000005","content":"inspect the durable result"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegation_message_entries_round_trip_in_the_single_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(1),
+            source_session_id: uuid(2),
+            entry_id: uuid(3),
+            entry: TranscriptEntry::DelegationMessage {
+                spawning_request_id: uuid(4),
+                message_id: uuid(5),
+                sender_session_id: uuid(1),
+                recipient_session_id: uuid(2),
+                ordinal: CanonicalU64::new(1),
+                delivery_sequence: CanonicalU64::new(2),
+                content: String::from("continue with the checked input"),
+            },
+        };
+
+        assert_server_message_round_trip(
+            request(11)?,
+            message,
+            r#"{"type":"transcript_entry","entry_index":"1","source_session_id":"00000000-0000-0000-0000-000000000002","entry_id":"00000000-0000-0000-0000-000000000003","entry":{"type":"delegation_message","spawning_request_id":"00000000-0000-0000-0000-000000000004","message_id":"00000000-0000-0000-0000-000000000005","sender_session_id":"00000000-0000-0000-0000-000000000001","recipient_session_id":"00000000-0000-0000-0000-000000000002","ordinal":"1","delivery_sequence":"2","content":"continue with the checked input"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_foreground_delegation_result_entries_round_trip_in_the_single_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(2),
+            source_session_id: uuid(1),
+            entry_id: uuid(3),
+            entry: TranscriptEntry::DelegationResult {
+                await_request_id: uuid(4),
+                spawning_request_id: uuid(5),
+                child_session_id: uuid(2),
+                mode: DelegationWaitMode::Foreground,
+                delivery_sequence: None,
+                outcome: DelegationOutcome::Returned,
+                content: Some(String::from("checked result")),
+                reason: DelegationReason::ChildCompleted,
+                provenance: DelegationProvenance::ChildTurn {
+                    child_session_id: uuid(2),
+                    child_turn_id: uuid(6),
+                },
+            },
+        };
+
+        assert_server_message_round_trip(
+            request(12)?,
+            message,
+            r#"{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000003","entry":{"type":"delegation_result","await_request_id":"00000000-0000-0000-0000-000000000004","spawning_request_id":"00000000-0000-0000-0000-000000000005","child_session_id":"00000000-0000-0000-0000-000000000002","mode":"foreground","delivery_sequence":null,"outcome":"returned","content":"checked result","reason":"child_completed","provenance":{"type":"child_turn","child_session_id":"00000000-0000-0000-0000-000000000002","child_turn_id":"00000000-0000-0000-0000-000000000006"}}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_background_delegation_result_entries_round_trip_in_the_single_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(3),
+            source_session_id: uuid(1),
+            entry_id: uuid(3),
+            entry: TranscriptEntry::DelegationResult {
+                await_request_id: uuid(4),
+                spawning_request_id: uuid(5),
+                child_session_id: uuid(2),
+                mode: DelegationWaitMode::Background,
+                delivery_sequence: Some(CanonicalU64::new(7)),
+                outcome: DelegationOutcome::Returned,
+                content: Some(String::from("wake result")),
+                reason: DelegationReason::ChildCompleted,
+                provenance: DelegationProvenance::ChildTurn {
+                    child_session_id: uuid(2),
+                    child_turn_id: uuid(6),
+                },
+            },
+        };
+
+        assert_server_message_round_trip(
+            request(13)?,
+            message,
+            r#"{"type":"transcript_entry","entry_index":"3","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000003","entry":{"type":"delegation_result","await_request_id":"00000000-0000-0000-0000-000000000004","spawning_request_id":"00000000-0000-0000-0000-000000000005","child_session_id":"00000000-0000-0000-0000-000000000002","mode":"background","delivery_sequence":"7","outcome":"returned","content":"wake result","reason":"child_completed","provenance":{"type":"child_turn","child_session_id":"00000000-0000-0000-0000-000000000002","child_turn_id":"00000000-0000-0000-0000-000000000006"}}}"#,
+        )?;
+        Ok(())
+    }
+
+    /// Rejects one `delegation_terminated` wire shape named by its outcome and
+    /// reason spelling. Every other member carries the canonical parent-goal
+    /// cascade the admitted shapes also use.
+    #[track_caller]
+    fn assert_delegation_terminal_state_rejected(outcome: &str, reason: &str) {
+        serde_json::from_value::<TurnState>(serde_json::json!({
+            "type": "delegation_terminated",
+            "spawning_request_id": "00000000-0000-0000-0000-000000000004",
+            "outcome": outcome,
+            "reason": reason,
+            "provenance": {
+                "type": "parent_goal_command",
+                "parent_session_id": "00000000-0000-0000-0000-000000000001",
+                "goal_generation": "2",
+                "command_id": "00000000-0000-0000-0000-000000000007",
+                "descendant_scope": "parent_and_descendants"
+            }
+        }))
+        .expect_err("an inadmissible terminal outcome and reason pair must not decode");
+    }
+
+    /// Round trips one admitted `delegation_terminated` turn state through
+    /// serde and through the frame validator every transcript read and initial
+    /// follow snapshot runs.
+    #[track_caller]
+    fn assert_delegation_terminal_state_round_trips(
+        outcome: DelegationOutcome,
+        reason: DelegationReason,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::DelegationTerminated {
+            spawning_request_id: uuid(4),
+            outcome,
+            reason,
+            provenance: DelegationProvenance::ParentGoalCommand {
+                parent_session_id: uuid(1),
+                goal_generation: CanonicalU64::new(2),
+                command_id: uuid(7),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        };
+        let encoded = serde_json::to_value(&state)?;
+        assert_eq!(serde_json::from_value::<TurnState>(encoded)?, state);
+
+        let frame = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(1),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state,
+            },
+        )?;
+        assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn awaiting_child_turn_state_round_trips_exact_wait_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::ActiveAwaitingChild {
+            await_request_id: uuid(4),
+            spawning_request_id: uuid(5),
+            child_session_id: uuid(2),
+        };
+        let encoded = serde_json::to_value(&state)?;
+        let decoded = serde_json::from_value::<TurnState>(encoded.clone())?;
+
+        assert_eq!(decoded, state);
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "active_awaiting_child",
+                "await_request_id": "00000000-0000-0000-0000-000000000004",
+                "spawning_request_id": "00000000-0000-0000-0000-000000000005",
+                "child_session_id": "00000000-0000-0000-0000-000000000002"
+            })
+        );
+        // A terminal delegated turn admits only a parent-policy reason and a
+        // stopped/cancelled outcome. Crossed pairs such as
+        // stopped/parent_cancelled are valid under a bound relationship's own
+        // termination policy and are covered by
+        // `inv033_delegation_terminal_turn_state_round_trips_crossed_parent_policy`;
+        // these two remain inadmissible on either half.
+        assert_delegation_terminal_state_rejected("stopped", "child_completed");
+        assert_delegation_terminal_state_rejected("already_terminal", "parent_cancelled");
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegation_terminal_turn_state_round_trips_parent_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::DelegationTerminated {
+            spawning_request_id: uuid(4),
+            outcome: DelegationOutcome::Stopped,
+            reason: DelegationReason::ParentStopped,
+            provenance: DelegationProvenance::ParentGoalCommand {
+                parent_session_id: uuid(1),
+                goal_generation: CanonicalU64::new(2),
+                command_id: uuid(7),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        };
+        let encoded = serde_json::to_value(&state)?;
+        let decoded = serde_json::from_value::<TurnState>(encoded.clone())?;
+
+        assert_eq!(decoded, state);
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "delegation_terminated",
+                "spawning_request_id": "00000000-0000-0000-0000-000000000004",
+                "outcome": "stopped",
+                "reason": "parent_stopped",
+                "provenance": {
+                    "type": "parent_goal_command",
+                    "parent_session_id": "00000000-0000-0000-0000-000000000001",
+                    "goal_generation": "2",
+                    "command_id": "00000000-0000-0000-0000-000000000007",
+                    "descendant_scope": "parent_and_descendants"
+                }
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegation_terminal_turn_state_round_trips_crossed_parent_policy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A bound relationship maps the parent verb through its own policy, so
+        // a parent cancellation may terminalize a child with `stop` and a
+        // parent stop may terminalize it with `cancel`. All four pairs must
+        // survive validation and round trip, matching what `process_read`
+        // projects.
+        assert_delegation_terminal_state_round_trips(
+            DelegationOutcome::Stopped,
+            DelegationReason::ParentStopped,
+        )?;
+        assert_delegation_terminal_state_round_trips(
+            DelegationOutcome::Stopped,
+            DelegationReason::ParentCancelled,
+        )?;
+        assert_delegation_terminal_state_round_trips(
+            DelegationOutcome::Cancelled,
+            DelegationReason::ParentStopped,
+        )?;
+        assert_delegation_terminal_state_round_trips(
+            DelegationOutcome::Cancelled,
+            DelegationReason::ParentCancelled,
+        )?;
         Ok(())
     }
 
@@ -6536,12 +8416,60 @@ mod tests {
     }
 
     #[test]
+    fn delegated_queued_turn_round_trips_exact_origin_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(1),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::QueuedDelegated {
+                    spawning_request_id: uuid(2),
+                    parent_session_id: uuid(3),
+                    parent_turn_id: uuid(4),
+                    content: InputContent::new(String::from("delegated task")),
+                },
+            },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"queued_delegated","spawning_request_id":"00000000-0000-0000-0000-000000000002","parent_session_id":"00000000-0000-0000-0000-000000000003","parent_turn_id":"00000000-0000-0000-0000-000000000004","content":"delegated task"}}"#,
+        )
+    }
+
+    #[test]
+    fn delegation_wake_queued_turn_round_trips_exact_delivery_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(1),
+                acceptance_position: CanonicalU64::new(2),
+                model_settings: None,
+                state: TurnState::QueuedDelegationWake {
+                    first_delivery_sequence: CanonicalU64::new(3),
+                    through_delivery_sequence: CanonicalU64::new(5),
+                },
+            },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","model_settings":null,"state":{"type":"queued_delegation_wake","first_delivery_sequence":"3","through_delivery_sequence":"5"}}"#,
+        )
+    }
+
+    #[test]
+    fn delegation_wake_queued_turn_rejects_invalid_delivery_ranges() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","model_settings":null,"state":{"type":"queued_delegation_wake","first_delivery_sequence":"0","through_delivery_sequence":"5"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","model_settings":null,"state":{"type":"queued_delegation_wake","first_delivery_sequence":"5","through_delivery_sequence":"3"}}}"#,
+        );
+    }
+
+    #[test]
     fn inv033_nested_unit_shapes_reject_unknown_members() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"sessions_start","extra":true}}"#,
         );
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued","extra":true}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued","extra":true}}}"#,
         );
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"session_created","extra":true}}}"#,
@@ -6551,42 +8479,42 @@ mod tests {
     #[test]
     fn inv033_active_running_requires_current_model_call_member() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000002"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000002"}}}"#,
         );
     }
 
     #[test]
     fn inv033_failed_terminal_shape_requires_nullable_attempt_member() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_model_call":null}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_model_call":null}}}"#,
         );
     }
 
     #[test]
     fn inv033_failed_terminal_shape_requires_nullable_call_member() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null}}}"#,
         );
     }
 
     #[test]
     fn inv033_failed_terminal_call_requires_an_attempt() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null,"terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000003","disposition":"known_failed"}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null,"terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000003","disposition":"known_failed"}}}}"#,
         );
     }
 
     #[test]
     fn inv033_failed_terminal_call_accepts_only_failure_dispositions() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"completed"}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"completed"}}}}"#,
         );
     }
 
     #[test]
     fn inv033_failed_terminal_call_rejects_unknown_members() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","extra":true}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","extra":true}}}}"#,
         );
     }
 
@@ -6598,6 +8526,7 @@ mod tests {
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(1),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(2),
                     terminal_attempt_id: Some(uuid(3)),
@@ -6607,7 +8536,7 @@ mod tests {
                     )),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"quota_exhausted"}}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"quota_exhausted"}}}"#,
         )?;
         Ok(())
     }
@@ -6615,28 +8544,28 @@ mod tests {
     #[test]
     fn failed_terminal_call_rejects_an_unknown_failure_cause() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"future_provider_error"}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"future_provider_error"}}}}"#,
         );
     }
 
     #[test]
     fn failed_terminal_call_rejects_explicit_null_cause() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":null}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":null}}}}"#,
         );
     }
 
     #[test]
     fn failed_terminal_call_rejects_a_cause_on_cancelled_disposition() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"cancelled","cause":"quota_exhausted"}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"cancelled","cause":"quota_exhausted"}}}}"#,
         );
     }
 
     #[test]
     fn inv033_cancelled_terminal_shape_requires_nullable_call_member() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003"}}}"#,
         );
     }
 
@@ -6657,7 +8586,7 @@ mod tests {
     #[test]
     fn inv033_nested_terminal_duplicate_members_are_rejected() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":null,"terminal_model_call":null}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":null,"terminal_model_call":null}}}"#,
         );
     }
 
@@ -6669,6 +8598,7 @@ mod tests {
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(1),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(2),
                     terminal_attempt_id: None,
@@ -6841,6 +8771,7 @@ mod tests {
                 ServerMessage::TranscriptTurn {
                     turn_id: uuid(1),
                     acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
                     state: TurnState::Failed {
                         terminal_frontier_id: uuid(2),
                         terminal_attempt_id: None,
@@ -7024,6 +8955,7 @@ mod tests {
             ClientRequest::CreateSession {
                 command_id: command(4)?,
                 initial_model_selection: model,
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement: super::SessionPlacement::Pathless {},
             },
@@ -7045,6 +8977,7 @@ mod tests {
                 session_id: uuid(6),
                 content: InputContent::new(String::new()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )?;
@@ -7577,6 +9510,7 @@ mod tests {
             initial_model_selection: ModelSelection::Direct {
                 selection_id: uuid(6),
             },
+            model_settings: ModelSettingsOverlay::inherit_all(),
         };
 
         let frame =
@@ -7584,7 +9518,7 @@ mod tests {
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"create_session_from_imported_frontier\",\"command_id\":\"00000000-0000-0000-0000-000000000004\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"through_position\":\"2\",\"relationship\":\"resume\",\"initial_model_selection\":{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000006\"}}}\n"
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"create_session_from_imported_frontier\",\"command_id\":\"00000000-0000-0000-0000-000000000004\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"through_position\":\"2\",\"relationship\":\"resume\",\"initial_model_selection\":{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000006\"},\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\"fast_mode\":{\"kind\":\"inherit\"},\"service_tier\":{\"kind\":\"inherit\"}}}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
@@ -7603,6 +9537,7 @@ mod tests {
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: uuid(6),
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -7696,6 +9631,7 @@ mod tests {
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: uuid(6),
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         );
 
@@ -8010,6 +9946,7 @@ mod tests {
                 session_id: uuid(6),
                 content: InputContent::new(String::from("ordinary work")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )?;
@@ -8031,6 +9968,8 @@ mod tests {
                 expected_active_turn_id: uuid(7),
                 content: InputContent::new(String::from("continue after the stop")),
                 expected_defaults_version: CanonicalU64::new(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -8051,6 +9990,7 @@ mod tests {
             expected_active_turn_id: uuid(7),
             content: InputContent::new(String::from("continue after reconciliation")),
             expected_defaults_version: CanonicalU64::new(1),
+            model_settings: ModelSettingsOverlay::inherit_all(),
         };
 
         let frame =
@@ -8063,7 +10003,10 @@ mod tests {
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
              \"content\":\"continue after reconciliation\",\
-             \"expected_defaults_version\":\"1\"}}\n"
+             \"expected_defaults_version\":\"1\",\
+             \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
+             \"fast_mode\":{\"kind\":\"inherit\"},\
+             \"service_tier\":{\"kind\":\"inherit\"}}}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
@@ -8137,6 +10080,7 @@ mod tests {
                 session_id: uuid(3),
                 content: InputContent::new(String::from("content")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )?;
@@ -8150,6 +10094,7 @@ mod tests {
                 accepted_input_id: uuid(4),
                 acceptance_position: CanonicalU64::new(1),
                 turn_id: uuid(5),
+                model_settings: settings_snapshot_fixture(),
             },
         )?;
         let encoded_response = encode_server_line(&response_frame)?;
@@ -8729,6 +10674,7 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: ModelSettingsOverlay::inherit_all(),
             dangerous_tool_auto_approval: true,
             system_prompt: SystemPromptMember::present(None),
         };
@@ -8742,6 +10688,8 @@ mod tests {
              \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"expected_defaults_version\":\"3\",\"model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
+             \"fast_mode\":{\"kind\":\"inherit\"},\"service_tier\":{\"kind\":\"inherit\"}},\
              \"dangerous_tool_auto_approval\":true,\"system_prompt\":null}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
@@ -8752,13 +10700,16 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: provider_default_settings_snapshot_fixture(),
             dangerous_tool_auto_approval: true,
             system_prompt: SystemPromptMember::present(None),
         };
         assert_server_message_round_trip(
             request(7)?,
             replacement_receipt,
-            r#"{"type":"session_defaults_replaced","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true,"system_prompt":null}"#,
+            &format!(
+                "{{\"type\":\"session_defaults_replaced\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"4\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":true,\"system_prompt\":null}}"
+            ),
         )?;
         let model_identity_entry = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(5),
@@ -8820,6 +10771,7 @@ mod tests {
             initial_model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(Some(SystemPromptText::try_new(
                 "exact prompt text".to_owned(),
             )?)),
@@ -8833,6 +10785,8 @@ mod tests {
              \"command_id\":\"00000000-0000-0000-0000-000000000001\",\
              \"initial_model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
+             \"fast_mode\":{\"kind\":\"inherit\"},\"service_tier\":{\"kind\":\"inherit\"}},\
              \"system_prompt\":\"exact prompt text\"}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
@@ -8842,6 +10796,7 @@ mod tests {
             initial_model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(None),
             placement: super::SessionPlacement::Pathless {},
         };
@@ -8854,11 +10809,13 @@ mod tests {
              \"command_id\":\"00000000-0000-0000-0000-000000000001\",\
              \"initial_model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
+             \"fast_mode\":{\"kind\":\"inherit\"},\"service_tier\":{\"kind\":\"inherit\"}},\
              \"system_prompt\":null}}\n"
         );
         assert_eq!(decode_client_line(&promptless_encoded)?, promptless_frame);
         let decoded_null = decode_client_line(&line(
-            r#"{"version":1,"request_id":"8","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"system_prompt":null}}"#,
+            r#"{"version":1,"request_id":"8","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"model_settings":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"system_prompt":null}}"#,
         ))?;
         let ClientRequest::CreateSession { system_prompt, .. } = decoded_null.request() else {
             panic!("decoded frame must be a create request");
@@ -8872,6 +10829,7 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: ModelSettingsOverlay::inherit_all(),
             dangerous_tool_auto_approval: false,
             system_prompt: SystemPromptMember::present(Some(SystemPromptText::try_new(
                 "exact prompt text".to_owned(),
@@ -8886,6 +10844,8 @@ mod tests {
              \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"expected_defaults_version\":\"3\",\"model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
+             \"fast_mode\":{\"kind\":\"inherit\"},\"service_tier\":{\"kind\":\"inherit\"}},\
              \"dangerous_tool_auto_approval\":false,\
              \"system_prompt\":\"exact prompt text\"}}\n"
         );
@@ -8927,6 +10887,7 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: provider_default_settings_snapshot_fixture(),
             dangerous_tool_auto_approval: true,
             system_prompt: SystemPromptMember::present(Some(SystemPromptText::try_new(
                 "exact prompt text".to_owned(),
@@ -8940,6 +10901,10 @@ mod tests {
              \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"defaults_version\":\"4\",\"model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"model_settings\":"
+                .to_owned()
+                + PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON
+                + ",\
              \"dangerous_tool_auto_approval\":true,\
              \"system_prompt\":\"exact prompt text\"}}\n"
         );
@@ -8954,13 +10919,16 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: provider_default_settings_snapshot_fixture(),
             dangerous_tool_auto_approval: false,
             system_prompt: Some(SystemPromptText::try_new("exact prompt text".to_owned())?),
         };
         assert_server_message_round_trip(
             request(13)?,
             defaults_read,
-            r#"{"type":"session_defaults","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":false,"system_prompt":"exact prompt text"}"#,
+            &format!(
+                "{{\"type\":\"session_defaults\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"4\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":false,\"system_prompt\":\"exact prompt text\"}}"
+            ),
         )?;
         assert_server_message_round_trip(
             request(14)?,
@@ -8970,10 +10938,13 @@ mod tests {
                 model_selection: ModelSelection::Direct {
                     selection_id: uuid(4),
                 },
+                model_settings: provider_default_settings_snapshot_fixture(),
                 dangerous_tool_auto_approval: false,
                 system_prompt: None,
             },
-            r#"{"type":"session_defaults","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":false,"system_prompt":null}"#,
+            &format!(
+                "{{\"type\":\"session_defaults\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"1\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":false,\"system_prompt\":null}}"
+            ),
         )?;
         Ok(())
     }
@@ -9063,13 +11034,14 @@ mod tests {
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: uuid(72),
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement: root.clone(),
             },
         )?;
         assert_eq!(
             String::from_utf8(encode_client_line(&create)?)?,
-            r#"{"version":1,"request_id":"70","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"},"system_prompt":null,"placement":{"kind":"root_global_read","path":"operator","intent":"acknowledged"}}}
+            r#"{"version":1,"request_id":"70","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"},"model_settings":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"system_prompt":null,"placement":{"kind":"root_global_read","path":"operator","intent":"acknowledged"}}}
 "#
         );
         let update = ClientFrame::try_new_for_version(
@@ -9106,7 +11078,7 @@ mod tests {
     fn inv033_session_placement_frames_admit_the_complete_structural_range() {
         let maximum_structural_path = vec!["x".repeat(64); 64].join(".");
         let frame = format!(
-            r#"{{"version":1,"request_id":"1","request":{{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"}},"system_prompt":null,"placement":{{"kind":"scoped","path":"{maximum_structural_path}"}}}}}}
+            r#"{{"version":1,"request_id":"1","request":{{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"}},"model_settings":{{"reasoning_level":{{"kind":"inherit"}},"fast_mode":{{"kind":"inherit"}},"service_tier":{{"kind":"inherit"}}}},"system_prompt":null,"placement":{{"kind":"scoped","path":"{maximum_structural_path}"}}}}}}
 "#
         );
 
@@ -9313,6 +11285,8 @@ mod tests {
             expected_active_turn_id: uuid(7),
             content: InputContent::new(String::from("continue after the stop")),
             expected_defaults_version: CanonicalU64::new(1),
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            model_settings: ModelSettingsOverlay::inherit_all(),
         };
 
         let frame =
@@ -9325,7 +11299,11 @@ mod tests {
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
              \"content\":\"continue after the stop\",\
-             \"expected_defaults_version\":\"1\"}}\n"
+             \"expected_defaults_version\":\"1\",\
+             \"descendant_scope\":\"parent_and_descendants\",\
+             \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
+             \"fast_mode\":{\"kind\":\"inherit\"},\
+             \"service_tier\":{\"kind\":\"inherit\"}}}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
@@ -10051,6 +12029,7 @@ mod tests {
         let model_reconciliation = ServerMessage::TranscriptTurn {
             turn_id: uuid(3),
             acceptance_position: CanonicalU64::new(1),
+            model_settings: None,
             state: TurnState::ReconciliationRequired {
                 terminal_frontier_id: uuid(6),
                 terminal_attempt_id: uuid(7),
@@ -10069,6 +12048,7 @@ mod tests {
         let tool_reconciliation = ServerMessage::TranscriptTurn {
             turn_id: uuid(3),
             acceptance_position: CanonicalU64::new(1),
+            model_settings: None,
             state: TurnState::ToolReconciliationRequired {
                 terminal_frontier_id: uuid(6),
                 terminal_attempt_id: uuid(7),
@@ -10106,6 +12086,303 @@ mod tests {
             )
         );
         assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn delegation_session_events_round_trip_their_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(40)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::ChildSpawned {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    relationship: DelegationPolicy::Background {},
+                },
+            },
+            r#"{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"child_spawned","spawning_request_id":"00000000-0000-0000-0000-000000000002","child_session_id":"00000000-0000-0000-0000-000000000003","relationship":{"type":"background"}}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(41)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(2),
+                session_id: uuid(1),
+                event: SessionEvent::ChildWaiting {
+                    await_request_id: uuid(4),
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    mode: DelegationWaitMode::Background,
+                },
+            },
+            r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"child_waiting","await_request_id":"00000000-0000-0000-0000-000000000004","spawning_request_id":"00000000-0000-0000-0000-000000000002","child_session_id":"00000000-0000-0000-0000-000000000003","mode":"background"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(42)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(3),
+                session_id: uuid(3),
+                event: SessionEvent::SessionMessage {
+                    spawning_request_id: uuid(2),
+                    message_id: uuid(5),
+                    sender_session_id: uuid(1),
+                    recipient_session_id: uuid(3),
+                    ordinal: CanonicalU64::new(2),
+                    delivery_sequence: CanonicalU64::new(7),
+                    content: String::from("status"),
+                },
+            },
+            r#"{"type":"session_event","cursor":"3","session_id":"00000000-0000-0000-0000-000000000003","event":{"type":"session_message","spawning_request_id":"00000000-0000-0000-0000-000000000002","message_id":"00000000-0000-0000-0000-000000000005","sender_session_id":"00000000-0000-0000-0000-000000000001","recipient_session_id":"00000000-0000-0000-0000-000000000003","ordinal":"2","delivery_sequence":"7","content":"status"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(43)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(4),
+                session_id: uuid(1),
+                event: SessionEvent::ChildResult {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::Returned,
+                    content: Some(String::from("done")),
+                    reason: DelegationReason::ChildCompleted,
+                    provenance: DelegationProvenance::ChildTurn {
+                        child_session_id: uuid(3),
+                        child_turn_id: uuid(6),
+                    },
+                },
+            },
+            r#"{"type":"session_event","cursor":"4","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"child_result","spawning_request_id":"00000000-0000-0000-0000-000000000002","child_session_id":"00000000-0000-0000-0000-000000000003","outcome":"returned","content":"done","reason":"child_completed","provenance":{"type":"child_turn","child_session_id":"00000000-0000-0000-0000-000000000003","child_turn_id":"00000000-0000-0000-0000-000000000006"}}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(44)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(5),
+                session_id: uuid(1),
+                event: SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::Stopped,
+                    reason: DelegationReason::ParentStopped,
+                    provenance: DelegationProvenance::ParentTurnCommand {
+                        parent_session_id: uuid(1),
+                        parent_turn_id: uuid(7),
+                        command_id: uuid(8),
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                },
+            },
+            r#"{"type":"session_event","cursor":"5","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"child_lifecycle_disposition","spawning_request_id":"00000000-0000-0000-0000-000000000002","child_session_id":"00000000-0000-0000-0000-000000000003","outcome":"stopped","reason":"parent_stopped","provenance":{"type":"parent_turn_command","parent_session_id":"00000000-0000-0000-0000-000000000001","parent_turn_id":"00000000-0000-0000-0000-000000000007","command_id":"00000000-0000-0000-0000-000000000008","descendant_scope":"parent_and_descendants"}}}"#,
+        )?;
+        Ok(())
+    }
+
+    /// Round trips one child-addressed lifecycle disposition through the frame
+    /// validator. The header session is the terminalized child, and the
+    /// canonical provenance names the commanding parent's descendant-scoped
+    /// turn command.
+    #[track_caller]
+    fn assert_child_addressed_disposition_round_trips(
+        outcome: DelegationOutcome,
+        reason: DelegationReason,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(5),
+                session_id: uuid(3),
+                event: SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome,
+                    reason,
+                    provenance: DelegationProvenance::ParentTurnCommand {
+                        parent_session_id: uuid(1),
+                        parent_turn_id: uuid(7),
+                        command_id: uuid(8),
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                },
+            },
+        )?;
+        assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn child_addressed_lifecycle_disposition_round_trips_for_a_child_follower()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A descendant cascade addresses the terminalization to the child
+        // itself so live child followers observe it. A bound relationship maps
+        // the parent verb through its own policy, so all four outcome and
+        // reason pairs reach the child follower.
+        assert_child_addressed_disposition_round_trips(
+            DelegationOutcome::Stopped,
+            DelegationReason::ParentStopped,
+        )?;
+        assert_child_addressed_disposition_round_trips(
+            DelegationOutcome::Cancelled,
+            DelegationReason::ParentCancelled,
+        )?;
+        assert_child_addressed_disposition_round_trips(
+            DelegationOutcome::Stopped,
+            DelegationReason::ParentCancelled,
+        )?;
+        assert_child_addressed_disposition_round_trips(
+            DelegationOutcome::Cancelled,
+            DelegationReason::ParentStopped,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn child_addressed_lifecycle_disposition_rejects_non_terminal_and_self_authored_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Continue-running and already-terminal remain parent-addressed only:
+        // they report a child the cascade did not terminalize.
+        let child_addressed_continue = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(3),
+                event: SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::ContinueRunning,
+                    reason: DelegationReason::ParentStopped,
+                    provenance: DelegationProvenance::ParentTurnCommand {
+                        parent_session_id: uuid(1),
+                        parent_turn_id: uuid(7),
+                        command_id: uuid(8),
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                },
+            },
+        );
+        // A child-addressed row must carry a foreign parent's authority; it can
+        // never name itself as the commanding parent.
+        let self_commanded = ServerFrame::try_new(
+            request(2)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(2),
+                session_id: uuid(3),
+                event: SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::Stopped,
+                    reason: DelegationReason::ParentStopped,
+                    provenance: DelegationProvenance::ParentTurnCommand {
+                        parent_session_id: uuid(3),
+                        parent_turn_id: uuid(7),
+                        command_id: uuid(8),
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                },
+            },
+        );
+        // The parent-alone scope carries no descendant authority either way.
+        let child_addressed_parent_alone = ServerFrame::try_new(
+            request(3)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(3),
+                session_id: uuid(3),
+                event: SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::Stopped,
+                    reason: DelegationReason::ParentStopped,
+                    provenance: DelegationProvenance::ParentTurnCommand {
+                        parent_session_id: uuid(1),
+                        parent_turn_id: uuid(7),
+                        command_id: uuid(8),
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                },
+            },
+        );
+
+        assert_eq!(
+            child_addressed_continue,
+            Err(FrameValidationError::DelegationShape)
+        );
+        assert_eq!(self_commanded, Err(FrameValidationError::DelegationShape));
+        assert_eq!(
+            child_addressed_parent_alone,
+            Err(FrameValidationError::DelegationShape)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delegation_session_events_reject_contradictory_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let missing_returned_content = ServerFrame::try_new(
+            request(45)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::ChildResult {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::Returned,
+                    content: None,
+                    reason: DelegationReason::ChildCompleted,
+                    provenance: DelegationProvenance::ChildTurn {
+                        child_session_id: uuid(3),
+                        child_turn_id: uuid(6),
+                    },
+                },
+            },
+        );
+        let parent_alone_disposition = ServerFrame::try_new(
+            request(46)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(2),
+                session_id: uuid(1),
+                event: SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::ContinueRunning,
+                    reason: DelegationReason::ParentStopped,
+                    provenance: DelegationProvenance::ParentTurnCommand {
+                        parent_session_id: uuid(1),
+                        parent_turn_id: uuid(7),
+                        command_id: uuid(8),
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                },
+            },
+        );
+        let zero_message_sequence = ServerFrame::try_new(
+            request(47)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(3),
+                session_id: uuid(1),
+                event: SessionEvent::SessionMessage {
+                    spawning_request_id: uuid(2),
+                    message_id: uuid(5),
+                    sender_session_id: uuid(1),
+                    recipient_session_id: uuid(3),
+                    ordinal: CanonicalU64::new(1),
+                    delivery_sequence: CanonicalU64::new(0),
+                    content: String::from("status"),
+                },
+            },
+        );
+
+        assert_eq!(
+            missing_returned_content,
+            Err(FrameValidationError::DelegationShape)
+        );
+        assert_eq!(
+            parent_alone_disposition,
+            Err(FrameValidationError::DelegationShape)
+        );
+        assert_eq!(
+            zero_message_sequence,
+            Err(FrameValidationError::DelegationShape)
+        );
         Ok(())
     }
 
@@ -10165,6 +12442,7 @@ mod tests {
             session_id: uuid(2),
             content: InputContent::new(String::from("steering")),
             expected_defaults_version: None,
+            model_settings: ModelSettingsOverlay::inherit_all(),
             delivery: Some(InputDelivery::Steer {
                 expected_active_turn_id: uuid(3),
             }),
@@ -10180,6 +12458,9 @@ mod tests {
                 "\"command_id\":\"00000000-0000-0000-0000-000000000001\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
                 "\"content\":\"steering\",\"expected_defaults_version\":null,",
+                "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+                "\"fast_mode\":{\"kind\":\"inherit\"},",
+                "\"service_tier\":{\"kind\":\"inherit\"}},",
                 "\"delivery\":{\"type\":\"steer\",",
                 "\"expected_active_turn_id\":",
                 "\"00000000-0000-0000-0000-000000000003\"}}}\n"
@@ -10200,6 +12481,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new(String::from("queued")),
                 expected_defaults_version: Some(CanonicalU64::new(7)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Queue {
                     expected_active_turn_id: uuid(3),
                 }),
@@ -10214,6 +12496,9 @@ mod tests {
                 "\"command_id\":\"00000000-0000-0000-0000-000000000004\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
                 "\"content\":\"queued\",\"expected_defaults_version\":\"7\",",
+                "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+                "\"fast_mode\":{\"kind\":\"inherit\"},",
+                "\"service_tier\":{\"kind\":\"inherit\"}},",
                 "\"delivery\":{\"type\":\"queue\",",
                 "\"expected_active_turn_id\":",
                 "\"00000000-0000-0000-0000-000000000003\"}}}\n"
@@ -10235,6 +12520,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new(String::from("start")),
                 expected_defaults_version: Some(CanonicalU64::new(7)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::StartWhenIdle {}),
             },
         )?;
@@ -10247,6 +12533,9 @@ mod tests {
                 "\"command_id\":\"00000000-0000-0000-0000-000000000005\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
                 "\"content\":\"start\",\"expected_defaults_version\":\"7\",",
+                "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+                "\"fast_mode\":{\"kind\":\"inherit\"},",
+                "\"service_tier\":{\"kind\":\"inherit\"}},",
                 "\"delivery\":{\"type\":\"start_when_idle\"}}}\n"
             )
         );
@@ -10267,6 +12556,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new(String::from("start without defaults")),
                 expected_defaults_version: None,
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::StartWhenIdle {}),
             },
         );
@@ -10280,6 +12570,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new(String::from("queue without defaults")),
                 expected_defaults_version: None,
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Queue {
                     expected_active_turn_id: uuid(3),
                 }),
@@ -10302,6 +12593,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new(String::from("misconfigured steering")),
                 expected_defaults_version: Some(CanonicalU64::new(7)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Steer {
                     expected_active_turn_id: uuid(3),
                 }),
@@ -10317,6 +12609,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new(String::from("zero-version steering")),
                 expected_defaults_version: Some(CanonicalU64::new(0)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Steer {
                     expected_active_turn_id: uuid(3),
                 }),
@@ -10385,6 +12678,7 @@ mod tests {
                 session_id: uuid(6),
                 content: InputContent::new(content),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )?;
@@ -10401,8 +12695,11 @@ mod tests {
             request(1)?,
             ServerMessage::SessionCreated {
                 session_id: uuid(1),
+                model_settings: provider_default_settings_snapshot_fixture(),
             },
-            r#"{"type":"session_created","session_id":"00000000-0000-0000-0000-000000000001"}"#,
+            &format!(
+                "{{\"type\":\"session_created\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"model_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON}}}"
+            ),
         )?;
         assert_server_message_round_trip(
             request(2)?,
@@ -10411,8 +12708,11 @@ mod tests {
                 accepted_input_id: uuid(2),
                 acceptance_position: CanonicalU64::new(1),
                 turn_id: uuid(3),
+                model_settings: settings_snapshot_fixture(),
             },
-            r#"{"type":"input_submitted","session_id":"00000000-0000-0000-0000-000000000001","accepted_input_id":"00000000-0000-0000-0000-000000000002","acceptance_position":"1","turn_id":"00000000-0000-0000-0000-000000000003"}"#,
+            &format!(
+                "{{\"type\":\"input_submitted\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"accepted_input_id\":\"00000000-0000-0000-0000-000000000002\",\"acceptance_position\":\"1\",\"turn_id\":\"00000000-0000-0000-0000-000000000003\",\"model_settings\":{SETTINGS_SNAPSHOT_JSON}}}"
+            ),
         )?;
         assert_server_message_round_trip(
             request(3)?,
@@ -10498,43 +12798,47 @@ mod tests {
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Refused {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: uuid(7),
                     terminal_model_call_id: uuid(8),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"refused","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"refused","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
         )?;
         assert_server_message_round_trip(
             request(14)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id: uuid(2),
                     content: InputContent::new("queued request".to_owned()),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued request"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued request"}}"#,
         )?;
         assert_server_message_round_trip(
             request(15)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::ActiveRunning {
                     current_attempt_id: uuid(7),
                     current_model_call: None,
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":null}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":null}}"#,
         )?;
         assert_server_message_round_trip(
             request(16)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::ActiveRunning {
                     current_attempt_id: uuid(7),
                     current_model_call: Some(CurrentModelCall::new(
@@ -10543,13 +12847,14 @@ mod tests {
                     )),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"prepared"}}}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"prepared"}}}}"#,
         )?;
         assert_server_message_round_trip(
             request(17)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::ActiveRunning {
                     current_attempt_id: uuid(7),
                     current_model_call: Some(CurrentModelCall::new(
@@ -10558,13 +12863,14 @@ mod tests {
                     )),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"in_flight"}}}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"in_flight"}}}}"#,
         )?;
         assert_server_message_round_trip(
             request(20)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::ActiveRunning {
                     current_attempt_id: uuid(7),
                     current_model_call: Some(CurrentModelCall::new(
@@ -10573,39 +12879,42 @@ mod tests {
                     )),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"cancellation_requested"}}}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"cancellation_requested"}}}}"#,
         )?;
         assert_server_message_round_trip(
             request(21)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: None,
                     terminal_model_call: None,
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":null,"terminal_model_call":null}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":null,"terminal_model_call":null}}"#,
         )?;
         assert_server_message_round_trip(
             request(22)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: Some(uuid(7)),
                     terminal_model_call: None,
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":null}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":null}}"#,
         )?;
         assert_server_message_round_trip(
             request(23)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: Some(uuid(7)),
@@ -10615,13 +12924,14 @@ mod tests {
                     )),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","disposition":"known_failed"}}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","disposition":"known_failed"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(24)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: Some(uuid(7)),
@@ -10631,46 +12941,49 @@ mod tests {
                     )),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","disposition":"cancelled"}}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","disposition":"cancelled"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(25)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Cancelled {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: uuid(7),
                     terminal_model_call_id: None,
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":null}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":null}}"#,
         )?;
         assert_server_message_round_trip(
             request(26)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Cancelled {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: uuid(7),
                     terminal_model_call_id: Some(uuid(8)),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
         )?;
         assert_server_message_round_trip(
             request(27)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::ReconciliationRequired {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: uuid(7),
                     terminal_model_call_id: uuid(8),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"reconciliation_required","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"reconciliation_required","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
         )?;
         assert_server_message_round_trip(
             request(8)?,
@@ -10841,5 +13154,683 @@ mod tests {
             r#"{"type":"error","code":"not_found","message":"not found"}"#,
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn model_capability_catalog_wire_vocabulary_is_exact() -> Result<(), Box<dyn std::error::Error>>
+    {
+        assert_client_request_round_trip(
+            request(41)?,
+            ClientRequest::ListModelCapabilities {},
+            r#"{"type":"list_model_capabilities"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(41)?,
+            ServerMessage::ModelCapabilityItem {
+                selection_id: uuid(4),
+                capabilities: ModelCapabilities {
+                    reasoning_levels: vec![ReasoningLevel::Low, ReasoningLevel::XHigh],
+                    fast_mode_supported: true,
+                    service_tiers: vec![ServiceTier::OpenAi(OpenAiServiceTier::Priority)],
+                },
+            },
+            r#"{"type":"model_capability_item","selection_id":"00000000-0000-0000-0000-000000000004","capabilities":{"reasoning_levels":["low","xhigh"],"fast_mode_supported":true,"service_tiers":[{"provider":"open_ai","value":"priority"}]}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn turn_settings_event_round_trip_preserves_override_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::SessionEvent {
+            cursor: CanonicalU64::new(9),
+            session_id: uuid(1),
+            event: SessionEvent::TurnModelSettingsResolved {
+                accepted_input_id: uuid(2),
+                turn_id: uuid(3),
+                defaults_version: CanonicalU64::new(7),
+                requested_model: ModelSelection::Direct {
+                    selection_id: uuid(4),
+                },
+                selected_direct_id: uuid(4),
+                per_call_override: settings_snapshot_fixture().precedence.per_call,
+                settings: settings_snapshot_fixture(),
+                adjusted_from_selection_id: None,
+                adjustments: Vec::new(),
+            },
+        };
+
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(42)?, message)?;
+        let encoded = encode_server_line(&frame)?;
+        let decoded = decode_server_line(&encoded)?;
+
+        assert_eq!(decoded, frame);
+        Ok(())
+    }
+
+    /// INV-032 / INV-053: a late follower's authoritative turn projection
+    /// carries the same complete frozen settings evidence as the durable event.
+    #[test]
+    fn inv032_inv053_transcript_turn_round_trips_frozen_settings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let settings = settings_snapshot_fixture();
+        let message = ServerMessage::TranscriptTurn {
+            turn_id: uuid(3),
+            acceptance_position: CanonicalU64::new(1),
+            model_settings: Some(TurnModelSettingsSnapshot {
+                turn_id: uuid(3),
+                accepted_input_id: uuid(2),
+                defaults_version: CanonicalU64::new(7),
+                requested_model: ModelSelection::Direct {
+                    selection_id: uuid(4),
+                },
+                selected_direct_id: uuid(4),
+                per_call_override: settings.precedence.per_call,
+                settings,
+                adjusted_from_selection_id: None,
+                adjustments: Vec::new(),
+            }),
+            state: TurnState::Queued {
+                accepted_input_id: uuid(2),
+                content: InputContent::new("settings-aware turn".to_owned()),
+            },
+        };
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(43)?, message)?;
+        let encoded = encode_server_line(&frame)?;
+
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: queued turn settings evidence belongs to the accepted input
+    /// named by the authoritative queued state.
+    #[test]
+    fn inv033_transcript_turn_rejects_settings_for_another_queued_input() {
+        let settings = settings_snapshot_fixture();
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: Some(TurnModelSettingsSnapshot {
+                    turn_id: uuid(3),
+                    accepted_input_id: uuid(5),
+                    defaults_version: CanonicalU64::new(7),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: settings.precedence.per_call,
+                    settings,
+                    adjusted_from_selection_id: None,
+                    adjustments: Vec::new(),
+                }),
+                state: TurnState::Queued {
+                    accepted_input_id: uuid(2),
+                    content: InputContent::new("settings-aware turn".to_owned()),
+                },
+            },
+        )
+        .expect_err("queued settings must name the queued accepted input");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: terminal turn settings evidence belongs to the turn named by
+    /// the authoritative transcript projection.
+    #[test]
+    fn inv033_transcript_turn_rejects_settings_for_another_terminal_turn() {
+        let settings = settings_snapshot_fixture();
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: Some(TurnModelSettingsSnapshot {
+                    turn_id: uuid(5),
+                    accepted_input_id: uuid(2),
+                    defaults_version: CanonicalU64::new(7),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: settings.precedence.per_call,
+                    settings,
+                    adjusted_from_selection_id: None,
+                    adjustments: Vec::new(),
+                }),
+                state: TurnState::Completed {
+                    terminal_frontier_id: uuid(6),
+                    terminal_attempt_id: uuid(7),
+                    terminal_model_call_id: uuid(8),
+                },
+            },
+        )
+        .expect_err("terminal settings must name the projected turn");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: required-nullable turn settings cannot be omitted.
+    #[test]
+    fn inv033_transcript_turn_requires_model_settings_member() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued request"}}}"#,
+        );
+    }
+
+    /// INV-033: complete settings snapshots cannot contradict their retained
+    /// precedence provenance.
+    #[test]
+    fn inv033_model_settings_snapshot_rejects_inconsistent_effective_values() {
+        let mut model_settings = session_settings_snapshot_fixture();
+        model_settings.effective.reasoning_level = Some(ReasoningLevel::Low);
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionCreated {
+                session_id: uuid(1),
+                model_settings,
+            },
+        )
+        .expect_err("effective settings must resolve from retained provenance");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: only the exact all-inherit provider-default snapshot is
+    /// model-independent.
+    #[test]
+    fn inv033_nondefault_settings_snapshot_requires_validation_identity() {
+        let mut model_settings = session_settings_snapshot_fixture();
+        model_settings.validated_for_selection_id = None;
+
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionCreated {
+                session_id: uuid(1),
+                model_settings,
+            },
+        )
+        .expect_err("nondefault settings require their validating direct selection");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: durable defaults snapshots cannot retain a per-call layer.
+    #[test]
+    fn inv033_defaults_snapshot_rejects_per_call_settings() {
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionCreated {
+                session_id: uuid(1),
+                model_settings: settings_snapshot_fixture(),
+            },
+        )
+        .expect_err("defaults cannot retain an origin-only per-call contribution");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: the separately reported per-call contribution must equal the
+    /// retained precedence layer.
+    #[test]
+    fn inv033_turn_settings_event_rejects_crosswired_per_call_override() {
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    defaults_version: CanonicalU64::new(1),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: ModelSettingsOverlay::inherit_all(),
+                    settings: settings_snapshot_fixture(),
+                    adjusted_from_selection_id: None,
+                    adjustments: Vec::new(),
+                },
+            },
+        )
+        .expect_err("event provenance must match the sealed per-call layer");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: adjustments require a distinct prior direct validation identity.
+    #[test]
+    fn inv033_turn_settings_event_rejects_unchanged_adjustment_source() {
+        let mut settings = settings_snapshot_fixture();
+        settings.precedence.session = settings.precedence.per_call;
+        settings.precedence.per_call = ModelSettingsOverlay::inherit_all();
+        settings.reasoning_source = Some(ModelSettingSource::Session);
+        settings.service_tier_source = Some(ModelSettingSource::Session);
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    defaults_version: CanonicalU64::new(1),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: ModelSettingsOverlay::inherit_all(),
+                    settings,
+                    adjusted_from_selection_id: Some(uuid(4)),
+                    adjustments: vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                        from: ReasoningLevel::XHigh,
+                        to: ReasoningLevel::High,
+                    }],
+                },
+            },
+        )
+        .expect_err("the selected model cannot also be the adjustment source");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: a distinct prior direct selection authenticates automatic
+    /// model-change adjustment evidence for the frozen turn.
+    #[test]
+    fn inv033_turn_settings_event_accepts_distinct_adjustment_source() {
+        let mut settings = settings_snapshot_fixture();
+        settings.precedence.session = settings.precedence.per_call;
+        settings.precedence.per_call = ModelSettingsOverlay::inherit_all();
+        settings.reasoning_source = Some(ModelSettingSource::Session);
+        settings.service_tier_source = Some(ModelSettingSource::Session);
+        let result = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    defaults_version: CanonicalU64::new(1),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: ModelSettingsOverlay::inherit_all(),
+                    settings,
+                    adjusted_from_selection_id: Some(uuid(5)),
+                    adjustments: vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                        from: ReasoningLevel::XHigh,
+                        to: ReasoningLevel::High,
+                    }],
+                },
+            },
+        );
+
+        assert!(result.is_ok());
+    }
+
+    /// INV-033: caller and adjustment evidence must derive the exact installed
+    /// defaults snapshot.
+    #[test]
+    fn inv033_settings_change_event_rejects_unrelated_installed_snapshot() {
+        let prior_settings = provider_default_settings_snapshot_fixture();
+        let installed_settings = session_settings_snapshot_fixture();
+        let model = ModelSelection::Direct {
+            selection_id: uuid(4),
+        };
+
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::SessionModelSettingsChanged {
+                    command_id: command(2).expect("fixture command identity is admitted"),
+                    prior_defaults_version: CanonicalU64::new(1),
+                    installed_defaults_version: CanonicalU64::new(2),
+                    prior_model: model,
+                    installed_model: model,
+                    prior_settings,
+                    installed_settings,
+                    caller_override: ModelSettingsOverlay::inherit_all(),
+                    adjustments: Vec::new(),
+                },
+            },
+        )
+        .expect_err("an all-inherit caller cannot install an unrelated session layer");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: an automatic model-change adjustment cannot rewrite a value
+    /// explicitly supplied by the caller of that same defaults replacement.
+    #[test]
+    fn inv033_settings_change_rejects_adjustment_to_caller_explicit_value() {
+        let prior_settings = provider_default_settings_snapshot_fixture();
+        let mut installed_settings = provider_default_settings_snapshot_fixture();
+        installed_settings.precedence.session.reasoning_level =
+            SettingOverlay::Value(ReasoningLevel::Low);
+        installed_settings.effective.reasoning_level = Some(ReasoningLevel::Low);
+        installed_settings.reasoning_source = Some(ModelSettingSource::Session);
+        installed_settings.validated_for_selection_id = Some(uuid(4));
+        let caller_override = ModelSettingsOverlay {
+            reasoning_level: SettingOverlay::Value(ReasoningLevel::High),
+            fast_mode: FastModeOverlay::Inherit,
+            service_tier: SettingOverlay::Inherit,
+        };
+
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::SessionModelSettingsChanged {
+                    command_id: command(2).expect("fixture command identity is admitted"),
+                    prior_defaults_version: CanonicalU64::new(1),
+                    installed_defaults_version: CanonicalU64::new(2),
+                    prior_model: ModelSelection::Direct {
+                        selection_id: uuid(3),
+                    },
+                    installed_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    prior_settings,
+                    installed_settings,
+                    caller_override,
+                    adjustments: vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                        from: ReasoningLevel::High,
+                        to: ReasoningLevel::Low,
+                    }],
+                },
+            },
+        )
+        .expect_err("caller-owned settings cannot be adjusted automatically");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: defaults reads bind a direct model to the snapshot validation
+    /// identity.
+    #[test]
+    fn inv033_defaults_read_rejects_crosswired_direct_settings() {
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionDefaults {
+                session_id: uuid(1),
+                defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: uuid(5),
+                },
+                model_settings: session_settings_snapshot_fixture(),
+                dangerous_tool_auto_approval: false,
+                system_prompt: None,
+            },
+        )
+        .expect_err("direct defaults require settings validated for that selection");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-012 / INV-033: settings-change events reject both reserved command
+    /// identities during wire decoding.
+    #[test]
+    fn inv012_inv033_settings_change_event_rejects_command_sentinels() {
+        let nil = format!(
+            "{{\"version\":1,\"request_id\":\"1\",\"message\":{{\"type\":\"session_event\",\"cursor\":\"1\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"event\":{{\"type\":\"session_model_settings_changed\",\"command_id\":\"00000000-0000-0000-0000-000000000000\",\"prior_defaults_version\":\"1\",\"installed_defaults_version\":\"2\",\"prior_model\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"installed_model\":{{\"kind\":\"alias\",\"alias_id\":\"00000000-0000-0000-0000-000000000005\"}},\"prior_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"installed_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"caller_override\":{{\"reasoning_level\":{{\"kind\":\"inherit\"}},\"fast_mode\":{{\"kind\":\"inherit\"}},\"service_tier\":{{\"kind\":\"inherit\"}}}},\"adjustments\":[]}}}}}}"
+        );
+        let all_ones = nil.replace(
+            "00000000-0000-0000-0000-000000000000",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        );
+
+        assert_server_malformed(&nil);
+        assert_server_malformed(&all_ones);
+    }
+
+    #[test]
+    fn fast_mode_overlay_rejects_provider_default_on_the_wire() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"model_settings":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"provider_default"},"service_tier":{"kind":"inherit"}},"system_prompt":null}}"#,
+        );
+    }
+
+    /// INV-033: steering inherits its source turn and cannot carry an
+    /// independent settings contribution.
+    #[test]
+    fn inv033_steering_rejects_a_model_settings_override() {
+        let mut model_settings = ModelSettingsOverlay::inherit_all();
+        model_settings.reasoning_level = SettingOverlay::Value(ReasoningLevel::High);
+        let error = ClientFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ClientRequest::SubmitInput {
+                command_id: command(1).expect("fixture command identity is admitted"),
+                session_id: uuid(2),
+                content: InputContent::new(String::from("steer")),
+                expected_defaults_version: None,
+                model_settings,
+                delivery: Some(InputDelivery::Steer {
+                    expected_active_turn_id: uuid(3),
+                }),
+            },
+        )
+        .expect_err("steering cannot override its source turn settings");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    #[test]
+    fn capability_item_rejects_noncanonical_reasoning_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::ModelCapabilityItem {
+            selection_id: uuid(4),
+            capabilities: ModelCapabilities {
+                reasoning_levels: vec![ReasoningLevel::High, ReasoningLevel::Low],
+                fast_mode_supported: false,
+                service_tiers: Vec::new(),
+            },
+        };
+
+        let error = ServerFrame::try_new_for_version(ProtocolVersion::One, request(43)?, message)
+            .expect_err("capability sets use canonical ascending wire order");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_model_setting_tags_reject_unknown_members() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"model_settings":{"reasoning_level":{"kind":"inherit","extra":1},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"system_prompt":null}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"model_settings":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit","extra":1},"service_tier":{"kind":"inherit"}},"system_prompt":null}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"model_capability_item","selection_id":"00000000-0000-0000-0000-000000000004","capabilities":{"reasoning_levels":[],"fast_mode_supported":false,"service_tiers":[{"provider":"open_ai","value":"priority","extra":1}]}}}"#,
+        );
+    }
+
+    #[test]
+    fn settings_change_event_rejects_zero_prior_version() {
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::SessionModelSettingsChanged {
+                    command_id: command(2).expect("fixture command identity is admitted"),
+                    prior_defaults_version: CanonicalU64::new(0),
+                    installed_defaults_version: CanonicalU64::new(1),
+                    prior_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    installed_model: ModelSelection::Alias { alias_id: uuid(5) },
+                    prior_settings: provider_default_settings_snapshot_fixture(),
+                    installed_settings: provider_default_settings_snapshot_fixture(),
+                    caller_override: ModelSettingsOverlay::inherit_all(),
+                    adjustments: Vec::new(),
+                },
+            },
+        )
+        .expect_err("a settings change cannot precede the initial defaults epoch");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    #[test]
+    fn settings_change_event_rejects_a_no_op() {
+        let model = ModelSelection::Direct {
+            selection_id: uuid(4),
+        };
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::SessionModelSettingsChanged {
+                    command_id: command(2).expect("fixture command identity is admitted"),
+                    prior_defaults_version: CanonicalU64::new(1),
+                    installed_defaults_version: CanonicalU64::new(2),
+                    prior_model: model,
+                    installed_model: model,
+                    prior_settings: provider_default_settings_snapshot_fixture(),
+                    installed_settings: provider_default_settings_snapshot_fixture(),
+                    caller_override: ModelSettingsOverlay::inherit_all(),
+                    adjustments: Vec::new(),
+                },
+            },
+        )
+        .expect_err("a durable settings-change event must record an actual change");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    #[test]
+    fn turn_settings_event_rejects_a_mismatched_direct_selection() {
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    defaults_version: CanonicalU64::new(1),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(5),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: settings_snapshot_fixture().precedence.per_call,
+                    settings: settings_snapshot_fixture(),
+                    adjusted_from_selection_id: None,
+                    adjustments: Vec::new(),
+                },
+            },
+        )
+        .expect_err("only an alias can resolve to a distinct direct selection");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    #[test]
+    fn turn_settings_event_admits_model_independent_provider_defaults() {
+        let result = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    defaults_version: CanonicalU64::new(1),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: ModelSettingsOverlay::inherit_all(),
+                    settings: provider_default_settings_snapshot_fixture(),
+                    adjusted_from_selection_id: None,
+                    adjustments: Vec::new(),
+                },
+            },
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn turn_settings_event_requires_validation_for_non_default_settings() {
+        let mut settings = settings_snapshot_fixture();
+        settings.validated_for_selection_id = None;
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    defaults_version: CanonicalU64::new(1),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: settings.precedence.per_call,
+                    settings,
+                    adjusted_from_selection_id: None,
+                    adjustments: Vec::new(),
+                },
+            },
+        )
+        .expect_err("non-default settings require exact validation provenance");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    #[test]
+    fn adjustment_inventory_rejects_duplicates_order_and_excess() {
+        let duplicate = vec![
+            ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::XHigh,
+                to: ReasoningLevel::High,
+            },
+            ModelChangeAdjustment::ReasoningLevelCleared {
+                from: ReasoningLevel::High,
+            },
+        ];
+        let reversed = vec![
+            ModelChangeAdjustment::FastModeDisabled {},
+            ModelChangeAdjustment::ReasoningLevelCleared {
+                from: ReasoningLevel::High,
+            },
+        ];
+        let excessive = vec![
+            ModelChangeAdjustment::ReasoningLevelCleared {
+                from: ReasoningLevel::High,
+            },
+            ModelChangeAdjustment::FastModeDisabled {},
+            ModelChangeAdjustment::ServiceTierCleared {
+                from: ServiceTier::OpenAi(OpenAiServiceTier::Priority),
+            },
+            ModelChangeAdjustment::ServiceTierCleared {
+                from: ServiceTier::OpenAi(OpenAiServiceTier::Flex),
+            },
+        ];
+
+        assert_eq!(
+            validate_adjustments(&duplicate),
+            Err(FrameValidationError::ModelSettingsShape)
+        );
+        assert_eq!(
+            validate_adjustments(&reversed),
+            Err(FrameValidationError::ModelSettingsShape)
+        );
+        assert_eq!(
+            validate_adjustments(&excessive),
+            Err(FrameValidationError::ModelSettingsShape)
+        );
     }
 }

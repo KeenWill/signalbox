@@ -164,10 +164,21 @@ cargo test -p signalbox-client --test end_to_end \
 ```
 
 The companion ignored real-Anthropic path makes a live provider request and may
-incur cost. It runs only when all three opt-in values are supplied:
+incur cost. The checked-in catalog names the production installation placeholder
+for the exec supervisor, so first materialize a runtime copy with the host
+executable that Cargo actually builds (inside `devenv shell`):
 
 ```console
-SIGNALBOX_E2E_CONFIG_FILE=config/signalboxd.example.toml \
+supervisor="$(tooling/resolve-cargo-bin.sh "$PWD/Cargo.toml" "$PWD/target" \
+  signalbox-tools-exec signalbox-exec-supervisor)"
+signalbox-materialize-config config/signalboxd.example.toml \
+  target/signalboxd.live.toml "$supervisor"
+```
+
+The live path then runs only when all three opt-in values are supplied:
+
+```console
+SIGNALBOX_E2E_CONFIG_FILE=target/signalboxd.live.toml \
 SIGNALBOX_E2E_ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
 SIGNALBOX_E2E_SELECTION_ID=a5fec003-0edd-4118-96d1-18af31157bd3 \
   cargo test -p signalbox-client --test end_to_end \
@@ -193,13 +204,13 @@ SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox 
 The debug database connection explicitly disables TLS and must not be used as
 production connection configuration.
 
-The same harness can run the production runtime bridge against Anthropic. Copy
-and review [`config/signalboxd.example.toml`](config/signalboxd.example.toml),
-put only the API-key bytes in a mode-`0600` file, then run:
+The same harness can run the production runtime bridge against Anthropic. Review
+the checked-in example, materialize `target/signalboxd.live.toml` with the setup
+command above, put only the API-key bytes in a mode-`0600` file, then run:
 
 ```console
 SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \
-SIGNALBOX_CONFIG_FILE=config/signalboxd.example.toml \
+SIGNALBOX_CONFIG_FILE=target/signalboxd.live.toml \
 ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
   cargo run -p signalboxd --bin signalbox-debug -- \
   --anthropic a5fec003-0edd-4118-96d1-18af31157bd3 \

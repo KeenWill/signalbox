@@ -1,8 +1,14 @@
 # Configuration and credentials
 
+The daemon model-settings configuration surface is verified against the
+implementing stack through this PR (`agent/model-settings-execution`).
+
 The delegated tool-approval posture, judge selection, and daemon composition are
 verified against the implementing stack through this PR
 (`agent/approval-judge-daemon`).
+
+The daemon-local Git and execution-tool dependencies are verified against this
+stack through this PR (`agent/daemon-exec-tools`).
 
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
@@ -12,6 +18,9 @@ The user-vocabulary surface on this page was re-verified through PR #378
 
 The credential billing-kind registry and versioned per-model rate catalog are
 verified against PR #389 (`agent/cost-accounting`).
+
+The rule binding one provider-model spelling to one adapter is verified against
+this PR (`agent/adapter-model-catalogs`).
 
 This page describes the implemented configuration and credential behavior of
 Signalbox, verified against the implementing stack through PR #217
@@ -39,11 +48,16 @@ templates, and orchestration template digests are verified through PR #349
 verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
 export contract is verified through PR #347 (`agent/telemetry-export`). The
 static model-to-adapter mapping and append-only session credential history are
-verified through PR #373 (`agent/adapter-wiring`). The composed code-host,
-pull-request, workspace, and conversation tool families are verified through PR
-#377 (`agent/tools-daemon-wiring`). Placement-scoped native conversation reads
-are verified through PR #400 (`agent/scoped-visibility-wiring`). Invariant law
-lives in [docs/invariants.md](../invariants.md), cited here by tag. The runner
+verified through PR #373 (`agent/adapter-wiring`); the `claude_cli` mapping, its
+process paths, and its ambient-login profile rule are verified against this PR
+(`agent/wire-claude-cli-adapter`), and the `openai` mapping with its pinned
+profile and conditional key path against this PR (`agent/wire-openai-adapter`).
+The composed code-host, pull-request, workspace, and conversation tool families
+are verified through PR #377 (`agent/tools-daemon-wiring`). The mapped local Git
+identity and repository-root requirements are verified through this PR
+(`agent/daemon-wiring`). Placement-scoped native conversation reads are verified
+through PR #400 (`agent/scoped-visibility-wiring`). Invariant law lives in
+[docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are verified through PR #376 (`agent/runner-daemon`).
 Runner credential use during provisioning or execution remains committed
@@ -52,8 +66,8 @@ unimplemented functionality as labeled below.
 ## Process configuration
 
 `signalboxd` reads six unconditionally required deployment values, the optional
-runner-socket override, and the conditionally required Anthropic key path from
-the process environment at startup, and also consults `HOME`:
+runner-socket override, and the two conditionally required provider key paths
+from the process environment at startup, and also consults `HOME`:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -70,6 +84,9 @@ the process environment at startup, and also consults `HOME`:
 - `ANTHROPIC_API_KEY_FILE` — path to the file holding the current Anthropic API
   key value. It is required only when at least one static model mapping selects
   the Anthropic adapter; a Codex-only configuration does not consult it.
+- `OPENAI_API_KEY_FILE` — path to the file holding the current OpenAI API key
+  value, on the same conditional terms: required only when at least one static
+  model mapping selects the OpenAI adapter, and never consulted otherwise.
 - `BRAVE_API_KEY_FILE` — path to the file holding the current Brave Search API
   key value used by the daemon-composed `web_search` tool.
 - `GITHUB_TOKEN_FILE` — path to the file holding the current token shared by the
@@ -118,12 +135,12 @@ local cluster, so the refusals above are what stand between a production cluster
 and ambient configuration, not that path's name.
 
 A missing or empty required value, an unreadable or invalid model or template
-catalog, an invalid or unreadable referenced prompt file, or a failed Anthropic
-or GitHub transport construction fails startup at the `Configuration` phase,
-before any database contact. A present invalid static tool mapping fails during
-that same pre-database configuration pass. After the database connects, an
-invalid workspace root or any failed tool-suite construction also fails at the
-`Configuration` phase. All tool dependencies are supplied by parsed
+catalog, an invalid or unreadable referenced prompt file, or a failed Anthropic,
+OpenAI, or GitHub transport construction fails startup at the `Configuration`
+phase, before any database contact. A present invalid static tool mapping fails
+during that same pre-database configuration pass. After the database connects,
+an invalid workspace root or any failed tool-suite construction also fails at
+the `Configuration` phase. All tool dependencies are supplied by parsed
 configuration, the already-constructed database pool, or explicit credential and
 transport values; no tool family discovers ambient authority. Startup and
 shutdown logs carry the phase, an operator failure class, and small typed fields
@@ -133,13 +150,13 @@ not survive to the log: `run_hub` collapses every catalog-parse and
 adapter-construction variant (and likewise connection and migration errors) into
 a generic `Infrastructure` class carrying only its phase, so an operator cannot
 distinguish an unreadable catalog from an unknown field, bad version, or invalid
-limit (see Open edges). The seven deployment paths are accepted without I/O at
+limit (see Open edges). The eight deployment paths are accepted without I/O at
 environment parsing time; both catalogs and every template prompt file are read
 during startup. No credential file is read at startup (see credential lifecycle
 below).
 
-The deployed daemon supplies no Anthropic endpoint or timeout knob; it
-constructs the adapter with its defaults. The
+The deployed daemon supplies no Anthropic or OpenAI endpoint or timeout knob; it
+constructs each adapter with its defaults. The
 [runtime-substrate](runtime-substrate.md) page owns those transport defaults,
 positive caller-level exchange-timeout overrides, and the whole-exchange bound.
 Startup ordering, recovery scanning, and shutdown policy are
@@ -429,6 +446,40 @@ fail-closed:
 - Parse errors are typed, sanitized values; no file content appears in error
   text. (signalboxd erases the type before logging, as described above.)
 
+The optional `[model_settings]` table supplies the deployment-global settings
+overlay. Each `[[model_settings_profiles]]` entry gives an exact unique `name`
+and an overlay that a selectable model may name with `settings_profile`. Both
+overlay forms admit `reasoning_level`, `fast_mode`, and `service_tier` only.
+Omission means inherit; reasoning and service tier also accept
+`provider_default`, while fast mode accepts `enabled` or `disabled`. A service
+tier is a provider-tagged inline table. Duplicate profile names, unknown profile
+references, malformed values, or a configured lower-layer value outside the
+selected model's capabilities fail startup. A lower-layer combination that the
+selected adapter cannot enforce also fails startup, including a global
+combination masked by the selected profile. The precedence and durable
+provenance of these layers are owned by
+[Model and session settings](model-session-settings.md).
+
+Each `[[models]]` record declares its capability surface with
+`reasoning_levels`, `fast_mode`, and `service_tiers`. Omitted arrays are empty,
+and omitted fast mode means `unsupported`. `request_control` authorizes the
+adapter's request-level fast control. `alternate_target` additionally requires
+`fast_target_id`; that identity must name a non-selectable `[[serving_targets]]`
+record with its own exact `model_family`, provider model, `max_output_tokens`,
+and `context_window_tokens`. Every serving record states its family, and that
+family must name one declared `[[adapter_mappings]]` entry; the mapping, not the
+selectable record naming the target, supplies the serving record's adapter and
+credential profile, so nothing is inferred from the pointing model. A serving
+record omitting `model_family`, or naming an unmapped one, is a typed startup
+failure. Startup rejects a missing, selectable, cross-adapter, or otherwise
+conflicting alternate target. An enabled call uses that serving record's
+provider identity and output-token request limit, while the client's durable
+selection remains unchanged. Capability values are validated against the
+selected adapter's explicit mapping table during startup, so an adapter cannot
+silently drop a configured setting. Input guarding, output reservation, and
+post-response usage enforcement use the effective serving record's limits for
+that enabled call rather than the selectable source record's limits.
+
 The conversation-import bound was verified against PR #401
 (`agent/import-chunks-protocol`). The optional `[conversation_import]` table has
 exactly one `max_source_bytes` positive integer. It bounds both a single-shot
@@ -448,6 +499,8 @@ request must match one configured canonical origin before dispatch, so automatic
 approval cannot silently egress to an arbitrary host. Paths and queries remain
 unrestricted request data at an admitted origin.
 
+<a id="daemon-tool-mapping-registry"></a>
+
 Production signalboxd composition requires exactly one mapping for each of the
 four deployment-mapped tool families in the same closed-table style as
 `[[adapter_mappings]]`:
@@ -465,18 +518,42 @@ four deployment-mapped tool families in the same closed-table style as
 The `[[tool_mappings]]` array may be absent for compatibility with deployments
 that have not enabled the configured composition. In that case production
 preserves the base catalog, including the code-host suite, without constructing
-pull-request, workspace, or conversation dependencies. When the array is present
-it must already be complete: an unknown, missing, or duplicate family; an
-unknown field; any fixed value with another spelling; a relative workspace root;
-or a dependency field on the wrong family is a sanitized configuration failure.
+pull-request, workspace, conversation, local Git, or execution dependencies.
+When the array is present it must already be complete: an unknown, missing, or
+duplicate family; an unknown field; any fixed value with another spelling; a
+relative workspace root; or a dependency field on the wrong family is a
+sanitized configuration failure.
+
+The complete mapped composition also requires one `[git_identity]` table with
+exactly `author_name` and `author_email`. Both are nonempty, at most the Git
+identity bound of 256 UTF-8 bytes, have no leading or trailing whitespace,
+control character, `<`, or `>`, and are injected as both author and committer
+identity; no ambient Git configuration or process environment supplies either
+value. A missing table, unknown field, invalid value, or identity construction
+failure is a sanitized configuration failure.
+
+The complete mapped composition also requires one `[daemon_tools]` table with
+exactly `exec_supervisor_executable`. The value is an absolute path to an
+existing file naming the separately packaged `signalbox-exec-supervisor`
+program. A missing table, unknown field, relative path, or path that is not a
+file is a sanitized configuration failure. Production resolves an admitted
+symlink to its canonical regular-file path and passes that canonical path to the
+execution suite, which pins the program during construction; the daemon never
+derives it from its own executable path.
+
 The root is opened once during tool construction and its pinned authority is
-cloned into both workspace suites, so a nonexistent, non-directory, or
-final-symlink root also fails startup. The GitHub policy admits exactly
-`https://api.github.com:443` for authenticated requests. The code-host
-`change_request_ci_job_log` operation retains the tool-loop-owned exception for
-one credential-free download from its validated, pinned, bounded public HTTPS
-redirect destination; the pull-request suite has no such exception. Model
-arguments cannot widen either admission rule.
+cloned into both workspace suites. The local Git suite independently binds that
+same root and requires a direct main worktree whose `.git` directory is inside
+the root. The three execution tools bind that root and share the one pinned
+supervisor runner. A nonexistent, non-directory, final-symlink, non-repository,
+linked, or externally administered root therefore fails startup for the complete
+mapped composition. The mapping-free base composition admits no root and
+constructs no Git or execution suite, so existing base-only deployments remain
+valid. The GitHub policy admits exactly `https://api.github.com:443` for
+authenticated requests. The code-host `change_request_ci_job_log` operation
+retains the tool-loop-owned exception for one credential-free download from its
+validated, pinned, bounded public HTTPS redirect destination; the pull-request
+suite has no such exception. Model arguments cannot widen either admission rule.
 
 The optional `[tool_approval_postures]` table maps an exact composed tool name
 to one of `auto`, `delegated`, or `human`. The parser rejects non-string or
@@ -539,7 +616,10 @@ Each `[[models]]` entry defines one direct selection:
   [identity-and-commands](identity-and-commands.md) material.
 - `model_family` — exact key of one `[[adapter_mappings]]` entry.
 - `provider_model` — the exact provider-native model spelling; must be nonempty
-  and unpadded.
+  and unpadded. One spelling routes to exactly one adapter across the document:
+  declaring it under two families whose mappings name different adapters is a
+  typed startup failure, so a deployment serving one provider through two
+  surfaces gives each surface its own spelling.
 - `max_output_tokens` — required positive `u32` output-token ceiling.
 - `context_window_tokens` — required positive `u32` context ceiling, not smaller
   than `max_output_tokens`.
@@ -554,16 +634,37 @@ Each `[[models]]` entry defines one direct selection:
   configuration error; omitting all five is valid and yields no dollar figure
   for that model.
 
-This build provides exactly `anthropic` and `codex_cli`. Anthropic mappings use
-the declared `anthropic-primary` profile. Codex mappings may select any declared
+This build provides exactly `anthropic`, `openai`, `claude_cli`, and
+`codex_cli`. Anthropic mappings use the declared `anthropic-primary` profile,
+and OpenAI mappings likewise use the declared `openai-primary` profile: each
+direct HTTP adapter has one deployment key file bound to that exact non-secret
+reference, so a mapping naming any other profile is a typed startup failure.
+OpenAI admits the reasoning levels `none` through `max` — `ultra` is the Codex
+effort value and is rejected — and the provider-tagged tiers `auto`, `default`,
+`flex`, `scale`, `priority`, and `fast`. Codex mappings may select any declared
 profile, but every Codex family in one daemon configuration must select the same
 one because the composed CLI runtime has one ambient authentication context. A
 Codex mapping also requires `[codex_cli]` with an absolute executable path
 naming an existing regular file and an absolute, existing `working_directory`;
 construction validates that shape and platform support without invoking Codex or
 inspecting login state. The Codex CLI owns its external login exactly as the
-adapter contract specifies. OpenAI HTTP and Claude CLI mappings are not provided
-by this build.
+adapter contract specifies.
+
+Claude Code mappings follow that same CLI shape. They may select any declared
+profile under the same one-ambient-login rule — every `claude_cli` family in one
+daemon configuration must select the same profile — and the checked-in example
+names `claude-subscription-primary`. A Claude mapping requires `[claude_cli]`
+with three deployment-named absolute paths: `executable` and
+`mcp_bridge_executable` must each name an existing regular file, and
+`working_directory` must name an existing directory. The bridge is the separate
+`signalbox-claude-mcp-bridge` program the adapter spawns as Claude Code's only
+tool server; the deployment names it exactly the way it names the CLI, so the
+daemon derives no executable path from its own image. Construction validates
+that shape and platform support without invoking Claude Code or inspecting login
+state, and Claude Code owns its external login exactly as its adapter contract
+specifies. Because Claude Code exposes no service tier, any `service_tiers`
+entry on a Claude model is a typed startup failure, while its reasoning set and
+either fast-mode form are admitted.
 
 Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling
@@ -675,33 +776,50 @@ bound is rejected before its contents are read. There is no newline trimming or
 interpolation.
 
 One valid table becomes an immutable resolved bundle containing the exact model
-request, system prompt, and dangerous-tool blanket. Its content digest is
-domain-separated SHA-256 over length-framed canonical values. Each frame is an
-unsigned 64-bit big-endian byte length followed by that many exact bytes. The
-frames, in order, are: ASCII `signalbox/session-template/content-digest/v1`; the
-template version as eight unsigned big-endian bytes; ASCII `direct` or `alias`;
-the selected UUID as its 16 network-order bytes; ASCII `disabled` or
-`approve_all`; and the exact UTF-8 prompt bytes. The name and source form are
-excluded: an inline and file-backed prompt with the same version and bundle have
-the same digest, while changing any copied value or the template version changes
-it. The stable vector for version 7, alias
+request, copied model-settings snapshot, system prompt, and dangerous-tool
+blanket. Its content digest is domain-separated SHA-256 over length-framed
+canonical values. Each frame is an unsigned 64-bit big-endian byte length
+followed by that many exact bytes. The frames, in order, are: ASCII
+`signalbox/session-template/content-digest/v2`; the template version as eight
+unsigned big-endian bytes; ASCII `direct` or `alias`; the selected UUID as its
+16 network-order bytes; ASCII `disabled` or `approve_all`; the exact UTF-8
+prompt bytes; and the 32-byte canonical model-settings digest described below.
+The name and source form are excluded: an inline and file-backed prompt with the
+same version and bundle have the same digest, while changing any copied value or
+the template version changes it. The stable vector for version 7, alias
 `30000000-0000-4000-8000-000000000003`, `ApproveAll`, and prompt
-`Review the change and report concrete findings.` is hexadecimal
-`00c08275577e73f1565716b5c886861a0f19ea4f2c9cb9e8f93034d030b9796d`. The daemon
+`Review the change and report concrete findings.`, with provider-default model
+settings is hexadecimal
+`88de5be79c6130058e68541d508a2ceabe99e25331bd24a9fdc4a9e34d34d8ba`. The daemon
 exposes only sorted name/version summaries to clients; clients never receive
 prompt text or parse this file.
 
+The canonical model-settings digest uses the same framing. Its first frame is
+ASCII `signalbox/model-settings/snapshot-digest/v1`. For each precedence layer
+in `per_call`, `session`, `profile`, `global_default` order, it then frames that
+layer name followed by its reasoning, fast-mode, and service-tier contribution.
+Reasoning uses `inherit`, `provider_default`, or the lowercase domain level;
+fast mode uses `inherit`, `disabled`, or `enabled`; and service tier uses
+`inherit`, `provider_default`, or its lowercase provider and value separated by
+`:` (the Codex CLI provider tag is `codex_cli`). The final frame is
+`unbound_provider_defaults`, or `validated_selection` followed by the validating
+direct selection's 16 network-order UUID bytes. Resolved values and source
+labels are not repeated because the admitted snapshot derives them uniquely from
+this complete precedence chain.
+
 Review orchestration retains a second digest for each generated template. It is
 domain-separated SHA-256 over the same unsigned-64-bit length framing. Its
-frames, in order, are ASCII `signalbox/review-template/orchestration-digest/v1`;
+frames, in order, are ASCII `signalbox/review-template/orchestration-digest/v2`;
 the exact stage or concern key; the source version as eight unsigned big-endian
 bytes; ASCII `direct` or `alias`; the selected UUID's 16 network-order bytes;
-ASCII `disabled` or `approve_all`; SHA-256 of the exact shared-header bytes; and
-SHA-256 of the exact body bytes. The key frame makes equal prompt bytes used for
-different stages or concerns distinct orchestration inputs. This orchestration
-digest does not replace the ordinary content digest: template provenance uses
-the complete assembled prompt digest above, while the immutable orchestration
-attempt uses the header/body/key-aware digest.
+ASCII `disabled` or `approve_all`; SHA-256 of the exact shared-header bytes;
+SHA-256 of the exact body bytes; and the generated template's 32-byte ordinary
+content digest. The key frame makes equal prompt bytes used for different stages
+or concerns distinct orchestration inputs. The content-digest frame binds the
+copied model-settings snapshot as well as the assembled prompt. This
+orchestration digest does not replace the ordinary content digest: template
+provenance uses the complete assembled bundle digest above, while the immutable
+orchestration attempt uses the header/body/key-aware digest.
 
 Creation by template name first consults the user-global durable-command
 registry by command identity. An existing create-session claim is reconstituted
@@ -798,25 +916,25 @@ deployment-side rules that code cannot enforce are stated in
   safe in configuration, errors, logs, and durable records; values are safe only
   at the adapter boundary. Why: value rotation preserves the stable name so no
   record or log ever needs the secret (INV-035). The composition constants are
-  `anthropic-primary`, `codex-subscription-primary`, `brave-search-primary`, and
-  `github-primary`; model configuration may declare additional non-secret
-  profiles.
+  `anthropic-primary`, `openai-primary`, `codex-subscription-primary`,
+  `claude-subscription-primary`, `brave-search-primary`, and `github-primary`;
+  model configuration may declare additional non-secret profiles.
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
-  the Anthropic, Brave Search, and GitHub references to their corresponding
-  deployment paths and reads the file for every Anthropic model call, web
-  search, code-host operation, or pull-request tool operation preparation;
-  nothing is cached. Why: atomic file replacement rotates any credential without
-  restarting signalboxd, and an in-flight operation keeps the value it
-  authenticated with. Resolution is reference-scoped: a foreign reference fails
-  typed `Unmapped`; a missing file is `Unavailable`; an unreadable file is
-  `Unreadable` — all reference-only errors.
-- **External Codex login.** A Codex mapping's profile names the
-  operator-selected ambient Codex CLI login. The default example uses
-  `codex-subscription-primary`. The daemon and adapter neither locate nor read
-  its credential store and invent no credential-value shape; the fresh CLI
-  process resolves login state under the adapter's existing environment
-  contract. The profile's configured billing kind labels derived cost; adapter
-  kind does not.
+  the Anthropic, OpenAI, Brave Search, and GitHub references to their
+  corresponding deployment paths and reads the file for every Anthropic or
+  OpenAI model call, web search, code-host operation, or pull-request tool
+  operation preparation; nothing is cached. Why: atomic file replacement rotates
+  any credential without restarting signalboxd, and an in-flight operation keeps
+  the value it authenticated with. Resolution is reference-scoped: a foreign
+  reference fails typed `Unmapped`; a missing file is `Unavailable`; an
+  unreadable file is `Unreadable` — all reference-only errors.
+- **External CLI logins.** A Codex or Claude mapping's profile names the
+  operator-selected ambient login of that CLI. The default examples use
+  `codex-subscription-primary` and `claude-subscription-primary`. The daemon and
+  adapter neither locate nor read either credential store and invent no
+  credential-value shape; the fresh CLI process resolves login state under the
+  adapter's existing environment contract. The profile's configured billing kind
+  labels derived cost; adapter kind does not.
 - **The value is the file's bytes less trailing line termination.** The read
   drops trailing `\n` and `\r` bytes and retains every other byte exactly,
   including leading and interior whitespace. Why: the tools that write a
@@ -847,13 +965,13 @@ deployment-side rules that code cannot enforce are stated in
   legacy entry for a differently named configured family; Codex routes never
   may. A later explicit credential event ends this migration-only aliasing
   because resolution then uses only that complete latest snapshot.
-- **Resolution timing.** The Anthropic adapter resolves the durably pinned
+- **Resolution timing.** Each direct HTTP adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
   before send authorization — and scopes the resulting value to that request
-  (INV-002 boundary type). Codex validates that the operation carries its pinned
-  external-login reference and then prepares the process capability without
-  reading a credential value. The shared cancellation contract for preparation
-  and execution is owned by
+  (INV-002 boundary type). Each CLI adapter validates that the operation carries
+  its pinned external-login reference and then prepares the process capability
+  without reading a credential value. The shared cancellation contract for
+  preparation and execution is owned by
   [model-call-execution](model-call-execution.md#staged-execution). A code-host
   tool resolves its fixed `github-primary` reference only after the durable tool
   attempt is authorized `InFlight` and immediately before its typed transport

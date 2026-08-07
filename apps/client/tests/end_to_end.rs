@@ -25,10 +25,9 @@ use signalbox_application::{
     UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
-    ActivatedAcceptedInputTurn, DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition,
-    NormalizedToolArguments, ProviderModelIdentity, ResolvedProviderTarget, SessionId,
-    SessionTemplateName, ToolEffectClass, ToolExecutionErrorDetail, ToolName,
-    ToolPermissionDefault,
+    DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    ProviderModelIdentity, ResolvedProviderTarget, SessionId, SessionTemplateName, ToolEffectClass,
+    ToolExecutionErrorDetail, ToolName, ToolPermissionDefault,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -202,7 +201,7 @@ async fn spawn_client(
 
 fn require_activated_turn(
     outcome: StartEligibleTurnOutcome,
-) -> Result<Box<ActivatedAcceptedInputTurn>, io::Error> {
+) -> Result<Box<signalbox_domain::ActivatedTurn>, io::Error> {
     match outcome {
         StartEligibleTurnOutcome::Activated(activated) => Ok(activated),
         StartEligibleTurnOutcome::NoEligibleTurn => Err(io::Error::other(

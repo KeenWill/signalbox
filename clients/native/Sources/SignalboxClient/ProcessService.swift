@@ -120,17 +120,20 @@ public struct SignalboxPreparedInputSubmission: Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let content: String
   public let expectedDefaultsVersion: SignalboxCanonicalUInt64
+  public let modelSelection: SignalboxModelSelection
 
   public init(
     commandID: SignalboxCommandID,
     sessionID: SignalboxCanonicalUUID,
     content: String,
-    expectedDefaultsVersion: SignalboxCanonicalUInt64
+    expectedDefaultsVersion: SignalboxCanonicalUInt64,
+    modelSelection: SignalboxModelSelection
   ) {
     self.commandID = commandID
     self.sessionID = sessionID
     self.content = content
     self.expectedDefaultsVersion = expectedDefaultsVersion
+    self.modelSelection = modelSelection
   }
 
   fileprivate var request: SignalboxProcessClientRequest {
@@ -233,19 +236,25 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
   public let activeTurnID: SignalboxCanonicalUUID
   public let content: String
   public let expectedDefaultsVersion: SignalboxCanonicalUInt64
+  public let descendantScope: SignalboxDescendantTerminationScope
+  public let modelSelection: SignalboxModelSelection
 
   public init(
     commandID: SignalboxCommandID,
     sessionID: SignalboxCanonicalUUID,
     activeTurnID: SignalboxCanonicalUUID,
     content: String,
-    expectedDefaultsVersion: SignalboxCanonicalUInt64
+    expectedDefaultsVersion: SignalboxCanonicalUInt64,
+    descendantScope: SignalboxDescendantTerminationScope = .parentAlone,
+    modelSelection: SignalboxModelSelection
   ) {
     self.commandID = commandID
     self.sessionID = sessionID
     self.activeTurnID = activeTurnID
     self.content = content
     self.expectedDefaultsVersion = expectedDefaultsVersion
+    self.descendantScope = descendantScope
+    self.modelSelection = modelSelection
   }
 
   fileprivate var request: SignalboxProcessClientRequest {
@@ -254,7 +263,8 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
       sessionID: sessionID,
       expectedActiveTurnID: activeTurnID,
       content: content,
-      expectedDefaultsVersion: expectedDefaultsVersion
+      expectedDefaultsVersion: expectedDefaultsVersion,
+      descendantScope: descendantScope
     )
   }
 }
@@ -812,7 +822,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       commandID: try commandID(),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -831,6 +842,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     guard submitted.sessionID == submission.sessionID else {
       throw SignalboxProcessServiceError.unexpectedMessage(
         "The input-submission receipt named a different session."
+      )
+    }
+    guard submitted.modelSettings.matches(submission.modelSelection) else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The input-submission receipt settings named a different direct model."
       )
     }
     return submitted
@@ -853,7 +869,9 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     try await mutation(
       creation.request,
       success: { message in
-        guard case .sessionCreated(let sessionID) = message else {
+        guard case .sessionCreated(let sessionID, let modelSettings) = message,
+          modelSettings.matches(creation.modelSelection)
+        else {
           return nil
         }
         return sessionID
@@ -894,23 +912,12 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     try await mutation(
       creation.request,
       success: { message in
-        switch message {
-        case .sessionCreated(let sessionID):
-          return sessionID
-        case .inputSubmitted, .toolRequestDecided, .sessionDefaults,
-          .sessionsStart, .sessionSummary, .sessionsEnd, .sessionMetadataPageStart,
-          .sessionMetadataSummary, .sessionMetadataPageEnd, .sessionMetadata,
-          .sessionMetadataReplaced, .conversationImportInserted,
-          .conversationImportAlreadyImported, .conversationPageStart,
-          .conversationSummary, .conversationPageEnd, .importedConversationStart,
-          .importedConversationEntry, .importedConversationEnd, .modelAliasesStart,
-          .modelAliasSummary, .modelAliasesEnd, .transcriptSnapshotStart,
-          .transcriptTurn, .transcriptModelCallUsage, .transcriptModelCallsEnd,
-          .transcriptEntry, .transcriptTextEntry, .transcriptContent,
-          .transcriptSnapshotEnd, .sessionEvent, .providerTextDelta,
-          .protocolError, .unknown:
+        guard case .sessionCreated(let sessionID, let modelSettings) = message,
+          modelSettings.matches(creation.modelSelection)
+        else {
           return nil
         }
+        return sessionID
       }
     )
   }
@@ -960,7 +967,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       sessionID: session.id,
       activeTurnID: activeTurnID,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -979,6 +987,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     guard submitted.sessionID == prepared.sessionID else {
       throw SignalboxProcessServiceError.unexpectedMessage(
         "The stop receipt named a different session."
+      )
+    }
+    guard submitted.modelSettings.matches(prepared.modelSelection) else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The stop receipt settings named a different direct model."
       )
     }
     return submitted

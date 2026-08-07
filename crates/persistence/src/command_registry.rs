@@ -32,7 +32,11 @@ pub(crate) const UPDATE_SESSION_PLACEMENT_KIND: &str =
     durable_command_kind_to_str(CommandKind::UpdateSessionPlacement);
 
 pub(crate) const fn create_session_storage_version_is_supported(version: i16) -> bool {
-    matches!(version, 1..=4 | 6)
+    matches!(version, 1..=4 | 6..=7)
+}
+
+pub(crate) const fn imported_session_storage_version_is_supported(version: i16) -> bool {
+    matches!(version, 1..=3 | 5)
 }
 
 #[derive(Clone, Copy)]
@@ -50,21 +54,21 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 11] = [
         spelling: CREATE_SESSION_KIND,
         typed_table: "create_session_command",
         minimum_version: 1,
-        maximum_version: 6,
+        maximum_version: 7,
     },
     CommandKindDefinition {
         kind: CommandKind::CreateSessionFromImportedFrontier,
         spelling: CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND,
         typed_table: "create_session_from_imported_frontier_command",
         minimum_version: 1,
-        maximum_version: 3,
+        maximum_version: 5,
     },
     CommandKindDefinition {
         kind: CommandKind::ReplaceSessionDefaults,
         spelling: REPLACE_SESSION_DEFAULTS_KIND,
         typed_table: "replace_session_defaults_command",
         minimum_version: 1,
-        maximum_version: 3,
+        maximum_version: 4,
     },
     CommandKindDefinition {
         kind: CommandKind::ReplaceSessionMetadata,
@@ -78,7 +82,7 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 11] = [
         spelling: SUBMIT_INPUT_KIND,
         typed_table: "submit_input_command",
         minimum_version: 1,
-        maximum_version: 1,
+        maximum_version: 2,
     },
     CommandKindDefinition {
         kind: CommandKind::DecideToolRequest,
@@ -128,6 +132,9 @@ impl CommandKindDefinition {
     const fn supports_version(self, version: i16) -> bool {
         match self.kind {
             CommandKind::CreateSession => create_session_storage_version_is_supported(version),
+            CommandKind::CreateSessionFromImportedFrontier => {
+                imported_session_storage_version_is_supported(version)
+            }
             _ => version >= self.minimum_version && version <= self.maximum_version,
         }
     }
@@ -256,7 +263,8 @@ mod tests {
 
     use super::{
         COMMAND_KIND_DEFINITIONS, CommandKind, RegistryCorruption,
-        create_session_storage_version_is_supported, sole_typed_record,
+        create_session_storage_version_is_supported, imported_session_storage_version_is_supported,
+        sole_typed_record,
     };
 
     fn database_admitted_command_kinds() -> BTreeSet<String> {
@@ -307,6 +315,10 @@ mod tests {
         assert!(create_session_storage_version_is_supported(4));
         assert!(!create_session_storage_version_is_supported(5));
         assert!(create_session_storage_version_is_supported(6));
+        assert!(create_session_storage_version_is_supported(7));
+        assert!(imported_session_storage_version_is_supported(3));
+        assert!(!imported_session_storage_version_is_supported(4));
+        assert!(imported_session_storage_version_is_supported(5));
     }
 
     #[test]
