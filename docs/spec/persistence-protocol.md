@@ -1336,8 +1336,8 @@ authorized substitution. The successor's call remains subject to
 `model_call_attempt_once`, pins the same target and a different profile, and
 cannot exist without that complete predecessor proof. A credential-availability
 wait must atomically retain the active turn slot and store the immutable
-pool-policy identity, the exhausted chain's member evidence, and the optional
-earliest reset required by
+pool-policy identity, every exhausted-chain member's evidence and optional
+reset, and the optional earliest-reset deadline required by
 [turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
 Reconstitution and wake must fail closed on partial or mismatched evidence. This
 paragraph constrains that future schema; no present storage surface provides it.

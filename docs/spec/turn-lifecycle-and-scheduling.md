@@ -96,13 +96,14 @@ path, or process state supplies the pool-exhaustion wait in
 [model-call execution](model-call-execution.md#availability-successor-calls),
 and no present runtime can enter it. Its implementing child must add a distinct
 active phase that retains the session slot and durably binds the frozen
-pool-policy snapshot, the exhausted chain's member evidence, and its optional
-earliest reset. Startup may reconstitute it only from that complete evidence.
-The scheduler must make a deadline reached or a durable member-availability
-update eligible; release returns the same turn to `Running` with a fresh attempt
-and a fresh availability chain while retaining durable membership exclusions and
-profile quarantines. This compatibility constraint does not add that phase to
-the implemented closed vocabulary above.
+pool-policy snapshot, every exhausted-chain member's evidence and optional
+reset, and the earliest of those resets as its optional deadline. Startup may
+reconstitute it only from that complete evidence. The scheduler must make a
+deadline reached or a durable member-availability update eligible; release
+returns the same turn to `Running` with a fresh attempt and a fresh availability
+chain while carrying forward member evidence whose reset has not passed, every
+durable membership exclusion, and every profile quarantine. This compatibility
+constraint does not add that phase to the implemented closed vocabulary above.
 
 At most one turn per session is `active`. Enforcement is layered:
 

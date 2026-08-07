@@ -751,9 +751,16 @@ make two credentials and could not authorize a successor call.
 **`file`** names an absolute deployment-owned path, read per preparation and
 never cached, narrowed by the trailing-line-termination rule below. The
 `anthropic` adapter forms an HTTP header from the value; `codex_cli` supplies it
-to the fresh process under the profile's `env_key`. This is the delivery for
-every credential that has an external source of truth — provider API keys, and
-any long-lived bearer token a provider's own tooling mints for unattended use.
+to the fresh process under the profile's `env_key`. A direct-HTTP adapter
+rejects `env_key` because it does not use a child environment. A CLI adapter
+requires the one credential variable its adapter contract names —
+`OPENAI_API_KEY` for `codex_cli` — and rejects every other value, including
+forwarded and process-control names such as `HOME`, `CODEX_HOME`, and `PATH`.
+This is the delivery for every credential that has an external source of truth —
+provider API keys, and any long-lived bearer token a provider's own tooling
+mints for unattended use. For one adapter, an absolute file path may appear on
+only one profile in a document: two names for the same bytes are not independent
+credentials and cannot authorize two attempts in one successor chain.
 [Credential operations policy](#credential-operations-policy) applies to it
 unchanged.
 
@@ -798,7 +805,9 @@ its own.
 `client_id`, `token_url`, `device_authorization_url`, and `scopes` its provider
 requires. These are configuration, never build-provided constants: which OAuth
 client a deployment presents is the operator's decision and is recorded in the
-operator's own document, not asserted by this build.
+operator's own document, not asserted by this build. Both endpoint values must
+be absolute `https` URLs; startup rejects every other scheme and provides no
+plaintext or local-host exception.
 
 **Committed unimplemented functionality — OAuth delivery and administration.**
 No present configuration composition, runtime path, API, process message, CLI
@@ -835,8 +844,10 @@ provider rotation, its persistence commit is ambiguous, or the daemon restarts
 with the marker still present, it never replays the stored token. It first
 rereads the durable generation: a committed replacement is adopted; an uncleared
 marker quarantines the profile and requires re-provisioning. Access tokens are
-held in memory; a clean restart costs one refresh per profile and keeps them out
-of the database entirely.
+held in memory. A clean restart discards them without contacting any provider;
+the first later call preparation that needs a profile lazily refreshes it. This
+keeps access tokens out of the database and preserves configuration-independent
+recovery even when a token endpoint is unavailable.
 
 Dispatch supplies each invocation a scratch credential home carrying a
 daemon-minted access token, discarded when the process ends. The refresh token
@@ -895,13 +906,13 @@ without renumbering the rest.
 
 The five admitted actions are:
 
-| Action               | Effect when its trigger fires for a member                                                                                                            |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `stay`               | The member keeps the session. The failure terminalizes as it would with no pool.                                                                      |
-| `switch_next_turn`   | The turn fails as it would with no pool. The next turn's preparation excludes this member.                                                            |
-| `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md#availability-successor-calls)). |
-| `avoid_new_sessions` | Sessions with a prior completed call through the member keep it; preparation for a session without one on this pool excludes it.                      |
-| `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an operator clears it.                                          |
+| Action               | Effect when its trigger fires for a member                                                                                                                 |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stay`               | The member keeps the session. A failure terminalizes as it would with no pool.                                                                             |
+| `switch_next_turn`   | A failure terminalizes as it would with no pool; low headroom does not fail or replace the current turn. The next turn's preparation excludes this member. |
+| `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md#availability-successor-calls)).      |
+| `avoid_new_sessions` | Sessions with a prior completed call through the member keep it; preparation for a session without one on this pool excludes it.                           |
+| `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an operator clears it.                                               |
 
 `switch_next_turn` creates a durable pending displacement scoped to the session,
 pool-policy snapshot, and member that observed the trigger. It survives restart
@@ -942,25 +953,26 @@ call's `Prepared` record also advances the cursor to the member after the one it
 selected, wrapping in declared order. A failed preparation advances nothing;
 restart preserves the cursor. Stickiness and a sole admitted member require no
 tie-break and do not advance it. Stickiness needs no separate durable state:
-preparation prefers the member the session's most recent completed call on that
-pool pinned, so a session stays on one account until a trigger displaces it.
-When the pool admits no member, `on_pool_exhausted` decides — `park` parks the
-turn in the durable wait carrying the earliest reset the pool's members
-reported. When no excluded member reports a reset, `park` records an indefinite
-durable wait with no deadline; only an operator clear, a zero-cost no-model
-availability probe, or another durable member-availability update wakes it. A
-restart alone does not. `fail` instead fails the turn as a known failure.
-Quarantine is durable and scoped to the profile rather than to the pool that
-observed it, because a rejected credential is a property of the account: a
-profile ranked in two pools is excluded from both. It is cleared only by an
-explicit operator command, or by a probe that costs nothing and calls no model
-where the adapter offers one — never by a timer, since a revoked credential does
-not heal on a schedule, and never by a restart. Why an operator command rather
-than rediscovery: for a `codex_home` or `oauth` profile the repair is an
-interactive re-authorization the operator performs, so the operator knows the
-moment it is fixed, and rediscovering it instead would spend a real model call
-to learn what they could have said. Reading a quarantine record is never on the
-recovery path for acknowledged work, so INV-034 is unaffected.
+preparation prefers the member the session's most recent `Prepared` call on that
+pool pinned, including a call that later failed under `stay`, so a session stays
+on one account until a trigger displaces it. When the pool admits no member,
+`on_pool_exhausted` decides — `park` parks the turn in the durable wait carrying
+the earliest reset the pool's members reported. When no excluded member reports
+a reset, `park` records an indefinite durable wait with no deadline; only an
+operator clear, a zero-cost no-model availability probe, or another durable
+member-availability update wakes it. A restart alone does not. `fail` instead
+fails the turn as a known failure. Quarantine is durable and scoped to the
+profile rather than to the pool that observed it, because a rejected credential
+is a property of the account: a profile ranked in two pools is excluded from
+both. It is cleared only by an explicit operator command, or by a probe that
+costs nothing and calls no model where the adapter offers one — never by a
+timer, since a revoked credential does not heal on a schedule, and never by a
+restart. Why an operator command rather than rediscovery: for a `codex_home` or
+`oauth` profile the repair is an interactive re-authorization the operator
+performs, so the operator knows the moment it is fixed, and rediscovering it
+instead would spend a real model call to learn what they could have said.
+Reading a quarantine record is never on the recovery path for acknowledged work,
+so INV-034 is unaffected.
 
 The durable record is unchanged in kind. A session's credential history event
 carries a complete family-to-pool-policy snapshot where it previously carried a
@@ -980,12 +992,15 @@ undeclared pool, members disagreeing on adapter, a priority that is not a
 positive integer, an unknown tie-break or exhaustion value, an unknown action,
 an action on a trigger that does not admit it, and any unknown field. It also
 rejects `headroom_reserve_percent`, `tie_break = "least_used"`, and any
-`on_headroom_low` action other than `stay` whenever the pool's adapter reports
-no remaining capacity — which in this build is every adapter, because no
-composed runtime observes it. Why: a configured reserve that silently never
-fires would read as protection the deployment does not have. The keys are
-admitted by the grammar so that a later adapter supplying the observation needs
-no configuration contract change; the observation itself is routed through
+`on_headroom_low` action other than `stay` in this build, because no composed
+runtime observes remaining capacity. Reporting capacity alone does not admit
+`least_used`: a later accepted adapter contract must first define the normalized
+quantity, observation lifetime, and deterministic secondary tie-break it uses.
+Why: a configured reserve or selection rule that silently never fires — or whose
+metric varies by implementation — would read as protection the deployment does
+not have. The keys are admitted by the grammar so that supplying that later
+contract needs no configuration grammar change; the observation itself is routed
+through
 [model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 
 A one-member pool is the ordinary single-account deployment and requires no

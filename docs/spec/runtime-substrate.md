@@ -687,12 +687,13 @@ adapter supports only its ambient credential home and keeps `OPENAI_API_KEY` and
 every other direct credential value outside the cleared child environment. The
 configuration grammar admits `file`, but the present composition rejects it as
 undelivered. Its implementing child must resolve the selected profile during
-preparation and add only that profile's validated `env_key` and value as an
-operation-scoped child override after clearing the parent environment. The value
-must be absent from argv, logs, debug output, retained evidence, and every later
-spawn, and must seed the adapter's exact-value redaction before any
-provider-controlled output leaves the crate. This future override does not
-weaken ambient mode's existing exclusion test.
+preparation. The adapter admits only the exact `OPENAI_API_KEY` `env_key`; every
+forwarded or process-control name is invalid configuration. It adds the selected
+value as an operation-scoped child override after clearing the parent
+environment. The value must be absent from argv, logs, debug output, retained
+evidence, and every later spawn, and must seed the adapter's exact-value
+redaction before any provider-controlled output leaves the crate. This future
+override does not weaken ambient mode's existing exclusion test.
 
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.

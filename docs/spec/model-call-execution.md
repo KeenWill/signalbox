@@ -597,9 +597,11 @@ excluded from the current availability-successor chain, so at most one call per
 member exists per chain and the longest possible chain is the pool's member
 count. A successful call ends that chain before any tool-round continuation is
 prepared. Releasing a parked wait also ends the exhausted chain; the resumed
-turn starts a fresh chain and recomputes admission, clearing only those
-chain-local exclusions while retaining every durable membership exclusion and
-profile quarantine.
+turn starts a fresh chain and recomputes admission. It drops a chain-local
+member exclusion only when that member's reported reset has passed or a durable
+availability update invalidates it; every later or absent reset remains initial
+exclusion evidence in the fresh chain. Every durable membership exclusion and
+profile quarantine is retained as well.
 
 When no member remains admissible, the pool's `on_pool_exhausted` decides. If
 the chain observed a qualifying provider failure, `fail` fails the turn as a
@@ -607,11 +609,12 @@ known failure carrying the last observed cause. A turn that reaches an already
 exhausted pool before issuing any call instead fails with the distinct
 `credential_pool_exhausted` preparation cause and the frozen policy's durable
 member-exclusion evidence; it never fabricates provider evidence or borrows a
-stale provider cause. `park` parks the turn in a durable wait carrying the
-earliest reset its members reported, which the scheduler releases when that time
-passes. If no member reported a reset, the wait has no deadline and only a
-durable member-availability update wakes it. A parked turn holds its session
-slot, appends no failure entry, and is not a terminal outcome.
+stale provider cause. `park` parks the turn in a durable wait carrying every
+excluded member's evidence and optional reset, plus the earliest reset as its
+deadline. The scheduler releases it when that deadline passes. If no member
+reported a reset, the wait has no deadline and only a durable
+member-availability update wakes it. A parked turn holds its session slot,
+appends no failure entry, and is not a terminal outcome.
 
 Each successor durably records the predecessor call it follows and the cause
 that authorized it, so a chain reads as evidence rather than as two calls that
