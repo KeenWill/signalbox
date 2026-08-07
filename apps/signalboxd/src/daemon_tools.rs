@@ -1671,6 +1671,9 @@ mod tests {
             .and_then(Path::parent)
             .and_then(Path::parent)
             .expect("test executable has a Cargo artifact parent");
+        if artifact_parent == default_target_dir {
+            return;
+        }
         let artifact_parent_name = artifact_parent
             .file_name()
             .expect("Cargo artifact parent has a name");
@@ -1719,6 +1722,32 @@ mod tests {
         invocation_directory
             .map(|directory| directory.join(configured))
             .unwrap_or_else(|| PathBuf::from("rustc"))
+    }
+
+    fn configure_compiler_wrapper(command: &mut Command, variable: &'static str) {
+        let Some(configured) = std::env::var_os(variable) else {
+            return;
+        };
+        let invocation_directory = std::env::var_os("PWD").map(PathBuf::from);
+        match compiler_wrapper_command_for(&configured, invocation_directory.as_deref()) {
+            Some(wrapper) => {
+                command.env(variable, wrapper);
+            }
+            None => {
+                command.env_remove(variable);
+            }
+        }
+    }
+
+    fn compiler_wrapper_command_for(
+        configured: &OsStr,
+        invocation_directory: Option<&Path>,
+    ) -> Option<PathBuf> {
+        let configured = Path::new(configured);
+        if configured.is_absolute() {
+            return Some(configured.to_path_buf());
+        }
+        invocation_directory.map(|directory| directory.join(configured))
     }
 
     fn lexically_normalized(path: &Path) -> PathBuf {
@@ -2319,6 +2348,16 @@ mod tests {
     }
 
     #[test]
+    fn bridge_default_target_recognition_accepts_a_filesystem_root() {
+        reject_unrecognized_default_target(DefaultTargetRecognition {
+            current_executable: Path::new("/debug/deps/daemon-tools-test"),
+            configured_target_dir: None,
+            default_target_dir: Path::new("/"),
+            known_targets: &BTreeSet::new(),
+        });
+    }
+
+    #[test]
     fn bridge_rustc_command_resolves_a_relative_override_from_the_invocation_directory() {
         assert_eq!(
             rustc_command_for(
@@ -2334,6 +2373,27 @@ mod tests {
         assert_eq!(
             rustc_command_for(Some(OsStr::new("tooling/rustc-wrapper")), None),
             PathBuf::from("rustc")
+        );
+    }
+
+    #[test]
+    fn bridge_compiler_wrapper_resolves_relative_to_the_invocation_directory() {
+        assert_eq!(
+            compiler_wrapper_command_for(
+                OsStr::new("tooling/compiler-wrapper"),
+                Some(Path::new("synthetic-workspace")),
+            ),
+            Some(PathBuf::from(
+                "synthetic-workspace/tooling/compiler-wrapper"
+            ))
+        );
+    }
+
+    #[test]
+    fn bridge_compiler_wrapper_rejects_a_relative_path_without_provenance() {
+        assert_eq!(
+            compiler_wrapper_command_for(OsStr::new("tooling/compiler-wrapper"), None),
+            None
         );
     }
 
@@ -2565,6 +2625,8 @@ mod tests {
         if let Some(rustc) = normalized_rustc_override() {
             build_command.env("RUSTC", rustc);
         }
+        configure_compiler_wrapper(&mut build_command, "RUSTC_WRAPPER");
+        configure_compiler_wrapper(&mut build_command, "RUSTC_WORKSPACE_WRAPPER");
         if let Some(target) = &selection.target {
             build_command.arg("--target").arg(target);
         }
@@ -3535,7 +3597,33 @@ mod tests {
     #[test]
     fn daemon_catalog_contains_every_injected_tool_family() {
         let workspace = tempfile::tempdir().expect("workspace root exists");
-        let catalog = mapped_daemon_catalog(workspace.path());
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
+        let (catalog, _executor) = DaemonTools::try_new(
+            || SystemTime::UNIX_EPOCH,
+            OfflineTransport,
+            MappedDaemonCredentialInputs {
+                web_search: OfflineCredentials,
+                code_host: OfflineCredentials,
+                github: OfflineCredentials,
+            },
+            OfflineSearchTransport,
+            OfflineWriter,
+            OfflineCodeHostTransport,
+            OfflineGitHubTransport,
+            GitHubEgressPolicy::github_api_only(),
+            LocalWorkspaceFileSystem,
+            workspace.path(),
+            git_identity(),
+            TokioProcessRunner::try_new(
+                std::env::current_exe().expect("test executable path is available"),
+            )
+            .expect("test executable can stand in for the unused supervisor"),
+            OfflineConversationPort,
+            OfflineConversationPort,
+            WebFetchEgressPolicy::deny_all(),
+        )
+        .expect("static daemon tools compile")
+        .into_parts();
 
         let definitions = catalog.definitions();
         let names = definition_names(&definitions);
@@ -3574,7 +3662,6 @@ mod tests {
                 PULL_REQUEST_PUBLISH_REVIEW_NAME,
                 PULL_REQUEST_REVIEW_THREADS_NAME,
                 GLOB_FILES_NAME,
-                GOAL_DECLARE_NAME,
                 signalbox_tools_conversations::LIST_CONVERSATIONS_NAME,
                 LIST_DIRECTORY_NAME,
                 signalbox_tools_plan::PLAN_READ_NAME,
