@@ -1310,7 +1310,7 @@ mod tests {
             .expect("fixture runtime builds");
         let _runtime_guard = runtime.enter();
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgresql://signalbox:synthetic@127.0.0.1/signalbox")
+            .connect_lazy(SYNTHETIC_GOAL_DATABASE_URL)
             .expect("synthetic lazy goal pool is valid");
         let goal = GoalDeclarationTool::try_new(pool).expect("static goal tool compiles");
 
@@ -1422,6 +1422,8 @@ mod tests {
 
     const CLAUDE_MCP_BRIDGE_BINARY: &str = "signalbox-claude-mcp-bridge";
     const CARGO_TEST_PROFILE: &str = "test";
+    const SYNTHETIC_GOAL_DATABASE_URL: &str =
+        "postgresql://signalbox:synthetic@127.0.0.1/signalbox";
 
     #[track_caller]
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
@@ -1473,18 +1475,9 @@ mod tests {
             .and_then(Path::parent)
             .expect("test executable has a Cargo artifact parent");
         if configured.as_os_str().is_empty() || configured.file_name().is_none() {
-            if artifact_parent
-                .file_name()
-                .is_some_and(|name| known_targets.contains(name))
-            {
-                return artifact_parent
-                    .parent()
-                    .expect("target-specific artifacts have a target directory")
-                    .to_path_buf();
-            }
-            return artifact_parent.to_path_buf();
+            return target_root_from_artifact_parent(artifact_parent, known_targets);
         }
-        let closest = artifact_parent
+        let Some(closest) = artifact_parent
             .ancestors()
             .find(|ancestor| ancestor.ends_with(&configured))
             .or_else(|| {
@@ -1493,7 +1486,9 @@ mod tests {
                     .ancestors()
                     .find(|ancestor| ancestor.file_name() == Some(configured_name))
             })
-            .expect("relative Cargo target directory is an ancestor of the test executable");
+        else {
+            return target_root_from_artifact_parent(artifact_parent, known_targets);
+        };
         if closest == artifact_parent
             && closest.parent().and_then(Path::file_name) == configured.file_name()
         {
@@ -1503,6 +1498,23 @@ mod tests {
                 .to_path_buf();
         }
         closest.to_path_buf()
+    }
+
+    #[track_caller]
+    fn target_root_from_artifact_parent(
+        artifact_parent: &Path,
+        known_targets: &BTreeSet<OsString>,
+    ) -> PathBuf {
+        if artifact_parent
+            .file_name()
+            .is_some_and(|name| known_targets.contains(name))
+        {
+            return artifact_parent
+                .parent()
+                .expect("target-specific artifacts have a target directory")
+                .to_path_buf();
+        }
+        artifact_parent.to_path_buf()
     }
 
     #[track_caller]
@@ -1840,6 +1852,35 @@ mod tests {
             .expect("fixture target symlink exists");
 
         assert_eq!(canonicalized_target_dir(&target_link), target_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_artifact_selection_recovers_a_differently_named_relative_symlink_root() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let target_dir = parent.path().join("resolved-target");
+        let target_link = parent.path().join("target-link");
+        fs::create_dir(&target_dir).expect("fixture target directory exists");
+        std::os::unix::fs::symlink(&target_dir, &target_link)
+            .expect("fixture target symlink exists");
+        let executable = target_dir.join("debug/deps/daemon-tools-test");
+        let configured_target_dir =
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: Path::new("target-link"),
+                known_targets: &BTreeSet::new(),
+            });
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: &target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: None,
+        });
     }
 
     #[test]
@@ -3059,6 +3100,7 @@ mod tests {
     }
 
     const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+    const MCP_UNSUPPORTED_PROTOCOL_VERSION: &str = "1900-01-01";
     const MCP_SERVER_NAME: &str = "signalbox-claude-cli-bridge";
     const MCP_CLIENT_NAME: &str = "signalboxd-mcp-conformance";
     const MCP_INITIALIZE_REQUEST_ID: u64 = 1;
@@ -3079,6 +3121,13 @@ mod tests {
         serde_json::json!({
             "code": -32602,
             "message": "undeclared tool or non-object arguments",
+        })
+    }
+
+    fn unsupported_protocol_error() -> serde_json::Value {
+        serde_json::json!({
+            "code": -32602,
+            "message": "unsupported MCP protocol version",
         })
     }
 
@@ -3124,23 +3173,7 @@ mod tests {
 
         #[track_caller]
         fn initialize(&mut self) -> serde_json::Value {
-            let initialized = self
-                .bridge
-                .as_mut()
-                .expect("bridge remains active")
-                .request(&serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": MCP_INITIALIZE_REQUEST_ID,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": MCP_PROTOCOL_VERSION,
-                        "capabilities": {},
-                        "clientInfo": {
-                            "name": MCP_CLIENT_NAME,
-                            "version": env!("CARGO_PKG_VERSION"),
-                        },
-                    },
-                }));
+            let initialized = self.request_initialize(MCP_PROTOCOL_VERSION);
             self.bridge
                 .as_mut()
                 .expect("bridge remains active")
@@ -3149,6 +3182,26 @@ mod tests {
                     "method": "notifications/initialized",
                 }));
             initialized
+        }
+
+        #[track_caller]
+        fn request_initialize(&mut self, protocol_version: &str) -> serde_json::Value {
+            self.bridge
+                .as_mut()
+                .expect("bridge remains active")
+                .request(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": MCP_INITIALIZE_REQUEST_ID,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": protocol_version,
+                        "capabilities": {},
+                        "clientInfo": {
+                            "name": MCP_CLIENT_NAME,
+                            "version": env!("CARGO_PKG_VERSION"),
+                        },
+                    },
+                }))
         }
 
         #[track_caller]
@@ -3255,6 +3308,15 @@ mod tests {
                 "version": env!("CARGO_PKG_VERSION"),
             })
         );
+    }
+
+    #[test]
+    fn claude_mcp_bridge_rejects_an_unsupported_protocol_version() {
+        let mut fixture = McpBridgeFixture::start();
+        let rejected = fixture.request_initialize(MCP_UNSUPPORTED_PROTOCOL_VERSION);
+        fixture.finish();
+
+        assert_eq!(rejected["error"], unsupported_protocol_error());
     }
 
     #[test]
