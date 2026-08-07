@@ -1,3 +1,6 @@
+// Release builds must not ship the in-memory process-protocol harness; the
+// mock is reachable only through Debug (and therefore test) configurations.
+#if DEBUG
 import Foundation
 
 #if canImport(SignalboxClient)
@@ -959,3 +962,4 @@ private actor MockProcessProtocolState {
 private enum MockProcessProtocolError: Error {
   case invalidRequest
 }
+#endif
