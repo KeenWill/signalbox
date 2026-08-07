@@ -1420,7 +1420,6 @@ mod tests {
         .0
     }
 
-    #[track_caller]
     /// Renders the bridge catalog document from the daemon registry through the
     /// production projection every adapter receives.
     ///
