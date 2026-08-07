@@ -17,17 +17,17 @@ use signalbox_domain::{
     ConsumedSteeringReconstitutionInput, ContextCompactionId,
     ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
     ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
-    ContextFrontierId, ContinuationRoundReconstitutionInput, DelegationContent,
-    DelegationMessageId, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
-    DelegationProvenanceReconstitutionInput, DelegationWaitMode, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
-    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
-    GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput, GoalTurnSource,
-    IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
-    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
-    ModelCapabilityCatalog, ModelSelectionOverride, ModelSelectionRequest,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
-    OriginModelSettingsError, PerInputConfigurationChoices,
+    ContextFrontierId, ContinuationRoundReconstitutionInput, DelegatedTurnSchedulingFact,
+    DelegatedTurnSchedulingState, DelegationContent, DelegationMessageId, DelegationOutcome,
+    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenanceReconstitutionInput,
+    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
+    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
+    FrozenModelSelection, GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput,
+    GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
+    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+    ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
+    ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
     ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
     SemanticTranscriptEntryId,
@@ -822,6 +822,20 @@ where
         };
     }
 
+    if matches!(
+        command.delivery(),
+        DeliveryRequest::Interrupt {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        }
+    ) {
+        sqlx::query(crate::lock_inventory::DELEGATION_TERMINATION_SESSION_FRONTIER)
+            .bind(session_id_to_uuid(command.session()))
+            .bind("cancelled")
+            .execute(&mut *connection)
+            .await?;
+    }
+
     let PreparedAgainstLockedState {
         prepared,
         scheduling,
@@ -1289,7 +1303,7 @@ async fn prepare_against_locked_state(
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     model_capabilities: Option<&ModelCapabilityCatalog>,
 ) -> Result<PreparedAgainstLockedState, SubmitInputRepositoryError> {
-    // Lock-mode constraint: this session-row lock must use the no-key-update
+    // Lock-mode constraint: these session-row locks must use the no-key-update
     // mode, not PostgreSQL's strongest row-lock mode. Submit orders the session row before the
     // scheduler row and current-defaults pointer row, while a concurrent
     // defaults replacement holds the pointer row (its compare-and-set) when its
@@ -1299,11 +1313,40 @@ async fn prepare_against_locked_state(
     // cycle into a deadlock (40P01); `FOR NO KEY UPDATE` does not conflict
     // with referential-integrity `KEY SHARE` locks while remaining
     // self-exclusive, so per-session position assignment stays serialized.
-    let session_exists = sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SESSION)
-        .bind(session_id_to_uuid(command.session()))
+    // A delegated child can terminalize while processing input. Such a
+    // terminalization later locks the parent endpoint, so delegated input must
+    // join peer-message ordering before it acquires the child scheduler.
+    let parent = sqlx::query_scalar::<_, Uuid>(
+        "SELECT parent_session_id
+           FROM session_delegation
+          WHERE child_session_id = $1",
+    )
+    .bind(session_id_to_uuid(command.session()))
+    .fetch_optional(&mut *connection)
+    .await?
+    .map(session_id_from_uuid);
+    let (first, second) = parent
+        .map(|parent| crate::lock_inventory::ordered_session_pair(command.session(), parent))
+        .unwrap_or((command.session(), command.session()));
+    let first_exists = sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SESSION)
+        .bind(session_id_to_uuid(first))
         .fetch_optional(&mut *connection)
         .await?
         .is_some();
+    let second_exists = if second == first {
+        first_exists
+    } else {
+        sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SESSION)
+            .bind(session_id_to_uuid(second))
+            .fetch_optional(&mut *connection)
+            .await?
+            .is_some()
+    };
+    let session_exists = if command.session() == first {
+        first_exists
+    } else {
+        second_exists
+    };
     if !session_exists {
         return Ok(PreparedAgainstLockedState {
             prepared: command.prepare_session_not_found(),
@@ -2973,6 +3016,8 @@ pub(crate) async fn load_scheduling_projection(
             call.context_frontier_id,
             call.state_kind,
             call.terminal_disposition_kind,
+            lifecycle.origin_kind AS turn_origin_kind,
+            lifecycle.pinned_provider_model_identity_id,
             (attempt.continued_from_attempt_id IS NOT NULL)
                 AS continues_prior_attempt
            FROM model_call AS call
@@ -2980,6 +3025,9 @@ pub(crate) async fn load_scheduling_projection(
              ON attempt.turn_attempt_id = call.turn_attempt_id
             AND attempt.turn_id = call.turn_id
             AND attempt.session_id = call.session_id
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.turn_id = call.turn_id
+            AND lifecycle.session_id = call.session_id
           WHERE call.session_id = $1
             AND call.model_call_id = ANY($2)
           ORDER BY call.model_call_id",
@@ -3006,6 +3054,7 @@ pub(crate) async fn load_scheduling_projection(
     let mut pinned_targets = Vec::with_capacity(model_call_rows.len());
     let mut loaded_pinned_turns = BTreeSet::new();
     let mut loaded_model_calls = BTreeSet::new();
+    let mut delegated_turns = BTreeSet::new();
     let mut consuming_call_facts = Vec::new();
     let mut named_gate_call_facts = Vec::new();
     for row in model_call_rows {
@@ -3016,10 +3065,19 @@ pub(crate) async fn load_scheduling_projection(
         let frontier_uuid: Uuid = required(&row, "context_frontier_id")?;
         let turn_uuid: Uuid = required(&row, "turn_id")?;
         let turn = turn_id_from_uuid(turn_uuid);
-        let pinned_identity = pinned_target_identities
-            .get(&turn)
-            .copied()
-            .ok_or(SubmitInputCorruption::Missing("model call turn target pin"))?;
+        let turn_origin_kind: String = required(&row, "turn_origin_kind")?;
+        if turn_origin_kind == "delegation" {
+            delegated_turns.insert(turn);
+        }
+        let pinned_identity = match pinned_target_identities.get(&turn).copied() {
+            Some(identity) => identity,
+            None if turn_origin_kind == "delegation" => {
+                required(&row, "pinned_provider_model_identity_id")?
+            }
+            None => {
+                return Err(SubmitInputCorruption::Missing("model call turn target pin").into());
+            }
+        };
         if loaded_pinned_turns.insert(turn) {
             pinned_targets.push(PinnedProviderTargetReconstitutionInput::new(
                 turn,
@@ -3252,33 +3310,136 @@ pub(crate) async fn load_scheduling_projection(
         ));
     }
 
-    let preceding_non_accepted_terminal = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
-        "SELECT terminal.child_turn_id,
-                terminal.terminal_frontier_id,
-                effective.direct_selection_id
-           FROM session_delegation_logical_terminal AS terminal
+    #[derive(sqlx::FromRow)]
+    struct PrecedingNonAcceptedTerminalRow {
+        turn_id: Uuid,
+        terminal_frontier_id: Uuid,
+        direct_selection_id: Uuid,
+    }
+    let preceding_non_accepted_terminal = sqlx::query_as::<_, PrecedingNonAcceptedTerminalRow>(
+        "WITH earliest_accepted AS (
+            SELECT queued.turn_id
+              FROM queued_input_origin AS queued
+             WHERE queued.session_id = $1
+               AND goal_turn_is_runtime_relevant(
+                    queued.session_id, queued.turn_id
+               )
+             ORDER BY queued.acceptance_position
+             LIMIT 1
+        )
+        SELECT terminal.turn_id AS turn_id,
+                turn_lifecycle_effective_terminal_frontier(
+                    terminal.session_id, terminal.turn_id
+                ) AS terminal_frontier_id,
+                effective.direct_selection_id AS direct_selection_id
+           FROM earliest_accepted AS earliest
+           JOIN turn_lifecycle AS terminal
+             ON terminal.session_id = $1
+            AND terminal.turn_id = accepted_input_turn_queue_predecessor(
+                    $1, earliest.turn_id
+                )
            JOIN LATERAL turn_origin_effective_model_configuration(
-                terminal.child_turn_id, terminal.child_session_id
+                terminal.turn_id, terminal.session_id
            ) AS effective ON true
-          WHERE terminal.child_session_id = $1
-            AND EXISTS (
-                SELECT 1
-                  FROM turn_lifecycle AS successor
-                 WHERE successor.session_id = terminal.child_session_id
-                   AND successor.turn_id <> terminal.child_turn_id
-                   AND goal_turn_is_runtime_relevant(
-                        successor.session_id, successor.turn_id
-                   )
-                   AND accepted_input_turn_queue_predecessor(
-                        successor.session_id, successor.turn_id
-                   ) = terminal.child_turn_id
-            )",
+          WHERE terminal.origin_kind = 'delegation'
+            AND (
+                terminal.state_kind = 'terminal'
+                OR terminal.delegation_runtime_terminal
+            )
+            AND turn_lifecycle_effective_terminal_frontier(
+                    terminal.session_id, terminal.turn_id
+                ) IS NOT NULL",
     )
     .bind(session_id_to_uuid(session_id))
     .fetch_optional(&mut *connection)
     .await?;
-    if let Some((_, terminal_frontier, _)) = preceding_non_accepted_terminal {
-        required_frontiers.insert(terminal_frontier);
+    if let Some(preceding) = preceding_non_accepted_terminal.as_ref() {
+        delegated_turns.insert(turn_id_from_uuid(preceding.turn_id));
+        required_frontiers.insert(preceding.terminal_frontier_id);
+    }
+
+    let semantic_delegated_turns = sqlx::query_scalar::<_, Uuid>(
+        "SELECT DISTINCT subject.turn_id
+           FROM (
+                SELECT CASE entry.payload_kind
+                         WHEN 'model_identity_changed'
+                           THEN entry.model_identity_turn_id
+                         WHEN 'turn_completed' THEN entry.completed_turn_id
+                         WHEN 'turn_failed' THEN entry.failed_turn_id
+                         WHEN 'turn_cancelled' THEN entry.cancelled_turn_id
+                       END AS turn_id
+                  FROM semantic_transcript_entry AS entry
+                 WHERE entry.source_session_id = $1
+                   AND entry.payload_kind IN (
+                        'model_identity_changed',
+                        'turn_completed',
+                        'turn_failed',
+                        'turn_cancelled'
+                   )
+           ) AS subject
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.session_id = $1
+            AND lifecycle.turn_id = subject.turn_id
+            AND lifecycle.origin_kind = 'delegation'
+            AND (
+                lifecycle.state_kind = 'terminal'
+                OR lifecycle.delegation_runtime_terminal
+            )
+          ORDER BY subject.turn_id",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_all(&mut *connection)
+    .await?;
+    delegated_turns.extend(semantic_delegated_turns.into_iter().map(turn_id_from_uuid));
+
+    let delegated_turn_ids = delegated_turns
+        .iter()
+        .map(|turn| turn.into_uuid())
+        .collect::<Vec<_>>();
+    let delegated_turn_rows = sqlx::query(
+        "SELECT lifecycle.turn_id,
+                effective.defaults_version,
+                effective.direct_selection_id,
+                lifecycle.state_kind,
+                lifecycle.terminal_disposition_kind,
+                lifecycle.delegation_runtime_terminal
+           FROM turn_lifecycle AS lifecycle
+           JOIN LATERAL turn_origin_effective_model_configuration(
+                lifecycle.turn_id, lifecycle.session_id
+           ) AS effective ON true
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.origin_kind = 'delegation'
+            AND lifecycle.turn_id = ANY($2)
+          ORDER BY lifecycle.turn_id",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .bind(&delegated_turn_ids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut delegated_turn_facts = Vec::with_capacity(delegated_turn_rows.len());
+    for row in delegated_turn_rows {
+        let turn = turn_id_from_uuid(required(&row, "turn_id")?);
+        let defaults_version =
+            defaults_version_from_numeric(required(&row, "defaults_version")?)
+                .map_err(|_| SubmitInputCorruption::Inconsistent("delegated defaults version"))?;
+        let selected = DirectModelSelection::from_uuid(required(&row, "direct_selection_id")?);
+        let state_kind: String = required(&row, "state_kind")?;
+        let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
+        let runtime_terminal: bool = required(&row, "delegation_runtime_terminal")?;
+        let state = decode_delegated_turn_scheduling_state(
+            &state_kind,
+            terminal_disposition.as_deref(),
+            runtime_terminal,
+        )?;
+        delegated_turn_facts.push(DelegatedTurnSchedulingFact::new(
+            turn,
+            defaults_version,
+            selected,
+            state,
+        ));
+    }
+    if delegated_turn_facts.len() != delegated_turn_ids.len() {
+        return Err(SubmitInputCorruption::Missing("delegated turn scheduling fact").into());
     }
 
     let required_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
@@ -4203,12 +4364,12 @@ pub(crate) async fn load_scheduling_projection(
     if let Some(imported_session) = imported_session {
         input = input.with_imported_session(imported_session);
     }
-    if let Some((turn, terminal_frontier, selected)) = preceding_non_accepted_terminal {
+    if let Some(preceding) = preceding_non_accepted_terminal {
         input = input.with_preceding_non_accepted_terminal(
             session_id,
-            TurnId::from_uuid(turn),
-            ContextFrontierId::from_uuid(terminal_frontier),
-            DirectModelSelection::from_uuid(selected),
+            TurnId::from_uuid(preceding.turn_id),
+            ContextFrontierId::from_uuid(preceding.terminal_frontier_id),
+            DirectModelSelection::from_uuid(preceding.direct_selection_id),
         );
     }
     input
@@ -4216,6 +4377,7 @@ pub(crate) async fn load_scheduling_projection(
         .with_context_compaction_facts(compaction_calls, compactions)
         .with_consumed_steering_facts(consumed_steering)
         .with_delegated_consumed_steering_facts(delegated_consumed_steering)
+        .with_delegated_turn_facts(delegated_turn_facts)
         .with_steering_continuation_rounds(steering_continuation_rounds)
         .with_continuation_rounds(continuation_rounds)
         .reconstitute()
@@ -4230,6 +4392,27 @@ fn delegation_content(
     field: &'static str,
 ) -> Result<DelegationContent, SubmitInputCorruption> {
     DelegationContent::try_new(value).map_err(|_| SubmitInputCorruption::Inconsistent(field))
+}
+
+fn decode_delegated_turn_scheduling_state(
+    state_kind: &str,
+    terminal_disposition: Option<&str>,
+    runtime_terminal: bool,
+) -> Result<DelegatedTurnSchedulingState, SubmitInputCorruption> {
+    match (state_kind, terminal_disposition, runtime_terminal) {
+        ("active", None, false) => Ok(DelegatedTurnSchedulingState::Active),
+        ("queued" | "active", None, true) => Ok(DelegatedTurnSchedulingState::RuntimeTerminal),
+        ("terminal", Some("completed"), _) => Ok(DelegatedTurnSchedulingState::TerminalCompleted),
+        ("terminal", Some("refused"), _) => Ok(DelegatedTurnSchedulingState::TerminalRefused),
+        ("terminal", Some("failed"), _) => Ok(DelegatedTurnSchedulingState::TerminalFailed),
+        ("terminal", Some("cancelled"), _) => Ok(DelegatedTurnSchedulingState::TerminalCancelled),
+        ("terminal", Some("reconciliation_required"), _) => {
+            Ok(DelegatedTurnSchedulingState::TerminalReconciliationRequired)
+        }
+        _ => Err(SubmitInputCorruption::Inconsistent(
+            "delegated turn scheduling state",
+        )),
+    }
 }
 
 fn decode_delegation_wait_mode(value: &str) -> Result<DelegationWaitMode, SubmitInputCorruption> {
