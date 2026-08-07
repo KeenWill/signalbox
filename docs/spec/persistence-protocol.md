@@ -32,17 +32,25 @@ PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
 posture storage were verified through PR #420 (`agent/approval-judge-storage`);
 the approval-judge lifecycle transactions were verified through this PR
 (`agent/approval-judge-execution-support`); the approval-decision outbox is
-verified against this implementing change; and the session-placement event,
-current head, and creation transaction were verified through PR #415
-(`agent/scoped-visibility-creation`). This page covers the Postgres
-representation in `crates/persistence` (source and migrations), migration
-discipline, durable command storage and replay equality, the fail-closed
-reconstitution boundary, the lock protocol, pending-steering durable state, the
-corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
-Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+verified against this implementing change; the session-placement event, current
+head, and creation transaction were verified through PR #415
+(`agent/scoped-visibility-creation`); and the exact stop-command descendant
+scopes, delegated transcript origins, foreground-result closure, pre-outbox
+cascade locks, typed delegation wake origins, and exact delegation update and
+wake obligations were verified through this PR
+(`agent/delegation-persistence-schema`); the model-settings command fields,
+immutable evidence, snapshot projection, and typed outbox records were verified
+through this PR (`agent/model-settings-persistence`); the defaults-replacement
+pointer-lock admission is verified through this PR
+(`agent/model-settings-execution`). This page covers the Postgres representation
+in `crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -83,16 +91,17 @@ Migration `202608020016_session_placement_path.sql` adds the append-only
 `session_placement_event` history, its one-row mutable current pointer, and the
 typed `update_session_placement_command` record. Every existing session is
 backfilled with a pathless version-one creation event. Post-migration legacy
-native creation records below storage version 6 and imported creation records
-materialize that same pathless event and head when their typed creation receipt
-is inserted, so a daemon spanning the migration cannot create an unreadable
-session. A deferred reverse check requires every newly inserted session to end
-its transaction with a complete selected placement event. New native creation
-records use storage version 6, store the optional path and explicit
-root-global-read-intent bit, and append the same event atomically with the
-session. Checks make the intent bit true exactly for a one-segment root path and
-false for pathless and non-root scoped values. The current pointer may advance
-only to the next event; event rows and typed command records are immutable.
+native creation records below storage version 6 and supported imported creation
+records below their model-settings version materialize that same pathless event
+and head when their typed creation receipt is inserted, so a daemon spanning the
+migration cannot create an unreadable session. A deferred reverse check requires
+every newly inserted session to end its transaction with a complete selected
+placement event. Native creation records at storage version 6 or later store the
+optional path and explicit root-global-read-intent bit and append the same event
+atomically with the session. Checks make the intent bit true exactly for a
+one-segment root path and false for pathless and non-root scoped values. The
+current pointer may advance only to the next event; event rows and typed command
+records are immutable.
 
 Connection options are explicit: production parsing forces
 `PgSslMode::VerifyFull`; the ephemeral-test helper forces `Disable`. Pool sizing
@@ -101,8 +110,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — fifty-seven files, `202607180001` through
-`202608020016` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — sixty-one files, `202607180001` through
+`202608030003` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -160,7 +169,9 @@ Implemented table families (across the forward-only migrations):
   `abandon_lost_runner_command`, `promote_pending_runner_command`, and
   `goal_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
-  `session_current_defaults`, `session_scheduler`;
+  `session_current_defaults`, `session_scheduler`, plus the immutable
+  `session_model_settings_changed` and `turn_model_settings_resolved` evidence
+  records;
 - `session_metadata` plus its current tag and attribute satellites,
   `session_metadata_installation`, and the complete tag and attribute satellites
   of `replace_session_metadata_command`;
@@ -233,6 +244,16 @@ Representation rules, all enforced in the schema:
   foreign keys, because megabyte text cannot join a btree key; the empty bytea
   stands for an absent prompt so a `MATCH SIMPLE` member never skips enforcement
   ([sessions-and-transcript](sessions-and-transcript.md)).
+- Migration `202608030003` advances native creation to storage version 7,
+  imported creation to version 5, defaults replacement to version 4, and
+  submit-input to version 2 for their settings-bearing command payloads. Rust
+  decoders require provider-default full settings or an inherit-all overlay on
+  every earlier supported version. Imported-creation version 4 remains
+  unsupported and reserved for its committed runner-placement shape. Existing
+  queued configuration roots are marked as predating settings evidence; every
+  root inserted after the migration requires a correlated
+  `turn_model_settings_resolved` row, and transcript reconstruction treats its
+  absence as corruption rather than legacy null.
 - Migration `202607280201` adds the closed `model_identity_changed`
   semantic-entry payload, whose turn, positive defaults epoch, and direct
   selection are total only for that kind. Deferred checks bind it to the named
@@ -449,24 +470,24 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
 `review_workflow`, `review_orchestration`, `compact_session`, `goal`,
 `update_session_placement`) and a kind-scoped `storage_version`. The gates above
-fix the current numbers: create-session records write version 6;
-defaults-bearing imported-create and replace-defaults records write version 3;
-every other closed kind writes version 1. Create-session records reconstitute
-version 1 with the disabled dangerous-tool posture, and versions 1 and 2 with no
-system prompt — a pre-version-three row carrying one fails closed in both the
-schema and every Rust reader. A pre-version-four create row carrying template
-provenance and a pre-version-five create row carrying a runner placement
-likewise fail closed; therefore a rollback reader that supports only versions 1
-through 4 rejects every new create record instead of projecting a runner-backed
-creation as daemon-only, exactly as a reader supporting only versions 1 through
-3 rejects every template-provenance record instead of projecting template
-creation as explicit creation. Metadata, submit, decision, review-workflow,
-compaction, and runner-recovery records use version 1. Each kind has one typed
-subordinate request record keyed by `command_id` that stores every
-caller-supplied semantic field in typed, `CHECK`-constrained columns. Every kind
-except runner replacement also stores the terminal `applied`/`rejected` result
-and typed result fields there. `replace_lost_runner_command` is the immutable
-request and provisioning-authorization root; at most one append-only
+fix the current numbers: create-session records write version 7, imported-create
+records write version 5, replace-defaults records write version 4, and
+submit-input records write version 2; every other closed kind writes version 1.
+The four settings-bearing families require the migration's provider-default full
+settings or inherit-all overlay on every earlier supported version.
+Create-session records reconstitute version 1 with the disabled dangerous-tool
+posture, and versions 1 and 2 with no system prompt — a pre-version-three row
+carrying one fails closed in both the schema and every Rust reader. A
+pre-version-four create row carrying template provenance and a pre-version-six
+create row carrying path placement likewise fail closed. Imported-create version
+4 remains unsupported compatibility space for committed runner placement, so the
+model-settings writer skips it. Metadata, decision, review-workflow, compaction,
+and runner-recovery records use version 1. Each kind has one typed subordinate
+request record keyed by `command_id` that stores every caller-supplied semantic
+field in typed, `CHECK`-constrained columns. Every kind except runner
+replacement also stores the terminal `applied`/`rejected` result and typed
+result fields there. `replace_lost_runner_command` is the immutable request and
+provisioning-authorization root; at most one append-only
 `replace_lost_runner_result` supplies its terminal result after off-transaction
 runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
 its fields. Deferred reverse constraints require exactly one typed request per
@@ -625,9 +646,13 @@ Locks per transaction, in acquisition order:
   approval-judge, tool-loop, and lifecycle-transition transactions from holding
   these rows in reverse order.
 
-- **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
-  on the `session_current_defaults` pointer row is the serialization point, and
-  its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
+- **ReplaceSessionDefaults**: an unseen command locks its
+  `session_current_defaults` pointer row `FOR UPDATE` before loading and
+  preparing against the current epoch. The compare-and-set `UPDATE` on that
+  already-locked row remains the applying check. Rejection-only admission uses
+  the same lock: a current expected version rolls back the command claim and
+  applies nothing, while a mismatch records the typed rejection. The
+  `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
   through the non-deferrable session foreign key.
 
 - **ReplaceSessionMetadata**: the target session row is locked
@@ -967,6 +992,14 @@ rather than only surfacing the flag.
 
 ## Delegation storage and locking
 
+**Implemented behavior.** Migration `202608020018_session_delegation.sql`
+retains the closed `parent_alone` or `parent_and_descendants` selection on every
+stop goal command and interrupt submit-input command. The accepted-input copy
+retains the same value for an applied interrupt. Other goal operations and
+delivery kinds require a null scope. Command and accepted-input reconstitution
+decode the stored selection without substituting a default, so equal replay
+returns the recorded result and changed-scope reuse conflicts.
+
 This section is the foundation proposal for migration
 `202608020018_session_delegation.sql` and becomes verified only with the full
 delegation stack. The migration widens `session.creation_cause` with
@@ -992,7 +1025,17 @@ Initial task work is one delegated-task origin row plus its semantic entry and
 first queued turn. The origin references the spawning request and repeats no
 independent actor claim; deferred checks resolve that request's checked task,
 parent session and turn, child relationship, semantic entry, and turn starting
-frontier as one closed shape. No accepted-input row is inserted.
+frontier as one closed shape. It stores the exact requested and frozen model
+configuration inherited from the parent turn, including a direct override or a
+frozen alias definition and its selected direct model; an equal effective model
+does not authorize reconstructing the request as a session default. No
+accepted-input row is inserted. The ordinary eligibility pass recognizes that
+typed origin directly, activates it without fabricating an accepted input, and
+starts model execution from the existing delegated-task semantic entry as the
+child's one-member initial frontier. The same typed path activates an idle
+recipient's delivery-range wake after its exact terminal predecessor, appending
+the contiguous checked message or background-result entries to that predecessor
+frontier.
 
 `session_delegation_event` is an append-only per-relationship ordinal stream.
 Its closed kind/shape checks require every lifecycle disposition to carry one
@@ -1011,38 +1054,88 @@ reason/provenance shape does not match its kind.
 
 `session_delegation_wait` records the exact awaiting tool request, relationship,
 parent turn, and foreground/background mode. A foreground row correlates the
-turn's `awaiting_child` phase; a background row cannot. `session_message` is
-append-only, uniquely orders messages per relationship, and requires exact
-parent/child sender and recipient plus the sending tool request.
-`session_child_result` has at most one row per spawning request and carries
-exactly one returned-text, failed, stopped, or cancelled shape with child turn
-provenance for returned, failed, result-unavailable, and child-originated
-terminal outcomes, or one of the same exclusive parent-turn-command and
-parent-goal-command provenance arms for a policy-driven stop or cancellation.
-Delivery satellites bind messages/results to their exact semantic entries; no
-transcript query supplies result content. Every pending message and background
-result delivery additionally receives one positive recipient-wide
-`delivery_sequence` under the recipient session lock. That sequence is unique
-and gap-free per recipient across both kinds; relationship ordinals remain
-relationship-local evidence and never order two different relationships.
-Foreground results stay ordered by their exact awaiting request and do not
-consume an inbox sequence.
+turn's `awaiting_child` phase; a background row cannot and instead requires the
+exact completed effect-free attempt and normalized registration receipt for its
+awaiting request. `session_message` is append-only, uniquely orders messages per
+relationship, and requires exact parent/child sender and recipient plus the
+sending tool request. `session_child_result` has at most one row per spawning
+request and carries exactly one returned-text, failed, stopped, or cancelled
+shape with child turn provenance for returned, failed, result-unavailable, and
+child-originated terminal outcomes, or one of the same exclusive
+parent-turn-command and parent-goal-command provenance arms for a policy-driven
+stop or cancellation. Delivery satellites bind messages/results to their exact
+semantic entries; no transcript query supplies result content. Every pending
+message and background result delivery additionally receives one positive
+recipient-wide `delivery_sequence` under the recipient session lock. That
+sequence is unique and gap-free per recipient across both kinds; relationship
+ordinals remain relationship-local evidence and never order two different
+relationships. Foreground results stay ordered by their exact awaiting request
+and do not consume an inbox sequence. Their semantic entry repeats that awaiting
+request as the ordinary logical tool-result correlation, so the unchanged
+proposal-order and single-result checks admit it as the `await_session` result
+without admitting a second result for the same request. Tool-batch outbox
+decoding and context-compaction evidence count that foreground correlation as
+one tool result; a background result has no tool-result correlation and counts
+as neither one.
 
-Parent-and-descendants termination locks relationship rows in stable spawning
-request order before it writes any disposition. The command and every evaluated
-edge commit together; a crash can leave all prior durable state or the complete
-typed evaluation, never an unrecorded partial cascade. Parent-alone takes no
-descendant authority. Background and bound-keep-running edges still receive a
-continue-running event when evaluated. An already-terminal edge receives its
-typed already-terminal event and traversal continues through that child's
-outgoing relationships, so a terminal intermediate session cannot hide live
-descendants.
+`session_delegation_wake_turn_origin` distinguishes an idle-recipient wake from
+the delegated child's initial task. It binds the queued turn to one contiguous
+recipient delivery range and the terminal predecessor's exact requested and
+frozen model configuration. While the turn is queued, later deliveries may only
+extend that range; activation freezes it. The requested selection, frozen
+selection, and defaults version must equal the exact terminal predecessor's
+configuration. The starting frontier extends that predecessor with every typed
+message or background-result semantic entry in delivery order, with the final
+delivery as the lifecycle origin entry. The schema admits at most one queued
+delegation-origin turn per recipient.
+
+Parent-and-descendants termination locks the root and complete reachable session
+frontier before inserting the applied parent command and therefore before any
+outbox allocation. It re-evaluates after a lock wait, then locks relationship
+rows in stable spawning-request order before it writes any disposition. Spawn
+admission takes the same parent-session lock, so spawn and cascade transactions
+do not invert the session/outbox lock order or omit an edge that committed while
+the cascade waited. The command and every evaluated edge commit together; a
+crash can leave all prior durable state or the complete typed evaluation, never
+an unrecorded partial cascade. Parent-alone takes no descendant authority.
+Deferred reverse constraints also reject an applied descendant-scoped root
+command that lacks its exact cascade row, so an omitted cascade writer fails
+closed instead of silently degrading to parent-alone. Background and
+bound-keep-running edges still receive a continue-running event when evaluated.
+An already-terminal edge receives its typed already-terminal event and traversal
+continues through that child's outgoing relationships, so a terminal
+intermediate session cannot hide live descendants.
+
+**SPEC PROPOSAL — cascade terminal authority.** For each newly stopped or
+cancelled edge, the cascade transaction appends one immutable logical-terminal
+row keyed by spawning request, child session/initial turn, and root command. The
+row foreign-keys the exact per-edge parent-termination authority and cannot
+commit without the matching parent-provenanced relationship event, unique child
+result, update, deliveries, and wake. The same transaction materializes an
+immutable retained terminal frontier and a one-to-one monotonic lifecycle flag.
+Partial active and queued indexes exclude the flagged row, while queue-order and
+start-frontier validation continue to recognize it as the immediate terminal
+predecessor of later accepted-input or delegation-wake work. Runtime eligibility
+therefore excludes the proof without rewriting the child's retained physical
+execution evidence. Provider observation commit rereads the proof under the
+session lock and discards a late response instead of persisting it. Transcript
+reads join the proof to its exact outcome event and expose the typed logical
+terminal state. This proposal is accepted with the implementing stack's merge.
 
 The scheduler sweep treats a deliverable foreground result, an undelivered
-background result, and a pending message inbox as durable hints. Result/message
-commit also writes a parent- or recipient-scoped `delegation_wake` outbox event
-in the same transaction. The ordinary nudge remains best effort and the durable
-predicate is authoritative after restart.
+background result, and a pending message inbox as durable hints. Every result
+and message commit also writes exactly one distinct parent- or recipient-scoped
+`delegation_wake` outbox event in the same transaction. A consumer may ignore
+the nudge while that session is already active. When a foreground wait is
+registered after its result and original wake already committed, the wait
+transaction writes a fresh result wake keyed by the awaiting request and ordered
+after the wait update. The ordinary nudge remains best effort and the durable
+predicate is authoritative after restart. A foreground hit does not try to
+activate a new turn: it locks and reconstitutes the exact `awaiting_child` tool
+batch, consumes the matching typed result into a `DelegationResult` semantic
+entry, and reopens the same turn under a fresh continued turn attempt. The tool
+loop then performs its ordinary serialized continuation from that checked
+frontier.
 
 ## Transactional outbox
 
@@ -1051,71 +1144,85 @@ transactional-outbox family (INV-032 mechanism; observation semantics are
 protocol scope). The authoritative typed-record inventory is the implemented
 storage below plus the delegation-stack extension identified inline:
 
-- `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
-  `storage_version`, `session_id`) plus one typed record table per kind —
-  `session_created_outbox_event`, `input_accepted_outbox_event`,
-  `goal_turn_retired_outbox_event`, `turn_activated_outbox_event`,
-  `turn_failed_outbox_event`, `model_call_transition_outbox_event`,
-  `tool_batch_transition_outbox_event`, `tool_approval_decided_outbox_event`,
-  `context_compacted_outbox_event`, `turn_completed_outbox_event`,
-  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`,
-  `turn_reconciliation_required_outbox_event`,
-  `runner_state_transition_outbox_event`, and the delegation stack's
+- the baseline `outbox_event` header and delegation-owned
+  `delegation_outbox_event` header (both carrying allocator-owned
+  `event_sequence`, closed `event_kind`, `storage_version`, and `session_id`)
+  plus one typed record table per kind — `session_created_outbox_event`,
+  `input_accepted_outbox_event`, `session_model_settings_changed_outbox_event`,
+  `turn_model_settings_resolved_outbox_event`, `goal_turn_retired_outbox_event`,
+  `turn_activated_outbox_event`, `turn_failed_outbox_event`,
+  `model_call_transition_outbox_event`, `tool_batch_transition_outbox_event`,
+  `tool_approval_decided_outbox_event`, `context_compacted_outbox_event`,
+  `turn_completed_outbox_event`, `turn_refused_outbox_event`,
+  `turn_cancelled_outbox_event`, `turn_reconciliation_required_outbox_event`,
+  `runner_state_transition_outbox_event`, and the delegation header's
   `delegation_update_outbox_event` and `delegation_wake_outbox_event` — with a
-  deferred trigger requiring exactly one typed record per header. A
-  runner-transition record carries the affected runner, the positive placement
-  revision, the sandbox profile, one closed transition state, and the relocation
-  facts that state requires, so a follower learns of loss, suspicion, recovery,
-  replacement, working-directory relocation, and abandonment from the same
-  family. The family is deliberately shaped for extension: a later runner fact —
-  another relocation shape, or runner metadata and attributes — adds a state and
-  its columns to this one record kind rather than a second event kind, so a
-  follower already decoding the family needs no new kind to keep hearing runner
-  news. Extension stays version-gated rather than silent: an addition every
-  existing decoder can ignore leaves the kind-scoped `storage_version` alone,
-  while a new closed transition state or a newly required column advances it,
-  and a decoder that predates the advance rejects the record as `Unsupported`
-  instead of coercing an unknown state onto one it knows. Tool-batch transition
-  records carry the producing call and exactly one closed state shape:
-  `proposed` names the yielded assistant/tool-use frontier, `results_projected`
-  names the all-resolved result frontier, and `recovery_required` names the
-  exact ambiguous physical attempt. The header and typed record tables are
-  append-only (`reject_immutable_record_change`), and every outbox table rejects
-  `TRUNCATE`. A context-compacted record names the authoritative compaction, its
-  completed dedicated call, exact positive through position, appended summary,
-  and result frontier.
+  deferred triggers requiring exactly one typed record per header. Both header
+  families share the one allocator and delivery prefix, so their committed
+  events form one gap-free global sequence. A runner-transition record carries
+  the affected runner, the positive placement revision, the sandbox profile, one
+  closed transition state, and the relocation facts that state requires, so a
+  follower learns of loss, suspicion, recovery, replacement, working-directory
+  relocation, and abandonment from the same family. The family is deliberately
+  shaped for extension: a later runner fact — another relocation shape, or
+  runner metadata and attributes — adds a state and its columns to this one
+  record kind rather than a second event kind, so a follower already decoding
+  the family needs no new kind to keep hearing runner news. Extension stays
+  version-gated rather than silent: an addition every existing decoder can
+  ignore leaves the kind-scoped `storage_version` alone, while a new closed
+  transition state or a newly required column advances it, and a decoder that
+  predates the advance rejects the record as `Unsupported` instead of coercing
+  an unknown state onto one it knows. Tool-batch transition records carry the
+  producing call and exactly one closed state shape: `proposed` names the
+  yielded assistant/tool-use frontier, `results_projected` names the
+  all-resolved result frontier, and `recovery_required` names the exact
+  ambiguous physical attempt. The header and typed record tables are append-only
+  (`reject_immutable_record_change`), and every outbox table rejects `TRUNCATE`.
+  A context-compacted record names the authoritative compaction, its completed
+  dedicated call, exact positive through position, appended summary, and result
+  frontier.
 
 **Session-delegation foundation proposal.** Migration `202608020018` in the full
-delegation stack adds one version-one `delegation_update_outbox_event` typed
-table, keyed by its `event_sequence` header foreign key and closed
-`update_kind`. Its common subject is the exact `spawning_request_id`; the
-shape-specific columns carry `child_session_id` and relationship for
-`child_spawned`, `await_request_id`, child, and mode for `child_waiting`, child,
-outcome, reason, and provenance for `child_lifecycle_disposition`, those fields
-plus nullable result content for `child_result`, or message identity, endpoints,
-ordinal, and content for `session_message`. A separate version-one
-`delegation_wake_outbox_event` typed table carries the internal
-`delegation_wake` event kind and one closed wake subject: `result` requires an
-equal `result_spawning_request_id`, while `message` requires a
-`DelegationMessageId` belonging to that relationship. The header's `session_id`
-is the stream receiving the update or wake. Per-kind checks require exactly that
-shape's columns and reject all others; foreign keys correlate every supplied
-identity to the same relationship. Dispatch decodes both closed unions and
-rejects every other storage version. The header completeness trigger includes
-both record kinds, and both typed records are append-only and reject `TRUNCATE`
-with the rest of the family.
+delegation stack adds one version-one `delegation_outbox_event` header and one
+version-one `delegation_update_outbox_event` typed table, keyed by its
+`event_sequence` header foreign key and closed `update_kind`. Its common subject
+is the exact `spawning_request_id`; the shape-specific columns carry
+`child_session_id` and relationship for `child_spawned`, `await_request_id`,
+child, and mode for `child_waiting`, child, outcome, reason, and provenance for
+`child_lifecycle_disposition`, those fields plus nullable result content for
+`child_result`, or message identity, endpoints, ordinal, and content for
+`session_message`. A separate version-one `delegation_wake_outbox_event` typed
+table carries the internal `delegation_wake` event kind and one closed wake
+subject: `result` requires an equal `result_spawning_request_id`; its nullable
+`awaiting_tool_request_id` distinguishes the one initial result wake from a
+fresh late-foreground-wait wake and, when present, must name that relationship's
+exact wait. `message` instead requires a `DelegationMessageId` belonging to that
+relationship and no awaiting request. The header's `session_id` is the stream
+receiving the update or wake. Per-kind checks require exactly that shape's
+columns and reject all others; foreign keys correlate every supplied identity to
+the same relationship. Lifecycle-disposition updates admit only
+parent-turn-command or parent-goal-command stop/cancel cascade evaluations;
+child-origin terminal events are delivered through `child_result` instead.
+Dispatch decodes both closed unions and rejects every other storage version. The
+delegation-header completeness trigger includes both record kinds; its header
+and both typed records are append-only and reject `TRUNCATE` with the rest of
+the family.
 
 Every client-observable delegation transition appends its corresponding typed
 update record in the transaction that commits the relationship, wait,
-disposition, result, or message. A result or message that makes dormant work
-runnable appends a distinct `delegation_wake` record in that same transaction;
-the internal wake subject does not stand in for the client-visible result or
-message update. A guarded transition that changes no durable state appends no
-update. State without its promised update, or an update without its state, is
-therefore unrepresentable.
+disposition, result, or message. Spawn, waiting, other lifecycle, and result
+updates go only to the parent stream, and message updates only to the payload
+recipient. A stopped or cancelled lifecycle disposition caused by a parent
+cascade is emitted on both the parent and child streams. Every result and
+message appends exactly one distinct `delegation_wake` record for that same
+recipient in the same transaction, even when the recipient is already active and
+may ignore the nudge; the internal wake subject does not stand in for the
+client-visible result or message update. A guarded transition that changes no
+durable state appends no update. State without its promised update, or an update
+without its state, is therefore unrepresentable.
 
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
-  `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
+  `BEFORE INSERT` triggers on both headers allocate `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
   deferred trigger requires the event row for every advance. Why: holding the
   allocator row lock until commit makes committed sequences contiguous and
@@ -1131,6 +1238,9 @@ existing connection; it never begins or commits a transaction, so the
 state-changing adapter owns the atomic boundary and no post-commit publish step
 exists in application code. Implemented appends: `CreateSession` and
 `CreateSessionFromImportedFrontier` handling each append `session_created`; an
+applied defaults replacement that changes model selection or settings appends
+`session_model_settings_changed`; every new origin records and appends
+`turn_model_settings_resolved` before its correlated `input_accepted`. An
 applied `SubmitInput` that creates a turn origin appends `input_accepted`, while
 `PendingSteering` appends nothing until terminal reclassification mints its
 successor turn and appends that correlated `input_accepted`; an applied
@@ -1203,12 +1313,88 @@ delivery still validates the allocator singleton and cursor. Daemon task
 ownership, polling, fan-out, and client observation semantics are owned by
 [process-protocol](process-protocol.md).
 
+**Committed unimplemented functionality — OAuth refresh staging.** No present
+migration or repository stores daemon-owned OAuth material. Its implementing
+child must durably mark one profile generation `refresh_in_progress` before the
+network exchange, then atomically replace the token and clear that exact marker
+after a successful rotation. A definitely failed exchange may clear the marker
+without changing the token only when provider non-rotation is proven. After a
+commit ambiguity the repository rereads the generation: the committed
+replacement wins, while an uncleared marker is durable quarantine evidence.
+Startup treats that marker the same way and never submits the possibly
+superseded stored token again. Provisioning replaces the quarantined generation
+with a fresh authorization in one transaction. This paragraph constrains the
+future schema; no present storage surface provides it.
+
+**Committed unimplemented functionality — credential-pool state.** No present
+migration stores a pool-policy revision, pool action, or pre-call exhaustion
+failure. The implementing schema must intern each policy as one immutable header
+plus ordered membership and action rows, with a deferred uniqueness constraint
+over the complete canonical structural value. The surrogate identity is reused
+only after full relational equality succeeds; a digest is not identity. Cursor
+rows key that identity and priority, so an unchanged policy retains its cursor
+across restart and an edited policy cannot inherit one.
+
+Profile-quarantine, membership-exclusion, and session-displacement rows each
+carry a positive generation, active/cleared state, and their exact scope. A
+provider-observation-derived row also carries the model-call observation
+correlation; deferred constraints require it and that exact terminal observation
+to exist together in the same transaction. A delivery-layer quarantine instead
+correlates its typed pre-request failure. A session displacement stores its
+source turn and cannot apply within that turn. Clearing marks the exact
+generation inactive rather than deleting it, which supplies the replay and
+`already_cleared` contract.
+
+A chain-exclusion row is scoped to the session, turn, immutable pool policy,
+profile, and predecessor model call whose qualifying observation created it. It
+carries active/cleared state and that exact observation correlation rather than
+an independently allocated generation. Clearing marks only that correlation
+inactive, retains it for replay, and wakes a matching indefinite availability
+wait without inventing provider evidence.
+
+Pre-call exhaustion uses one turn-correlated failure header with cause exactly
+`credential_pool_exhausted`, the current attempt, and the immutable policy
+identity, plus contiguous member rows in policy order carrying the closed
+exclusion kind, correlated record generation or predecessor observation, and
+optional reset. Deferred constraints require the complete policy membership, no
+model call for the attempt, `KnownFailure` attempt end, `Failed` turn, exact
+`TurnFailed` marker and terminal frontier, and one typed preparation-failure
+outbox row in the same commit. Reconstitution rejects a missing, duplicate,
+reordered, stale, or foreign evidence row. This paragraph constrains the future
+schema; no present storage surface provides it.
+
+**Committed unimplemented functionality — availability-successor storage.** No
+present migration, repository operation, or reconstitution path stores an
+availability successor or credential-availability wait. Its implementing child
+must give a predecessor-linked attempt a closed origin distinct from the
+tool-loop continuation origin and atomically persist its predecessor model call,
+the qualifying availability cause, and the typed non-acceptance evidence that
+authorized substitution. The successor's call remains subject to
+`model_call_attempt_once`, pins the same target and a different profile, and
+cannot exist without that complete predecessor proof. A credential-availability
+wait must atomically retain the active turn slot and store a closed
+`exhausted`/`contended` discriminator plus the immutable pool-policy identity.
+The exhausted form stores every policy member's exclusion evidence and optional
+reset plus the optional earliest-reset deadline. The contended form stores every
+durable exclusion in the selection snapshot and the complete nonempty set of
+otherwise-admissible bounded members with their exact invocation-reservation
+identities and generations. Invocation completion releases its reservation and
+writes the wake signal atomically; startup closes prior-process reservations as
+lost before waking their waiters and retains reservations owned by the live
+fenced process. These are the shapes required by
+[turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
+Reconstitution and wake must fail closed on partial, stale, or mismatched
+evidence. This paragraph constrains that future schema; no present storage
+surface provides it.
+
 ## Open edges
 
 - Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
   in [open questions](../open-questions.md#protocols-and-persistence).
-- Attempt continuation is admitted only for the tool-loop yield/approval path;
-  no other producer can construct a predecessor-linked attempt.
+- Attempt continuation is presently admitted only for the tool-loop
+  yield/approval path. The availability-successor producer described above is
+  committed but unimplemented; no current producer can construct that second
+  predecessor-linked shape.
 - Frontier lineage checks admit `none` and checked imported-frontier ancestry;
   native `SingleSource` fork ancestry remains unimplemented.
 - The aggregate-map rows for model calls and the tool loop have landed; provider

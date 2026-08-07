@@ -166,11 +166,23 @@ cargo test -p signalbox-client --test end_to_end \
 ```
 
 The companion ignored real-Anthropic path makes a live provider request and may
-incur cost. It runs only when both opt-in values are supplied, and reads the key
-path from the reviewed catalog's Anthropic credential profile:
+incur cost. The checked-in catalog names the production installation placeholder
+for the exec supervisor, so first materialize a runtime copy with the host
+executable that Cargo actually builds (inside `devenv shell`):
 
 ```console
-SIGNALBOX_E2E_CONFIG_FILE=/path/to/reviewed-signalboxd.toml \
+supervisor="$(tooling/resolve-cargo-bin.sh "$PWD/Cargo.toml" "$PWD/target" \
+  signalbox-tools-exec signalbox-exec-supervisor)"
+signalbox-materialize-config config/signalboxd.example.toml \
+  target/signalboxd.live.toml "$supervisor"
+```
+
+Review that runtime copy and point its Anthropic credential profile's `file` at
+a mode-`0600` file containing only the API-key bytes. The live path then runs
+only when both opt-in values are supplied:
+
+```console
+SIGNALBOX_E2E_CONFIG_FILE=target/signalboxd.live.toml \
 SIGNALBOX_E2E_SELECTION_ID=a5fec003-0edd-4118-96d1-18af31157bd3 \
   cargo test -p signalbox-client --test end_to_end \
     terminal_client_completes_the_real_anthropic_path \
@@ -195,14 +207,14 @@ SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox 
 The debug database connection explicitly disables TLS and must not be used as
 production connection configuration.
 
-The same harness can run the production runtime bridge against Anthropic. Copy
-and review [`config/signalboxd.example.toml`](config/signalboxd.example.toml),
-put only the API-key bytes in a mode-`0600` file, point the copy's Anthropic
-credential profile at that file, then run:
+The same harness can run the production runtime bridge against Anthropic. Review
+the checked-in example, materialize `target/signalboxd.live.toml` with the setup
+command above, and point its Anthropic credential profile at the mode-`0600` key
+file before running:
 
 ```console
 SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \
-SIGNALBOX_CONFIG_FILE=/path/to/reviewed-signalboxd.toml \
+SIGNALBOX_CONFIG_FILE=target/signalboxd.live.toml \
   cargo run -p signalboxd --bin signalbox-debug -- \
   --anthropic a5fec003-0edd-4118-96d1-18af31157bd3 \
   "Reply with exactly: signalbox smoke ok"

@@ -482,6 +482,15 @@ mod tests {
     impl ToolExecutionTransaction for ExecutorFixtureTransaction {
         type Error = CurrentTimeExecutorError;
 
+        async fn resume_child_wait(
+            &mut self,
+            _session: SessionId,
+            _turn: TurnId,
+            _attempt: TurnAttemptId,
+        ) -> Result<bool, Self::Error> {
+            panic!("current-time fixtures never contain a delegated child wait")
+        }
+
         async fn load_active_batch(
             &mut self,
             _session: SessionId,

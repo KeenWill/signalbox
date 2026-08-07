@@ -39,13 +39,17 @@ signalbox-domain = { path = "../../crates/domain" }
 signalbox-model-provider-runtime = { path = "../../crates/model-provider-runtime" }
 signalbox-model-runtime = { path = "../../crates/model-runtime" }
 signalbox-model-runtime-anthropic = { path = "../../crates/model-runtime-anthropic" }
+signalbox-model-runtime-claude-cli = { path = "../../crates/model-runtime-claude-cli" }
 signalbox-model-runtime-codex-cli = { path = "../../crates/model-runtime-codex-cli" }
+signalbox-model-runtime-openai = { path = "../../crates/model-runtime-openai" }
 signalbox-persistence = { path = "../../crates/persistence" }
 signalbox-process-protocol = { path = "../../crates/process-protocol" }
 signalbox-runner-wire = { path = "../../crates/runner-wire" }
 signalbox-tools-basic = { path = "../../crates/tools-basic" }
 signalbox-tools-code-host = { path = "../../crates/tools-code-host" }
 signalbox-tools-conversations = { path = "../../crates/tools-conversations" }
+signalbox-tools-exec = { path = "../../crates/tools-exec" }
+signalbox-tools-git = { path = "../../crates/tools-git" }
 signalbox-tools-github = { path = "../../crates/tools-github" }
 signalbox-tools-plan = { path = "../../crates/tools-plan" }
 signalbox-tools-web = { path = "../../crates/tools-web" }
@@ -85,6 +89,7 @@ url = "2.5.8"
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 
 [dev-dependencies]
+git2 = { version = "0.21.0", default-features = false, features = ["unstable-sha256"] }
 opentelemetry_sdk = { version = "0.32.0", default-features = false, features = [
     "testing",
     "trace",

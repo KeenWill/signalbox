@@ -12,16 +12,19 @@
 //! real transport path — headers sent, redirect discipline, connect-failure
 //! classification, and stream-integrity evidence — deterministically.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, DeliveryMode,
-    LossCause, ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact,
-    PROVIDER_JSON_NESTING_LIMIT, PreparationFailure, PreparationOutcome, ProviderErrorKind,
-    ProviderRequestId, RequestedTarget, ResolvedTarget, StreamInterruption, TerminalEvidence,
-    TerminalReport, UnsentCause,
+    FastMode, FastModeTarget, InputTokenCountOutcome, LossCause, ModelCapabilities,
+    ModelCapabilityCatalog, ModelCapabilityDefinition, ModelInputTokenCounter, ModelOperation,
+    ModelRuntime, ModelSettings, Observation, ObservationFact, PROVIDER_JSON_NESTING_LIMIT,
+    PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderRequestId, ReasoningLevel,
+    RequestedTarget, ResolvedTarget, StreamInterruption, TerminalEvidence, TerminalReport,
+    UnsentCause,
 };
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
@@ -628,6 +631,117 @@ async fn preparation_resolves_once_sends_nothing_and_execution_does_not_resolve_
 
     assert_eq!(resolutions.load(Ordering::SeqCst), 1);
     assert_eq!(server.recorded_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn input_count_rejects_unsupported_settings_before_credential_resolution() {
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let runtime = AnthropicRuntime::new(
+        AnthropicConfig::new(),
+        CountingKey {
+            resolutions: Arc::clone(&resolutions),
+            value: b"key_count_rejected",
+        },
+    )
+    .expect("configuration constructs");
+    let mut unsupported = operation("count-unsupported");
+    unsupported.settings.reasoning_level = Some(ReasoningLevel::Low);
+
+    let outcome = runtime
+        .count_input_tokens(unsupported, CancellationSignal::never())
+        .await;
+
+    assert_eq!(
+        outcome,
+        InputTokenCountOutcome::Failed {
+            correlation: "count-unsupported".to_string(),
+        }
+    );
+    assert_eq!(resolutions.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn input_count_uses_the_declared_fast_target() {
+    let server =
+        CannedServer::serving(vec![http_response("200 OK", &[], br#"{"input_tokens":7}"#)]).await;
+    let selected = ResolvedTarget::new("model-exact-1");
+    let mapped = ResolvedTarget::new("model-fast-1");
+    let definitions = [ModelCapabilityDefinition::new(
+        selected,
+        ModelCapabilities::new(
+            BTreeSet::new(),
+            Some(FastModeTarget::Mapped(mapped.clone())),
+            BTreeSet::new(),
+        ),
+    )];
+    let mut config = AnthropicConfig::new();
+    config.base_url = server.base_url.clone();
+    config.model_capabilities = ModelCapabilityCatalog::try_from_definitions(definitions)
+        .expect("fixture capabilities are unique");
+    let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+    let mut counted = operation("count-fast");
+    counted.settings.fast_mode = FastMode::Enabled;
+
+    let outcome = runtime
+        .count_input_tokens(counted, CancellationSignal::never())
+        .await;
+    let requests = server.recorded_requests();
+
+    assert_eq!(
+        outcome,
+        InputTokenCountOutcome::Counted {
+            correlation: "count-fast".to_string(),
+            input_tokens: 7,
+        }
+    );
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains(&format!(r#""model":"{}""#, mapped.as_str())));
+    assert!(!requests[0].contains(r#""speed":"fast""#));
+    assert!(!requests[0].contains("anthropic-beta: fast-mode-2026-02-01"));
+}
+
+#[tokio::test]
+async fn input_count_preserves_reasoning_and_same_target_fast_controls() {
+    let correlation = "count-request-controls";
+    let input_tokens = 7;
+    let response_body = format!(r#"{{"input_tokens":{input_tokens}}}"#);
+    let server =
+        CannedServer::serving(vec![http_response("200 OK", &[], response_body.as_bytes())]).await;
+    let mut counted = operation(correlation);
+    counted.settings.reasoning_level = Some(ReasoningLevel::Low);
+    counted.settings.fast_mode = FastMode::Enabled;
+    let selected = counted.resolved_target.clone();
+    let definitions = [ModelCapabilityDefinition::new(
+        selected.clone(),
+        ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::Low]),
+            Some(FastModeTarget::SameTarget),
+            BTreeSet::new(),
+        ),
+    )];
+    let mut config = AnthropicConfig::new();
+    config.base_url = server.base_url.clone();
+    config.model_capabilities = ModelCapabilityCatalog::try_from_definitions(definitions)
+        .expect("fixture capabilities are unique");
+    let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+
+    let outcome = runtime
+        .count_input_tokens(counted, CancellationSignal::never())
+        .await;
+    let requests = server.recorded_requests();
+
+    assert_eq!(
+        outcome,
+        InputTokenCountOutcome::Counted {
+            correlation: correlation.to_string(),
+            input_tokens,
+        }
+    );
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains(&format!(r#""model":"{}""#, selected.as_str())));
+    assert!(requests[0].contains(r#""output_config":{"effort":"low"}"#));
+    assert!(requests[0].contains(r#""speed":"fast""#));
+    assert!(requests[0].contains("anthropic-beta: fast-mode-2026-02-01"));
 }
 
 #[derive(Debug)]

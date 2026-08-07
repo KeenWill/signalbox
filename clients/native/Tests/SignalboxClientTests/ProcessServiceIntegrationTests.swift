@@ -556,6 +556,29 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testToolReconciliationSideProjectionAcceptsForegroundDelegationResult() throws {
+    let snapshot = try ProcessProjectionFixture
+      .snapshotWithForegroundDelegationReconciliationResult()
+    let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.toolNames(in: projection),
+      ProcessProjectionFixture.reconciliationSuffixToolNames
+    )
+    XCTAssertEqual(
+      ProcessProjectionFixture.conservativeKinds(in: projection),
+      ProcessProjectionFixture.foregroundDelegationResultKinds
+    )
+    XCTAssertEqual(
+      ProcessProjectionFixture.toolSummaries(in: projection),
+      ProcessProjectionFixture.foregroundDelegationToolSummaries
+    )
+  }
+
   func testToolReconciliationSideProjectionRejectsAttemptlessDeniedSuffix() throws {
     let snapshot = try ProcessProjectionFixture
       .snapshotWithAttemptlessDeniedReconciliationResults()
@@ -3746,6 +3769,36 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(error, ProcessDriverFixture.mismatchedSubmissionSessionError)
   }
 
+  func testStopReceiptRejectsSettingsForAnotherDirectModel() async throws {
+    let expectedSelection = try SignalboxCanonicalUUID(
+      validating: ProcessDriverFixture.modelCall
+    )
+    let prepared = SignalboxPreparedTurnStop(
+      commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
+      sessionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.session),
+      activeTurnID: try SignalboxCanonicalUUID(
+        validating: ProcessSubmissionFixture.acceptedTurnID
+      ),
+      content: ProcessSubmissionFixture.content,
+      expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 1),
+      modelSelection: .direct(selectionID: expectedSelection)
+    )
+    let requester = StaticProcessRequester(
+      frames: [
+        try ProcessDriverFixture.inputSubmitted(
+          validatedForSelectionID: ProcessDriverFixture.metadataSessionA
+        )
+      ]
+    )
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+
+    let error = await capturedServiceError {
+      _ = try await service.stopTurn(prepared)
+    }
+
+    XCTAssertEqual(error, ProcessDriverFixture.mismatchedStopSettingsError)
+  }
+
   func testMetadataReadRejectsDuplicateTagsBeforeReplacement() async throws {
     let sessions = try await makeService().listSessions(includeArchived: true)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -4314,10 +4367,24 @@ private enum ProcessSubmissionFixture {
       from: Data(
         """
         {
+          "type":"input_submitted",
           "session_id":"\(sessionID.rawValue)",
           "accepted_input_id":"\(acceptedInputID)",
           "acceptance_position":"1",
-          "turn_id":"\(acceptedTurnID)"
+          "turn_id":"\(acceptedTurnID)",
+          "model_settings":{
+            "precedence":{
+              "per_call":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+              "session":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+              "profile":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+              "global_default":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}
+            },
+            "effective":{"reasoning_level":null,"fast_mode":"disabled","service_tier":null},
+            "reasoning_source":null,
+            "fast_mode_source":null,
+            "service_tier_source":null,
+            "validated_for_selection_id":null
+          }
         }
         """.utf8
       )
@@ -4347,6 +4414,19 @@ private enum ProcessSubmissionFixture {
           "model_selection":{
             "kind":"direct",
             "selection_id":"\(ProcessDriverFixture.modelCall)"
+          },
+          "model_settings":{
+            "precedence":{
+              "per_call":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+              "session":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+              "profile":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+              "global_default":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}
+            },
+            "effective":{"reasoning_level":null,"fast_mode":"disabled","service_tier":null},
+            "reasoning_source":null,
+            "fast_mode_source":null,
+            "service_tier_source":null,
+            "validated_for_selection_id":null
           },
           "dangerous_tool_auto_approval":false,
           "system_prompt":null
@@ -4378,7 +4458,10 @@ private enum ProcessSubmissionFixture {
       commandID: try SignalboxCommandID(validating: commandID),
       sessionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.session),
       content: content,
-      expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 1)
+      expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 1),
+      modelSelection: .direct(
+        selectionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.modelCall)
+      )
     )
   }
 
@@ -4474,7 +4557,8 @@ private struct RejectingProcessService: SignalboxProcessServiceProtocol {
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -4794,7 +4878,8 @@ private actor AmbiguousThenAcceptingProcessService: SignalboxProcessServiceProto
       commandID: try SignalboxCommandID(validating: commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -4858,7 +4943,8 @@ private actor AmbiguousThenAcceptingStopProcessService: SignalboxProcessServiceP
       sessionID: session.id,
       activeTurnID: activeTurnID,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -5009,7 +5095,8 @@ private actor CancellationThenAcceptingProcessService: SignalboxProcessServicePr
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -5055,7 +5142,8 @@ private actor ImmediateAcceptingProcessService: SignalboxProcessServiceProtocol 
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -5076,7 +5164,8 @@ private actor ImmediateAcceptingProcessService: SignalboxProcessServiceProtocol 
       sessionID: session.id,
       activeTurnID: activeTurnID,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -5125,7 +5214,8 @@ private actor DefaultsMismatchThenAcceptingProcessService: SignalboxProcessServi
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -5188,7 +5278,8 @@ private actor SuspendedSubmissionService: SignalboxProcessServiceProtocol {
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -5253,7 +5344,8 @@ private actor AmbiguousThenUnsentSubmissionService: SignalboxProcessServiceProto
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -5667,6 +5759,9 @@ private enum ProcessDriverFixture {
   static let mismatchedSubmissionSessionError = SignalboxProcessServiceError.unexpectedMessage(
     "The input-submission receipt named a different session."
   )
+  static let mismatchedStopSettingsError = SignalboxProcessServiceError.unexpectedMessage(
+    "The stop receipt settings named a different direct model."
+  )
   static let invalidMetadataReadError = SignalboxProcessServiceError.unexpectedMessage(
     "The metadata read violated the metadata contract."
   )
@@ -6061,16 +6156,31 @@ private enum ProcessDriverFixture {
   }
 
   static func inputSubmitted(
-    sessionID: String = session
+    sessionID: String = session,
+    validatedForSelectionID: String? = nil
   ) throws -> SignalboxProcessServerFrame {
-    try frame(
+    let validationIdentity = validatedForSelectionID.map { "\"\($0)\"" } ?? "null"
+    return try frame(
       """
       {
         "type":"input_submitted",
         "session_id":"\(sessionID)",
         "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
         "acceptance_position":"1",
-        "turn_id":"\(ProcessSubmissionFixture.acceptedTurnID)"
+        "turn_id":"\(ProcessSubmissionFixture.acceptedTurnID)",
+        "model_settings":{
+          "precedence":{
+            "per_call":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "session":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "profile":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "global_default":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}
+          },
+          "effective":{"reasoning_level":null,"fast_mode":"disabled","service_tier":null},
+          "reasoning_source":null,
+          "fast_mode_source":null,
+          "service_tier_source":null,
+          "validated_for_selection_id":\(validationIdentity)
+        }
       }
       """
     )
@@ -6184,6 +6294,15 @@ private enum ProcessProjectionFixture {
   static let reconciliationClosedEntry = "33333333-3333-4333-8333-333333333333"
   static let reconciliationClosedOutput = "Ambiguous fixture tool closed."
   static let reconciliationDeniedOutput = "Fixture tool request denied."
+  static let delegationSpawningRequest = "22222222-3333-4333-8333-333333333333"
+  static let delegationChildSession = "11111111-3333-4333-8333-333333333333"
+  static let delegationChildTurn = "aaaaaaaa-3333-4333-8333-333333333333"
+  static let delegationResultContent = "Delegated fixture inspected."
+  static let foregroundDelegationResultKinds = ["delegation_result"]
+  static let foregroundDelegationToolSummaries = [
+    "\(proposedToolName): \(delegationResultContent)",
+    "\(reconciliationSuffixToolName): \(reconciliationSuffixOutput)",
+  ]
   static let reconciliationSuffixToolNames = [
     proposedToolName, reconciliationSuffixToolName,
   ]
@@ -9855,6 +9974,17 @@ private enum ProcessProjectionFixture {
     }
   }
 
+  static func conservativeKinds(
+    in projection: SignalboxProcessTranscriptProjection
+  ) -> [String] {
+    projection.records.compactMap { record in
+      guard case .processConservative(let event) = record.event else {
+        return nil
+      }
+      return event.kind
+    }
+  }
+
   static func toolSummaries(
     in projection: SignalboxProcessTranscriptProjection
   ) -> [String] {
@@ -10104,6 +10234,55 @@ private enum ProcessProjectionFixture {
             "type":"tool_closed",
             "tool_request_id":"\(proposedToolRequest)",
             "content":"\(reconciliationClosedOutput)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"3",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationSuffixResultEntry)",
+          "entry":{
+            "type":"tool_execution_result",
+            "tool_request_id":"\(reconciliationSuffixToolRequest)",
+            "tool_attempt_id":"\(reconciliationSuffixAttempt)",
+            "content":"\(reconciliationSuffixOutput)"
+          }
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithForegroundDelegationReconciliationResult() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try reconciliationResultSnapshot(
+      trailingEntries: [],
+      entryCount: 4,
+      resultEntries: [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"2",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationClosedEntry)",
+          "entry":{
+            "type":"delegation_result",
+            "await_request_id":"\(proposedToolRequest)",
+            "spawning_request_id":"\(delegationSpawningRequest)",
+            "child_session_id":"\(delegationChildSession)",
+            "mode":"foreground",
+            "delivery_sequence":null,
+            "outcome":"returned",
+            "content":"\(delegationResultContent)",
+            "reason":"child_completed",
+            "provenance":{
+              "type":"child_turn",
+              "child_session_id":"\(delegationChildSession)",
+              "child_turn_id":"\(delegationChildTurn)"
+            }
           }
         }
         """,

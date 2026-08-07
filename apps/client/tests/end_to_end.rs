@@ -25,10 +25,9 @@ use signalbox_application::{
     UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
-    ActivatedAcceptedInputTurn, DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition,
-    NormalizedToolArguments, ProviderModelIdentity, ResolvedProviderTarget, SessionId,
-    SessionTemplateName, ToolEffectClass, ToolExecutionErrorDetail, ToolName,
-    ToolPermissionDefault,
+    DirectModelSelection, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    ProviderModelIdentity, ResolvedProviderTarget, SessionId, SessionTemplateName, ToolEffectClass,
+    ToolExecutionErrorDetail, ToolName, ToolPermissionDefault,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -49,10 +48,9 @@ use signalbox_process_protocol::{
     ServerMessage, SessionMetadata, decode_server_line, encode_client_line,
 };
 use signalboxd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnExecution, ActivatedTurnPass,
-    FatalExecutionSupervisor, FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
-    SessionTemplateConfiguration,
+    ActivatedTurnExecution, ActivatedTurnPass, FatalExecutionSupervisor, FileCredentialAccess,
+    HubModelConfiguration, LocalProcessListener, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, SessionTemplateConfiguration,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -212,7 +210,7 @@ async fn spawn_client(
 
 fn require_activated_turn(
     outcome: StartEligibleTurnOutcome,
-) -> Result<Box<ActivatedAcceptedInputTurn>, io::Error> {
+) -> Result<Box<signalbox_domain::ActivatedTurn>, io::Error> {
     match outcome {
         StartEligibleTurnOutcome::Activated(activated) => Ok(activated),
         StartEligibleTurnOutcome::NoEligibleTurn => Err(io::Error::other(
@@ -2931,24 +2929,24 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
     }
 
     let model_configuration = HubModelConfiguration::read(&configuration_file)?;
-    let credential_access = FileCredentialAccess::new(
+    let selection = DirectModelSelection::from_uuid(selection_uuid);
+    let credential_profile = model_configuration
+        .resolve_direct_model(selection)
+        .filter(|route| route.uses_anthropic_adapter())
+        .ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                "SIGNALBOX_E2E_SELECTION_ID must select the Anthropic adapter",
+            )
+        })?
+        .credential_profile()
+        .to_owned();
+    let credential_access = FileCredentialAccess::from_files(
         model_configuration
-            .anthropic_credential_file()
-            .ok_or_else(|| {
-                io::Error::new(
-                    ErrorKind::InvalidInput,
-                    "SIGNALBOX_E2E_CONFIG_FILE must map a family to the Anthropic adapter",
-                )
-            })?
-            .to_owned(),
-        CredentialReference::new(
-            model_configuration
-                .anthropic_credential_profile()
-                .unwrap_or(ANTHROPIC_CREDENTIAL_REFERENCE),
-        ),
+            .file_credential_profiles()
+            .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
     );
-    let credential_reference =
-        ModelCallCredentialReference::new(credential_access.credential_reference().as_str());
+    let credential_reference = ModelCallCredentialReference::new(credential_profile);
     let anthropic = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)?;
     let provider =
         RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());

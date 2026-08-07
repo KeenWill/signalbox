@@ -9,11 +9,12 @@
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU32,
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
 use toml_edit::{InlineTable, Item, Table};
+use url::Url;
 
 use crate::configuration::{
     BillingKind, HubModelConfigurationError, ModelAdapter, reject_unknown_fields, required_string,
@@ -86,32 +87,158 @@ impl CredentialDelivery {
                 delivery: Arc::from(key),
             });
         }
-        if !adapter.delivers(key) {
-            return Err(HubModelConfigurationError::UndeliveredCredentialDelivery {
-                delivery: Arc::from(key),
-            });
-        }
         match key {
             "ambient" => {
                 reject_unknown_fields(profile, &PROFILE_COMMON_FIELDS)?;
+                reject_undelivered(adapter, key)?;
                 Ok(Self::Ambient)
             }
-            _ => {
+            "file" => {
                 let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
                 allowed.extend_from_slice(&["file", "env_key"]);
                 reject_unknown_fields(profile, &allowed)?;
-                let path = PathBuf::from(required_string(profile, "file")?);
-                if !path.is_absolute() {
+                let path = normalize_absolute_path(Path::new(required_string(profile, "file")?))?;
+                let env_key = parse_file_env_key(profile, adapter)?;
+                reject_undelivered(adapter, key)?;
+                Ok(Self::File { path, env_key })
+            }
+            "codex_home" => {
+                let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
+                allowed.extend_from_slice(&["codex_home", "max_concurrent_invocations"]);
+                reject_unknown_fields(profile, &allowed)?;
+                normalize_absolute_path(Path::new(required_string(profile, "codex_home")?))?;
+                parse_max_concurrent_invocations(profile)?;
+                Err(undelivered(key))
+            }
+            "oauth" => {
+                let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
+                allowed.extend_from_slice(&[
+                    "client_id",
+                    "token_url",
+                    "device_authorization_url",
+                    "scopes",
+                ]);
+                reject_unknown_fields(profile, &allowed)?;
+                parse_oauth_delivery(profile)?;
+                Err(undelivered(key))
+            }
+            _ => Err(HubModelConfigurationError::InvalidCredentialDelivery),
+        }
+    }
+}
+
+fn undelivered(delivery: &str) -> HubModelConfigurationError {
+    HubModelConfigurationError::UndeliveredCredentialDelivery {
+        delivery: Arc::from(delivery),
+    }
+}
+
+fn reject_undelivered(
+    adapter: ModelAdapter,
+    delivery: &str,
+) -> Result<(), HubModelConfigurationError> {
+    if adapter.delivers(delivery) {
+        Ok(())
+    } else {
+        Err(undelivered(delivery))
+    }
+}
+
+fn parse_file_env_key(
+    profile: &Table,
+    adapter: ModelAdapter,
+) -> Result<Option<Arc<str>>, HubModelConfigurationError> {
+    match adapter {
+        ModelAdapter::Anthropic | ModelAdapter::OpenAi => {
+            if profile.contains_key("env_key") {
+                return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+            }
+            Ok(None)
+        }
+        ModelAdapter::ClaudeCli => {
+            let env_key = validated_name(required_string(profile, "env_key")?)?;
+            Ok(Some(env_key))
+        }
+        ModelAdapter::CodexCli => {
+            let env_key = validated_name(required_string(profile, "env_key")?)?;
+            if env_key.as_ref() != "OPENAI_API_KEY" {
+                return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+            }
+            Ok(Some(env_key))
+        }
+    }
+}
+
+fn normalize_absolute_path(path: &Path) -> Result<PathBuf, HubModelConfigurationError> {
+    if !path.is_absolute() {
+        return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
                     return Err(HubModelConfigurationError::InvalidCredentialDelivery);
                 }
-                let env_key = profile
-                    .get("env_key")
-                    .map(|_| validated_name(required_string(profile, "env_key")?))
-                    .transpose()?;
-                Ok(Self::File { path, env_key })
             }
         }
     }
+    Ok(normalized)
+}
+
+fn parse_max_concurrent_invocations(
+    profile: &Table,
+) -> Result<Option<NonZeroU32>, HubModelConfigurationError> {
+    profile
+        .get("max_concurrent_invocations")
+        .map(|value| {
+            value
+                .as_integer()
+                .and_then(|value| u32::try_from(value).ok())
+                .and_then(NonZeroU32::new)
+                .ok_or(HubModelConfigurationError::InvalidCredentialDelivery)
+        })
+        .transpose()
+}
+
+fn parse_oauth_delivery(profile: &Table) -> Result<(), HubModelConfigurationError> {
+    let client_id = required_string(profile, "client_id")?;
+    if client_id.is_empty() || client_id.len() > 1_024 || client_id.contains('\0') {
+        return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+    }
+    validate_https_url(required_string(profile, "token_url")?)?;
+    validate_https_url(required_string(profile, "device_authorization_url")?)?;
+    let scopes = profile
+        .get("scopes")
+        .and_then(Item::as_array)
+        .ok_or(HubModelConfigurationError::InvalidCredentialDelivery)?;
+    if scopes.is_empty() || scopes.len() > 64 {
+        return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+    }
+    let mut declared = HashSet::with_capacity(scopes.len());
+    for scope in scopes {
+        let scope = scope
+            .as_str()
+            .ok_or(HubModelConfigurationError::InvalidCredentialDelivery)?;
+        if scope.is_empty() || scope.len() > 256 || scope.contains('\0') || !declared.insert(scope)
+        {
+            return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+        }
+    }
+    Ok(())
+}
+
+fn validate_https_url(value: &str) -> Result<(), HubModelConfigurationError> {
+    let parsed =
+        Url::parse(value).map_err(|_| HubModelConfigurationError::InvalidCredentialDelivery)?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+    }
+    Ok(())
 }
 
 /// One provider account and the delivery that authenticates calls through it.
@@ -379,11 +506,21 @@ pub(crate) fn parse_credential_profiles(
         return Err(HubModelConfigurationError::MissingCredentialProfiles);
     }
     let mut profiles = HashMap::with_capacity(tables.len());
+    let mut ambient_adapters = HashSet::new();
+    let mut file_paths = HashSet::new();
     for profile in tables {
         let name = validated_name(required_string(profile, "name")?)?;
         let adapter = ModelAdapter::parse(required_string(profile, "adapter")?)?;
         let billing_kind = BillingKind::parse(required_string(profile, "billing_kind")?)?;
         let delivery = CredentialDelivery::parse(profile, adapter)?;
+        if delivery == CredentialDelivery::Ambient && !ambient_adapters.insert(adapter) {
+            return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+        }
+        if let CredentialDelivery::File { path, .. } = &delivery
+            && !file_paths.insert((adapter, path.clone()))
+        {
+            return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+        }
         let parsed = CredentialProfile {
             name: Arc::clone(&name),
             adapter,

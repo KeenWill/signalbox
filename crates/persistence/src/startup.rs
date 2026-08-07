@@ -228,6 +228,7 @@ impl PostgresStartupScanRepository {
                     SELECT session_id
                       FROM turn_lifecycle
                      WHERE state_kind = 'active'
+                       AND NOT delegation_runtime_terminal
                     UNION
                     SELECT session_id
                       FROM context_compaction_model_call
@@ -405,7 +406,8 @@ where
             ));
         }
         signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. } => {
+        | signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. }
+        | signalbox_domain::ActiveTurnPhase::AwaitingChild { .. } => {
             return Ok(TransactionDecision::Rollback(
                 StartupScanSessionOutcome::NoActiveTurn,
             ));
@@ -843,6 +845,9 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanReposit
         }
         SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. } => {
             StartupScanCorruption::Inconsistent("origin accepted-input identity").into()
+        }
+        SubmitInputRepositoryError::UnsupportedModelSetting(_) => {
+            StartupScanCorruption::Inconsistent("origin model settings").into()
         }
         SubmitInputRepositoryError::ModelExecution(_) => {
             StartupScanCorruption::Inconsistent("origin command application").into()

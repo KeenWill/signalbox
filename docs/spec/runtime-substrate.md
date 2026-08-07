@@ -6,17 +6,21 @@ This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime-claude-cli`, verified against the implementing stack
 through PR #183 (`agent/provider-call-security-parser`). The Claude Code CLI
 adapter implementation was verified through PR #320
-(`agent/claude-cli-adapter`). The Codex CLI adapter stack comprises PR #264
-(`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
-escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
-compatibility-smoke automation was verified through PR #333
-(`agent/ci-tells-truth`); its feature classification, ambient-skill catalog
-probe, and pinned version were verified against the `0.146.0` executable through
-PR #321 (`renovate/openai-codex-0.x`). The `signalboxd` names this page states
-for the composition root, its telemetry, and the production
-`FileCredentialAccess` were verified through PR #258
-(`agent/signalboxd-rename`); the Anthropic adapter's server-side
-`fallback`-block recognition was verified through PR #280
+(`agent/claude-cli-adapter`); its derived version pin, gated compatibility
+smoke, twice-daily schedule, and workflow-self-change trigger were verified
+through PR #468 (`agent/claude-cli-smoke`), including the credential-free
+version gate against the installed pinned executable. The Codex CLI adapter
+stack comprises PR #264 (`agent/codex-cli-wrap`) and PR #268
+(`agent/codex-cli-pin-smoke`); its escalation closeout is PR #317
+(`agent/escalation-closeout`). The Codex CLI compatibility-smoke automation was
+verified through PR #333 (`agent/ci-tells-truth`); its feature classification,
+ambient-skill catalog probe, and pinned version were verified against the
+`0.146.0` executable through PR #321 (`renovate/openai-codex-0.x`). Its
+twice-daily schedule and workflow-self-change trigger were verified through PR
+#471 (`agent/codex-smoke-schedule`). The `signalboxd` names this page states for
+the composition root, its telemetry, and the production `FileCredentialAccess`
+were verified through PR #258 (`agent/signalboxd-rename`); the Anthropic
+adapter's server-side `fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The HTTP fallback-body redaction
 ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
 persistence-repository families in the operator-failure inventory were verified
@@ -27,12 +31,19 @@ shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
 CLI redaction contract was verified through PR #316
 (`agent/redaction-hardening`; shape coverage, absorbing suppression, enumerated
 single-split parity, and geometric work bound). Exact Codex CLI usage-axis
-projection is verified against PR #389 (`agent/cost-accounting`). It covers the
-provider-neutral operation, observation, and evidence vocabulary; SSE framing;
-structured-output and tool decode; `ScriptedModel`; the four provider adapters;
-and their credential boundaries. Layer-2 authorization and evidence
-classification ([model-call-execution](model-call-execution.md)), credential
-channels, delivery, and rotation discipline
+projection is verified against PR #389 (`agent/cost-accounting`). Model-settings
+mappings and advisory exceptions are verified against PR #437
+(`agent/model-settings-adapters`). The Claude Code CLI adapter's daemon
+composition is verified against this PR (`agent/wire-claude-cli-adapter`), and
+the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). The
+Anthropic compatibility smoke was verified through PR #465
+(`agent/anthropic-api-smoke`), and the OpenAI compatibility smoke through PR
+#466 (`agent/openai-api-smoke`). This page covers the provider-neutral
+operation, observation, and evidence vocabulary; SSE framing; structured-output
+and tool decode; `ScriptedModel`; the four provider adapters; and their
+credential boundaries. Layer-2 authorization and evidence classification
+([model-call-execution](model-call-execution.md)), credential channels,
+delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -74,9 +85,10 @@ no durable state, makes no lifecycle decisions, and performs no logging.
 `ResolvedTarget`), optional system text, typed conversation history
 (`ConversationMessage` with text, replayed tool calls, tool results, and signed
 or redacted thinking parts), `ModelSettings` (required `max_output_tokens`;
-optional temperature, top-p, stop sequences), declared `ToolDefinition`s, a
-`ToolChoice` (automatic/any/named), an optional `StructuredOutputContract`, and
-a `DeliveryMode` (buffered or streamed). Settings are provider-enforced request
+optional temperature, top-p, stop sequences, reasoning level, fast mode, and
+provider-tagged service tier), declared `ToolDefinition`s, a `ToolChoice`
+(automatic/any/named), an optional `StructuredOutputContract`, and a
+`DeliveryMode` (buffered or streamed). Settings are provider-enforced request
 controls unless an adapter's owning section records a capability-limited
 advisory exception; an adapter never silently presents prompt instructions as
 hard transport controls.
@@ -228,6 +240,18 @@ strings appear only as retained detail inside already-classified variants:
   terminal marker, stream protocol violation) and the partial facts observed
   before the loss.
 
+**Committed unimplemented functionality — provider non-acceptance evidence.** No
+present `TerminalEvidence` variant or `ProviderErrorEvidence` field proves that
+a provider rejected a request before accepting it, and no current adapter can
+authorize an availability successor. The implementing child must add a sealed
+typed proof alongside `ProviderError` for the exact quota-exhausted,
+rate-limited, and overloaded provider responses whose protocol semantics
+establish non-acceptance. Each adapter owns its exhaustive native mapping; the
+provider bridge preserves the proof without deriving it from
+`ProviderErrorKind`, status retryability, or native prose. Classification alone
+remains insufficient, and absence of the proof keeps the known failure terminal.
+This constraint adds no proof to the implemented evidence vocabulary above.
+
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss
 in both direct HTTP adapters, never silently completed. A finish reason observed
@@ -241,6 +265,44 @@ buffered HTTP request exposes no independent proof that the response arrived
 only after the complete upload. Why: without full-upload proof a refusal token
 cannot satisfy the completed-exchange precondition for the refusal disposition,
 so the adapter fails toward known failure rather than inventing evidence.
+
+Post-finish error records (Anthropic adapter): once its stream has reported why
+generation stopped, a later error record that classifies as `Unrecognized` is a
+protocol violation rather than definitive provider evidence. Why: it supersedes
+the reported finish with no classifiable failure, and it would otherwise reach
+the caller wearing exactly the shape the refusal downgrade above produces — an
+HTTP 200 exchange, `Unrecognized`, and the same absent or fabricated native
+material — leaving a genuine failure indistinguishable from a decoded refusal.
+An error record that *does* classify still outranks the reported finish, because
+it carries information the finish does not.
+
+Unrecognized finish reasons (OpenAI adapter) record their verdict but defer it
+to `[DONE]`, so records arriving after that finish are still examined and a
+definitive error among them supersedes it. Why: returning at the finish chunk
+would leave such a record unread, and the post-finish rule below could never
+fire for this finish — a caller would accept the prefix as a clean stop at an
+output bound. The two envelope checks that are already decidable — assistant
+role established and model identity reported — still run at the finish rather
+than at `[DONE]`, and a stream failing either reports the envelope defect and
+carries no `finish_reported`, because a caller cannot otherwise distinguish a
+well-formed response that stopped at an output bound from an envelope that was
+never valid and also reported one. Accumulated tool content is deliberately not
+among those checks: a tool-bearing request can legitimately exhaust the output
+ceiling partway through a call, so the token is an observed fact rather than a
+contradiction, and the buffered decoder retains it in exactly that case — the
+two decoders must not disagree about the same response.
+
+Post-finish error records (OpenAI adapter): once its stream has reported why
+generation stopped, a later error record carrying no native material at all is a
+protocol violation rather than definitive provider evidence. Why: it supersedes
+the reported finish with nothing a caller could act on, and it would otherwise
+reach the caller wearing exactly the shape the refusal downgrade above produces
+— an HTTP 200 exchange, `Unrecognized`, and empty native facts — leaving a
+genuine failure indistinguishable from a decoded refusal. An error record
+carrying any native material still outranks the reported finish, even when its
+type or code is unfamiliar and it therefore classifies as `Unrecognized`: it
+carries diagnostics the finish does not, and cannot be mistaken for the
+downgrade.
 
 ## SSE framing
 
@@ -425,6 +487,155 @@ Usage is provider-stated only, never estimated; OpenAI's cache-read count comes
 from `prompt_tokens_details.cached_tokens` and no cache-creation count is
 fabricated.
 
+Anthropic preflight input counting preserves the generation request's
+prompt/cache-affecting `output_config` and same-target `speed` fields. A mapped
+fast serving identity consumes the fast toggle during preparation, so neither
+the `speed` field nor its beta header is emitted for the counting or generation
+request in addition to that alternate target.
+
+### Compatibility smoke
+
+Both direct HTTP adapters carry a gated live compatibility smoke — the Anthropic
+adapter's in `.github/workflows/anthropic-smoke.yml`, the OpenAI adapter's in
+`.github/workflows/openai-smoke.yml`. Each spends one real exchange against the
+cheapest model its provider currently advertises (`claude-haiku-4-5` and
+`gpt-5-nano` respectively), run through that crate's own `ModelRuntime`
+implementation with a small fixed prompt and no provider-side prompt caching: at
+one exchange per gated run a cache write is never amortized by a later read, so
+caching would raise the cost of the run it is meant to cheapen. Unlike the Codex
+CLI smoke, there is no locally installed executable and therefore no version to
+verify beforehand; each adapter targets its provider's stable public API
+directly, so spending the one exchange is the whole smoke rather than a second
+gate behind a credential-free version probe.
+
+Everything below applies to both smokes except where a paragraph names one
+adapter, which marks a difference in what that provider's wire protocol makes
+observable.
+
+Each smoke asserts only the protocol surfaces a provider-side change would move:
+a definitive HTTP 200, and the response decoding as `Completed` evidence, or as
+the adapter's downgraded-refusal `ProviderError` shape (`kind: Unrecognized`
+from that same 200 exchange — see the refusal-downgrade rule above; a raw
+`Refused` never leaves either adapter). That downgraded shape is accepted only
+when it carries exactly the native material its adapter's downgrade fabricates
+and nothing else — for Anthropic the stable `native.error_token: "refusal"`
+discriminator with no code and no message, for OpenAI no native material at all
+— and the execution also observed a reported refusal finish. A mid-stream native
+error inside a 200 SSE body reaches the caller as `Unrecognized` from the same
+status, and those two further facts are what a genuine streamed failure cannot
+present. Either accepted shape must carry provider-reported input usage present
+*and positive* (a request that reached the model always billed at least one
+input token). Neither smoke asserts anything about answer quality. Output usage
+is held to a looser bar: present, not positive. A valid `Completed` response can
+legitimately report zero output tokens, and a downgraded refusal can be blocked
+before any completion token is produced, so both accepted shapes share one
+output usage-presence check without demanding it be nonzero.
+
+The OpenAI smoke also accepts one loss shape: the exchange that stopped at its
+own output ceiling. Chat Completions reports that as `finish_reason: "length"`,
+which this adapter deliberately leaves unmapped, so the decoder ends the stream
+as `BoundaryLoss` carrying the token verbatim. That is a truthful report about
+answer length, not a protocol break — the request was accepted and the body
+framed and decoded — so failing the smoke on it would assert something about
+answer quality, which this smoke does not do. The acceptance is keyed to that
+exact token from a 200 exchange; any other unrecognized finish, and every other
+loss cause, still fails, as does a `length` finish from a stream that never
+reported a model identity: that check runs at the finish chunk rather than at
+`[DONE]`, so the reported identity is established before the verdict is
+deferred.
+
+That shape carries usage like the other two, and is held to the same
+requirements above. The trailing usage-only chunk is valid only after a finish,
+and the decoder defers the unrecognized-finish verdict to `[DONE]` precisely so
+that chunk is consumed first; a stream that never sends it fails the
+`include_usage` contract and reports that missing chunk instead of an
+output-bound stop.
+
+Accepting that shape is what makes the OpenAI smoke's reasoning-capable target
+safe as a required check. Hidden reasoning tokens bill against the same ceiling
+as visible content, and Chat Completions offers no control that caps them below
+it — `reasoning_effort` is a qualitative hint, so even its lowest setting leaves
+the worst case unbounded. No effort is pinned there: this repository's own
+OpenAI catalog records that the `"minimal"` effort is listed by no current model
+page and appears on no row, so pinning it would assert a capability the
+repository does not claim. That operation therefore sets no explicit provider
+control, and the smoke's `ModelCapabilityCatalog` is correspondingly empty.
+
+The Anthropic smoke pins no explicit reasoning effort either, and needs no
+equivalent loss shape. Extended reasoning is requested per operation — the
+adapter emits `output_config.effort` only when `ModelSettings.reasoning_level`
+is set explicitly, and that smoke never sets it — so the exchange spends no
+hidden reasoning tokens against the output ceiling. Its ceiling is therefore a
+pure cost cap: every token billed against it is visible output that the fixed
+one-word prompt already bounds, and the exchange cannot truncate into a
+`BoundaryLoss` a required check could not distinguish from a real compatibility
+break.
+
+This smoke's required aggregate is merge-gating for a pull request that changes
+the adapter crate or the workflow itself — an explicit exception to
+`CONTRIBUTING.md`'s general testing-strategy default that a credentialed
+live-provider smoke is never the merge gate, extending the same accepted
+tradeoff already commissioned for the Codex CLI smoke's required check. Provider
+unavailability, rate limiting, or a misconfigured credential therefore reports
+as a temporary red rather than a verdict on the change's correctness; the
+accepted remedy is rerunning the smoke once the provider or environment
+recovers, not weakening the gate.
+
+The workflow reports on every pull request without a path filter. GitHub
+independently withholds secrets from ordinary fork `pull_request` runs
+regardless of environment policy. Its secretless eligibility job then checks the
+complete pull request file list: no change to the adapter crate or to the
+workflow's own definition is an immediate success; for a qualifying change it
+compares `github.event.pull_request.head.repo.full_name` with
+`github.repository`, fails a mismatch with a manual-dispatch instruction, and
+admits the live job only for a same-repository head. The credentialed job
+condition independently repeats that comparison. A final always-running job
+folds the eligibility and conditional live results into the required check, so a
+skipped or failed required smoke cannot appear green; for a pull request that
+requires the smoke, the aggregate also repeats the same-repository comparison.
+Manual dispatch remains available, and a path-filtered push to `main` — gated on
+the adapter crate and the workflow file itself, so an edit to the workflow's own
+definition cannot land unexercised — reruns the smoke after merge.
+
+A twice-daily schedule (`0 13 * * *` and `0 1 * * *` UTC) also triggers the
+workflow as a provider-drift canary between adapter-touching pull requests,
+spending one more real, paid exchange per run. A scheduled trigger is not a
+`pull_request` event, so the eligibility gate's non-`pull_request` branch marks
+it required unconditionally — the same branch a manual dispatch or a qualifying
+push takes — and the workflow-level concurrency group already falls back to the
+run id for a non-`pull_request` event, so each scheduled run keeps its own slot.
+GitHub only fires `schedule` events from a repository's default branch, so the
+schedule takes effect only once a change lands on `main`.
+
+The `anthropic-smoke` and `openai-smoke` environments are configured for all
+branches, for the same reason the `codex-smoke` environment is: GitHub evaluates
+an environment used by `pull_request` against `GITHUB_REF`, the synthetic merge
+ref rather than the head branch. That setting admits fork and same-repository
+merge refs alike and supplies no security boundary. Forks are excluded, in
+order, by GitHub secret withholding and the three explicit repository-name
+comparisons above.
+
+The workflow's own concurrency is a single group keyed to the pull request ref
+(or the run id for every other event), so a run superseded only by a newer push
+to the same ref releases its slot, exactly as the Codex smoke's own
+workflow-level group does. There is deliberately no additional job-level group
+serializing the live exchange itself: a fixed inner group shared across every
+ref — which an earlier revision of this workflow carried — lets an unrelated
+smoke-required run evict this job's queued slot even though
+`cancel-in-progress: false` does not protect it, because GitHub keeps at most
+one running and one pending member per concurrency group and replaces the
+pending one when a third arrives. That would fail a required check that never
+tested its own head. A concurrent real exchange costs a small fraction of a
+cent; required-check integrity is worth more than serializing that spend.
+
+Each credential (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) is referenced only in
+the step that spends the exchange, scoped to that step's environment alone,
+never echoed and never passed in argv. The crate is compiled before that step
+runs, and the compiled test binary's path is captured from that credential-free
+build and invoked directly rather than through a second `cargo test`, so no
+build-freshness check — and therefore no build script or procedural macro — ever
+runs while the key is readable.
+
 ## Codex CLI provider adapter
 
 `signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event
@@ -470,6 +681,19 @@ creates, so construction rejects hosts where process-group control is
 unavailable; a descendant that deliberately leaves that group is outside the
 adapter's boundary. Host isolation owns containment beyond the created group —
 specifically the runner sandbox in build-out — and is not an adapter claim.
+
+**Committed unimplemented functionality — Codex file delivery.** The present
+adapter supports only its ambient credential home and keeps `OPENAI_API_KEY` and
+every other direct credential value outside the cleared child environment. The
+configuration grammar admits `file`, but the present composition rejects it as
+undelivered. Its implementing child must resolve the selected profile during
+preparation. The adapter admits only the exact `OPENAI_API_KEY` `env_key`; every
+forwarded or process-control name is invalid configuration. It adds the selected
+value as an operation-scoped child override after clearing the parent
+environment. The value must be absent from argv, logs, debug output, retained
+evidence, and every later spawn, and must seed the adapter's exact-value
+redaction before any provider-controlled output leaves the crate. This future
+override does not weaken ambient mode's existing exclusion test.
 
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.
@@ -538,6 +762,14 @@ two, and top-p outside zero through one as unsupported caller input. The offline
 fake CLI verifies the advisory rendering and applies the same strict-schema
 validation to every spawned exchange, so a schema shape the live API refuses
 cannot pass the fixture corpus.
+
+Reasoning level, fast mode, and service tier are enforced through the explicit
+preparation mappings owned by
+[model/session settings](model-session-settings.md#adapter-translation); they
+are not part of the advisory exception above. The adapter validates the exact
+target capability record before checking its ambient-login reference whenever an
+operation carries an explicit catalog-governed control, and never delegates
+validation to the CLI. Provider-default-only operations need no catalog lookup.
 
 The adapter bounds every stdout event while copying and drains stderr while
 retaining only a bounded prefix. Streamed credential lookbehind retains at most
@@ -631,8 +863,9 @@ the response envelope decoding as a completed or refused terminal outcome — an
 nothing about answer quality. The workflow reports on every pull request without
 a path filter. GitHub independently withholds secrets from ordinary fork
 `pull_request` runs regardless of environment policy. Its secretless eligibility
-job then checks the complete pull request file list: no pin change is an
-immediate success; for a pin change it compares
+job then checks the complete pull request file list: no change to the CLI pin or
+to the workflow's own definition is an immediate success; a pull request that
+changes the pin, the workflow file, or both compares
 `github.event.pull_request.head.repo.full_name` with `github.repository`, fails
 a mismatch with a manual-dispatch instruction, and admits the live job only for
 a same-repository head. The credentialed job condition independently repeats
@@ -640,8 +873,12 @@ that comparison. A final always-running job folds the eligibility and
 conditional live results into the required check, so a skipped or failed
 required smoke cannot appear green; for a pull request that requires the smoke,
 the aggregate also repeats the same-repository comparison. Manual dispatch
-remains available, and a path-filtered push to `main` reruns the smoke after
-merge.
+remains available, a path-filtered push to `main` — gated on the pin manifest
+and the workflow file itself, so an edit to the workflow's own definition cannot
+land unexercised — reruns the smoke after merge, and a twice-daily schedule
+(13:00 and 01:00 UTC, drifting an hour under standard time — accepted) spends
+two further live exchanges a day as a paid provider-drift canary independent of
+any code change.
 
 The `codex-smoke` environment is configured for all branches because GitHub
 evaluates an environment used by `pull_request` against `GITHUB_REF`, which is
@@ -662,10 +899,11 @@ unattended path for.
 ## Claude Code CLI provider adapter
 
 `signalbox-model-runtime-claude-cli` wraps the Claude Code print-mode JSONL
-protocol at the exact crate-local npm pin `2.1.220`. Preparation validates and
-renders the full `ModelOperation`, creates a private temporary MCP catalog and
-isolated settings files, and returns a one-shot capability without spawning
-Claude. Execution consumes it as one fresh Unix process using
+protocol at the exact version its crate-local npm manifest pins, from which the
+adapter build derives its exported supported-version constant. Preparation
+validates and renders the full `ModelOperation`, creates a private temporary MCP
+catalog and isolated settings files, and returns a one-shot capability without
+spawning Claude. Execution consumes it as one fresh Unix process using
 `--print --verbose --output-format=stream-json --no-session-persistence`; it
 passes the rendered frontier on stdin, selects the resolved model, and never
 resumes a CLI session. `SendCommenced` immediately precedes spawn and no
@@ -698,9 +936,9 @@ monitoring, notebook, notification, read/remote/report/scheduling/messaging,
 `Task*`, `ToolSearch`, web, workflow, and write); and `--allowedTools` contains
 only the qualified declared MCP names. `dontAsk` is used because no undeclared
 capability may become an interactive permission question. The initial event must
-also report no slash commands, skills, or plugins and must identify Claude Code
-`2.1.220`; any mismatch is stream-protocol boundary loss, not a relaxed
-invocation.
+also report no slash commands, skills, or plugins and must identify the pinned
+Claude Code version; any mismatch is stream-protocol boundary loss, not a
+relaxed invocation.
 
 The pinned stream establishes correlation and reported-model evidence through
 `system/init`. Assistant `text`, `thinking`, `redacted_thinking`, and `tool_use`
@@ -726,8 +964,83 @@ identifiers, errors, reasoning, and tool JSON pass through the same
 credential-shape and cross-fragment redaction discipline as the Codex CLI
 adapter before observations or terminal evidence leave the crate.
 
-The adapter crate does not compose itself into signalboxd and defines no
-provider-selection or configuration mapping.
+The output-token ceiling is enforced by the cleared child environment, while
+reasoning level and fast mode use the explicit preparation mappings owned by
+[model/session settings](model-session-settings.md#adapter-translation).
+Temperature, top-p, and stop sequences are the capability-limited advisory
+exception for this adapter. When an operation carries an explicit
+catalog-governed control, exact-target capability and mapping validation
+precedes the ambient-login reference check. A service tier is always rejected.
+
+The crate itself still defines no provider-selection or configuration mapping.
+signalboxd composes it from the deployment-owned `claude_cli` adapter mapping
+and its three absolute process paths, described in
+[configuration-and-credentials](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog).
+
+The wrapped CLI is an external program on its own release cadence, so the same
+three statements the Codex adapter binds must agree here too: the version pinned
+for installation, the version the adapter covers, and the version actually
+invoked.
+
+`crates/model-runtime-claude-cli/package.json` is the pin of record — an npm
+manifest naming the CLI's distribution package at an exact `major.minor.patch`
+version, with a committed lockfile so the installed artifact is
+integrity-checked. It is a Renovate-tracked manifest under the same policy as
+the Codex pin: no minimum-release-age gate and no automerge. The adapter build
+reads that manifest and derives its exported supported-version constant from the
+exact dependency value, so the manifest is the single source of truth and a
+Renovate change is mechanically complete. An unconditional offline test still
+rejects a range, tag, alias, prerelease, or any shape other than exactly three
+numeric components, and separately requires the committed lockfile to install
+the version the manifest pins — the build reads only the manifest, so a lockfile
+that disagreed would install an executable the adapter does not claim to
+support.
+
+The compatibility smoke is the second gate: one exchange against the cheapest
+model the smoke credential can address, run through this adapter with the real
+pinned executable. Which models a credential may address is account-scoped, so
+the model is a configured value with the cheapest advertised model as default.
+Before spending anything it asserts that the executable's reported version
+equals the derived supported version; an unreadable, unparsable, or mismatched
+version fails rather than skipping. That version gate also has a separate
+ignored, credential-free entry point so it can run locally before the gated
+workflow supplies a credential. The smoke requests no prompt caching: at one
+exchange per pin bump a cache write is never amortized by a later read, so
+caching would raise the cost of the run it is meant to cheapen.
+
+Unlike the Codex smoke, there are no credential-free capability probes before
+spend. The Claude Code CLI exposes no equivalent of a built-in feature registry
+or a prompt-input dump, so the invocation-isolation surfaces are proven inside
+the exchange instead: the adapter refuses a `system/init` that reports any slash
+command, skill, or plugin, or a tool inventory differing from the declared MCP
+surface. That is a weaker gate than the Codex one because it fails after spend
+rather than before it.
+
+The smoke then asserts only the protocol surfaces a version bump moves — the
+session identifier reaching the exchange facts, the reported model, the terminal
+usage counters, and the response envelope decoding as a completed or refused
+terminal outcome — and nothing about answer quality. Reaching a decoded response
+is itself the version-handshake evidence, because the adapter turns a
+`system/init` reporting a different version into stream-protocol boundary loss.
+The workflow reports on every pull request without a path filter, and its
+secretless eligibility job, the credentialed job condition, and the
+always-running required aggregate apply the same three repository-name
+comparisons and the same fork exclusions the Codex smoke section describes,
+against a path gate of `crates/model-runtime-claude-cli/**`. Manual dispatch
+remains available, and a path-filtered push to `main` reruns the smoke after
+merge.
+
+Installation differs from the Codex smoke in one respect. The Codex package
+ships its platform binary as an optional dependency and needs no lifecycle
+script, while this package's launcher is a stub until its own installer places
+the native binary. The workflow therefore keeps `npm ci --ignore-scripts` and
+runs that installer as its own named step, so the same package-authored code
+runs explicitly and reviewably rather than as an implicit side effect of
+installation, and still before any step carries a credential.
+
+How the smoke credential reaches the CLI is not settled.
+[Claude Code CLI smoke credential delivery](../open-questions.md#claude-code-cli-smoke-credential-delivery)
+owns that decision; until it closes, the live job cannot authenticate.
 
 ## Credential-access boundary
 
@@ -747,9 +1060,10 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   signal so a blocked read cannot hold a cancelled operation. Failures are
   reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
   secret bytes.
-- The production implementation is signalboxd's `FileCredentialAccess`: each
-  resolve rereads the key file the pinned Anthropic credential profile declares
-  and feeds the production `AnthropicRuntime`.
+- The production implementation is signalboxd's `FileCredentialAccess`.
+  Composition supplies the complete map of every `file` profile reference to its
+  catalog path, whatever direct HTTP adapter consumes it. Each resolve rereads
+  the mapped file and feeds the selected runtime.
 - The resolved value is scoped to the one prepared request as a
   sensitivity-marked HTTP header; execute performs no second lookup.
 - Provider-controlled text is credential-sanitized before leaving the adapter:
@@ -901,3 +1215,6 @@ failures after staleness handling.
 - [Codex CLI fixture validation](../open-questions.md#codex-cli-fixture-validation)
   owns how a pin bump will prove that the recorded offline event-shape fixtures
   still represent the installed CLI.
+- [Claude Code CLI smoke credential delivery](../open-questions.md#claude-code-cli-smoke-credential-delivery)
+  owns how the Claude compatibility smoke's credential reaches the wrapped CLI
+  through the adapter's credential-free child-environment allowlist.

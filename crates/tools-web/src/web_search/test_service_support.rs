@@ -399,6 +399,15 @@ pub(super) struct ExecutorFixtureTransaction {
 impl ToolExecutionTransaction for ExecutorFixtureTransaction {
     type Error = WebSearchExecutorError;
 
+    async fn resume_child_wait(
+        &mut self,
+        _session: SessionId,
+        _turn: TurnId,
+        _attempt: TurnAttemptId,
+    ) -> Result<bool, Self::Error> {
+        panic!("web-search fixtures never contain a delegated child wait")
+    }
+
     async fn load_active_batch(
         &mut self,
         _session: SessionId,
@@ -676,14 +685,24 @@ where
 pub(super) fn is_committed_known_failure(outcome: &ToolExecutionServiceOutcome) -> bool {
     match committed_tool_attempt_end(outcome) {
         Some(ToolAttemptEnd::KnownFailed { .. }) => true,
-        Some(ToolAttemptEnd::Completed { .. } | ToolAttemptEnd::Ambiguous) | None => false,
+        Some(
+            ToolAttemptEnd::Completed { .. }
+            | ToolAttemptEnd::AwaitingChild { .. }
+            | ToolAttemptEnd::Ambiguous,
+        )
+        | None => false,
     }
 }
 
 pub(super) fn is_committed_completed(outcome: &ToolExecutionServiceOutcome) -> bool {
     match committed_tool_attempt_end(outcome) {
         Some(ToolAttemptEnd::Completed { .. }) => true,
-        Some(ToolAttemptEnd::KnownFailed { .. } | ToolAttemptEnd::Ambiguous) | None => false,
+        Some(
+            ToolAttemptEnd::KnownFailed { .. }
+            | ToolAttemptEnd::AwaitingChild { .. }
+            | ToolAttemptEnd::Ambiguous,
+        )
+        | None => false,
     }
 }
 
@@ -692,7 +711,12 @@ pub(super) fn is_committed_known_failure_without_detail(
 ) -> bool {
     match committed_tool_attempt_end(outcome) {
         Some(ToolAttemptEnd::KnownFailed { error }) => error.detail().is_none(),
-        Some(ToolAttemptEnd::Completed { .. } | ToolAttemptEnd::Ambiguous) | None => false,
+        Some(
+            ToolAttemptEnd::Completed { .. }
+            | ToolAttemptEnd::AwaitingChild { .. }
+            | ToolAttemptEnd::Ambiguous,
+        )
+        | None => false,
     }
 }
 
@@ -708,6 +732,7 @@ pub(super) fn committed_tool_attempt_end(
         | ToolExecutionServiceOutcome::PreflightFailed(_)
         | ToolExecutionServiceOutcome::ObservationAlreadyCommitted(_)
         | ToolExecutionServiceOutcome::CrashClassified(_)
+        | ToolExecutionServiceOutcome::ChildWaitResumed(_)
         | ToolExecutionServiceOutcome::ContinuationCheckpointed(_)
         | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => None,
     }

@@ -158,13 +158,14 @@ ALLOWLIST = (
     Allowance(
         "GitHub repository GraphQL owner variables",
         re.compile(
-            r"^(?:crates/tools-github/src/lib[.]rs|"
+            r"^(?:apps/signalboxd/src/repo_watch_runtime[.]rs|"
+            r"crates/tools-github/src/lib[.]rs|"
             r"crates/tools-code-host/src/code_host/github[.]rs)$"
         ),
         re.compile(
             r"^query (?:PullRequestReviewThreads|ReviewThreads|Convergence|"
             r"ThreadInventory)\(\$owner: String!,|"
-            r"^\s*repository\(owner: \$owner, name: \$name\) \{\s*$"
+            r"^\s*repository\(owner: \$(?:namespace|owner), name: \$name\) \{\s*$"
         ),
     ),
     Allowance(
@@ -216,7 +217,7 @@ ALLOWLIST = (
             r"^(?:apps/signalbox-runner/src/(?:configuration|protocol|state)[.]rs|"
             r"apps/signalboxd/src/(?:local_socket|runner_protocol_runtime)[.]rs|"
             r"apps/signalboxd/tests/process_substrate[.]rs|"
-            r"crates/model-runtime-codex-cli/tests/live_smoke[.]rs|"
+            r"crates/model-runtime-(?:claude|codex)-cli/tests/live_smoke[.]rs|"
             r"docs/spec/(?:configuration-and-credentials|process-protocol|"
             r"runner-protocol)[.]md)$"
         ),
@@ -277,7 +278,8 @@ ALLOWLIST = (
             r"202608020001_review_orchestration|"
             r"202608020002_review_orchestration_command_recovery|"
             r"202608020003_runner_wire_contract|"
-            r"202608020015_llm_delegated_tool_approval"
+            r"202608020015_llm_delegated_tool_approval|"
+            r"202608020018_session_delegation"
             r")[.]sql$"
         ),
         re.compile(

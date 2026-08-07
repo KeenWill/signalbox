@@ -18,7 +18,7 @@ use signalbox_tools_workspace::{
 
 use crate::descriptor::{
     FileIdentity, QuarantineDirectory, descriptor_entry_exists, descriptor_path_from_fd,
-    file_identity,
+    file_identity, stat_file_identity,
 };
 use crate::failure::LocalGitFailure;
 use crate::index_lock::IndexLock;
@@ -321,10 +321,7 @@ pub(super) fn atomic_restore_checkout_path<FileSystem: WorkspaceFileSystem>(
                 &workspace_leaf,
                 AtFlags::SYMLINK_NOFOLLOW,
             )
-            .map(|metadata| FileIdentity {
-                device: metadata.st_dev,
-                inode: metadata.st_ino,
-            })
+            .map(|metadata| stat_file_identity(&metadata))
             .map_err(|_| LocalGitFailure::Operation)?;
             if current_identity != sentinel_identity {
                 return Err(LocalGitFailure::Operation);
@@ -356,10 +353,7 @@ pub(super) fn capture_rollback_identities(
                 let (parent, leaf) = open_worktree_parent(root, &full_path)?;
                 Some(
                     statat(&parent, &leaf, AtFlags::SYMLINK_NOFOLLOW)
-                        .map(|metadata| FileIdentity {
-                            device: metadata.st_dev,
-                            inode: metadata.st_ino,
-                        })
+                        .map(|metadata| stat_file_identity(&metadata))
                         .map_err(|_| LocalGitFailure::Operation)?,
                 )
             };
@@ -396,10 +390,7 @@ pub(super) fn capture_rollback_identity(
         };
     }
     match statat(&directory, &leaf, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(status) => Ok(Some(FileIdentity {
-            device: status.st_dev,
-            inode: status.st_ino,
-        })),
+        Ok(status) => Ok(Some(stat_file_identity(&status))),
         Err(error) if error == rustix::io::Errno::NOENT => Ok(None),
         Err(_) => Err(LocalGitFailure::Operation),
     }

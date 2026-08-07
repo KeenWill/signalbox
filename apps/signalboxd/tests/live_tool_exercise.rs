@@ -39,14 +39,16 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
-    ModelSelection, ProtocolVersion, RequestId, ServerFrame, ServerMessage, SessionPlacement,
-    SystemPromptMember, ToolDecision, TurnState, decode_server_line, encode_client_line,
+    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RequestId, ServerFrame, ServerMessage,
+    SessionPlacement, SystemPromptMember, ToolDecision, TurnState, decode_server_line,
+    encode_client_line,
 };
 use signalbox_tools_basic::SESSION_STATUS_UPDATE_NAME;
 use signalbox_tools_conversations::{
     LIST_CONVERSATIONS_NAME, READ_CONVERSATION_NAME, READ_IMPORTED_CONVERSATION_NAME,
     READ_OWN_CONVERSATION_NAME,
 };
+use signalbox_tools_exec::UNSANDBOXED_EXEC_NAME;
 use signalbox_tools_plan::{PLAN_READ_NAME, PLAN_WRITE_NAME};
 use signalbox_tools_web::{BRAVE_SEARCH_CREDENTIAL_REFERENCE, WEB_FETCH_NAME, WEB_SEARCH_NAME};
 use signalboxd::{
@@ -84,6 +86,7 @@ const FIXTURE_HEAD_REVISION: &str = "59af8a3634792a30cfb9480bea08cb04acd17bbf";
 const SMOKE_ALIAS: u128 = 0x7fde05bcb4c344f78a87748814c80191;
 const TRANSCRIPT_MARKER: &str = "live conversation transcript marker";
 const SEED_PATH: &str = "seed.txt";
+const GIT_ADMINISTRATION_DIRECTORY: &str = ".git";
 const SEED_CONTENT: &str = "needle from the real workspace\n";
 const SEED_PATTERN: &str = "needle";
 const STAGED_PATH: &str = "staged.txt";
@@ -101,6 +104,7 @@ const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/";
 const UNUSED_WEB_SEARCH_CREDENTIAL_FILE: &str = "unused-brave-key";
 const DENIED_WEB_SEARCH_QUERY: &str = "synthetic denied search";
+const DENIED_UNSANDBOXED_PROGRAM: &str = "/bin/false";
 const DENIED_WRITE_PATH: &str = "denied.txt";
 const DENIED_PATCH_PATH: &str = "denied-patch.txt";
 
@@ -198,6 +202,7 @@ async fn run_live_smoke() -> SmokeResult {
     };
 
     let workspace = tempfile::tempdir()?;
+    git2::Repository::init(workspace.path())?;
     fs::write(workspace.path().join(SEED_PATH), SEED_CONTENT)?;
     let credential_directory = tempfile::tempdir()?;
     let credential_file = credential_directory.path().join("github-token");
@@ -217,6 +222,10 @@ async fn run_live_smoke() -> SmokeResult {
         .expect("the smoke configuration wires every deployment-owned family");
     let github_egress_policy = daemon_configuration.github_egress_policy();
     let configured_workspace = daemon_configuration.workspace_root().to_path_buf();
+    let git_identity = daemon_configuration.git_identity().clone();
+    let exec_supervisor_executable = daemon_configuration
+        .exec_supervisor_executable()
+        .to_path_buf();
     let web_fetch_egress_policy = model_configuration.web_fetch_egress_policy();
 
     let listener = LocalProcessListener::bind(&socket)?;
@@ -257,6 +266,8 @@ async fn run_live_smoke() -> SmokeResult {
         GitHubCodeHostTransport::try_new()?,
         github_egress_policy,
         &configured_workspace,
+        git_identity,
+        &exec_supervisor_executable,
         web_fetch_egress_policy,
     )?;
     let (tool_catalog, tool_executor) = tools.into_parts();
@@ -473,6 +484,13 @@ workspace_root = "{}"
 family = "conversations"
 adapter = "application"
 
+[daemon_tools]
+exec_supervisor_executable = "{}"
+
+[git_identity]
+author_name = "Signalbox Live Smoke"
+author_email = "signalbox-live@example.test"
+
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000001"
 target_id = "00000000-0000-0000-0000-000000000003"
@@ -484,10 +502,15 @@ context_window_tokens = 200000
 [[aliases]]
 alias_id = "7fde05bc-b4c3-44f7-8a87-748814c80191"
 selection_id = "00000000-0000-0000-0000-000000000001"
+
+[[aliases]]
+alias_id = "540ce009-c2ec-4a04-b823-c411ea189778"
+selection_id = "00000000-0000-0000-0000-000000000001"
 "#,
         executable.display(),
         workspace.display(),
         workspace.display(),
+        executable.display(),
     );
     Ok(HubModelConfiguration::parse(&configuration)?)
 }
@@ -684,6 +707,10 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<ScriptedToolCall> {
             SESSION_STATUS_UPDATE_NAME,
             json!({"title": "denied", "tags": [], "attributes": {}, "archived": false}),
         ),
+        call(
+            UNSANDBOXED_EXEC_NAME,
+            json!({"program": DENIED_UNSANDBOXED_PROGRAM}),
+        ),
         call(WEB_FETCH_NAME, json!({"url": WEB_URL})),
         call(WEB_SEARCH_NAME, json!({"query": DENIED_WEB_SEARCH_QUERY})),
         call(
@@ -778,7 +805,8 @@ fn assert_workspace_read_results(results: &[Value]) -> SmokeResult {
     };
     assert_eq!(read["content"], SEED_CONTENT);
     assert_eq!(read["truncated"], false);
-    assert_eq!(list["entries"][0]["path"], SEED_PATH);
+    assert_eq!(list["entries"][0]["path"], GIT_ADMINISTRATION_DIRECTORY);
+    assert_eq!(list["entries"][1]["path"], SEED_PATH);
     assert_eq!(search["matches"][0]["path"], SEED_PATH);
     assert_eq!(search["matches"][0]["line"], 1);
     Ok(())
@@ -899,7 +927,7 @@ async fn activate_turn(
     pool: &PgPool,
     session: CanonicalUuid,
     expected_turn: TurnId,
-) -> SmokeResult<Box<signalbox_domain::ActivatedAcceptedInputTurn>> {
+) -> SmokeResult<Box<signalbox_domain::ActivatedTurn>> {
     let mut service = StartEligibleTurnService::new(
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),
@@ -1056,13 +1084,14 @@ async fn create_session(connection: &mut Connection) -> SmokeResult<CanonicalUui
             initial_model_selection: ModelSelection::Alias {
                 alias_id: CanonicalUuid::from_uuid(Uuid::from_u128(SMOKE_ALIAS)),
             },
+            model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(None),
             placement: SessionPlacement::Pathless {},
         })
         .await?;
     let response = connection.response_within().await?;
     match response.message() {
-        ServerMessage::SessionCreated { session_id } => Ok(*session_id),
+        ServerMessage::SessionCreated { session_id, .. } => Ok(*session_id),
         message => {
             Err(io::Error::other(format!("unexpected create-session response: {message:?}")).into())
         }
@@ -1080,6 +1109,7 @@ async fn submit_turn(
             session_id: session,
             content: InputContent::new(content.to_owned()),
             expected_defaults_version: Some(CanonicalU64::new(1)),
+            model_settings: ModelSettingsOverlay::inherit_all(),
             delivery: None,
         })
         .await?;

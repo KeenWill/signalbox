@@ -17,11 +17,23 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
-    LossCause, Observation, ObservationFact, ObservationSink, ProviderErrorEvidence,
-    ProviderJsonNestingValidator, ProviderReportedModel, RefusalEvidence, SseRecord,
-    StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
-    validate_provider_json_nesting,
+    LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
+    ProviderErrorEvidence, ProviderJsonNestingValidator, ProviderReportedModel, RefusalEvidence,
+    SseRecord, StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
+    ToolName, validate_provider_json_nesting,
 };
+
+/// The violation detail reported when an otherwise well-formed stream ends on
+/// an unrecognized finish reason — in practice, `length`, the token this
+/// adapter declines to map because the provider reuses it for two different
+/// bounds.
+///
+/// Public because a caller cannot otherwise distinguish that outcome from any
+/// other protocol violation: the loss evidence carries only the cause and the
+/// finish, and the finish is deliberately retained for truncated tool calls
+/// too. Exporting the exact spelling makes this one shared constant rather
+/// than a string a caller has to guess and keep in sync.
+pub const OUTPUT_CEILING_VIOLATION_DETAIL: &str = "stream carries an unrecognized finish_reason";
 
 use crate::response::{StopSequences, convert_usage, map_finish};
 use crate::status::classify_error_envelope;
@@ -60,6 +72,10 @@ pub(crate) struct StreamDecoder {
     tool_builders: BTreeMap<u32, ToolBuilder>,
     completed_tools: Vec<ToolCallProposal>,
     final_usage_reported: bool,
+    /// The violation an unrecognized finish will report at `[DONE]`. Held
+    /// rather than returned so records following that finish are still
+    /// examined — a definitive error among them must supersede it.
+    pending_unrecognized_finish: Option<String>,
 }
 
 impl StreamDecoder {
@@ -77,6 +93,7 @@ impl StreamDecoder {
             tool_builders: BTreeMap::new(),
             completed_tools: Vec::new(),
             final_usage_reported: false,
+            pending_unrecognized_finish: None,
         }
     }
 
@@ -116,12 +133,30 @@ impl StreamDecoder {
             // with no HTTP status of its own it classifies by native code.
             let code = error.code_text();
             let kind = classify_error_envelope(0, code.as_deref(), error.error_type.as_deref());
+            let native = error.into_native_facts();
+            if self.finish.is_some() && native == NativeErrorFacts::default() {
+                // The provider already reported why generation stopped, and
+                // this record carries no native material at all, so it
+                // supersedes that finish with nothing a caller could act on.
+                // It is also byte-identical to the refusal downgrade `execute`
+                // applies — an HTTP 200 exchange, `Unrecognized`, and empty
+                // native facts — which would let a genuine failure pass as a
+                // decoded refusal.
+                //
+                // Keyed on the native material rather than the classification:
+                // an error whose type or code is merely *unfamiliar* still
+                // classifies `Unrecognized`, but it carries diagnostics worth
+                // keeping and cannot be confused with the downgrade, so it
+                // stays definitive provider evidence.
+                return self
+                    .violation("contentless error record follows the reported finish_reason");
+            }
             return StreamStep::Terminal(Box::new(TerminalEvidence::ProviderError(
                 ProviderErrorEvidence {
                     exchange: self.exchange.clone(),
                     reported_model: self.reported_model.clone(),
                     kind,
-                    native: error.into_native_facts(),
+                    native,
                     usage: self.usage,
                 },
             )));
@@ -329,8 +364,55 @@ impl StreamDecoder {
             if let Some(token) = choice.finish_reason {
                 let mut finish = map_finish(&token, self.stop_sequences);
                 if matches!(finish, FinishReason::Unrecognized { .. }) {
+                    // The verdict is recorded here but *deferred* to `[DONE]`,
+                    // so records that follow are still examined. Returning at
+                    // once would let a stream report an output bound and then
+                    // announce a definitive error that nobody ever consumed —
+                    // the post-finish error rule could never fire for this
+                    // finish, and a caller would accept the prefix as a clean
+                    // ceiling stop.
+                    //
+                    // The two envelope checks that are already decidable run
+                    // now rather than at `[DONE]`, so a malformed envelope
+                    // reports the envelope defect and carries no
+                    // `finish_reported`. A caller cannot otherwise tell
+                    // "healthy stream hit an output bound" from "the envelope
+                    // was never well formed and also said `length`".
+                    if !self.saw_assistant_role {
+                        return self.violation(
+                            "stream terminated without establishing the assistant role",
+                        );
+                    }
+                    if self.reported_model.is_none() {
+                        return self.violation("stream terminated without a model identity");
+                    }
+                    // Accumulated tool state is deliberately *not* a reason to
+                    // withhold the finish. A request carrying tools can
+                    // legitimately exhaust the output ceiling partway through a
+                    // tool call, so `length` is then an observed fact about the
+                    // response rather than a contradiction: the buffered
+                    // decoder keeps it in exactly that case, and a finish
+                    // observed before a stream loss must survive in
+                    // `finish_reported`. Both rules are stated in the
+                    // unrecognized-finish paragraph of the runtime-substrate
+                    // specification, which owns this behavior.
+                    //
+                    // It does change *which* violation this is, though. A tool
+                    // call opened here may have emitted no observation at all —
+                    // `ToolArgumentsDelta` needs a non-empty fragment and
+                    // `ToolCallProposed` needs `finalize_tools`, which this
+                    // return precedes — so the cause is the only place that
+                    // fact can survive for a caller who cares whether tools
+                    // were involved.
+                    let opened_tool_calls =
+                        !self.tool_builders.is_empty() || !self.completed_tools.is_empty();
                     self.finish = Some(finish);
-                    return self.violation("stream carries an unrecognized finish_reason");
+                    self.pending_unrecognized_finish = Some(if opened_tool_calls {
+                        format!("{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened")
+                    } else {
+                        OUTPUT_CEILING_VIOLATION_DETAIL.to_string()
+                    });
+                    return StreamStep::Continue;
                 }
                 if !self.refusal_text.is_empty() {
                     // Accumulated refusal material is the provider's refusal
@@ -508,6 +590,20 @@ impl StreamDecoder {
     }
 
     fn apply_done(&mut self) -> StreamStep {
+        if let Some(detail) = self.pending_unrecognized_finish.take() {
+            // Nothing between the finish and `[DONE]` superseded it, so the
+            // deferred verdict stands. Reported here rather than at the finish
+            // chunk so a trailing error record gets its chance first.
+            //
+            // The requested final usage chunk is still required: deferring to
+            // `[DONE]` means it normally arrives, so a stream that omits it is
+            // failing the `include_usage` contract and must not pass as an
+            // ordinary stop at an output bound.
+            if !self.final_usage_reported {
+                return self.violation("stream terminated without the requested final usage chunk");
+            }
+            return self.violation(detail);
+        }
         if !self.saw_assistant_role {
             return self.violation("stream terminated without establishing the assistant role");
         }
@@ -561,13 +657,15 @@ impl StreamDecoder {
 #[cfg(test)]
 mod tests {
     use signalbox_model_runtime::{
-        AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
-        ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderErrorKind, ProviderReportedModel,
-        ProviderRequestId, SseFraming, SseRecord, StreamInterruption, TerminalEvidence, TokenUsage,
-        ToolCallId, ToolCallProposal, ToolName,
+        AssistantPart, BoundaryLossEvidence, CompletionFinish, ExchangeFacts, FinishReason,
+        LossCause, Observation, ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderErrorKind,
+        ProviderReportedModel, ProviderRequestId, SseFraming, SseRecord, StreamInterruption,
+        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     };
 
-    use super::{StreamDecoder, StreamStep};
+    use signalbox_model_runtime::ProviderErrorEvidence;
+
+    use super::{OUTPUT_CEILING_VIOLATION_DETAIL, StreamDecoder, StreamStep};
     use crate::response::StopSequences;
 
     /// Pushes one chunk that must frame without a failure and returns its
@@ -832,11 +930,12 @@ mod tests {
               \"arguments\":\"{\\\"city\\\":\"}}]}}]}\n\n",
             b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\
               \"finish_reason\":\"length\"}]}\n\n",
+            final_usage_chunk(),
+            b"data: [DONE]\n\n",
         ]);
 
-        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
-            panic!("ambiguous finish must remain boundary-loss evidence");
-        };
+        let loss = expect_boundary_loss(terminal);
+
         assert_eq!(
             loss.finish_reported,
             Some(FinishReason::Unrecognized {
@@ -960,6 +1059,288 @@ mod tests {
         assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
         assert_eq!(error.usage.input_tokens, Some(25));
         assert_eq!(error.usage.output_tokens, Some(7));
+    }
+
+    /// The boundary-loss payload of a terminal outcome, so a case that is
+    /// about *which* loss occurred reads as setup and assertions with no
+    /// branch of its own.
+    #[track_caller]
+    fn expect_boundary_loss(terminal: Option<TerminalEvidence>) -> BoundaryLossEvidence {
+        match terminal {
+            Some(TerminalEvidence::BoundaryLoss(loss)) => loss,
+            other => panic!("expected boundary-loss evidence, got {other:?}"),
+        }
+    }
+
+    /// The provider-error payload of a terminal outcome, so a case about
+    /// *which* error occurred reads as setup and assertions with no branch.
+    #[track_caller]
+    fn expect_provider_error(terminal: Option<TerminalEvidence>) -> ProviderErrorEvidence {
+        match terminal {
+            Some(TerminalEvidence::ProviderError(error)) => error,
+            other => panic!("expected provider-error evidence, got {other:?}"),
+        }
+    }
+
+    /// Whether any tool-argument fragment reached the sink. Named because the
+    /// case that uses it is *about* this fact being absent, and a search
+    /// spelled inline would put the discriminator in the test body.
+    #[track_caller]
+    fn tool_argument_delta_observed(observations: &[Observation<String>]) -> bool {
+        observations
+            .iter()
+            .any(|observation| match &observation.fact {
+                ObservationFact::ToolArgumentsDelta { .. } => true,
+                // Enumerated rather than wildcarded: a new observation class must
+                // be considered here instead of silently classifying as "no tool
+                // material".
+                ObservationFact::SendCommenced
+                | ObservationFact::ExchangeEstablished(_)
+                | ObservationFact::ProviderModelReported(_)
+                | ObservationFact::TextDelta { .. }
+                | ObservationFact::ThinkingDelta { .. }
+                | ObservationFact::ToolCallProposed(_)
+                | ObservationFact::UsageReported(_)
+                | ObservationFact::FinishReported(_) => false,
+            })
+    }
+
+    /// The finish token the provider sends when generation reached an output
+    /// bound. Bound once so a fixture and the expectation asserted against it
+    /// cannot drift apart.
+    const CEILING_FINISH_TOKEN: &str = "length";
+
+    /// A finish-only chunk reporting `token`, built from the same binding the
+    /// asserting case compares against.
+    fn finish_chunk(token: &str) -> String {
+        format!(
+            "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+             \"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"{token}\"}}]}}\n\n"
+        )
+    }
+
+    /// The `StreamProtocolViolation` cause carrying `detail`, spelled once so
+    /// each case names only the detail it is about.
+    fn protocol_violation(detail: &str) -> LossCause {
+        LossCause::StreamProtocolViolation {
+            detail: detail.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_finish_without_the_assistant_role_reports_the_envelope_defect() {
+        // The unrecognized-finish branch ends the stream before `apply_done`,
+        // so it applies the role check itself and reports no finish. That is
+        // what lets a caller tell a malformed envelope from a healthy stream
+        // that merely hit an output bound.
+        let (terminal, _) = drive(&[
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\"delta\":{},\
+              \"finish_reason\":\"length\"}]}\n\n",
+        ]);
+
+        let loss = expect_boundary_loss(terminal);
+
+        assert_eq!(
+            loss.cause,
+            protocol_violation("stream terminated without establishing the assistant role")
+        );
+        assert_eq!(loss.finish_reported, None);
+    }
+
+    #[test]
+    fn a_truncated_tool_call_keeps_its_length_finish_like_the_buffered_path() {
+        // Exhausting the output ceiling partway through a tool call is a real
+        // outcome for a request that carries tools, not a contradiction, so
+        // the observed token survives. This is the streamed twin of
+        // `response.rs`'s
+        // `ambiguous_length_finish_is_boundary_loss_even_with_partial_tool_material`;
+        // the two decoders must not disagree about the same response.
+        let (terminal, observations) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+              \"id\":\"call_1\",\"function\":{\"name\":\"probe\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            finish_chunk(CEILING_FINISH_TOKEN).as_bytes(),
+            final_usage_chunk(),
+            b"data: [DONE]\n\n",
+        ]);
+
+        // The positive direction of the helper the sibling case relies on for
+        // its negative claim: a non-empty argument fragment does emit the
+        // delta, so a helper hard-coded either way fails one of the two.
+        assert!(tool_argument_delta_observed(&observations));
+        let loss = expect_boundary_loss(terminal);
+
+        assert_eq!(
+            loss.finish_reported,
+            Some(FinishReason::Unrecognized {
+                provider_token: CEILING_FINISH_TOKEN.to_string()
+            })
+        );
+        // The token survives, and the cause additionally records that tools
+        // were involved. Here the delta observation records it too, as the
+        // assertion above shows; the cause is the channel that still carries
+        // it when no fragment is emitted — see the sibling case below.
+        assert_eq!(
+            loss.cause,
+            protocol_violation(&format!(
+                "{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_tool_call_start_without_arguments_still_marks_the_ceiling_loss() {
+        // The residual the observation-based check cannot see: a tool call
+        // that opens with an id and name but no argument fragment emits
+        // nothing, so only the cause can carry it.
+        let (terminal, observations) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+              \"id\":\"call_1\",\"function\":{\"name\":\"probe\"}}]}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            final_usage_chunk(),
+            b"data: [DONE]\n\n",
+        ]);
+
+        assert!(
+            !tool_argument_delta_observed(&observations),
+            "a tool call opened with no argument fragment emits no delta"
+        );
+        let loss = expect_boundary_loss(terminal);
+        assert_eq!(
+            loss.cause,
+            protocol_violation(&format!(
+                "{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_well_formed_unrecognized_finish_still_reports_its_token() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            finish_chunk(CEILING_FINISH_TOKEN).as_bytes(),
+            final_usage_chunk(),
+            b"data: [DONE]\n\n",
+        ]);
+
+        let loss = expect_boundary_loss(terminal);
+
+        assert_eq!(
+            loss.finish_reported,
+            Some(FinishReason::Unrecognized {
+                provider_token: CEILING_FINISH_TOKEN.to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn an_unfamiliar_but_described_error_after_the_finish_stays_definitive() {
+        // Classification alone is the wrong test: an error whose type is
+        // merely unfamiliar still classifies `Unrecognized`, but it carries
+        // diagnostics a caller wants and cannot be confused with the refusal
+        // downgrade, which fabricates no native material at all.
+        let expected_message = "short and stout";
+        let error_record = format!(
+            "data: {{\"error\":{{\"type\":\"teapot_error\",\"message\":\"{expected_message}\"}}}}\n\n"
+        );
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            final_usage_chunk(),
+            error_record.as_bytes(),
+        ]);
+
+        let error = expect_provider_error(terminal);
+
+        assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+        assert_eq!(error.native.message, Some(expected_message.to_string()));
+    }
+
+    #[test]
+    fn a_length_finish_without_final_usage_is_protocol_loss() {
+        // Deferring to `[DONE]` means the usage chunk normally arrives, so a
+        // stream that omits it is failing the `include_usage` contract rather
+        // than stopping cleanly at an output bound.
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            b"data: [DONE]\n\n",
+        ]);
+
+        let loss = expect_boundary_loss(terminal);
+
+        assert_eq!(
+            loss.cause,
+            protocol_violation("stream terminated without the requested final usage chunk")
+        );
+    }
+
+    #[test]
+    fn an_error_after_a_length_finish_supersedes_the_deferred_verdict() {
+        // The reason the length verdict is deferred to `[DONE]`: returning at
+        // the finish chunk would leave this error record unread, and a caller
+        // would accept the prefix as a clean stop at an output bound.
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            b"data: {\"error\":{\"message\":\"quota exhausted\",\
+              \"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}\n\n",
+        ]);
+
+        let error = expect_provider_error(terminal);
+
+        assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+    }
+
+    #[test]
+    fn a_contentless_error_after_a_length_finish_is_protocol_loss() {
+        // The other half: a record adding nothing still supersedes the ceiling
+        // verdict, but as loss rather than provider evidence.
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            b"data: {\"error\":{}}\n\n",
+        ]);
+
+        let loss = expect_boundary_loss(terminal);
+
+        assert_eq!(
+            loss.cause,
+            protocol_violation("contentless error record follows the reported finish_reason")
+        );
+    }
+
+    #[test]
+    fn a_contentless_error_after_the_finish_is_protocol_loss() {
+        // The sibling above keeps a *typed* error outranking the finish,
+        // because it carries information the finish does not. One that names
+        // no classifiable failure carries none, and would reach the caller
+        // wearing the exact shape `execute` gives a downgraded refusal — HTTP
+        // 200, `Unrecognized`, no native material — so a genuine failure could
+        // pass as a decoded refusal. It must stay a protocol violation.
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            final_usage_chunk(),
+            b"data: {\"error\":{}}\n\n",
+        ]);
+
+        let loss = expect_boundary_loss(terminal);
+
+        assert_eq!(
+            loss.cause,
+            protocol_violation("contentless error record follows the reported finish_reason")
+        );
     }
 
     #[test]
@@ -1382,6 +1763,8 @@ mod tests {
                 first_chunk(),
                 b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
                   \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                final_usage_chunk(),
+                b"data: [DONE]\n\n",
             ],
             StopSequences::Declared,
         );

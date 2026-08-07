@@ -27,14 +27,15 @@ use serde::{Deserialize, de::DeserializeOwned};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationCursor,
     ConversationImportFormat, ConversationImportSource, ConversationOrigin,
-    ConversationOriginFilter, ConversationSummary, ErrorCode, ErrorDetail, FrameEncodeError,
-    GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
-    MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
-    ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion, RejectionDetail,
-    RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput,
-    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
-    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
-    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ConversationOriginFilter, ConversationSummary, DescendantTerminationScope, ErrorCode,
+    ErrorDetail, FrameEncodeError, GoalHistoryEvent, GoalLifecycleState, InputContent,
+    InputDelivery, MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
+    MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
+    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
+    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
+    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
+    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
     ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
     ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
     SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
@@ -217,6 +218,9 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ModelAliasesStart {}
         | ServerMessage::ModelAliasSummary { .. }
         | ServerMessage::ModelAliasesEnd { .. }
+        | ServerMessage::ModelCapabilitiesStart {}
+        | ServerMessage::ModelCapabilityItem { .. }
+        | ServerMessage::ModelCapabilitiesEnd { .. }
         | ServerMessage::SessionMetadata { .. }
         | ServerMessage::SessionMetadataReplaced { .. }
         | ServerMessage::SessionDefaultsReplaced { .. }
@@ -629,6 +633,7 @@ async fn execute(
             turn_id,
             command_id,
             defaults_version,
+            descendants,
         } => {
             let input = input.ok_or(ClientError::Input("standard-input content was not read"))?;
             stop(
@@ -638,6 +643,7 @@ async fn execute(
                 turn_id,
                 command_id,
                 defaults_version,
+                descendants,
                 input,
             )
             .await
@@ -867,12 +873,16 @@ async fn create(
         .mutation_request(ClientRequest::CreateSession {
             command_id,
             initial_model_selection: selection,
+            model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(system_prompt),
             placement,
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
-        ServerMessage::SessionCreated { session_id } => {
+        ServerMessage::SessionCreated {
+            session_id,
+            model_settings,
+        } if model_settings.matches_model(&selection) => {
             output.session_created(session_id)?;
             Ok(())
         }
@@ -907,7 +917,7 @@ async fn create_from_template(
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
-        ServerMessage::SessionCreated { session_id } => {
+        ServerMessage::SessionCreated { session_id, .. } => {
             output.session_created(session_id)?;
             Ok(())
         }
@@ -1062,10 +1072,14 @@ async fn continue_imported(
             through_position,
             relationship,
             initial_model_selection: selection,
+            model_settings: ModelSettingsOverlay::inherit_all(),
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
-        ServerMessage::SessionCreated { session_id } => {
+        ServerMessage::SessionCreated {
+            session_id,
+            model_settings,
+        } if model_settings.matches_model(&selection) => {
             output.session_created(session_id)?;
             Ok(())
         }
@@ -1127,6 +1141,7 @@ async fn compact(
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedSessionDefaults {
     version: CanonicalU64,
+    model_settings: ModelSettingsOverlay,
     dangerous_tool_auto_approval: bool,
     system_prompt: Option<SystemPromptText>,
 }
@@ -1167,16 +1182,14 @@ async fn replace_session_model(
             // copied-forward prompt is re-read from the immutable epoch the
             // printed version names, so the retried payload is byte-exact
             // regardless of later concurrent replacements.
+            let named_defaults = read_session_defaults(client, session_id, Some(version)).await?;
             let system_prompt = match &system_prompt {
-                ModelSystemPromptChoice::Keep => {
-                    read_session_defaults(client, session_id, Some(version))
-                        .await?
-                        .system_prompt
-                }
+                ModelSystemPromptChoice::Keep => named_defaults.system_prompt,
                 ModelSystemPromptChoice::Replace(_) | ModelSystemPromptChoice::Clear => None,
             };
             ObservedSessionDefaults {
                 version,
+                model_settings: named_defaults.model_settings,
                 dangerous_tool_auto_approval: matches!(
                     posture,
                     DangerousToolAutoApprovalArgument::ApproveAll
@@ -1212,6 +1225,7 @@ async fn replace_session_model(
             session_id,
             expected_defaults_version: observed.version,
             model_selection: selection,
+            model_settings: observed.model_settings,
             dangerous_tool_auto_approval: observed.dangerous_tool_auto_approval,
             system_prompt: SystemPromptMember::present(replacement_system_prompt.clone()),
         })
@@ -1221,10 +1235,13 @@ async fn replace_session_model(
             session_id: replaced_session,
             defaults_version: installed_version,
             model_selection,
+            model_settings,
             dangerous_tool_auto_approval,
             system_prompt: receipt_system_prompt,
+            ..
         } if replaced_session == session_id
             && model_selection == selection
+            && replacement_receipt_settings_match(observed.model_settings, &model_settings)
             && dangerous_tool_auto_approval == observed.dangerous_tool_auto_approval
             && receipt_system_prompt.value() == Some(&replacement_system_prompt)
             && observed
@@ -1251,6 +1268,13 @@ async fn replace_session_model(
     }
 }
 
+fn replacement_receipt_settings_match(
+    requested: ModelSettingsOverlay,
+    returned: &signalbox_process_protocol::ModelSettingsSnapshot,
+) -> bool {
+    returned.precedence.session == requested
+}
+
 async fn read_session_defaults(
     client: &mut ProcessClient,
     session_id: CanonicalUuid,
@@ -1267,13 +1291,16 @@ async fn read_session_defaults(
             session_id: read_session,
             defaults_version: read_version,
             model_selection: _,
+            model_settings,
             dangerous_tool_auto_approval,
             system_prompt,
+            ..
         } if read_session == session_id
             && defaults_version.is_none_or(|named| named == read_version) =>
         {
             Ok(ObservedSessionDefaults {
                 version: read_version,
+                model_settings: model_settings.precedence.session,
                 dangerous_tool_auto_approval,
                 system_prompt,
             })
@@ -1910,11 +1937,13 @@ async fn goal(
         GoalCommand::Stop {
             session_id,
             command_id,
+            descendants,
         } => {
             goal_mutation(client, output, session_id, command_id, |command_id| {
                 ClientRequest::StopGoal {
                     command_id,
                     session_id,
+                    descendant_scope: descendant_scope(descendants),
                 }
             })
             .await
@@ -2728,6 +2757,10 @@ async fn reconcile(
 /// call cancels directly, an issued call first enters its durable
 /// cancellation-requested state — and the content becomes the
 /// immediate-successor turn this verb then follows to its own terminal.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closed stop request keeps each recovery and scope input explicit"
+)]
 async fn stop(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
@@ -2735,6 +2768,7 @@ async fn stop(
     turn_id: Option<CanonicalUuid>,
     command_id: Option<CommandId>,
     defaults_version: Option<CanonicalU64>,
+    descendants: bool,
     content: String,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
@@ -2759,6 +2793,7 @@ async fn stop(
         expected_active_turn,
         InputContent::new(content),
         defaults_version,
+        descendant_scope(descendants),
     )
     .await?;
 
@@ -2915,6 +2950,7 @@ async fn submit_input(
             session_id,
             content,
             expected_defaults_version,
+            model_settings: ModelSettingsOverlay::inherit_all(),
             delivery,
         })
         .await?;
@@ -2958,6 +2994,7 @@ async fn reconcile_turn(
             expected_active_turn_id,
             content,
             expected_defaults_version: defaults_version,
+            model_settings: ModelSettingsOverlay::inherit_all(),
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -2975,6 +3012,14 @@ async fn reconcile_turn(
     }
 }
 
+const fn descendant_scope(descendants: bool) -> DescendantTerminationScope {
+    if descendants {
+        DescendantTerminationScope::ParentAndDescendants
+    } else {
+        DescendantTerminationScope::ParentAlone
+    }
+}
+
 async fn stop_turn(
     client: &mut ProcessClient,
     command_id: CommandId,
@@ -2982,6 +3027,7 @@ async fn stop_turn(
     expected_active_turn_id: CanonicalUuid,
     content: InputContent,
     defaults_version: CanonicalU64,
+    descendant_scope: DescendantTerminationScope,
 ) -> Result<CanonicalUuid, ClientError> {
     let mut connection = client
         .mutation_request(ClientRequest::StopTurn {
@@ -2990,6 +3036,8 @@ async fn stop_turn(
             expected_active_turn_id,
             content,
             expected_defaults_version: defaults_version,
+            descendant_scope,
+            model_settings: ModelSettingsOverlay::inherit_all(),
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -3068,6 +3116,13 @@ async fn await_turn_terminal(
                         };
                         return Ok(terminal);
                     }
+                    if child_lifecycle_terminalization(&event, session_id) {
+                        let mut refreshed = transcript(client, session_id).await?;
+                        let refreshed_state = refreshed.turn_state(turn_id)?;
+                        if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
+                            return Ok(terminal);
+                        }
+                    }
                     if wait_mode == TurnWaitMode::QueuedTurn && session_recovery_transition(&event)
                     {
                         let mut refreshed = transcript(client, session_id).await?;
@@ -3130,8 +3185,12 @@ fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError>
         TurnState::ActiveAwaitingModelCallRecovery { .. }
         | TurnState::ActiveAwaitingToolRecovery { .. } => Err(ClientError::TurnRecoveryRequired),
         TurnState::Queued { .. }
+        | TurnState::QueuedDelegated { .. }
+        | TurnState::QueuedDelegationWake { .. }
+        | TurnState::DelegationTerminated { .. }
         | TurnState::ActiveRunning { .. }
         | TurnState::ActiveAwaitingToolApproval { .. }
+        | TurnState::ActiveAwaitingChild { .. }
         | TurnState::Completed { .. }
         | TurnState::Failed { .. }
         | TurnState::Refused { .. }
@@ -3139,6 +3198,25 @@ fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError>
         | TurnState::ReconciliationRequired { .. }
         | TurnState::ToolReconciliationRequired { .. } => Ok(()),
     }
+}
+
+/// Reports whether this event terminalizes the followed session's own turn as
+/// the child of a parent cascade.
+///
+/// A descendant cascade addresses its lifecycle disposition to the terminalized
+/// child as well as to the commanding parent, and the child-addressed row names
+/// the relationship rather than the child turn. A follower therefore cannot
+/// project the disposition onto its tracked turn directly; it re-reads
+/// authoritative turn state, where the retained delegated turn projects as
+/// `TurnState::DelegationTerminated`.
+fn child_lifecycle_terminalization(event: &SessionEvent, session_id: CanonicalUuid) -> bool {
+    matches!(
+        event,
+        SessionEvent::ChildLifecycleDisposition {
+            child_session_id,
+            ..
+        } if *child_session_id == session_id
+    )
 }
 
 fn session_recovery_transition(event: &SessionEvent) -> bool {
@@ -3187,13 +3265,17 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
         Some(TurnState::Failed { .. }) => Ok(Some(TurnTerminal::Failed)),
         Some(TurnState::Refused { .. }) => Ok(Some(TurnTerminal::Refused)),
         Some(TurnState::Cancelled { .. }) => Ok(Some(TurnTerminal::Cancelled)),
+        Some(TurnState::DelegationTerminated { .. }) => Ok(Some(TurnTerminal::Cancelled)),
         Some(
             TurnState::ReconciliationRequired { .. } | TurnState::ToolReconciliationRequired { .. },
         ) => Ok(Some(TurnTerminal::ReconciliationRequired)),
         Some(
             TurnState::Queued { .. }
+            | TurnState::QueuedDelegated { .. }
+            | TurnState::QueuedDelegationWake { .. }
             | TurnState::ActiveRunning { .. }
-            | TurnState::ActiveAwaitingToolApproval { .. },
+            | TurnState::ActiveAwaitingToolApproval { .. }
+            | TurnState::ActiveAwaitingChild { .. },
         ) => Ok(None),
         Some(
             TurnState::ActiveAwaitingModelCallRecovery { .. }
@@ -3231,6 +3313,8 @@ fn terminal_event_state(
             Some(TurnTerminal::ReconciliationRequired)
         }
         SessionEvent::SessionCreated {}
+        | SessionEvent::SessionModelSettingsChanged { .. }
+        | SessionEvent::TurnModelSettingsResolved { .. }
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
@@ -3243,7 +3327,12 @@ fn terminal_event_state(
         | SessionEvent::TurnRefused { .. }
         | SessionEvent::TurnCancelled { .. }
         | SessionEvent::TurnReconciliationRequired { .. }
-        | SessionEvent::TurnToolReconciliationRequired { .. } => None,
+        | SessionEvent::TurnToolReconciliationRequired { .. }
+        | SessionEvent::ChildSpawned { .. }
+        | SessionEvent::ChildWaiting { .. }
+        | SessionEvent::SessionMessage { .. }
+        | SessionEvent::ChildResult { .. }
+        | SessionEvent::ChildLifecycleDisposition { .. } => None,
     }
 }
 
@@ -3282,7 +3371,7 @@ async fn follow(
                     }
                     observed_cursor = cursor.value();
                     output.event(observed_cursor, session_id, &event)?;
-                    if let Some(selection) = terminal_snapshot_selection(&event) {
+                    if let Some(selection) = terminal_snapshot_selection(&event, session_id) {
                         let mut refreshed = transcript(client, session_id).await?;
                         output.terminal_material(
                             &mut refreshed,
@@ -3325,7 +3414,15 @@ async fn follow(
     }
 }
 
-fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection> {
+fn terminal_snapshot_selection(
+    event: &SessionEvent,
+    session_id: CanonicalUuid,
+) -> Option<SnapshotSelection> {
+    if child_lifecycle_terminalization(event, session_id) {
+        // The cascade names no terminal entry of its own, so the refresh it
+        // requires selects whatever material the child produced before it.
+        return Some(SnapshotSelection::All);
+    }
     match event {
         SessionEvent::TurnCompleted {
             turn_id,
@@ -3384,12 +3481,19 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         }),
         SessionEvent::TurnRefused { .. } | SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
+        | SessionEvent::SessionModelSettingsChanged { .. }
+        | SessionEvent::TurnModelSettingsResolved { .. }
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
+        | SessionEvent::ModelCallTransition { .. }
+        | SessionEvent::ChildSpawned { .. }
+        | SessionEvent::ChildWaiting { .. }
+        | SessionEvent::SessionMessage { .. }
+        | SessionEvent::ChildResult { .. }
         | SessionEvent::ToolApprovalDecided { .. }
-        | SessionEvent::ModelCallTransition { .. } => None,
+        | SessionEvent::ChildLifecycleDisposition { .. } => None,
     }
 }
 
@@ -4514,17 +4618,20 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
         ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
-        ConversationSummary, FrameEncodeError, GoalCommandRejection, GoalHistoryEvent,
-        GoalLifecycleState, ImportedContentKind, ImportedSessionRelationship,
-        ImportedSourceSpeaker, InputContent, InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
-        MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion,
-        RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewExternalObjectKind,
-        ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
+        ConversationSummary, DelegationOutcome, DelegationProvenance, DelegationReason,
+        DescendantTerminationScope, EffectiveModelSettings, FastMode, FrameEncodeError,
+        GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
+        ImportedSessionRelationship, ImportedSourceSpeaker, InputContent, InputDelivery,
+        MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState,
+        ModelSelection, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
+        ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
+        ReviewConcernTerminalOutcome, ReviewExternalObjectKind, ReviewFindingEvent,
+        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
         ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
         ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
         ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
-        SessionEvent, SessionPlacement, ToolBatchState, ToolDecision, TurnState,
-        decode_client_line, encode_server_line,
+        SessionEvent, SessionPlacement, SettingOverlay, SystemPromptMember, ToolBatchState,
+        ToolDecision, TurnState, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -4533,26 +4640,89 @@ mod tests {
     };
     use uuid::Uuid;
 
+    fn provider_default_model_settings() -> ModelSettingsSnapshot {
+        ModelSettingsSnapshot {
+            precedence: ModelSettingsPrecedence {
+                per_call: ModelSettingsOverlay::inherit_all(),
+                session: ModelSettingsOverlay::inherit_all(),
+                profile: ModelSettingsOverlay::inherit_all(),
+                global_default: ModelSettingsOverlay::inherit_all(),
+            },
+            effective: EffectiveModelSettings {
+                reasoning_level: None,
+                fast_mode: FastMode::Disabled,
+                service_tier: None,
+            },
+            reasoning_source: None,
+            fast_mode_source: None,
+            service_tier_source: None,
+            validated_for_selection_id: None,
+        }
+    }
+
+    fn session_reasoning_model_settings(selection_id: CanonicalUuid) -> ModelSettingsSnapshot {
+        let mut session = ModelSettingsOverlay::inherit_all();
+        session.reasoning_level = SettingOverlay::Value(ReasoningLevel::High);
+        ModelSettingsSnapshot {
+            precedence: ModelSettingsPrecedence {
+                per_call: ModelSettingsOverlay::inherit_all(),
+                session,
+                profile: ModelSettingsOverlay::inherit_all(),
+                global_default: ModelSettingsOverlay::inherit_all(),
+            },
+            effective: EffectiveModelSettings {
+                reasoning_level: Some(ReasoningLevel::High),
+                fast_mode: FastMode::Disabled,
+                service_tier: None,
+            },
+            reasoning_source: Some(ModelSettingSource::Session),
+            fast_mode_source: None,
+            service_tier_source: None,
+            validated_for_selection_id: Some(selection_id),
+        }
+    }
+
     use super::{
         ConversationImportOutcome, ConversationsPageRequest, GoalHistoryReplay,
         MAX_CONTENT_FRAGMENT_BYTES, MAX_INPUT_CONTENT_BYTES, MAX_REVIEW_FINDINGS_PER_RUN,
-        MAX_REVIEW_JSON_INPUT_BYTES, MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ProcessClient,
-        ReviewCommand, ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest,
-        SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
-        await_turn_terminal, collect_import_paths, continue_imported,
+        MAX_REVIEW_JSON_INPUT_BYTES, MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ModelSystemPromptChoice,
+        ProcessClient, ReviewCommand, ReviewConcernsFile, ReviewFindingsFile,
+        SessionMetadataPageRequest, SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument,
+        TurnTerminal, TurnWaitMode, await_turn_terminal, collect_import_paths, continue_imported,
         conversation_import_chunk_read_limit, conversations, create, decide,
-        decode_goal_mutation_receipt, import_conversation_file, imported,
+        decode_goal_mutation_receipt, descendant_scope, import_conversation_file, imported,
         model_call_recovery_transition, open_scanned_import_source,
         placement_update_receipt_matches, placement_update_rejection_matches, read_goal_text_file,
         read_import_file, read_input, read_review_json_file, read_system_prompt_file,
-        reconcile_turn, review, review_concern_state_is_coherent, review_finding_event_status,
+        reconcile_turn, replace_session_model, replacement_receipt_settings_match, review,
+        review_concern_state_is_coherent, review_finding_event_status,
         review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
         review_pass_completion_is_coherent, review_publication_state_is_coherent,
         review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
         source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
         terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
-    use crate::{error::ClientError, presentation::Output};
+    use crate::{child_lifecycle_terminalization, error::ClientError, presentation::Output};
+
+    /// The session a follower reads. Only a delegation event addressed to this
+    /// exact session terminalizes the follower's own turn.
+    const FOLLOWED_SESSION_IDENTITY: u128 = 0x5e5;
+
+    fn followed_session() -> CanonicalUuid {
+        CanonicalUuid::from_uuid(Uuid::from_u128(FOLLOWED_SESSION_IDENTITY))
+    }
+
+    #[test]
+    fn s19_descendant_scope_follows_the_explicit_cli_choice() {
+        assert_eq!(
+            descendant_scope(false),
+            DescendantTerminationScope::ParentAlone
+        );
+        assert_eq!(
+            descendant_scope(true),
+            DescendantTerminationScope::ParentAndDescendants
+        );
+    }
 
     #[test]
     fn inv033_goal_history_replay_accepts_supersession_lineage() -> Result<(), ClientError> {
@@ -5066,6 +5236,7 @@ mod tests {
                     &encode_server_line(&frame(ServerMessage::TranscriptTurn {
                         turn_id: historical_terminal_turn_id,
                         acceptance_position: CanonicalU64::new(1),
+                        model_settings: None,
                         state: TurnState::ReconciliationRequired {
                             terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
                             terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(6)),
@@ -5078,6 +5249,7 @@ mod tests {
                     &encode_server_line(&frame(ServerMessage::TranscriptTurn {
                         turn_id: queued_turn_id,
                         acceptance_position: CanonicalU64::new(3),
+                        model_settings: None,
                         state: TurnState::Queued {
                             accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(10)),
                             content: InputContent::new(String::from("wait behind recovery")),
@@ -5089,6 +5261,7 @@ mod tests {
                     &encode_server_line(&frame(ServerMessage::TranscriptTurn {
                         turn_id: current_blocker_turn_id,
                         acceptance_position: CanonicalU64::new(4),
+                        model_settings: None,
                         state: blocker_state,
                     })?)
                     .map_err(io::Error::other)?,
@@ -5211,6 +5384,7 @@ mod tests {
                 &encode_server_line(&frame(ServerMessage::TranscriptTurn {
                     turn_id,
                     acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                         content: InputContent::new(String::from("stream the reply")),
@@ -5303,6 +5477,7 @@ mod tests {
                 &encode_server_line(&frame(ServerMessage::TranscriptTurn {
                     turn_id,
                     acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
                         content: InputContent::new(String::from("stream the reply")),
@@ -5449,26 +5624,32 @@ mod tests {
         let call = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let frontier = CanonicalUuid::from_uuid(Uuid::from_u128(3));
         assert_eq!(
-            terminal_snapshot_selection(&SessionEvent::ToolBatchTransition {
-                turn_id: turn,
-                model_call_id: call,
-                state: ToolBatchState::Proposed {
-                    frontier_id: frontier,
+            terminal_snapshot_selection(
+                &SessionEvent::ToolBatchTransition {
+                    turn_id: turn,
+                    model_call_id: call,
+                    state: ToolBatchState::Proposed {
+                        frontier_id: frontier,
+                    },
                 },
-            }),
+                followed_session()
+            ),
             Some(SnapshotSelection::ToolBatchProposed {
                 turn_id: turn,
                 model_call_id: call,
             })
         );
         assert_eq!(
-            terminal_snapshot_selection(&SessionEvent::ToolBatchTransition {
-                turn_id: turn,
-                model_call_id: call,
-                state: ToolBatchState::ResultsProjected {
-                    frontier_id: frontier,
+            terminal_snapshot_selection(
+                &SessionEvent::ToolBatchTransition {
+                    turn_id: turn,
+                    model_call_id: call,
+                    state: ToolBatchState::ResultsProjected {
+                        frontier_id: frontier,
+                    },
                 },
-            }),
+                followed_session()
+            ),
             Some(SnapshotSelection::ToolBatchResults {
                 turn_id: turn,
                 model_call_id: call,
@@ -5479,11 +5660,14 @@ mod tests {
     #[test]
     fn refused_terminal_event_requests_no_side_reread() {
         assert!(
-            terminal_snapshot_selection(&SessionEvent::TurnRefused {
-                turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
-                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
-                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-            })
+            terminal_snapshot_selection(
+                &SessionEvent::TurnRefused {
+                    turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+                    model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                    terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                },
+                followed_session()
+            )
             .is_none()
         );
     }
@@ -5497,7 +5681,7 @@ mod tests {
                 turn_id,
                 cancellation_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
                 terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-            }),
+            }, followed_session()),
             Some(SnapshotSelection::Cancelled {
                 turn_id: selected,
                 terminal_entry_id,
@@ -5510,11 +5694,14 @@ mod tests {
         let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
 
         assert!(
-            terminal_snapshot_selection(&SessionEvent::TurnReconciliationRequired {
-                turn_id,
-                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
-                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-            })
+            terminal_snapshot_selection(
+                &SessionEvent::TurnReconciliationRequired {
+                    turn_id,
+                    model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                    terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                },
+                followed_session()
+            )
             .is_none()
         );
     }
@@ -5526,16 +5713,63 @@ mod tests {
         let terminal_frontier_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
 
         assert_eq!(
-            terminal_snapshot_selection(&SessionEvent::TurnToolReconciliationRequired {
-                turn_id,
-                tool_attempt_id,
-                terminal_frontier_id,
-            }),
+            terminal_snapshot_selection(
+                &SessionEvent::TurnToolReconciliationRequired {
+                    turn_id,
+                    tool_attempt_id,
+                    terminal_frontier_id,
+                },
+                followed_session()
+            ),
             Some(SnapshotSelection::ToolReconciliation {
                 turn_id,
                 tool_attempt_id,
                 terminal_frontier_id,
             })
+        );
+    }
+
+    #[test]
+    fn child_addressed_cascade_disposition_requests_an_authoritative_reread() {
+        let event = SessionEvent::ChildLifecycleDisposition {
+            spawning_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            child_session_id: followed_session(),
+            outcome: DelegationOutcome::Stopped,
+            reason: DelegationReason::ParentStopped,
+            provenance: DelegationProvenance::ParentGoalCommand {
+                parent_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                goal_generation: CanonicalU64::new(1),
+                command_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        };
+
+        assert!(child_lifecycle_terminalization(&event, followed_session()));
+        assert_eq!(
+            terminal_snapshot_selection(&event, followed_session()),
+            Some(SnapshotSelection::All)
+        );
+    }
+
+    #[test]
+    fn parent_addressed_cascade_disposition_requests_no_reread() {
+        let event = SessionEvent::ChildLifecycleDisposition {
+            spawning_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            child_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+            outcome: DelegationOutcome::Stopped,
+            reason: DelegationReason::ParentStopped,
+            provenance: DelegationProvenance::ParentGoalCommand {
+                parent_session_id: followed_session(),
+                goal_generation: CanonicalU64::new(1),
+                command_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        };
+
+        assert!(!child_lifecycle_terminalization(&event, followed_session()));
+        assert_eq!(
+            terminal_snapshot_selection(&event, followed_session()),
+            None
         );
     }
 
@@ -6149,12 +6383,16 @@ mod tests {
                     through_position: CanonicalU64::new(2),
                     relationship: ImportedSessionRelationship::Resume,
                     initial_model_selection: ModelSelection::Direct { selection_id },
+                    model_settings: ModelSettingsOverlay::inherit_all(),
                 }
             );
             let response = ServerFrame::try_new_for_version(
                 request.version(),
                 request.request_id(),
-                ServerMessage::SessionCreated { session_id },
+                ServerMessage::SessionCreated {
+                    session_id,
+                    model_settings: provider_default_model_settings(),
+                },
             )
             .map_err(io::Error::other)?;
             writer
@@ -6710,6 +6948,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_rejects_settings_for_another_direct_model() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let requested_selection_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let returned_selection_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(3))?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::CreateSession {
+                    command_id,
+                    initial_model_selection: ModelSelection::Direct {
+                        selection_id: requested_selection_id,
+                    },
+                    model_settings: ModelSettingsOverlay::inherit_all(),
+                    system_prompt: SystemPromptMember::present(None),
+                    placement: SessionPlacement::Pathless {},
+                }
+            );
+            let response = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::SessionCreated {
+                    session_id,
+                    model_settings: session_reasoning_model_settings(returned_selection_id),
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let error = create(
+            &mut client,
+            &mut output,
+            ModelSelection::Direct {
+                selection_id: requested_selection_id,
+            },
+            Some(command_id),
+            None,
+            SessionPlacement::Pathless {},
+        )
+        .await
+        .expect_err("creation must reject settings validated for another direct model");
+
+        assert!(error.is_ambiguous_mutation());
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn model_replacement_preserves_the_session_settings_layer() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let prior_selection_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let installed_selection_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+        let expected_session_settings = session_reasoning_model_settings(prior_selection_id)
+            .precedence
+            .session;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let read = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                read.request(),
+                &ClientRequest::ReadSessionDefaults {
+                    session_id,
+                    defaults_version: None,
+                }
+            );
+            let read_response = ServerFrame::try_new_for_version(
+                read.version(),
+                read.request_id(),
+                ServerMessage::SessionDefaults {
+                    session_id,
+                    defaults_version: CanonicalU64::new(1),
+                    model_selection: ModelSelection::Direct {
+                        selection_id: prior_selection_id,
+                    },
+                    model_settings: session_reasoning_model_settings(prior_selection_id),
+                    dangerous_tool_auto_approval: false,
+                    system_prompt: None,
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&read_response).map_err(io::Error::other)?)
+                .await?;
+
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let replace = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                replace.request(),
+                &ClientRequest::ReplaceSessionDefaults {
+                    command_id,
+                    session_id,
+                    expected_defaults_version: CanonicalU64::new(1),
+                    model_selection: ModelSelection::Direct {
+                        selection_id: installed_selection_id,
+                    },
+                    model_settings: expected_session_settings,
+                    dangerous_tool_auto_approval: false,
+                    system_prompt: SystemPromptMember::present(None),
+                }
+            );
+            let replace_response = ServerFrame::try_new_for_version(
+                replace.version(),
+                replace.request_id(),
+                ServerMessage::SessionDefaultsReplaced {
+                    session_id,
+                    defaults_version: CanonicalU64::new(2),
+                    model_selection: ModelSelection::Direct {
+                        selection_id: installed_selection_id,
+                    },
+                    model_settings: session_reasoning_model_settings(installed_selection_id),
+                    dangerous_tool_auto_approval: false,
+                    system_prompt: SystemPromptMember::present(None),
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&replace_response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        replace_session_model(
+            &mut client,
+            &mut output,
+            session_id,
+            ModelSelection::Direct {
+                selection_id: installed_selection_id,
+            },
+            Some(command_id),
+            None,
+            None,
+            ModelSystemPromptChoice::Keep,
+        )
+        .await?;
+
+        assert_eq!(
+            String::from_utf8(stderr)?,
+            "defaults_version=1\ndangerous_tool_auto_approval=disabled\n"
+        );
+        assert_eq!(
+            String::from_utf8(stdout)?,
+            format!("session={session_id} defaults_version=2 model={installed_selection_id}\n")
+        );
+        server.await??;
+        Ok(())
+    }
+
+    #[test]
+    fn model_replacement_rejects_a_receipt_with_another_session_settings_layer() {
+        let prior_selection_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let expected_session_settings = session_reasoning_model_settings(prior_selection_id)
+            .precedence
+            .session;
+        let returned = provider_default_model_settings();
+
+        assert!(!replacement_receipt_settings_match(
+            expected_session_settings,
+            &returned
+        ));
+    }
+
+    #[tokio::test]
     async fn submit_connection_failure_is_definitely_uncommitted() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let mut client = ProcessClient::new(directory.path().join("missing.sock"));
@@ -6752,6 +7188,7 @@ mod tests {
                     session_id,
                     content: expected_content,
                     expected_defaults_version: Some(CanonicalU64::new(1)),
+                    model_settings: ModelSettingsOverlay::inherit_all(),
                     delivery: None,
                 }
             );
@@ -6763,6 +7200,7 @@ mod tests {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                     acceptance_position: CanonicalU64::new(1),
                     turn_id,
+                    model_settings: provider_default_model_settings(),
                 },
             )
             .map_err(io::Error::other)?;
@@ -6818,6 +7256,7 @@ mod tests {
                     session_id,
                     content: InputContent::new(String::from("steering content")),
                     expected_defaults_version: None,
+                    model_settings: ModelSettingsOverlay::inherit_all(),
                     delivery: Some(InputDelivery::Steer {
                         expected_active_turn_id: source_turn_id,
                     }),
@@ -6875,20 +7314,27 @@ mod tests {
         let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
         let parked_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let successor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+        let defaults_version = CanonicalU64::new(1);
+        let content = InputContent::new(String::from("continue after reconciliation"));
+        let expected_content = content.clone();
         let server = tokio::spawn(async move {
             let (stream, mut writer) = listener.accept().await?.0.into_split();
             let mut reader = BufReader::new(stream);
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert!(matches!(
+            assert_eq!(
                 request.request(),
-                ClientRequest::ReconcileTurn {
-                    session_id: requested_session,
-                    expected_active_turn_id: requested_turn,
-                    ..
-                } if *requested_session == session_id && *requested_turn == parked_turn_id
-            ));
+                &ClientRequest::ReconcileTurn {
+                    command_id,
+                    session_id,
+                    expected_active_turn_id: parked_turn_id,
+                    content: expected_content,
+                    expected_defaults_version: defaults_version,
+                    model_settings: ModelSettingsOverlay::inherit_all(),
+                }
+            );
             let response = ServerFrame::try_new_for_version(
                 request.version(),
                 request.request_id(),
@@ -6897,6 +7343,7 @@ mod tests {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                     acceptance_position: CanonicalU64::new(2),
                     turn_id: successor_turn_id,
+                    model_settings: provider_default_model_settings(),
                 },
             )
             .map_err(io::Error::other)?;
@@ -6909,11 +7356,11 @@ mod tests {
         let mut client = ProcessClient::new(socket);
         let accepted_successor = reconcile_turn(
             &mut client,
-            CommandId::try_from_uuid(Uuid::from_u128(4))?,
+            command_id,
             session_id,
             parked_turn_id,
-            InputContent::new(String::from("continue after reconciliation")),
-            CanonicalU64::new(1),
+            content,
+            defaults_version,
         )
         .await?;
         assert_eq!(accepted_successor, successor_turn_id);
@@ -6932,20 +7379,26 @@ mod tests {
         let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
         let active_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let successor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+        let content = InputContent::new(String::from("continue after the stop"));
+        let defaults_version = CanonicalU64::new(1);
+        let selected_scope = DescendantTerminationScope::ParentAndDescendants;
+        let expected_request = ClientRequest::StopTurn {
+            command_id,
+            session_id,
+            expected_active_turn_id: active_turn_id,
+            content: content.clone(),
+            expected_defaults_version: defaults_version,
+            descendant_scope: selected_scope,
+            model_settings: ModelSettingsOverlay::inherit_all(),
+        };
         let server = tokio::spawn(async move {
             let (stream, mut writer) = listener.accept().await?.0.into_split();
             let mut reader = BufReader::new(stream);
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert!(matches!(
-                request.request(),
-                ClientRequest::StopTurn {
-                    session_id: requested_session,
-                    expected_active_turn_id: requested_turn,
-                    ..
-                } if *requested_session == session_id && *requested_turn == active_turn_id
-            ));
+            assert_eq!(request.request(), &expected_request);
             let response = ServerFrame::try_new_for_version(
                 request.version(),
                 request.request_id(),
@@ -6954,6 +7407,7 @@ mod tests {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                     acceptance_position: CanonicalU64::new(2),
                     turn_id: successor_turn_id,
+                    model_settings: provider_default_model_settings(),
                 },
             )
             .map_err(io::Error::other)?;
@@ -6966,11 +7420,12 @@ mod tests {
         let mut client = ProcessClient::new(socket);
         let accepted_successor = stop_turn(
             &mut client,
-            CommandId::try_from_uuid(Uuid::from_u128(4))?,
+            command_id,
             session_id,
             active_turn_id,
-            InputContent::new(String::from("continue after the stop")),
-            CanonicalU64::new(1),
+            content,
+            defaults_version,
+            selected_scope,
         )
         .await?;
         assert_eq!(accepted_successor, successor_turn_id);

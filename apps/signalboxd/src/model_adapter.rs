@@ -6,6 +6,9 @@ use signalbox_model_runtime::{
     CancellationSignal, ModelOperation, ModelRuntime, ObservationSink, PreparationDefect,
     PreparationOutcome, TerminalReport,
 };
+use signalbox_model_runtime_claude_cli::{
+    ClaudeCliConstructionError, ClaudeCliPreparedRequest, ClaudeCliRuntime,
+};
 use signalbox_model_runtime_codex_cli::{
     CodexCliConstructionError, CodexCliPreparedRequest, CodexCliRuntime,
 };
@@ -13,9 +16,20 @@ use signalbox_model_runtime_codex_cli::{
 use crate::configuration::{HubModelConfiguration, ModelAdapter};
 
 /// One prepared capability tagged by the adapter that created it.
-pub enum ConfiguredPreparedRequest<C, A, P> {
+///
+/// Each direct HTTP adapter contributes its own runtime and prepared-capability
+/// parameters, so a test composition can script either one independently of the
+/// other exactly as it already could for Anthropic alone.
+pub enum ConfiguredPreparedRequest<C, A, P, O, Q> {
     /// Anthropic HTTP request capability.
     Anthropic { runtime: Arc<A>, prepared: P },
+    /// OpenAI HTTP request capability.
+    OpenAi { runtime: Arc<O>, prepared: Q },
+    /// Claude Code CLI process request capability.
+    ClaudeCli {
+        runtime: Arc<ClaudeCliRuntime>,
+        prepared: Box<ClaudeCliPreparedRequest<C>>,
+    },
     /// Codex CLI process request capability.
     CodexCli {
         runtime: Arc<CodexCliRuntime>,
@@ -23,44 +37,96 @@ pub enum ConfiguredPreparedRequest<C, A, P> {
     },
 }
 
+/// Why one configured CLI adapter could not be constructed at startup.
+///
+/// Each variant keeps its own adapter's typed construction evidence so the
+/// composition root can name the exact failing adapter without inspecting an
+/// adapter-owned string.
+#[derive(Debug)]
+pub enum ConfiguredAdapterConstructionError {
+    /// The configured Claude Code CLI adapter could not be constructed.
+    ClaudeCli(ClaudeCliConstructionError),
+    /// The configured Codex CLI adapter could not be constructed.
+    CodexCli(CodexCliConstructionError),
+}
+
+impl ConfiguredAdapterConstructionError {
+    /// Returns the closed operator cause token for this construction failure.
+    pub const fn cause_code(&self) -> &'static str {
+        match self {
+            Self::ClaudeCli(_) => "claude_cli_construction_failed",
+            Self::CodexCli(_) => "codex_cli_construction_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for ConfiguredAdapterConstructionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ClaudeCli(_) => "configured Claude CLI adapter could not be constructed",
+            Self::CodexCli(_) => "configured Codex CLI adapter could not be constructed",
+        })
+    }
+}
+
+impl std::error::Error for ConfiguredAdapterConstructionError {}
+
 /// Runtime router whose exact routes come only from startup configuration.
-pub struct ConfiguredModelRuntime<A> {
+pub struct ConfiguredModelRuntime<A, O> {
     anthropic: Option<Arc<A>>,
+    openai: Option<Arc<O>>,
+    claude_cli: Option<Arc<ClaudeCliRuntime>>,
     codex_cli: Option<Arc<CodexCliRuntime>>,
     routes: HashMap<String, ModelAdapter>,
 }
 
-impl<A> Clone for ConfiguredModelRuntime<A> {
+impl<A, O> Clone for ConfiguredModelRuntime<A, O> {
     fn clone(&self) -> Self {
         Self {
             anthropic: self.anthropic.clone(),
+            openai: self.openai.clone(),
+            claude_cli: self.claude_cli.clone(),
             codex_cli: self.codex_cli.clone(),
             routes: self.routes.clone(),
         }
     }
 }
 
-impl<A> ConfiguredModelRuntime<A> {
+impl<A, O> ConfiguredModelRuntime<A, O> {
     /// Constructs every configured adapter without provider interaction.
     pub fn new(
         anthropic: Option<A>,
+        openai: Option<O>,
         configuration: &HubModelConfiguration,
-    ) -> Result<Self, CodexCliConstructionError> {
+    ) -> Result<Self, ConfiguredAdapterConstructionError> {
         Ok(Self {
             anthropic: anthropic.map(Arc::new),
-            codex_cli: configuration.codex_cli_runtime()?.map(Arc::new),
+            openai: openai.map(Arc::new),
+            claude_cli: configuration
+                .claude_cli_runtime()
+                .map_err(ConfiguredAdapterConstructionError::ClaudeCli)?
+                .map(Arc::new),
+            codex_cli: configuration
+                .codex_cli_runtime()
+                .map_err(ConfiguredAdapterConstructionError::CodexCli)?
+                .map(Arc::new),
             routes: configuration.adapter_routes(),
         })
     }
 }
 
-impl<A> std::fmt::Debug for ConfiguredModelRuntime<A> {
+impl<A, O> std::fmt::Debug for ConfiguredModelRuntime<A, O> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ConfiguredModelRuntime")
             .field(
                 "anthropic",
                 &self.anthropic.as_ref().map(|_| "[model adapter]"),
+            )
+            .field("openai", &self.openai.as_ref().map(|_| "[model adapter]"))
+            .field(
+                "claude_cli",
+                &self.claude_cli.as_ref().map(|_| "[model adapter]"),
             )
             .field(
                 "codex_cli",
@@ -97,13 +163,15 @@ fn map_preparation<C, P, R>(
     }
 }
 
-impl<C, A> ModelRuntime<C> for ConfiguredModelRuntime<A>
+impl<C, A, O> ModelRuntime<C> for ConfiguredModelRuntime<A, O>
 where
     C: Clone + Send + Sync,
     A: ModelRuntime<C> + Send + Sync,
     A::Prepared: Send,
+    O: ModelRuntime<C> + Send + Sync,
+    O::Prepared: Send,
 {
-    type Prepared = ConfiguredPreparedRequest<C, A, A::Prepared>;
+    type Prepared = ConfiguredPreparedRequest<C, A, A::Prepared, O, O::Prepared>;
 
     async fn prepare(
         &self,
@@ -129,6 +197,40 @@ where
                     prepared,
                 })
             }
+            Some(ModelAdapter::OpenAi) => {
+                let runtime = match self.openai.as_ref() {
+                    Some(runtime) => Arc::clone(runtime),
+                    None => {
+                        return PreparationOutcome::Defect {
+                            correlation: operation.correlation,
+                            defect: PreparationDefect::RequestConstructionFailed {
+                                detail: String::from("configured OpenAI adapter is unavailable"),
+                            },
+                        };
+                    }
+                };
+                let prepared = runtime.prepare(operation, cancellation).await;
+                map_preparation(prepared, |prepared| ConfiguredPreparedRequest::OpenAi {
+                    runtime,
+                    prepared,
+                })
+            }
+            Some(ModelAdapter::ClaudeCli) => match self.claude_cli.as_ref() {
+                Some(runtime) => {
+                    let prepared = runtime.prepare(operation, cancellation).await;
+                    let runtime = Arc::clone(runtime);
+                    map_preparation(prepared, |prepared| ConfiguredPreparedRequest::ClaudeCli {
+                        runtime,
+                        prepared: Box::new(prepared),
+                    })
+                }
+                None => PreparationOutcome::Defect {
+                    correlation: operation.correlation,
+                    defect: PreparationDefect::RequestConstructionFailed {
+                        detail: String::from("configured Claude CLI adapter is unavailable"),
+                    },
+                },
+            },
             Some(ModelAdapter::CodexCli) => match self.codex_cli.as_ref() {
                 Some(runtime) => {
                     let prepared = runtime.prepare(operation, cancellation).await;
@@ -164,6 +266,12 @@ where
             ConfiguredPreparedRequest::Anthropic { runtime, prepared } => {
                 runtime.execute(prepared, sink, cancellation).await
             }
+            ConfiguredPreparedRequest::OpenAi { runtime, prepared } => {
+                runtime.execute(prepared, sink, cancellation).await
+            }
+            ConfiguredPreparedRequest::ClaudeCli { runtime, prepared } => {
+                runtime.execute(*prepared, sink, cancellation).await
+            }
             ConfiguredPreparedRequest::CodexCli { runtime, prepared } => {
                 runtime.execute(*prepared, sink, cancellation).await
             }
@@ -176,10 +284,12 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use signalbox_model_runtime::{
-        AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish,
-        ConversationMessage, CredentialReference, ExchangeFacts, ModelOperation, ModelRuntime,
-        Observation, ObservationSink, PreparationOutcome, ProviderReportedModel, RequestedTarget,
-        ResolvedTarget, Script, ScriptedModel, TerminalEvidence, TokenUsage,
+        AnthropicServiceTier, AssistantPart, CancellationSignal, CodexCliServiceTier,
+        CompletionEvidence, CompletionFinish, ConversationMessage, CredentialReference,
+        ExchangeFacts, FastMode, ModelOperation, ModelRuntime, ModelSettings, Observation,
+        ObservationSink, OpenAiServiceTier, PreparationDefect, PreparationOutcome,
+        ProviderReportedModel, ReasoningLevel, RequestedTarget, ResolvedTarget, Script,
+        ScriptedModel, ServiceTier, TerminalEvidence, TokenUsage,
     };
 
     use crate::configuration::HubModelConfiguration;
@@ -232,6 +342,74 @@ mod tests {
         })
     }
 
+    #[test]
+    fn alternate_fast_target_projects_as_declared_runtime_lineage() {
+        let standard_model = "claude-standard-fixture";
+        let fast_model = "claude-fast-fixture";
+        let configuration = HubModelConfiguration::parse(&format!(
+            r#"
+version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+adapter = "anthropic"
+billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_pool = "anthropic-main"
+
+[compaction]
+prompt = "Summarize."
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000001"
+target_id = "20000000-0000-4000-8000-000000000001"
+model_family = "anthropic"
+provider_model = "{standard_model}"
+max_output_tokens = 256
+context_window_tokens = 200000
+fast_mode = "alternate_target"
+fast_target_id = "20000000-0000-4000-8000-000000000002"
+reasoning_levels = ["high"]
+service_tiers = ["standard_only"]
+
+[[serving_targets]]
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "anthropic"
+provider_model = "{fast_model}"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#,
+        ))
+        .expect("the declared alternate target is valid");
+        assert_eq!(configuration.model_capability_catalog().iter().count(), 1);
+        let catalog = configuration.runtime_model_capability_catalog();
+        let selected = ResolvedTarget::new(standard_model);
+        let expected = ResolvedTarget::new(fast_model);
+        let mut settings = ModelSettings::new(256);
+        settings.reasoning_level = Some(ReasoningLevel::High);
+        settings.fast_mode = FastMode::Enabled;
+        settings.service_tier = Some(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly));
+        let capabilities = catalog
+            .validate(&selected, &settings)
+            .expect("the selected target declares fast mode");
+
+        assert_eq!(
+            capabilities.effective_target(&selected, settings.fast_mode),
+            Ok((&expected, FastMode::Disabled))
+        );
+    }
+
     #[tokio::test]
     async fn anthropic_mapping_executes_the_existing_runtime_path_unchanged() {
         let expected_completion = "unchanged Anthropic";
@@ -276,8 +454,12 @@ context_window_tokens = 200000
             "claude-example",
         )));
         let received = anthropic.clone();
-        let runtime = ConfiguredModelRuntime::new(Some(anthropic), &configuration)
-            .expect("Anthropic-only runtime constructs");
+        let runtime = ConfiguredModelRuntime::new(
+            Some(anthropic),
+            None::<ScriptedModel<String>>,
+            &configuration,
+        )
+        .expect("Anthropic-only runtime constructs");
         let operation = ModelOperation::new(
             String::from("anthropic-route"),
             CredentialReference::new("anthropic-primary"),
@@ -301,6 +483,275 @@ context_window_tokens = 200000
         assert_eq!(completion_text(&report.evidence), Some(expected_completion));
         assert_eq!(received.received_operations().len(), 1);
         assert!(observations.0.is_empty());
+    }
+
+    const OPENAI_CONFIGURATION: &str = r#"
+version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+adapter = "anthropic"
+billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_profiles]]
+name = "openai-primary"
+adapter = "openai"
+billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/openai-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
+[[credential_pools]]
+name = "openai-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{ profile = "openai-primary", priority = 1 }]
+
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_pool = "anthropic-main"
+
+[[adapter_mappings]]
+model_family = "openai"
+adapter = "openai"
+credential_pool = "openai-main"
+
+[compaction]
+prompt = "Summarize."
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000001"
+target_id = "20000000-0000-4000-8000-000000000001"
+model_family = "anthropic"
+provider_model = "claude-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000004"
+target_id = "20000000-0000-4000-8000-000000000004"
+model_family = "openai"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+reasoning_levels = ["medium"]
+fast_mode = "request_control"
+service_tiers = ["priority"]
+"#;
+
+    fn openai_operation() -> ModelOperation<String> {
+        let mut settings = ModelSettings::new(256);
+        settings.reasoning_level = Some(ReasoningLevel::Medium);
+        settings.service_tier = Some(ServiceTier::OpenAi(OpenAiServiceTier::Priority));
+        ModelOperation::new(
+            String::from("openai-route"),
+            CredentialReference::new("openai-primary"),
+            RequestedTarget::new("openai-selection"),
+            ResolvedTarget::new("gpt-example"),
+            vec![ConversationMessage::user_text("respond")],
+            settings,
+        )
+    }
+
+    /// The OpenAI slot mirrors the Anthropic one: a configured route reaches
+    /// its own injected runtime and nothing else.
+    #[tokio::test]
+    async fn openai_mapping_executes_through_its_own_configured_runtime() {
+        let expected_completion = "routed through OpenAI";
+        let configuration = HubModelConfiguration::parse(OPENAI_CONFIGURATION)
+            .expect("the OpenAI mapping and model are valid");
+        let openai = ScriptedModel::single(Script::delivering(scripted_completion(
+            expected_completion,
+            "gpt-example",
+        )));
+        let received = openai.clone();
+        let anthropic = ScriptedModel::<String>::single(Script::delivering(scripted_completion(
+            "never routed",
+            "claude-example",
+        )));
+        let unrouted = anthropic.clone();
+        let runtime = ConfiguredModelRuntime::new(Some(anthropic), Some(openai), &configuration)
+            .expect("configured adapters construct");
+
+        let prepared = prepared(
+            runtime
+                .prepare(openai_operation(), CancellationSignal::never())
+                .await,
+        )
+        .expect("configured OpenAI operation prepares through its own adapter");
+        let mut observations = Observations::default();
+        let report = runtime
+            .execute(prepared, &mut observations, CancellationSignal::never())
+            .await;
+
+        assert_eq!(report.correlation, "openai-route");
+        assert_eq!(completion_text(&report.evidence), Some(expected_completion));
+        assert_eq!(received.received_operations().len(), 1);
+        assert!(unrouted.received_operations().is_empty());
+    }
+
+    /// A configured OpenAI route with no constructed adapter is a composition
+    /// defect, never a silent fallback onto another provider.
+    #[tokio::test]
+    async fn openai_route_without_its_adapter_is_a_composition_defect() {
+        let configuration = HubModelConfiguration::parse(OPENAI_CONFIGURATION)
+            .expect("the OpenAI mapping and model are valid");
+        let runtime = ConfiguredModelRuntime::new(
+            None::<ScriptedModel<String>>,
+            None::<ScriptedModel<String>>,
+            &configuration,
+        )
+        .expect("configured adapters construct");
+
+        let outcome = runtime
+            .prepare(openai_operation(), CancellationSignal::never())
+            .await;
+
+        assert!(matches!(
+            outcome,
+            PreparationOutcome::Defect {
+                defect: PreparationDefect::RequestConstructionFailed { ref detail },
+                ..
+            } if detail == "configured OpenAI adapter is unavailable"
+        ));
+    }
+
+    #[tokio::test]
+    async fn configured_claude_model_runs_through_the_cli_fake_transport() {
+        let temporary = tempfile::tempdir().expect("temporary working directory is available");
+        let executable = temporary.path().join("fake-claude");
+        let bridge = temporary.path().join("fake-claude-mcp-bridge");
+        let expected_completion = "routed through Claude";
+        let provider_model = "claude-cli-offline-exact";
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"019c0000-0000-7000-8000-000000000002","tools":[],"mcp_servers":[{"name":"signalbox_tools","status":"connected"}],"model":"<provider-model>","slash_commands":[],"skills":[],"plugins":[],"claude_code_version":"2.1.220"}'
+printf '%s\n' '{"type":"assistant","parent_tool_use_id":null,"message":{"model":"<provider-model>","id":"message-1","role":"assistant","content":[{"type":"text","text":"<completion-text>"}],"usage":{"input_tokens":8,"output_tokens":4}}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"019c0000-0000-7000-8000-000000000002","stop_reason":"end_turn","terminal_reason":"completed","result":"<completion-text>","errors":[],"usage":{"input_tokens":8,"output_tokens":4,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'
+"#
+            .replace("<completion-text>", expected_completion)
+            .replace("<provider-model>", provider_model),
+        )
+        .expect("fake Claude executable is writable");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("fake executable metadata is available")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions)
+            .expect("fake Claude executable permissions are set");
+        std::fs::write(&bridge, "#!/bin/sh\nexit 0\n").expect("fake MCP bridge is writable");
+        let configuration = HubModelConfiguration::parse(&format!(
+            r#"
+version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+adapter = "anthropic"
+billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_profiles]]
+name = "claude-subscription-primary"
+adapter = "claude_cli"
+billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
+[[credential_pools]]
+name = "claude-main"
+tie_break = "first_listed"
+on_pool_exhausted = "fail"
+members = [{{ profile = "claude-subscription-primary", priority = 1 }}]
+
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_pool = "anthropic-main"
+
+[[adapter_mappings]]
+model_family = "claude_code"
+adapter = "claude_cli"
+credential_pool = "claude-main"
+
+[claude_cli]
+executable = "{}"
+mcp_bridge_executable = "{}"
+working_directory = "{}"
+
+[compaction]
+prompt = "Summarize."
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000001"
+target_id = "20000000-0000-4000-8000-000000000001"
+model_family = "anthropic"
+provider_model = "claude-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000003"
+target_id = "20000000-0000-4000-8000-000000000003"
+model_family = "claude_code"
+provider_model = "{provider_model}"
+max_output_tokens = 256
+context_window_tokens = 200000
+reasoning_levels = ["high"]
+fast_mode = "request_control"
+"#,
+            executable.display(),
+            bridge.display(),
+            temporary.path().display(),
+        ))
+        .expect("Claude mapping and process paths are valid");
+        let runtime = ConfiguredModelRuntime::new(
+            None::<ScriptedModel<String>>,
+            None::<ScriptedModel<String>>,
+            &configuration,
+        )
+        .expect("configured adapters construct");
+        assert!(format!("{runtime:?}").contains("claude_cli: Some"));
+        let mut settings = ModelSettings::new(256);
+        settings.reasoning_level = Some(ReasoningLevel::High);
+        settings.fast_mode = FastMode::Enabled;
+        let operation = ModelOperation::new(
+            String::from("claude-route"),
+            CredentialReference::new("claude-subscription-primary"),
+            RequestedTarget::new("claude-cli-selection"),
+            ResolvedTarget::new(provider_model),
+            vec![ConversationMessage::user_text("respond")],
+            settings,
+        );
+
+        let prepared = prepared(
+            runtime
+                .prepare(operation, CancellationSignal::never())
+                .await,
+        )
+        .expect("configured Claude operation prepares through the CLI adapter");
+        let mut observations = Observations::default();
+        let report = runtime
+            .execute(prepared, &mut observations, CancellationSignal::never())
+            .await;
+
+        assert_eq!(report.correlation, "claude-route");
+        assert_eq!(completion_text(&report.evidence), Some(expected_completion));
     }
 
     #[tokio::test]
@@ -389,21 +840,32 @@ model_family = "codex"
 provider_model = "gpt-offline-exact"
 max_output_tokens = 256
 context_window_tokens = 200000
+reasoning_levels = ["low"]
+fast_mode = "request_control"
+service_tiers = ["priority"]
 "#,
             executable.display(),
             temporary.path().display(),
         ))
         .expect("Codex mapping and process paths are valid");
-        let runtime = ConfiguredModelRuntime::new(None::<ScriptedModel<String>>, &configuration)
-            .expect("configured adapters construct");
+        let runtime = ConfiguredModelRuntime::new(
+            None::<ScriptedModel<String>>,
+            None::<ScriptedModel<String>>,
+            &configuration,
+        )
+        .expect("configured adapters construct");
         assert!(format!("{runtime:?}").contains("anthropic: None"));
+        let mut settings = ModelSettings::new(256);
+        settings.reasoning_level = Some(ReasoningLevel::Low);
+        settings.fast_mode = FastMode::Enabled;
+        settings.service_tier = Some(ServiceTier::CodexCli(CodexCliServiceTier::Priority));
         let operation = ModelOperation::new(
             String::from("codex-route"),
             CredentialReference::new("codex-subscription-primary"),
             RequestedTarget::new("codex-selection"),
             ResolvedTarget::new("gpt-offline-exact"),
             vec![ConversationMessage::user_text("respond")],
-            signalbox_model_runtime::ModelSettings::new(256),
+            settings,
         );
 
         let prepared = prepared(

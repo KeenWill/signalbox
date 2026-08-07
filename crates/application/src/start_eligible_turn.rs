@@ -8,7 +8,7 @@
 use std::future::Future;
 
 use signalbox_domain::{
-    AcceptedInputTurnActivationIdentities, ActivatedAcceptedInputTurn, ContextFrontierId,
+    AcceptedInputTurnActivationIdentities, ActivatedTurn, ContextFrontierId,
     SemanticTranscriptEntryId, SessionId, TurnAttemptId,
 };
 
@@ -57,8 +57,8 @@ impl StartEligibleTurnIdGenerator for UuidV7StartEligibleTurnIdGenerator {
 pub enum StartEligibleTurnOutcome {
     /// Authoritative state contained no turn eligible for activation.
     NoEligibleTurn,
-    /// The earliest eligible accepted-input turn was atomically activated.
-    Activated(Box<ActivatedAcceptedInputTurn>),
+    /// The earliest eligible turn was atomically activated.
+    Activated(Box<ActivatedTurn>),
 }
 
 /// Atomic boundary for one session eligibility pass.
@@ -533,7 +533,7 @@ mod tests {
     #[test]
     fn s01_inv009_activated_outcome_passes_through_unchanged() {
         let activated = activated_turn();
-        let expected = StartEligibleTurnOutcome::Activated(Box::new(activated));
+        let expected = StartEligibleTurnOutcome::Activated(Box::new(activated.into()));
         let mut service = StartEligibleTurnService::new(
             FakeIds::supplying_one_candidate_set(),
             FakeTransaction::returning([Ok(expected.clone())]),

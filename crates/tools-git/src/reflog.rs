@@ -16,7 +16,7 @@ use rustix::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::descriptor::{FileIdentity, file_identity};
+use crate::descriptor::{FileIdentity, file_identity, permission_bits};
 use crate::failure::LocalGitFailure;
 use crate::limits::MAX_REFLOG_BYTES;
 use crate::pack_install::{pack_lock_is_owned, remove_owned_pack_lock};
@@ -32,7 +32,7 @@ pub(super) struct ReferenceLogLock {
     backup: Option<fs::File>,
     original_permissions: Option<fs::Permissions>,
     original_snapshot: Option<ReferenceLogSnapshot>,
-    created_directories: CreatedReferenceDirectories,
+    _created_directories: CreatedReferenceDirectories,
     committed: bool,
 }
 
@@ -101,12 +101,12 @@ impl ReferenceLogLock {
             backup: None,
             original_permissions: None,
             original_snapshot: None,
-            created_directories,
+            _created_directories: created_directories,
             committed: false,
         };
         guard
             .lock
-            .set_permissions(fs::Permissions::from_mode(file_mode.bits()))
+            .set_permissions(fs::Permissions::from_mode(permission_bits(file_mode)))
             .map_err(|_| LocalGitFailure::Operation)?;
         guard.copy_existing()?;
         Ok(guard)

@@ -7,8 +7,9 @@ use std::{
 };
 
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, InputContent, ModelSelection,
-    ServerMessage, SessionEvent, SystemPromptMember, ToolDecision, TurnState,
+    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, DescendantTerminationScope, ErrorCode,
+    InputContent, ModelSelection, ServerMessage, SessionEvent, SystemPromptMember,
+    SystemPromptText, ToolDecision, TurnState,
 };
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt as _, AsyncRead, ReadBuf},
@@ -18,7 +19,8 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    MAX_INPUT_CONTENT_BYTES, ObservedSessionDefaults, SubmitInputReceipt, command_identity,
+    MAX_INPUT_CONTENT_BYTES, ObservedSessionDefaults, SubmitInputReceipt,
+    child_lifecycle_terminalization, command_identity,
     connection::ProcessClient,
     error::ClientError,
     presentation::{ChatTurnStatus, Output},
@@ -524,8 +526,10 @@ where
                             }
                             observed_cursor = cursor.value();
                             output.event(observed_cursor, session_id, &event)?;
-                            let turn_effect = update_turns_from_event(&mut turns, &event);
-                            if let Some(selection) = terminal_snapshot_selection(&event) {
+                            let turn_effect =
+                                update_turns_from_event(&mut turns, &event, session_id);
+                            if let Some(selection) = terminal_snapshot_selection(&event, session_id)
+                            {
                                 let mut refreshed = match await_request(
                                     output,
                                     &mut interrupts,
@@ -1018,6 +1022,7 @@ async fn stop(
         active_turn,
         InputContent::new(content),
         defaults_version,
+        DescendantTerminationScope::ParentAlone,
     )
     .await
 }
@@ -1092,24 +1097,26 @@ async fn replace_model(
 ) -> Result<u64, ClientError> {
     let replacement_system_prompt = observed.system_prompt.clone();
     let mut connection = client
-        .mutation_request(ClientRequest::ReplaceSessionDefaults {
+        .mutation_request(model_replacement_request(
             command_id,
             session_id,
-            expected_defaults_version: observed.version,
-            model_selection: selection,
-            dangerous_tool_auto_approval: observed.dangerous_tool_auto_approval,
-            system_prompt: SystemPromptMember::present(replacement_system_prompt.clone()),
-        })
+            selection,
+            &observed,
+            replacement_system_prompt.clone(),
+        ))
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
         ServerMessage::SessionDefaultsReplaced {
             session_id: replaced_session,
             defaults_version: installed_version,
             model_selection,
+            model_settings,
             dangerous_tool_auto_approval,
             system_prompt: receipt_system_prompt,
+            ..
         } if replaced_session == session_id
             && model_selection == selection
+            && model_settings.precedence.session == observed.model_settings
             && dangerous_tool_auto_approval == observed.dangerous_tool_auto_approval
             && receipt_system_prompt.value() == Some(&replacement_system_prompt)
             && observed
@@ -1131,6 +1138,24 @@ async fn replace_model(
     }
 }
 
+fn model_replacement_request(
+    command_id: CommandId,
+    session_id: CanonicalUuid,
+    selection: ModelSelection,
+    observed: &ObservedSessionDefaults,
+    replacement_system_prompt: Option<SystemPromptText>,
+) -> ClientRequest {
+    ClientRequest::ReplaceSessionDefaults {
+        command_id,
+        session_id,
+        expected_defaults_version: observed.version,
+        model_selection: selection,
+        model_settings: observed.model_settings,
+        dangerous_tool_auto_approval: observed.dangerous_tool_auto_approval,
+        system_prompt: SystemPromptMember::present(replacement_system_prompt),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TurnEventEffect {
     None,
@@ -1139,7 +1164,18 @@ enum TurnEventEffect {
     Ready,
 }
 
-fn update_turns_from_event(turns: &mut ChatTurns, event: &SessionEvent) -> TurnEventEffect {
+fn update_turns_from_event(
+    turns: &mut ChatTurns,
+    event: &SessionEvent,
+    session_id: CanonicalUuid,
+) -> TurnEventEffect {
+    if child_lifecycle_terminalization(event, session_id) {
+        // The cascade terminalized this session's own delegated turn without
+        // naming it. The caller's refresh resynchronizes the tracked turn from
+        // the authoritative snapshot, so this reports only that the chat must
+        // reset its interrupt offer and render the resulting status.
+        return TurnEventEffect::Ready;
+    }
     match event {
         SessionEvent::InputAccepted { turn_id, .. } => {
             turns.accepted(*turn_id);
@@ -1173,9 +1209,16 @@ fn update_turns_from_event(turns: &mut ChatTurns, event: &SessionEvent) -> TurnE
         }
         SessionEvent::ToolApprovalDecided { .. } => TurnEventEffect::ApprovalDecided,
         SessionEvent::SessionCreated {}
+        | SessionEvent::SessionModelSettingsChanged { .. }
+        | SessionEvent::TurnModelSettingsResolved { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
-        | SessionEvent::ContextCompacted { .. } => TurnEventEffect::None,
+        | SessionEvent::ContextCompacted { .. }
+        | SessionEvent::ChildSpawned { .. }
+        | SessionEvent::ChildWaiting { .. }
+        | SessionEvent::SessionMessage { .. }
+        | SessionEvent::ChildResult { .. }
+        | SessionEvent::ChildLifecycleDisposition { .. } => TurnEventEffect::None,
     }
 }
 
@@ -1312,8 +1355,59 @@ fn parse_uuid(value: &str, message: &'static str) -> Result<CanonicalUuid, ChatS
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signalbox_process_protocol::{
+        DelegationOutcome, DelegationProvenance, DelegationReason, FastModeOverlay,
+        ModelSettingsOverlay, ReasoningLevel, SettingOverlay,
+    };
 
     const REQUEST: &str = "00000000-0000-0000-0000-000000000123";
+    /// The session the chat follows. Only a delegation event addressed to this
+    /// exact session projects onto the chat's own turns.
+    const FOLLOWED_SESSION_IDENTITY: u128 = 0x5e5;
+
+    fn followed_session() -> CanonicalUuid {
+        CanonicalUuid::from_uuid(Uuid::from_u128(FOLLOWED_SESSION_IDENTITY))
+    }
+
+    #[test]
+    fn chat_model_replacement_preserves_the_observed_session_settings() {
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(1))
+            .expect("fixture command identity is admitted");
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let selection_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let model_settings = ModelSettingsOverlay {
+            reasoning_level: SettingOverlay::Value(ReasoningLevel::High),
+            fast_mode: FastModeOverlay::Inherit,
+            service_tier: SettingOverlay::Inherit,
+        };
+        let observed = ObservedSessionDefaults {
+            version: CanonicalU64::new(4),
+            model_settings,
+            dangerous_tool_auto_approval: false,
+            system_prompt: None,
+        };
+
+        let request = model_replacement_request(
+            command_id,
+            session_id,
+            ModelSelection::Direct { selection_id },
+            &observed,
+            None,
+        );
+
+        assert_eq!(
+            request,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id,
+                session_id,
+                expected_defaults_version: observed.version,
+                model_selection: ModelSelection::Direct { selection_id },
+                model_settings,
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            }
+        );
+    }
 
     #[tokio::test]
     async fn terminal_input_reads_async_channel_chunks() {
@@ -1510,7 +1604,8 @@ mod tests {
                     turn_id,
                     acceptance_position: CanonicalU64::new(FIRST_ACCEPTANCE_POSITION),
                     content: InputContent::new(String::from(QUEUED_USER_INPUT)),
-                }
+                },
+                followed_session(),
             ),
             TurnEventEffect::None
         );
@@ -1522,7 +1617,8 @@ mod tests {
                 &SessionEvent::TurnActivated {
                     turn_id,
                     current_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(ATTEMPT_IDENTITY)),
-                }
+                },
+                followed_session(),
             ),
             TurnEventEffect::Activated(turn_id)
         );
@@ -1552,6 +1648,7 @@ mod tests {
                     acceptance_position: CanonicalU64::new(1),
                     content: InputContent::new(String::from("obsolete goal input")),
                 },
+                followed_session(),
             ),
             TurnEventEffect::None
         );
@@ -1561,6 +1658,7 @@ mod tests {
                 &SessionEvent::GoalTurnRetired {
                     turn_id: retired_turn,
                 },
+                followed_session(),
             ),
             TurnEventEffect::Ready
         );
@@ -1575,6 +1673,7 @@ mod tests {
                     acceptance_position: CanonicalU64::new(2),
                     content: InputContent::new(String::from("replacement goal input")),
                 },
+                followed_session(),
             ),
             TurnEventEffect::None
         );
@@ -1587,6 +1686,7 @@ mod tests {
                         REPLACEMENT_ATTEMPT_IDENTITY,
                     )),
                 },
+                followed_session(),
             ),
             TurnEventEffect::Activated(replacement_turn)
         );
@@ -1678,6 +1778,7 @@ mod tests {
                 ServerMessage::TranscriptTurn {
                     turn_id: first_turn,
                     acceptance_position: CanonicalU64::new(FIRST_POSITION),
+                    model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(
                             FIRST_INPUT_IDENTITY,
@@ -1688,6 +1789,7 @@ mod tests {
                 ServerMessage::TranscriptTurn {
                     turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(SECOND_TURN_IDENTITY)),
                     acceptance_position: CanonicalU64::new(SECOND_POSITION),
+                    model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(
                             SECOND_INPUT_IDENTITY,
@@ -1722,6 +1824,7 @@ mod tests {
             [ServerMessage::TranscriptTurn {
                 turn_id,
                 acceptance_position: CanonicalU64::new(ACCEPTANCE_POSITION),
+                model_settings: None,
                 state: TurnState::ActiveAwaitingToolApproval {
                     tool_request_id: first_request,
                 },
@@ -1733,6 +1836,7 @@ mod tests {
             [ServerMessage::TranscriptTurn {
                 turn_id,
                 acceptance_position: CanonicalU64::new(ACCEPTANCE_POSITION),
+                model_settings: None,
                 state: TurnState::ActiveAwaitingToolApproval {
                     tool_request_id: second_request,
                 },
@@ -1784,6 +1888,7 @@ mod tests {
                     },
                     rationale: None,
                 },
+                followed_session(),
             ),
             TurnEventEffect::ApprovalDecided
         );
@@ -1842,7 +1947,8 @@ mod tests {
                     current_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(
                         OLD_ATTEMPT_IDENTITY
                     )),
-                }
+                },
+                followed_session(),
             ),
             TurnEventEffect::None
         );
@@ -1858,10 +1964,82 @@ mod tests {
                     terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(
                         TERMINAL_FRONTIER_IDENTITY
                     )),
-                }
+                },
+                followed_session(),
             ),
             TurnEventEffect::None
         );
         assert_eq!(turns.status(), Some(ChatTurnStatus::Queued(successor_turn)));
+    }
+
+    #[test]
+    fn cascade_terminalizing_this_chat_renders_authoritative_ready_state() {
+        const SPAWNING_REQUEST_IDENTITY: u128 = 71;
+        const PARENT_SESSION_IDENTITY: u128 = 72;
+        const COMMAND_IDENTITY: u128 = 73;
+        const DELEGATED_TURN_IDENTITY: u128 = 74;
+        let delegated_turn = CanonicalUuid::from_uuid(Uuid::from_u128(DELEGATED_TURN_IDENTITY));
+        let mut turns = ChatTurns::default();
+        turns.activated(delegated_turn);
+
+        assert_eq!(
+            update_turns_from_event(
+                &mut turns,
+                &SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        SPAWNING_REQUEST_IDENTITY,
+                    )),
+                    child_session_id: followed_session(),
+                    outcome: DelegationOutcome::Stopped,
+                    reason: DelegationReason::ParentStopped,
+                    provenance: DelegationProvenance::ParentGoalCommand {
+                        parent_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                            PARENT_SESSION_IDENTITY,
+                        )),
+                        goal_generation: CanonicalU64::new(1),
+                        command_id: CanonicalUuid::from_uuid(Uuid::from_u128(COMMAND_IDENTITY)),
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                },
+                followed_session(),
+            ),
+            TurnEventEffect::Ready
+        );
+    }
+
+    #[test]
+    fn cascade_terminalizing_another_child_leaves_this_chat_turn_active() {
+        const SPAWNING_REQUEST_IDENTITY: u128 = 81;
+        const OTHER_CHILD_SESSION_IDENTITY: u128 = 82;
+        const COMMAND_IDENTITY: u128 = 83;
+        const ACTIVE_TURN_IDENTITY: u128 = 84;
+        let active_turn = CanonicalUuid::from_uuid(Uuid::from_u128(ACTIVE_TURN_IDENTITY));
+        let mut turns = ChatTurns::default();
+        turns.activated(active_turn);
+
+        assert_eq!(
+            update_turns_from_event(
+                &mut turns,
+                &SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        SPAWNING_REQUEST_IDENTITY,
+                    )),
+                    child_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                        OTHER_CHILD_SESSION_IDENTITY,
+                    )),
+                    outcome: DelegationOutcome::Stopped,
+                    reason: DelegationReason::ParentStopped,
+                    provenance: DelegationProvenance::ParentGoalCommand {
+                        parent_session_id: followed_session(),
+                        goal_generation: CanonicalU64::new(1),
+                        command_id: CanonicalUuid::from_uuid(Uuid::from_u128(COMMAND_IDENTITY)),
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                },
+                followed_session(),
+            ),
+            TurnEventEffect::None
+        );
+        assert_eq!(turns.status(), Some(ChatTurnStatus::Active(active_turn)));
     }
 }

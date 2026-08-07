@@ -70,6 +70,7 @@ impl TranscriptSnapshot {
                     TurnState::ActiveRunning { .. }
                         | TurnState::ActiveAwaitingModelCallRecovery { .. }
                         | TurnState::ActiveAwaitingToolApproval { .. }
+                        | TurnState::ActiveAwaitingChild { .. }
                         | TurnState::ActiveAwaitingToolRecovery { .. }
                 )
             {
@@ -386,6 +387,7 @@ fn snapshot_record(message: ServerMessage) -> Result<SnapshotRecord, ClientError
             turn_id,
             acceptance_position,
             state,
+            ..
         } => Ok(SnapshotRecord::Turn(TranscriptTurn {
             turn_id,
             acceptance_position: acceptance_position.value(),
@@ -648,10 +650,34 @@ fn stable_hash(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use signalbox_process_protocol::CanonicalUuid;
+    use signalbox_process_protocol::{CanonicalU64, CanonicalUuid, ServerMessage, TurnState};
     use uuid::Uuid;
 
-    use super::{DiskModelCallUsageOrder, FixedDiskSet};
+    use super::{DiskModelCallUsageOrder, FixedDiskSet, TranscriptSnapshot};
+
+    #[test]
+    fn awaiting_child_snapshot_owns_the_active_turn_slot() {
+        let turn = wire_uuid(1);
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            1,
+            [ServerMessage::TranscriptTurn {
+                turn_id: turn,
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::ActiveAwaitingChild {
+                    await_request_id: wire_uuid(2),
+                    spawning_request_id: wire_uuid(3),
+                    child_session_id: wire_uuid(4),
+                },
+            }],
+        )
+        .expect("the awaiting-child snapshot is valid");
+
+        assert_eq!(
+            snapshot.active_turn().expect("the snapshot replays"),
+            Some(turn)
+        );
+    }
 
     #[test]
     fn disk_usage_order_rejects_a_return_to_an_earlier_turn() {

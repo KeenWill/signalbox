@@ -40,9 +40,8 @@ use signalbox_persistence::{
     start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
 };
 use signalboxd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSignal,
-    FatalExecutionSupervisor, FileCredentialAccess, HubModelConfiguration,
-    PostgresProviderModelExecution, PostgresScriptedModelExecution,
+    ActivatedTurnPass, FatalExecutionSignal, FatalExecutionSupervisor, FileCredentialAccess,
+    HubModelConfiguration, PostgresProviderModelExecution, PostgresScriptedModelExecution,
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::{
@@ -423,21 +422,20 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
             let configuration = HubModelConfiguration::read(&model_configuration_file)
                 .map_err(|_| DebugDriverError::Configuration)?;
             require_anthropic_selection(&configuration, selection)?;
-            let credential_access = FileCredentialAccess::new(
-                configuration
-                    .anthropic_credential_file()
-                    .ok_or(DebugDriverError::Configuration)?
-                    .to_owned(),
-                CredentialReference::new(
-                    configuration
-                        .anthropic_credential_profile()
-                        .unwrap_or(ANTHROPIC_CREDENTIAL_REFERENCE),
-                ),
-            );
-            let credential_reference = ModelCallCredentialReference::new(
-                credential_access.credential_reference().as_str(),
-            );
-            let runtime = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)
+            let credential_profile = configuration
+                .resolve_direct_model(selection)
+                .ok_or(DebugDriverError::Configuration)?
+                .credential_profile()
+                .to_owned();
+            let credential_access =
+                FileCredentialAccess::from_files(configuration.file_credential_profiles().map(
+                    |(reference, path)| (CredentialReference::new(reference), path.to_path_buf()),
+                ));
+            let credential_reference = ModelCallCredentialReference::new(credential_profile);
+            let mut adapter_configuration = AnthropicConfig::new();
+            adapter_configuration.model_capabilities =
+                configuration.runtime_model_capability_catalog();
+            let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)
                 .map_err(|_| DebugDriverError::Configuration)?;
             let provider =
                 RuntimeModelCallProvider::new(runtime, configuration.runtime_model_catalog());

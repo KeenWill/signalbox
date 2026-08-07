@@ -20,7 +20,9 @@ verified through PR #311 (`agent/session-templates-spec`); exact start-frontier
 reconstitution across a validated compaction boundary was verified through PR
 `#312` (`agent/context-compaction-core`); and the corresponding persistent
 final-state gate was verified through PR #314
-(`agent/context-compaction-protocol`). Code homes:
+(`agent/context-compaction-protocol`); the delegated foreground-wait termination
+path and descendant-cascade ordering were verified through this PR
+(`agent/delegation`). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -87,6 +89,41 @@ a stored current-attempt state inside the `running` active phase and
 reconstitutes only from its exact applied-interrupt proof; `AwaitingApproval`
 reconstitutes only from the exact earliest undecided request of a complete tool
 batch and carries no live turn or tool attempt ([tool-loop](tool-loop.md)).
+
+**Committed unimplemented functionality — credential-availability wait.** No
+present `ActiveTurnPhase`, storage discriminator, startup-scan branch, scheduler
+path, or process state supplies the pool-availability wait in
+[model-call execution](model-call-execution.md#availability-successor-calls),
+and no present runtime can enter it. Its implementing child must add a distinct
+active phase with a closed `exhausted`/`contended` cause that retains the
+session slot and durably binds the frozen pool-policy snapshot. The exhausted
+form carries every policy member's exclusion evidence and optional reset, plus
+the earliest reset as its optional deadline. The contended form carries every
+durable exclusion in the selection snapshot and the complete nonempty set of
+otherwise-admissible bounded members with exact invocation-reservation
+identities and generations. Startup may reconstitute either only from that
+complete evidence; it retains live-process reservations and closes fenced
+prior-process reservations as lost before waking a contended waiter. The
+scheduler makes a reached deadline, an exact reservation release, or a durable
+member-availability update eligible. Release returns the same turn to `Running`
+with a fresh attempt and availability chain while carrying forward member
+evidence whose reset has not passed, every durable membership exclusion, and
+every profile quarantine.
+
+The wait has an exact occupied-slot control matrix. `steer` is accepted as
+ordinary pending steering bound to this source turn and remains pending until a
+release transaction consumes it with the fresh call. `stop_turn` is admitted:
+under the scheduler lock it revalidates the exact wait, accepts the configured
+immediate-successor origin, records the ordinary applied-interrupt proof, closes
+the wait as interrupted, appends `TurnCancelled` after the wait's latest
+frontier, and terminalizes `Cancelled`, all atomically. Equal replay returns
+that receipt; a released or otherwise changed wait returns the ordinary
+active-turn mismatch. A goal `stop_goal` or supersede command remains a
+goal-state transition and does not manufacture turn-interrupt authority; if the
+caller also wants to release this active slot it submits the existing
+`stop_turn` command. No approval or reconciliation command applies to the wait.
+This compatibility constraint does not add that phase or these branches to the
+implemented closed vocabulary above.
 
 At most one turn per session is `active`. Enforcement is layered:
 
@@ -741,8 +778,9 @@ naming provider targets, selections, and aliases),
 `SIGNALBOX_TEMPLATE_CONFIG_FILE`, `BRAVE_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and
 `SIGNALBOX_SOCKET_PATH`—from the process environment, plus the optional
 `SIGNALBOX_RUNNER_SOCKET_PATH` override and `HOME` as specified below. A
-model-provider credential path is not among them: the credential profile a
-mapping's pool pins carries its own file, as specified by
+model-provider credential path is not among them: every `file` profile carries
+its own path, and composition builds `FileCredentialAccess` from the complete
+profile map, as specified by
 [configuration and credentials](configuration-and-credentials.md#process-configuration).
 The configuration page owns these provisional channels. It validates the model
 catalog, then resolves the template catalog and all of its prompt files against
@@ -799,11 +837,25 @@ delegation-wake origin appropriate to the work that queued it.
 `AwaitingChild { wait }` is an active phase with no current attempt. Its wait
 names the exact foreground `await_session` request, spawning request, and child;
 it retains the parent's sole progressing-turn slot, and survives restart
-unchanged until that relationship has one deliverable terminal result. Result
-consumption atomically appends the parent's delivered-result entry, returns the
-result as that tool request's content, and moves the same turn back to running
-with a fresh continuation attempt. A raw child identity or an unrelated result
-cannot release the wait.
+unchanged until that relationship has one deliverable terminal result or an
+applied interrupt terminates the parent turn. Result consumption atomically
+appends the parent's delivered-result entry, returns the result as that tool
+request's content, and moves the same turn back to running with a fresh
+continuation attempt. A parent-only interrupt instead appends ordinary
+`ToolClosed` evidence for the await request and terminalizes the parent without
+fabricating a child result or a live turn attempt. A descendant-scoped interrupt
+materializes its complete cascade first, so a resulting child outcome is
+delivered before the parent closes. The scheduler routes a durable result hint
+back through the tool loop: the exact parked batch is reconstituted first, then
+the fresh attempt and lifecycle transition commit before ordinary tool
+continuation runs. A raw child identity or an unrelated result cannot release
+the wait.
+
+A delegated-task or delegation-wake turn owns the same session-local active slot
+as an accepted-input turn. Input submission therefore uses that exact turn for
+active-turn mismatch, vacant-slot rejection, safe-point steering, and interrupt
+predecessor checks even though delegated origins do not fabricate an
+accepted-input scheduling row.
 
 A background await instead commits a delivery registration and returns its
 receipt immediately. It does not create `AwaitingChild` or retain the slot; the
@@ -842,6 +894,21 @@ reconciliation-required turn supplies no terminal child outcome, and the same
 cancelled-turn evidence cannot be selected as a stopped outcome. Detached child
 work stays independently schedulable after the parent's turn or goal has
 terminalized.
+
+**SPEC PROPOSAL — immediate descendant terminalization.** A bound `Stop` or
+`Cancel` policy action commits an authoritative logical terminal proof for the
+child in the same transaction as the parent command, relationship disposition,
+delivered child result, and wake. That proof carries the exact parent-command
+authority and is terminal even when a provider or tool operation was already
+physically in flight. The child is no longer scheduler work: an immutable
+one-to-one lifecycle projection releases its active or queued index slot, while
+the retained turn reads as the typed parent-terminated outcome and remains the
+immediate terminal predecessor of later independent work. Its retained terminal
+frontier preserves that execution lineage for accepted-input and delegation-wake
+activation. Physical cancellation latency cannot revive it, replace its result,
+or change the typed stop/cancel provenance. A background or bound `KeepRunning`
+edge has no such proof and remains schedulable. This proposal is accepted with
+the implementing stack's merge.
 
 Startup and the periodic sweep recognize child waits, pending delegation inbox
 content, and undelivered results from durable rows. They neither infer a result

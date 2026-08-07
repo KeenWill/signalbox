@@ -44,11 +44,14 @@ compaction-call evidence were verified through PR #312
 preparation machinery, configured prompt, and provider-native input-counting
 implementation were verified through PR #314
 (`agent/context-compaction-protocol`). The daemon does not schedule that
-automatic machinery. The runner-placement rendering and executable session-tool
-snapshot paragraphs are the foundation proposal at the bottom of their
-implementing stack and become verified only with those child pull requests, as
-is [availability successor calls](#availability-successor-calls). Invariant tags
-cite [docs/invariants.md](../invariants.md).
+automatic machinery. Session-delegation semantic rendering and its
+provider-neutral bridge were verified against this PR (`agent/delegation`). The
+runner-placement rendering and executable session-tool snapshot paragraphs are
+the foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests. Availability successor calls are
+the foundation proposal at the bottom of their implementing stack and become
+verified only with its child pull requests. Invariant tags cite
+[docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -227,9 +230,7 @@ messages:
   assistant tool calls and user tool results after resolving their referenced
   request, attempt, and decision records through [tool-loop](tool-loop.md).
 
-**Committed unimplemented functionality (session-delegation foundation
-proposal).** No present renderer admits the delegation semantic variants. The
-implementing delegation child pull requests add these mappings:
+The renderer admits the delegation semantic variants with these mappings:
 
 - `DelegatedTask` renders as a structured provider-neutral delegated-task
   message retaining the child, parent session and turn, and exact spawning
@@ -428,6 +429,16 @@ signal as `Cancelled`, and the application returns `NoWork`; it never converts
 authoritative cancellation into the guarded known-failure closure for a call
 that may already be terminal (INV-037).
 
+**SPEC PROPOSAL — parent-cascade cancellation.** The same poll treats an exact
+delegation logical-terminal proof as authoritative cancellation even though the
+retained model-call row may still say `Prepared` or `InFlight`. Capability work
+then returns `NoWork`; invocation cancellation reaches the provider. If a
+provider response wins physically but its observation transaction reloads after
+the parent cascade committed, the transaction discards that response and the
+application returns `NoWork`. It never derives a second turn outcome, overwrites
+the delivered child result, or substitutes provider provenance for the parent
+command. This proposal is accepted with the implementing stack's merge.
+
 1. **Prepare transaction.** Locks the session, reconstitutes the aggregate, and
    either: reports no runnable work; creates and commits the exact `Prepared`
    call with its pinned non-secret credential reference
@@ -481,7 +492,10 @@ that may already be terminal (INV-037).
    revalidates complete authority — it never trusts the pre-send projection —
    checks the observation's correlation against fresh state, and atomically
    commits the call disposition, attempt and turn transitions, semantic entries,
-   terminal frontier, and outbox rows.
+   terminal frontier, and outbox rows. If the frozen credential-pool policy
+   derives a quarantine, pending displacement, or membership exclusion from that
+   observation, the same transaction commits the action record with the
+   observation's exact correlation; neither side may commit alone.
 
 Failure keeps its stage: `ModelCallExecutionError` names which of prepare,
 render, capability, capability-failure commit, capability-failure reread,
@@ -569,6 +583,19 @@ its own attempt, `model_call_attempt_once UNIQUE (turn_attempt_id)` still admits
 exactly one call row per attempt and needs no relaxation; the attempt chain is
 the one intra-turn tool rounds already create.
 
+An observation that admits this path ends the predecessor attempt as
+`KnownFailure` but does not terminalize the turn. Under the session-scheduler
+lock, its atomic observation transaction applies the frozen `switch_now` action
+and either prepares the successor attempt and call or enters the pool's
+exhausted or contended disposition. It appends no `TurnFailed`, creates no
+terminal frontier, and does not reclassify pending steering while a successor or
+wait retains the active turn. A concurrently accepted stop is serialized by that
+same lock: when its applied-interrupt proof already exists, the known failure
+follows the ordinary stop-requested terminal path and no successor is created;
+when the observation wins first, the later stop targets the newly active
+successor. One commit can therefore never both terminalize the turn and
+authorize a successor.
+
 Three causes qualify and no others. Refusal never qualifies: it is provider
 judgment about the request, so another account would refuse the same content and
 substituting one would be shopping for a different answer. Ambiguity never
@@ -576,17 +603,53 @@ qualifies (INV-025): a lost acknowledgement cannot prove the provider did not
 act, so a successor could duplicate both an effect and its spend. Credential
 resolution failure and `provider_credential_rejected` never qualify: both are
 deployment misconfiguration, and moving to another account hides the account
-that is broken. Every other known failure keeps the behavior above, failing its
-attempt and turn.
+that is broken. For each admitted availability cause, the adapter supplies
+distinct typed evidence that the request was not accepted; classification as
+quota exhaustion, rate limiting, or overload alone is insufficient. Every other
+known failure keeps the behavior above, failing its attempt and turn.
 
 The chain is bounded by the pool. A member that produced a qualifying failure is
-excluded from the rest of that turn, so at most one call per member exists per
-turn and the longest possible chain is the pool's member count. When no member
-remains admissible, the pool's `on_pool_exhausted` decides: `fail` fails the
-turn as a known failure carrying the last observed cause, and `park` parks the
-turn in a durable wait carrying the earliest reset its members reported, which
-the scheduler releases when that time passes. A parked turn holds its session
-slot, appends no failure entry, and is not a terminal outcome.
+excluded from the current availability-successor chain, so at most one call per
+member exists per chain and the longest possible chain is the pool's member
+count. A successful call ends that chain before any tool-round continuation is
+prepared. Releasing a parked wait also ends the exhausted chain; the resumed
+turn starts a fresh chain and recomputes admission. It drops a chain-local
+member exclusion only when that member's reported reset has passed or a durable
+availability update invalidates it; every later or absent reset remains initial
+exclusion evidence in the fresh chain. An explicit clear of its exact
+predecessor correlation is such an update. Every durable membership exclusion
+and profile quarantine is retained as well.
+
+When no member remains admissible, the pool's `on_pool_exhausted` decides. If
+the chain observed a qualifying provider failure, `fail` fails the turn as a
+known failure carrying the last observed cause. A turn that reaches an already
+exhausted pool before issuing any call instead fails with the distinct
+`credential_pool_exhausted` preparation cause and the frozen policy's durable
+member-exclusion evidence; it never fabricates provider evidence or borrows a
+stale provider cause. `park` parks the turn in a durable wait carrying every
+excluded member's evidence and optional reset, plus the earliest reset as its
+deadline. The scheduler releases it when that deadline passes. If no member
+reported a reset, the wait has no deadline and only a durable
+member-availability update wakes it. A parked turn holds its session slot,
+appends no failure entry, and is not a terminal outcome.
+
+**Committed unimplemented functionality — pre-call pool-exhaustion failure.** No
+present domain transition, repository shape, or process event can produce this
+failure. Its implementing child must add the sealed
+`CredentialPoolExhaustedFailure` value carrying the immutable pool-policy
+identity and a complete nonempty evidence list in policy-member order. Each
+member item carries the profile reference, the one closed exclusion kind
+(`profile_quarantine`, `membership_exclusion`, `session_displacement`, or
+`chain_exclusion`), its durable record generation or predecessor-observation
+correlation, and its optional reset. It carries no provider prose or credential
+value. The guarded transition requires an active turn whose current attempt has
+no model call, ends that attempt `KnownFailure`, terminalizes the turn `Failed`,
+appends the ordinary `TurnFailed { turn }` marker to that attempt's source
+frontier, and atomically emits the typed preparation-failure event owned by
+[process protocol](process-protocol.md#credential-pool-preparation-failure).
+Partial evidence, a member outside the frozen policy, duplicate or reordered
+members, or any correlated record that is no longer exclusion evidence fails
+closed. Persistence owns the corresponding all-or-nothing representation below.
 
 Each successor durably records the predecessor call it follows and the cause
 that authorized it, so a chain reads as evidence rather than as two calls that
@@ -732,10 +795,12 @@ persistence commits it atomically with its outbox rows
 - **KnownFailed.** The call ends `KnownFailed`; definitive provider-error
   evidence additionally retains only its closed `ProviderErrorKind`
   classification as the optional provider-failure cause — never provider prose.
-  An unstopped attempt ends `KnownFailure`, and the turn fails with a
-  `TurnFailed` entry and terminal frontier. A stop-requested attempt instead
-  ends `AfterCancellation(KnownFailure)` and still fails; the physical result
-  has not proven cancellation.
+  An unstopped attempt ends `KnownFailure`. Unless the same atomic observation
+  admits the availability-successor path above, the turn fails with a
+  `TurnFailed` entry and terminal frontier; an admitted successor instead keeps
+  the turn active without either. A stop-requested attempt ends
+  `AfterCancellation(KnownFailure)` and still fails, and cannot admit a
+  successor; the physical result has not proven cancellation.
 - **Cancelled.** Without the exact applied-interrupt proof, a physical
   cancellation is an unstopped known failure. With the exact proof — carried
   directly by the atomic interrupt transition before any call exists or for an
@@ -837,13 +902,13 @@ attempt, redispatches a call, or assumes a request was or was not sent.
 
 Production composition wires `PostgresModelCallRepository` (all four transaction
 roles), the in-process gate, and `RuntimeModelCallProvider` over the
-configuration-selected Anthropic HTTP or Codex CLI runtime, with the domain
-target catalog, runtime model catalog, and exact adapter routes built from one
-versioned static configuration file. Anthropic rereads its credential file;
-Codex uses its external CLI login
-([configuration-and-credentials](configuration-and-credentials.md)). The
-`signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`) drives
-one session through the real scheduler and PostgreSQL path with either a
+configuration-selected Anthropic HTTP, OpenAI HTTP, Claude CLI, or Codex CLI
+runtime, with the domain target catalog, runtime model catalog, and exact
+adapter routes built from one versioned static configuration file. Direct HTTP
+runtimes reread their credential files; CLI runtimes use the selected profile's
+delivery ([configuration-and-credentials](configuration-and-credentials.md)).
+The `signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`)
+drives one session through the real scheduler and PostgreSQL path with either a
 deterministic scripted reply or an explicit `--anthropic` smoke mode, then
 prints the semantic transcript; it is deliberately not the client protocol.
 
