@@ -1064,10 +1064,13 @@ mod tests {
     use std::{
         ffi::OsString,
         fmt, fs,
-        io::{BufRead, BufReader, Write},
+        io::{self, BufRead, BufReader, Cursor, ErrorKind, Read, Write},
         path::{Path, PathBuf},
         process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio},
-        sync::mpsc::{self, Receiver, RecvTimeoutError},
+        sync::{
+            Mutex,
+            mpsc::{self, Receiver, RecvTimeoutError},
+        },
         thread::{self, JoinHandle},
         time::{Duration, Instant, SystemTime},
     };
@@ -1257,7 +1260,7 @@ mod tests {
 
     fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
         git2::Repository::init(workspace).expect("fixture repository initializes");
-        DaemonTools::try_new(
+        let mut catalog = DaemonTools::try_new(
             || SystemTime::UNIX_EPOCH,
             OfflineTransport,
             MappedDaemonCredentialInputs {
@@ -1283,7 +1286,34 @@ mod tests {
         )
         .expect("static daemon tools compile")
         .into_parts()
-        .0
+        .0;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("fixture runtime builds");
+        let goal_catalog = runtime.block_on(async {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgresql://signalbox:synthetic@127.0.0.1/signalbox")
+                .expect("synthetic lazy goal pool is valid");
+            let (goal_catalog, goal_executor) = GoalDeclarationTool::try_new(pool)
+                .expect("static goal tool compiles")
+                .into_parts();
+            drop(goal_executor);
+            goal_catalog
+        });
+        let goal_definitions = goal_catalog.definitions();
+        let [goal_definition] = goal_definitions.as_ref() else {
+            panic!("goal tool catalog contains exactly one definition");
+        };
+        let replaced = catalog.entries.insert(
+            goal_definition.name().clone(),
+            DaemonToolCatalogEntry {
+                definition: goal_definition.clone(),
+                catalog: goal_catalog,
+            },
+        );
+        assert!(replaced.is_none(), "goal tool name is unique");
+        catalog
     }
 
     fn bridge_catalog(definitions: &[ToolDefinition]) -> serde_json::Value {
@@ -1303,22 +1333,44 @@ mod tests {
         serde_json::json!({"tools": tools})
     }
 
-    fn claude_mcp_bridge_executable() -> PathBuf {
+    struct BridgeArtifactSelection {
+        executable: PathBuf,
+        profile: OsString,
+        target_dir: PathBuf,
+    }
+
+    fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
-        let profile = current
+        let profile_dir = current
             .parent()
             .and_then(Path::parent)
             .expect("test executable is under the Cargo profile directory");
-        profile.join(format!(
-            "signalbox-claude-mcp-bridge{}",
-            std::env::consts::EXE_SUFFIX
-        ))
+        let profile_dir_name = profile_dir
+            .file_name()
+            .expect("Cargo profile directory has a name");
+        let profile = match profile_dir_name.to_str() {
+            Some("debug") => OsString::from("dev"),
+            Some("release") => OsString::from("release"),
+            _ => profile_dir_name.to_os_string(),
+        };
+        BridgeArtifactSelection {
+            executable: profile_dir.join(format!(
+                "signalbox-claude-mcp-bridge{}",
+                std::env::consts::EXE_SUFFIX
+            )),
+            profile,
+            target_dir: profile_dir
+                .parent()
+                .expect("Cargo profile has a target directory")
+                .to_path_buf(),
+        }
     }
 
     const BRIDGE_BUILD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
     const BRIDGE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
     const BRIDGE_EXIT_TIMEOUT: Duration = Duration::from_secs(12);
     const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+    static BRIDGE_BUILD_LOCK: Mutex<()> = Mutex::new(());
 
     fn wait_for_child(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
         let deadline = Instant::now() + timeout;
@@ -1339,10 +1391,10 @@ mod tests {
     }
 
     fn ensure_claude_mcp_bridge_executable() -> PathBuf {
-        let executable = claude_mcp_bridge_executable();
-        if executable.is_file() {
-            return executable;
-        }
+        let _build_guard = BRIDGE_BUILD_LOCK
+            .lock()
+            .expect("bridge build lock is available");
+        let selection = claude_mcp_bridge_artifact_selection();
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut build = Command::new(cargo)
@@ -1354,6 +1406,10 @@ mod tests {
                 "--bin",
                 "signalbox-claude-mcp-bridge",
             ])
+            .arg("--profile")
+            .arg(&selection.profile)
+            .arg("--target-dir")
+            .arg(&selection.target_dir)
             .current_dir(workspace)
             .spawn()
             .expect("bridge binary build starts");
@@ -1365,18 +1421,20 @@ mod tests {
         };
         assert!(status.success(), "bridge binary build succeeds");
         assert!(
-            executable.is_file(),
+            selection.executable.is_file(),
             "bridge binary build produces its target"
         );
-        executable
+        selection.executable
     }
 
-    fn bridge_response_reader(
-        output: ChildStdout,
-    ) -> (Receiver<Result<String, std::io::Error>>, JoinHandle<()>) {
+    fn response_reader<Output>(
+        mut output: Output,
+    ) -> (Receiver<Result<String, io::Error>>, JoinHandle<()>)
+    where
+        Output: BufRead + Send + 'static,
+    {
         let (sender, receiver) = mpsc::channel();
         let reader = thread::spawn(move || {
-            let mut output = BufReader::new(output);
             loop {
                 let mut response = String::new();
                 match output.read_line(&mut response) {
@@ -1394,6 +1452,100 @@ mod tests {
             }
         });
         (receiver, reader)
+    }
+
+    fn bridge_response_reader(
+        output: ChildStdout,
+    ) -> (Receiver<Result<String, io::Error>>, JoinHandle<()>) {
+        response_reader(BufReader::new(output))
+    }
+
+    struct OneLineThenPanic {
+        consumed: bool,
+    }
+
+    impl Read for OneLineThenPanic {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let length = available.len().min(buffer.len());
+            buffer[..length].copy_from_slice(&available[..length]);
+            self.consume(length);
+            Ok(length)
+        }
+    }
+
+    impl BufRead for OneLineThenPanic {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            assert!(!self.consumed, "reader is not polled after disconnection");
+            Ok(b"response\n")
+        }
+
+        fn consume(&mut self, _amount: usize) {
+            self.consumed = true;
+        }
+    }
+
+    struct FailingBridgeReader;
+
+    impl Read for FailingBridgeReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(ErrorKind::BrokenPipe, "synthetic failure"))
+        }
+    }
+
+    impl BufRead for FailingBridgeReader {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            Err(io::Error::new(ErrorKind::BrokenPipe, "synthetic failure"))
+        }
+
+        fn consume(&mut self, _amount: usize) {}
+    }
+
+    #[test]
+    fn bridge_response_reader_delivers_one_complete_line() {
+        let (responses, reader) = response_reader(Cursor::new(b"response\n"));
+
+        assert_eq!(
+            responses
+                .recv_timeout(BRIDGE_RESPONSE_TIMEOUT)
+                .expect("response arrives")
+                .expect("response read succeeds"),
+            "response\n"
+        );
+        reader.join().expect("response reader exits");
+    }
+
+    #[test]
+    fn bridge_response_reader_closes_at_eof() {
+        let (responses, reader) = response_reader(Cursor::new(Vec::<u8>::new()));
+
+        assert!(matches!(
+            responses.recv_timeout(BRIDGE_RESPONSE_TIMEOUT),
+            Err(RecvTimeoutError::Disconnected)
+        ));
+        reader.join().expect("response reader exits");
+    }
+
+    #[test]
+    fn bridge_response_reader_stops_when_its_receiver_disconnects() {
+        let (responses, reader) = response_reader(OneLineThenPanic { consumed: false });
+        drop(responses);
+
+        reader
+            .join()
+            .expect("response reader exits after disconnect");
+    }
+
+    #[test]
+    fn bridge_response_reader_forwards_a_read_failure() {
+        let (responses, reader) = response_reader(FailingBridgeReader);
+
+        let error = responses
+            .recv_timeout(BRIDGE_RESPONSE_TIMEOUT)
+            .expect("failure arrives")
+            .expect_err("read failure is preserved");
+        assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+        reader.join().expect("response reader exits");
     }
 
     struct McpBridgeProcess {
@@ -1826,6 +1978,7 @@ mod tests {
                 PULL_REQUEST_PUBLISH_REVIEW_NAME,
                 PULL_REQUEST_REVIEW_THREADS_NAME,
                 GLOB_FILES_NAME,
+                GOAL_DECLARE_NAME,
                 signalbox_tools_conversations::LIST_CONVERSATIONS_NAME,
                 LIST_DIRECTORY_NAME,
                 signalbox_tools_plan::PLAN_READ_NAME,
@@ -1848,71 +2001,153 @@ mod tests {
         );
     }
 
-    /// The adapter-owned stdio bridge exposes the exact daemon registry and
-    /// acknowledges a workspace proposal without executing it itself.
-    #[test]
-    fn claude_mcp_bridge_conforms_to_the_daemon_catalog() {
-        let workspace = tempfile::tempdir().expect("workspace root exists");
-        let catalog = mapped_daemon_catalog(workspace.path());
-        let bridge_catalog = bridge_catalog(&catalog.definitions());
-        let support = tempfile::tempdir().expect("bridge support directory exists");
-        let catalog_path = support.path().join("tools.json");
-        let ready_path = support.path().join("ready");
-        fs::write(
-            &catalog_path,
-            serde_json::to_vec(&bridge_catalog).expect("bridge catalog serializes"),
-        )
-        .expect("bridge catalog is written");
-        let bridge_executable = ensure_claude_mcp_bridge_executable();
-        let mut bridge = McpBridgeProcess::spawn(
-            &bridge_executable,
-            &catalog_path,
-            &ready_path,
-            workspace.path(),
-        );
-        let protocol_version = "2025-11-25";
-        let initialized = bridge.request(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {"protocolVersion": protocol_version},
-        }));
-        bridge.notify(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-        }));
-        assert!(!ready_path.exists());
-        let listed = bridge.request(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-            "params": {},
-        }));
-        wait_for_bridge_ready(&bridge_executable, &ready_path, workspace.path());
-        let target = workspace.path().join("bridge-must-not-write.txt");
-        let called = bridge.request(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {
-                "name": WRITE_FILE_NAME,
-                "arguments": {
-                    "path": "bridge-must-not-write.txt",
-                    "content": "proposal only\n",
-                },
-            },
-        }));
-        bridge.finish();
+    const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+    const MCP_PROPOSAL_PATH: &str = "bridge-must-not-write.txt";
+    const MCP_PROPOSAL_CONTENT: &str = "proposal only\n";
+    const MCP_PROPOSAL_ACKNOWLEDGEMENT: &str =
+        "Signalbox recorded this tool proposal for external execution.";
 
-        assert_eq!(initialized["result"]["protocolVersion"], protocol_version);
-        assert_eq!(listed["result"]["tools"], bridge_catalog["tools"]);
-        assert!(ready_path.is_file());
+    struct McpBridgeFixture {
+        workspace: tempfile::TempDir,
+        _support: tempfile::TempDir,
+        expected_catalog: serde_json::Value,
+        ready_path: PathBuf,
+        executable: PathBuf,
+        bridge: McpBridgeProcess,
+    }
+
+    impl McpBridgeFixture {
+        fn start() -> Self {
+            let workspace = tempfile::tempdir().expect("workspace root exists");
+            let catalog = mapped_daemon_catalog(workspace.path());
+            let expected_catalog = bridge_catalog(&catalog.definitions());
+            let support = tempfile::tempdir().expect("bridge support directory exists");
+            let catalog_path = support.path().join("tools.json");
+            let ready_path = support.path().join("ready");
+            fs::write(
+                &catalog_path,
+                serde_json::to_vec(&expected_catalog).expect("bridge catalog serializes"),
+            )
+            .expect("bridge catalog is written");
+            let executable = ensure_claude_mcp_bridge_executable();
+            let bridge =
+                McpBridgeProcess::spawn(&executable, &catalog_path, &ready_path, workspace.path());
+            Self {
+                workspace,
+                _support: support,
+                expected_catalog,
+                ready_path,
+                executable,
+                bridge,
+            }
+        }
+
+        fn initialize(&mut self) -> serde_json::Value {
+            let initialized = self.bridge.request(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": MCP_PROTOCOL_VERSION},
+            }));
+            self.bridge.notify(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+            }));
+            initialized
+        }
+
+        fn list_tools(&mut self) -> serde_json::Value {
+            self.bridge.request(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            }))
+        }
+
+        fn call_write_file(&mut self) -> serde_json::Value {
+            self.bridge.request(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": WRITE_FILE_NAME,
+                    "arguments": {
+                        "path": MCP_PROPOSAL_PATH,
+                        "content": MCP_PROPOSAL_CONTENT,
+                    },
+                },
+            }))
+        }
+
+        fn finish(self) {
+            self.bridge.finish();
+        }
+    }
+
+    #[test]
+    fn claude_mcp_bridge_negotiates_the_supported_protocol() {
+        let mut fixture = McpBridgeFixture::start();
+        let initialized = fixture.initialize();
+        fixture.finish();
+
+        assert_eq!(
+            initialized["result"]["protocolVersion"],
+            MCP_PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn claude_mcp_bridge_lists_the_exact_daemon_catalog() {
+        let mut fixture = McpBridgeFixture::start();
+        fixture.initialize();
+        let expected = fixture.expected_catalog["tools"].clone();
+        let listed = fixture.list_tools();
+        fixture.finish();
+
+        assert_eq!(listed["result"]["tools"], expected);
+    }
+
+    #[test]
+    fn claude_mcp_bridge_publishes_readiness_only_after_listing_tools() {
+        let mut fixture = McpBridgeFixture::start();
+        assert!(!fixture.ready_path.exists());
+        fixture.initialize();
+        fixture.list_tools();
+        wait_for_bridge_ready(
+            &fixture.executable,
+            &fixture.ready_path,
+            fixture.workspace.path(),
+        );
+        assert!(fixture.ready_path.is_file());
+        fixture.finish();
+    }
+
+    #[test]
+    fn claude_mcp_bridge_acknowledges_a_workspace_proposal() {
+        let mut fixture = McpBridgeFixture::start();
+        fixture.initialize();
+        fixture.list_tools();
+        let called = fixture.call_write_file();
+        fixture.finish();
+
         assert_eq!(called["result"]["isError"], false);
         assert_eq!(called["result"]["content"][0]["type"], "text");
         assert_eq!(
             called["result"]["content"][0]["text"],
-            "Signalbox recorded this tool proposal for external execution."
+            MCP_PROPOSAL_ACKNOWLEDGEMENT
         );
+    }
+
+    #[test]
+    fn claude_mcp_bridge_does_not_execute_a_workspace_proposal() {
+        let mut fixture = McpBridgeFixture::start();
+        fixture.initialize();
+        fixture.list_tools();
+        fixture.call_write_file();
+        let target = fixture.workspace.path().join(MCP_PROPOSAL_PATH);
+        fixture.finish();
+
         assert!(!target.exists());
     }
 }
