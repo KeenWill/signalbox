@@ -264,12 +264,16 @@ material — leaving a genuine failure indistinguishable from a decoded refusal.
 An error record that *does* classify still outranks the reported finish, because
 it carries information the finish does not.
 
-Unrecognized finish reasons (OpenAI adapter) end the stream before the
-end-of-stream envelope checks would otherwise run, so that branch applies the
-two decidable ones — assistant role established and model identity reported —
-before recording the finish. A stream failing either reports the envelope defect
-and carries no `finish_reported`. Why: without that, a caller cannot distinguish
-a well-formed response that stopped at an output bound from an envelope that was
+Unrecognized finish reasons (OpenAI adapter) record their verdict but defer it
+to `[DONE]`, so records arriving after that finish are still examined and a
+definitive error among them supersedes it. Why: returning at the finish chunk
+would leave such a record unread, and the post-finish rule below could never
+fire for this finish — a caller would accept the prefix as a clean stop at an
+output bound. The two envelope checks that are already decidable — assistant
+role established and model identity reported — still run at the finish rather
+than at `[DONE]`, and a stream failing either reports the envelope defect and
+carries no `finish_reported`, because a caller cannot otherwise distinguish a
+well-formed response that stopped at an output bound from an envelope that was
 never valid and also reported one. Accumulated tool content is deliberately not
 among those checks: a tool-bearing request can legitimately exhaust the output
 ceiling partway through a call, so the token is an observed fact rather than a
