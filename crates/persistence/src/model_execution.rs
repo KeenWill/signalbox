@@ -1358,8 +1358,10 @@ async fn delegated_terminal_result_matches(
         )
         SELECT NOT EXISTS (
                     SELECT 1
-                      FROM session_delegation
-                     WHERE child_session_id = $1
+                      FROM turn_lifecycle
+                     WHERE session_id = $1
+                       AND turn_id = $2
+                       AND origin_kind = 'delegation'
                )
             OR (
                 SELECT count(*) = 1
@@ -1501,8 +1503,10 @@ async fn delegated_nonterminal_result_absent(
         )
         SELECT NOT EXISTS (
                     SELECT 1
-                      FROM session_delegation
-                     WHERE child_session_id = $1
+                      FROM turn_lifecycle
+                     WHERE session_id = $1
+                       AND turn_id = $2
+                       AND origin_kind = 'delegation'
                )
             OR (
                 (SELECT count(*) = 1 FROM delegated)
