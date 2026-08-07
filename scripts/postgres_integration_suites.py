@@ -81,6 +81,9 @@ ARCHIVED_RUN_OPTIONS = {
 }
 WORKSPACE_SELECTORS = ("--workspace", "--all")
 AGGREGATE_JOB = "postgres-integration"
+RUN_JOB = "postgres-integration-run"
+ENV_KEY = re.compile(r"^(?P<indent>[ ]*)(?P<dash>-[ ]+)?env:[ ]*$")
+ALWAYS_CONDITION = re.compile(r"^[ ]*if:.*\balways\(\)", re.MULTILINE)
 # A path value may contain spaces inside a `${{ … }}` expression, so it runs
 # to the end of the line rather than to the first space.
 ARTIFACT_PATH = re.compile(r"^[ ]*path:[ ]*(?P<path>.+?)[ ]*$")
@@ -394,11 +397,29 @@ def workflow_shell_commands(text: str) -> list[tuple[str, dict[str, str]]]:
     inference the suite manifest exists to make unnecessary.
     """
     lines = text.splitlines()
+    # A `run:`/`command:` key nested under `env:` is an environment value, not
+    # a command the runner executes. Left in, a conforming nextest string
+    # parked in one would satisfy the archived-run requirement while no step
+    # ran anything.
+    inert = set()
+    for index, line in enumerate(lines):
+        opening = ENV_KEY.match(line)
+        if opening is None:
+            continue
+        # `- env:` puts the key two columns right of the list item, and its
+        # sibling `run:` sits at the key's indent — not inside the mapping.
+        indent = len(opening.group("indent")) + len(opening.group("dash") or "")
+        for following in range(index + 1, len(lines)):
+            entry = lines[following]
+            if entry.strip() and len(entry) - len(entry.lstrip(" ")) <= indent:
+                break
+            inert.add(following)
+
     commands: list[tuple[str, dict[str, str]]] = []
     index = 0
     while index < len(lines):
         match = SHELL_SCALAR.match(lines[index])
-        if match is None:
+        if match is None or index in inert:
             index += 1
             continue
         indentation = len(match.group("indent"))
@@ -566,13 +587,20 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
                 f"{MANIFEST}: {' '.join(tokens)}"
             )
 
+    shard_job = "\n".join(job_lines(text, RUN_JOB))
+    shard_commands = [
+        (tokens, variables)
+        for command, variables in workflow_shell_commands(shard_job)
+        for tokens in simple_commands(command)
+    ]
     if not any(
-        runs_archived_ignored_tests(tokens, variables) for tokens, variables in executed
+        runs_archived_ignored_tests(tokens, variables)
+        for tokens, variables in shard_commands
     ):
         failures.append(
-            f"{WORKFLOW} runs no archive-backed `cargo nextest run` with "
-            f"`--run-ignored only`, so the suites {MANIFEST} declares are "
-            "never executed"
+            f"{WORKFLOW} job `{RUN_JOB}` runs no archive-backed `cargo nextest "
+            f"run` with `--run-ignored only`, so the suites {MANIFEST} declares "
+            "are never executed"
         )
 
     # The aggregate job carries the required check's name, so it going green
@@ -580,6 +608,14 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     # every manifest-declared test failed or never ran. Read from that job's
     # own block: the same binding and assertion elsewhere proves nothing.
     aggregate = "\n".join(job_lines(text, AGGREGATE_JOB))
+    # Without `always()` the aggregate job is skipped when a dependency fails,
+    # and a skipped required check reports success — branch protection green
+    # with the build or every shard failed.
+    if aggregate and ALWAYS_CONDITION.search(aggregate) is None:
+        failures.append(
+            f"{WORKFLOW} job `{AGGREGATE_JOB}` has no `if: always()`, so it is "
+            "skipped when a dependency fails instead of failing the check"
+        )
     asserted = {
         match.group("job"): match.group("variable")
         for match in NEEDS_RESULT.finditer(aggregate)
@@ -822,8 +858,14 @@ def runs_ignored_tests(arguments: list[str]) -> bool:
     return "--ignored" in harness or "--include-ignored" in harness
 
 
-def documented_ignored_commands(text: str) -> list[tuple[int, list[str]]]:
+def documented_ignored_commands(
+    text: str,
+) -> list[tuple[int, list[str], str | None]]:
     """Return documented `cargo test` commands that run ignored tests.
+
+    Each is reported with the directory a preceding `cd` in the same chain put
+    it in, because `cd crates/persistence && cargo test …` selects that package
+    as surely as `-p` does.
 
     Backslash continuations are folded into their opening line, so a command
     wrapped across a fenced block reads as one command and is reported at the
@@ -837,17 +879,22 @@ def documented_ignored_commands(text: str) -> list[tuple[int, list[str]]]:
             continue
         logical.append((number, line))
 
-    found: list[tuple[int, list[str]]] = []
+    found: list[tuple[int, list[str], str | None]] = []
     for number, line in logical:
-        for match in re.finditer(r"cargo\b[^`]*", line):
-            # A documented command may be chained — `cargo fmt && cargo test …`
-            # — so the match is split into the commands a shell would run
-            # rather than read as one.
-            for tokens in simple_commands(match.group(0)):
+        # Backticks bound an inline code span; a fenced block has none and is
+        # one segment. A chain is walked in order so a `cd` reaches the command
+        # that follows it — `cargo fmt && cargo test …` is two commands, and
+        # `cd pkg && cargo test …` is a command with a working directory.
+        for segment in line.split("`"):
+            directory: str | None = None
+            for tokens in simple_commands(segment):
+                if tokens[0] == "cd" and len(tokens) > 1:
+                    directory = tokens[1]
+                    continue
                 arguments = cargo_test_arguments(tokens)
                 if arguments is None or not runs_ignored_tests(arguments):
                     continue
-                found.append((number, arguments))
+                found.append((number, arguments, directory))
     return found
 
 
@@ -887,7 +934,7 @@ def documentation_disagreements(
     known = {(suite.package, frozenset(suite.features)) for suite in suites}
     packages = {suite.package for suite in suites}
     failures: list[tuple[int, str]] = []
-    for line, arguments in documented_ignored_commands(text):
+    for line, arguments, directory in documented_ignored_commands(text):
         cargo_arguments = arguments[: arguments.index("--")]
         # Cargo accepts `-p` repeatedly and runs every package named. Keeping
         # only the last one let an unmanifested package trailing a manifested
@@ -937,7 +984,14 @@ def documentation_disagreements(
             if any(flag in cargo_arguments for flag in WORKSPACE_SELECTORS)
             and suite.package not in excluded
         ]
-        for name in selected or by_manifest_path or workspace:
+        # A `cd` into a workspace member selects that member.
+        entered = (
+            manifest_path_package(root, f"{directory}/Cargo.toml")
+            if directory
+            else None
+        )
+        local = [entered] if entered else []
+        for name in selected or by_manifest_path or workspace or local:
             report_documented_selection(
                 failures, label, line, name, declared, cargo_arguments,
                 packages, known, suites,

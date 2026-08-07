@@ -300,6 +300,7 @@ jobs:
           name: postgres-integration-archive-alpha
           path: ${{ runner.temp }}/alpha.tar.zst
   postgres-integration:
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - env:
@@ -763,6 +764,28 @@ class WorkflowAgreementTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("manifest-driven", failures[0])
 
+    def test_an_aggregate_check_without_always_is_reported(self) -> None:
+        # Without `always()` the job is skipped when a dependency fails, and a
+        # skipped required check reports success.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace("    if: ${{ always() }}\n", "")
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("always()", failures[0])
+
+    def test_a_command_under_an_env_key_is_not_executed(self) -> None:
+        # A conforming nextest string parked in an environment value would
+        # satisfy the archived-run requirement while no step ran anything.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                "        run: >-\n          cargo nextest run",
+                "        env:\n          command: >-\n            cargo nextest run",
+            )
+        )
+
+        self.assertTrue(any("runs no archive-backed" in failure for failure in failures))
+
     def test_a_result_assertion_in_another_job_does_not_count(self) -> None:
         # The aggregate job carries the required check's name, so the same
         # binding and assertion sitting elsewhere proves nothing about it.
@@ -1009,6 +1032,25 @@ class DocumentedCommandTests(unittest.TestCase):
             " -- --ignored`\n",
             (suite(package="pa", features=("one",)),),
         )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("other", failures[0][1])
+
+    def test_a_cd_into_a_package_selects_it(self) -> None:
+        # `cd crates/persistence && cargo test …` runs that package's suite.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "pa").mkdir()
+            (root / "pa/Cargo.toml").write_text(
+                '[package]\nname = "pa"\nversion = "0.0.0"\n', encoding="utf-8"
+            )
+
+            failures = documentation_disagreements(
+                "AGENTS.md",
+                "`cd pa && cargo test --features other --tests -- --ignored`\n",
+                (suite(package="pa", features=("one",)),),
+                root,
+            )
 
         self.assertEqual(len(failures), 1)
         self.assertIn("other", failures[0][1])

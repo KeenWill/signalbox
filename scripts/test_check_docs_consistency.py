@@ -54,6 +54,7 @@ def write_manifest_workflow(root: Path, *names: str) -> None:
     )
     aggregate = (
         "  postgres-integration:\n"
+        "    if: ${{ always() }}\n"
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
         "      - env:\n"
@@ -717,6 +718,7 @@ class DocsConsistencyTests(unittest.TestCase):
             "          name: postgres-integration-archive-fixture\n"
             "          path: ${{ runner.temp }}/fixture.tar.zst\n"
             "  postgres-integration:\n"
+            "    if: ${{ always() }}\n"
             "    runs-on: ubuntu-latest\n"
             "    steps:\n"
             "      - env:\n"
