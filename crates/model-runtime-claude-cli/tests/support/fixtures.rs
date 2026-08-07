@@ -8,6 +8,8 @@ pub const SESSION_ID: &str = "session-synthetic-1";
 pub const MESSAGE_ID: &str = "message-synthetic-1";
 pub const OTHER_MESSAGE_ID: &str = "message-synthetic-2";
 pub const MODEL: &str = "claude-synthetic-model";
+pub const RESOLVED_MODEL: &str = "claude-synthetic-model-resolved";
+pub const OTHER_RESOLVED_MODEL: &str = "claude-synthetic-model-other";
 pub const MODEL_CREDENTIAL_PREFIX: &str = "api_";
 pub const MODEL_CREDENTIAL_CONTINUATION: &str = "key=synthetic-model-continuation";
 pub const MODEL_RECONSTRUCTED_CREDENTIAL: &str = "api_key=synthetic-model-continuation";

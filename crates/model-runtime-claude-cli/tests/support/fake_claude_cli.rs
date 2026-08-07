@@ -106,6 +106,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text(fixtures::ANSWER)?;
             success("end_turn", Some(fixtures::ANSWER))?;
         }
+        "resolved_assistant_model" => {
+            assistant_text_with_identity(
+                fixtures::MESSAGE_ID,
+                fixtures::RESOLVED_MODEL,
+                fixtures::ANSWER,
+            )?;
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
+        "conflicting_assistant_model" => {
+            assistant_text_with_identity(
+                fixtures::MESSAGE_ID,
+                fixtures::RESOLVED_MODEL,
+                fixtures::ANSWER,
+            )?;
+            assistant_text_with_identity(
+                fixtures::MESSAGE_ID,
+                fixtures::OTHER_RESOLVED_MODEL,
+                fixtures::ANSWER,
+            )?;
+            success("end_turn", Some(fixtures::ANSWER))?;
+        }
         "file_credential_redaction" => {
             assistant_text(fixtures::FILE_DELIVERED_CREDENTIAL)?;
             success("end_turn", Some(fixtures::FILE_DELIVERED_CREDENTIAL))?;

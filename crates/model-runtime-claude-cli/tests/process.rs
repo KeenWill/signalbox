@@ -92,6 +92,25 @@ async fn nonterminal_system_events_do_not_mask_the_initialized_exchange() {
 }
 
 #[tokio::test]
+async fn assistant_resolved_model_may_differ_from_the_selected_init_alias() {
+    let result = execute_scenario("resolved_assistant_model", OperationShape::Text).await;
+
+    assert_eq!(completion_text(&result.evidence), fixtures::ANSWER);
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn assistant_model_must_remain_stable_after_its_first_event() {
+    let result = execute_scenario("conflicting_assistant_model", OperationShape::Text).await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn file_delivery_materializes_private_claude_settings_without_direct_child_key() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let runtime = file_delivery_runtime(temporary.path(), fixtures::FILE_DELIVERED_CREDENTIAL);
