@@ -5814,6 +5814,7 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
             entry_index,
             request,
             attempt,
+            disposition: _,
             content,
             ..
         } => serde_json::json!({
@@ -10233,6 +10234,7 @@ where
             entry,
             request,
             attempt,
+            disposition: _,
             content,
         } => {
             write_message(

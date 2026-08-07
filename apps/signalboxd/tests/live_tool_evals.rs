@@ -36,9 +36,10 @@ use signalbox_domain::{
     DangerousToolAutoApproval, DeliveryRequest, DirectModelSelection, DurableCommandId,
     ModelCallId, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
     ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
-    ProviderModelIdentity, ResolvedProviderTarget, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
-    ToolName as DomainToolName, TurnId, UserContent,
+    ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SubmitInputAppliedResult, SubmitInputResult, ToolAttemptId, ToolName as DomainToolName,
+    ToolRequestId, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -52,7 +53,10 @@ use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiPreparedRequest, OpenAi
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
-    process_read::{ProcessFailedModelCallDisposition, ProcessReadRepository, ProcessTurnState},
+    process_read::{
+        ProcessReadRepository, ProcessToolExecutionResultDisposition, ProcessTranscriptEntry,
+        ProcessTurnState,
+    },
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
@@ -112,6 +116,12 @@ const WEB_URL: &str = "https://example.com/eval";
 const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
 const ARBITRARY_EVAL_SELECTION_ID: u128 = 0x9101;
 const ARBITRARY_EVAL_PROVIDER_ID: u128 = 0x9102;
+const ARBITRARY_EVAL_REQUEST_ID: u128 = 0x9103;
+const ARBITRARY_EVAL_ATTEMPT_ID: u128 = 0x9104;
+const ARBITRARY_EVAL_ENTRY_ID: u128 = 0x9105;
+const ARBITRARY_EVAL_TURN_ATTEMPT_ID: u128 = 0x9106;
+const ARBITRARY_EVAL_SESSION_ID: u128 = 0x9107;
+const ARBITRARY_EVAL_MODEL_CALL_ID: u128 = 0x9108;
 const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
 
 type EvalResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -995,8 +1005,10 @@ struct CaseSnapshot {
 
 #[derive(sqlx::FromRow)]
 struct RequestSnapshot {
+    request_id: Uuid,
     name: String,
     arguments_text: String,
+    #[sqlx(skip)]
     attempt_succeeded: bool,
 }
 
@@ -1019,17 +1031,11 @@ impl CaseSnapshot {
             .ok_or_else(|| io::Error::other("the eval transcript turn is missing"))?
             .state();
         let turn_disposition = SnapshotTurnDisposition::from_process_state(turn_state)?;
+        let successful_requests = successful_tool_requests(transcript.entries());
         let requests = sqlx::query_as::<_, RequestSnapshot>(
-            "SELECT request.tool_name AS name,
-                    request.arguments_text,
-                    EXISTS (
-                        SELECT 1
-                          FROM tool_attempt AS attempt
-                         WHERE attempt.request_id = request.request_id
-                           AND attempt.session_id = request.session_id
-                           AND attempt.turn_id = request.turn_id
-                           AND attempt.terminal_disposition_kind = 'completed'
-                    ) AS attempt_succeeded
+            "SELECT request.request_id,
+                    request.tool_name AS name,
+                    request.arguments_text
                FROM tool_request AS request
               WHERE request.session_id = $1 AND request.turn_id = $2
               ORDER BY request.producing_model_call_id, request.request_ordinal",
@@ -1038,6 +1044,13 @@ impl CaseSnapshot {
         .bind(turn.into_uuid())
         .fetch_all(pool)
         .await?;
+        let requests = requests
+            .into_iter()
+            .map(|mut request| {
+                request.attempt_succeeded = successful_requests.contains(&request.request_id);
+                request
+            })
+            .collect();
         let model_calls = sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM model_call WHERE session_id = $1 AND turn_id = $2",
         )
@@ -1109,6 +1122,20 @@ impl CaseSnapshot {
     }
 }
 
+fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ProcessTranscriptEntry::ToolExecutionResult {
+                request,
+                disposition: ProcessToolExecutionResultDisposition::Completed,
+                ..
+            } => Some(request.into_uuid()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 enum SnapshotTurnDisposition {
     Completed,
@@ -1119,13 +1146,22 @@ impl SnapshotTurnDisposition {
     fn from_process_state(state: &ProcessTurnState) -> EvalResult<Self> {
         match state {
             ProcessTurnState::Completed { .. } => Ok(Self::Completed),
-            ProcessTurnState::Failed {
-                terminal_model_call: Some(call),
-                ..
-            } if call.disposition() == ProcessFailedModelCallDisposition::KnownFailed => {
-                Err(io::Error::other("the eval model provider committed a known failure").into())
-            }
-            _ => Ok(Self::Other),
+            ProcessTurnState::Refused { .. }
+            | ProcessTurnState::ActiveAwaitingToolApproval { .. } => Ok(Self::Other),
+            ProcessTurnState::Queued { .. }
+            | ProcessTurnState::QueuedDelegated { .. }
+            | ProcessTurnState::QueuedDelegationWake { .. }
+            | ProcessTurnState::DelegationTerminated { .. }
+            | ProcessTurnState::ActiveRunning { .. }
+            | ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
+            | ProcessTurnState::ActiveAwaitingChild { .. }
+            | ProcessTurnState::ActiveAwaitingToolRecovery { .. }
+            | ProcessTurnState::Failed { .. }
+            | ProcessTurnState::Cancelled { .. }
+            | ProcessTurnState::ReconciliationRequired { .. } => Err(io::Error::other(
+                "the eval turn did not reach a reportable model outcome",
+            )
+            .into()),
         }
     }
 
@@ -1194,6 +1230,51 @@ impl CaseOutcome {
     }
 }
 
+fn synthetic_tool_result(
+    disposition: ProcessToolExecutionResultDisposition,
+) -> ProcessTranscriptEntry {
+    ProcessTranscriptEntry::ToolExecutionResult {
+        entry_index: 0,
+        source_session: SessionId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_SESSION_ID)),
+        entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_ENTRY_ID)),
+        request: ToolRequestId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)),
+        attempt: ToolAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_ATTEMPT_ID)),
+        disposition,
+        content: String::from("synthetic tool result"),
+    }
+}
+
+#[test]
+fn successful_tool_requests_accepts_a_typed_completed_result() {
+    let entries = [synthetic_tool_result(
+        ProcessToolExecutionResultDisposition::Completed,
+    )];
+
+    assert_eq!(
+        successful_tool_requests(&entries),
+        BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)])
+    );
+}
+
+#[test]
+fn successful_tool_requests_rejects_a_typed_known_failure() {
+    let entries = [synthetic_tool_result(
+        ProcessToolExecutionResultDisposition::KnownFailed,
+    )];
+
+    assert!(successful_tool_requests(&entries).is_empty());
+}
+
+#[test]
+fn turn_snapshot_rejects_ambiguous_model_recovery() {
+    let state = ProcessTurnState::ActiveAwaitingModelCallRecovery {
+        ended_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_TURN_ATTEMPT_ID)),
+        recovery_call: ModelCallId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID)),
+    };
+
+    assert!(SnapshotTurnDisposition::from_process_state(&state).is_err());
+}
+
 #[test]
 fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
     let target = GIT_STATUS_NAME;
@@ -1205,6 +1286,7 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
                 attempt_succeeded: true,
@@ -1227,6 +1309,7 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
                 attempt_succeeded: true,
@@ -1249,6 +1332,7 @@ fn forced_tier_reports_a_miss_for_a_known_failed_attempt() {
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
                 attempt_succeeded: false,
@@ -1270,6 +1354,7 @@ fn unforced_git_tier_requires_both_task_tools() {
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(GIT_STAGE_NAME),
                 arguments_text: String::from(r#"{"paths":["eval.txt"]}"#),
                 attempt_succeeded: true,
@@ -1341,6 +1426,7 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(target),
                 arguments_text: String::from(r#"{"unexpected":true}"#),
                 attempt_succeeded: true,
@@ -1369,6 +1455,7 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
         turn_disposition: SnapshotTurnDisposition::Completed,
         requests: vec![
             RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(WRITE_FILE_NAME),
                 arguments_text: String::from(
                     r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
@@ -1376,6 +1463,7 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
                 attempt_succeeded: true,
             },
             RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(READ_FILE_NAME),
                 arguments_text: String::from(r#"{"path":"brief.txt"}"#),
                 attempt_succeeded: true,
@@ -1393,11 +1481,13 @@ fn web_natural_state_requires_the_exact_query() -> EvalResult {
         turn_disposition: SnapshotTurnDisposition::Completed,
         requests: vec![
             RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(WEB_SEARCH_NAME),
                 arguments_text: String::from(r#"{"query":"different query"}"#),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(WEB_FETCH_NAME),
                 arguments_text: String::from(r#"{"url":"https://example.com/eval"}"#),
                 attempt_succeeded: true,
