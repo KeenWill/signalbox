@@ -5109,23 +5109,25 @@ members = [
 
     #[test]
     fn equal_priorities_resolve_to_the_first_listed_member() {
-        let configured = HubModelConfiguration::parse(&configuration_with_anthropic_pool(
+        let first_listed_profile = ANTHROPIC_OVERFLOW_PROFILE;
+        let pool = format!(
             r#"[[credential_pools]]
 name = "anthropic-main"
 tie_break = "first_listed"
 on_pool_exhausted = "park"
 members = [
-  { profile = "anthropic-overflow", priority = 1 },
-  { profile = "anthropic-primary", priority = 1 },
+  {{ profile = "{first_listed_profile}", priority = 1 }},
+  {{ profile = "anthropic-primary", priority = 1 }},
 ]"#,
-        ))
-        .expect("equal priorities are valid");
+        );
+        let configured = HubModelConfiguration::parse(&configuration_with_anthropic_pool(&pool))
+            .expect("equal priorities are valid");
 
         let route = configured
             .resolve_direct_model(configured_judge_selection_fixture())
             .expect("the configured selection resolves");
 
-        assert_eq!(route.credential_profile(), "anthropic-overflow");
+        assert_eq!(route.credential_profile(), first_listed_profile);
     }
 
     #[test]

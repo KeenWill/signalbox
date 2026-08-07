@@ -57,6 +57,7 @@ on:
     branches: [main]
     paths:
       - "crates/model-runtime-claude-cli/**"
+      - "crates/model-runtime/src/cli_process.rs"
       # A change to this workflow is a change to the gate itself, so it must
       # trigger its own run rather than being proven only by the next
       # adapter change.
@@ -122,6 +123,7 @@ jobs:
           adapter_changed=false
           while IFS= read -r -d '' path; do
             if [[ "${path}" == crates/model-runtime-claude-cli/* \
+              || "${path}" == "crates/model-runtime/src/cli_process.rs" \
               || "${path}" == ".github/workflows/claude-smoke.yml" ]]; then
               adapter_changed=true
               break
@@ -129,7 +131,7 @@ jobs:
           done < "${changed_paths}"
           if [[ "${adapter_changed}" != "true" ]]; then
             echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
-            echo "Not applicable: neither crates/model-runtime-claude-cli/** nor this workflow's own definition changed."
+            echo "Not applicable: neither the Claude adapter, shared CLI process, nor this workflow changed."
             exit 0
           fi
 

@@ -151,9 +151,10 @@ credential_pool = "anthropic-main"
 # delivery = "codex_home"
 # codex_home = "/var/lib/signalbox/codex/account-b"
 #
-# delivery = "file" — an API key, read per preparation and supplied to the fresh
-# process under env_key. Metered rather than subscription, and the one Codex
-# delivery the ordinary rotation policy covers end to end.
+# Committed unimplemented functionality: delivery = "file" will supply an API
+# key to each fresh Codex process under env_key and use api_metered billing. No
+# present Codex adapter surface delivers it, so uncommenting this recipe fails
+# startup until that child implementation lands.
 # [[credential_profiles]]
 # name = "codex-api"
 # adapter = "codex_cli"

@@ -592,6 +592,12 @@ fn create_support_files(
         .prefix("signalbox-claude-")
         .tempdir_in(temporary_directory)
         .map_err(|error| format!("could not create private support directory: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("could not set private support directory mode: {error}"))?;
+    }
     let catalog = directory.path().join("tools.json");
     let ready = directory.path().join("mcp-ready");
     let mcp_config = directory.path().join("mcp.json");
@@ -682,6 +688,12 @@ fn write_private_support_file(path: &Path, contents: &[u8], mode: u32) -> Result
     let mut file = options
         .open(path)
         .map_err(|error| format!("could not create private support file: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(mode))
+            .map_err(|error| format!("could not set private support file mode: {error}"))?;
+    }
     std::io::Write::write_all(&mut file, contents)
         .map_err(|error| format!("could not write private support file: {error}"))
 }
