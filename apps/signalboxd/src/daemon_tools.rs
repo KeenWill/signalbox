@@ -1399,6 +1399,27 @@ mod tests {
         target_dir: PathBuf,
     }
 
+    struct ConfiguredCargoTargetDirInput<'a> {
+        current_executable: &'a Path,
+        configured: &'a Path,
+        known_targets: &'a BTreeSet<OsString>,
+    }
+
+    struct DefaultTargetRecognition<'a> {
+        current_executable: &'a Path,
+        configured_target_dir: Option<&'a Path>,
+        default_target_dir: &'a Path,
+        known_targets: &'a BTreeSet<OsString>,
+    }
+
+    struct BridgeArtifactSelectionInput<'a> {
+        current_executable: &'a Path,
+        debug_profile: &'a str,
+        configured_target_dir: Option<&'a Path>,
+        default_target_dir: &'a Path,
+        known_targets: &'a BTreeSet<OsString>,
+    }
+
     const CLAUDE_MCP_BRIDGE_BINARY: &str = "signalbox-claude-mcp-bridge";
     const CARGO_TEST_PROFILE: &str = "test";
 
@@ -1408,19 +1429,19 @@ mod tests {
         let known_targets = rustc_target_names();
         let configured_target_dir = configured_cargo_target_dir(&current, &known_targets);
         let default_target_dir = cargo_metadata_target_dir();
-        reject_unrecognized_default_target(
-            &current,
-            configured_target_dir.as_deref(),
-            &default_target_dir,
-            &known_targets,
-        );
-        claude_mcp_bridge_artifact_selection_for(
-            &current,
-            CARGO_TEST_PROFILE,
-            configured_target_dir.as_deref(),
-            &default_target_dir,
-            &known_targets,
-        )
+        reject_unrecognized_default_target(DefaultTargetRecognition {
+            current_executable: &current,
+            configured_target_dir: configured_target_dir.as_deref(),
+            default_target_dir: &default_target_dir,
+            known_targets: &known_targets,
+        });
+        claude_mcp_bridge_artifact_selection_for(BridgeArtifactSelectionInput {
+            current_executable: &current,
+            debug_profile: CARGO_TEST_PROFILE,
+            configured_target_dir: configured_target_dir.as_deref(),
+            default_target_dir: &default_target_dir,
+            known_targets: &known_targets,
+        })
     }
 
     #[track_caller]
@@ -1429,16 +1450,19 @@ mod tests {
         known_targets: &BTreeSet<OsString>,
     ) -> Option<PathBuf> {
         let configured = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR")?);
-        let configured = configured_cargo_target_dir_for(current, &configured, known_targets);
+        let configured = configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+            current_executable: current,
+            configured: &configured,
+            known_targets,
+        });
         Some(canonicalized_target_dir(&configured))
     }
 
     #[track_caller]
-    fn configured_cargo_target_dir_for(
-        current: &Path,
-        configured: &Path,
-        known_targets: &BTreeSet<OsString>,
-    ) -> PathBuf {
+    fn configured_cargo_target_dir_for(input: ConfiguredCargoTargetDirInput<'_>) -> PathBuf {
+        let current = input.current_executable;
+        let configured = input.configured;
+        let known_targets = input.known_targets;
         if configured.is_absolute() {
             return configured.to_path_buf();
         }
@@ -1460,12 +1484,12 @@ mod tests {
             }
             return artifact_parent.to_path_buf();
         }
-        let closest = current
+        let closest = artifact_parent
             .ancestors()
             .find(|ancestor| ancestor.ends_with(&configured))
             .or_else(|| {
                 let configured_name = configured.file_name()?;
-                current
+                artifact_parent
                     .ancestors()
                     .find(|ancestor| ancestor.file_name() == Some(configured_name))
             })
@@ -1503,17 +1527,12 @@ mod tests {
     }
 
     #[track_caller]
-    fn reject_unrecognized_default_target(
-        current: &Path,
-        configured_target_dir: Option<&Path>,
-        default_target_dir: &Path,
-        known_targets: &BTreeSet<OsString>,
-    ) {
-        if configured_target_dir.is_some() {
+    fn reject_unrecognized_default_target(input: DefaultTargetRecognition<'_>) {
+        if input.configured_target_dir.is_some() {
             return;
         }
-        let current = lexically_normalized(current);
-        let default_target_dir = lexically_normalized(default_target_dir);
+        let current = lexically_normalized(input.current_executable);
+        let default_target_dir = lexically_normalized(input.default_target_dir);
         let artifact_parent = current
             .parent()
             .and_then(Path::parent)
@@ -1524,7 +1543,7 @@ mod tests {
             .expect("Cargo artifact parent has a name");
         assert!(
             artifact_parent.parent() != Some(default_target_dir.as_path())
-                || known_targets.contains(artifact_parent_name),
+                || input.known_targets.contains(artifact_parent_name),
             "custom Cargo target specifications are unsupported by the nested bridge build"
         );
     }
@@ -1564,15 +1583,11 @@ mod tests {
 
     #[track_caller]
     fn claude_mcp_bridge_artifact_selection_for(
-        current: &Path,
-        debug_profile: &str,
-        configured_target_dir: Option<&Path>,
-        default_target_dir: &Path,
-        known_targets: &BTreeSet<OsString>,
+        input: BridgeArtifactSelectionInput<'_>,
     ) -> BridgeArtifactSelection {
-        let current = lexically_normalized(current);
-        let configured_target_dir = configured_target_dir.map(lexically_normalized);
-        let default_target_dir = lexically_normalized(default_target_dir);
+        let current = lexically_normalized(input.current_executable);
+        let configured_target_dir = input.configured_target_dir.map(lexically_normalized);
+        let default_target_dir = lexically_normalized(input.default_target_dir);
         let profile_dir = current
             .parent()
             .and_then(Path::parent)
@@ -1581,7 +1596,7 @@ mod tests {
             .file_name()
             .expect("Cargo profile directory has a name");
         let profile = match profile_dir_name.to_str() {
-            Some("debug") => OsString::from(debug_profile),
+            Some("debug") => OsString::from(input.debug_profile),
             Some("release") => OsString::from("release"),
             _ => profile_dir_name.to_os_string(),
         };
@@ -1601,7 +1616,7 @@ mod tests {
                     "Cargo target-specific profile is directly below the configured target directory"
                 );
                 assert!(
-                    known_targets.contains(artifact_parent_name),
+                    input.known_targets.contains(artifact_parent_name),
                     "custom Cargo target specifications are unsupported by the nested bridge build"
                 );
                 (
@@ -1610,7 +1625,7 @@ mod tests {
                 )
             }
         } else if artifact_parent.parent() == Some(default_target_dir.as_path())
-            && known_targets.contains(artifact_parent_name)
+            && input.known_targets.contains(artifact_parent_name)
         {
             (
                 artifact_parent
@@ -1647,13 +1662,13 @@ mod tests {
             .map(OsString::from)
             .into_iter()
             .collect();
-        let selection = claude_mcp_bridge_artifact_selection_for(
-            expectation.executable,
-            expectation.debug_profile,
-            expectation.configured_target_dir,
-            expectation.default_target_dir,
-            &known_targets,
-        );
+        let selection = claude_mcp_bridge_artifact_selection_for(BridgeArtifactSelectionInput {
+            current_executable: expectation.executable,
+            debug_profile: expectation.debug_profile,
+            configured_target_dir: expectation.configured_target_dir,
+            default_target_dir: expectation.default_target_dir,
+            known_targets: &known_targets,
+        });
 
         assert_eq!(
             selection.profile,
@@ -1788,7 +1803,12 @@ mod tests {
         let target_dir = Path::new("synthetic-target");
         let executable = target_dir.join("custom/debug/deps/daemon-tools-test");
 
-        reject_unrecognized_default_target(&executable, None, target_dir, &BTreeSet::new());
+        reject_unrecognized_default_target(DefaultTargetRecognition {
+            current_executable: &executable,
+            configured_target_dir: None,
+            default_target_dir: target_dir,
+            known_targets: &BTreeSet::new(),
+        });
     }
 
     #[test]
@@ -1847,11 +1867,12 @@ mod tests {
         let executable = target_dir
             .join(SYNTHETIC_CARGO_TARGET)
             .join("debug/deps/daemon-tools-test");
-        let configured_target_dir = configured_cargo_target_dir_for(
-            &executable,
-            Path::new("relative-target"),
-            &synthetic_known_targets(),
-        );
+        let configured_target_dir =
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: Path::new("relative-target"),
+                known_targets: &synthetic_known_targets(),
+            });
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
@@ -1866,16 +1887,40 @@ mod tests {
     }
 
     #[test]
+    fn bridge_artifact_selection_excludes_the_profile_from_relative_root_matching() {
+        let target_dir = Path::new("synthetic-workspace/debug");
+        let executable = target_dir.join("debug/deps/daemon-tools-test");
+        let configured_target_dir =
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: Path::new("debug"),
+                known_targets: &BTreeSet::new(),
+            });
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: None,
+        });
+    }
+
+    #[test]
     fn bridge_artifact_selection_resolves_a_parent_relative_configured_directory() {
         let target_dir = Path::new("synthetic-parent/artifact");
         let executable = target_dir
             .join(SYNTHETIC_CARGO_TARGET)
             .join("debug/deps/daemon-tools-test");
-        let configured_target_dir = configured_cargo_target_dir_for(
-            &executable,
-            Path::new("../artifact"),
-            &synthetic_known_targets(),
-        );
+        let configured_target_dir =
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: Path::new("../artifact"),
+                known_targets: &synthetic_known_targets(),
+            });
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
@@ -1895,11 +1940,13 @@ mod tests {
         let executable = target_dir
             .join(SYNTHETIC_CARGO_TARGET)
             .join("debug/deps/daemon-tools-test");
-        let configured_target_dir = configured_cargo_target_dir_for(
-            &executable,
-            &Path::new("..").join(SYNTHETIC_CARGO_TARGET),
-            &synthetic_known_targets(),
-        );
+        let configured = Path::new("..").join(SYNTHETIC_CARGO_TARGET);
+        let configured_target_dir =
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: &configured,
+                known_targets: &synthetic_known_targets(),
+            });
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
@@ -1918,7 +1965,11 @@ mod tests {
         let target_dir = Path::new("synthetic-workspace");
         let executable = target_dir.join("debug/deps/daemon-tools-test");
         let configured_target_dir =
-            configured_cargo_target_dir_for(&executable, Path::new("."), &BTreeSet::new());
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: Path::new("."),
+                known_targets: &BTreeSet::new(),
+            });
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
@@ -1938,11 +1989,12 @@ mod tests {
         let executable = target_dir
             .join(SYNTHETIC_CARGO_TARGET)
             .join("debug/deps/daemon-tools-test");
-        let configured_target_dir = configured_cargo_target_dir_for(
-            &executable,
-            Path::new("."),
-            &synthetic_known_targets(),
-        );
+        let configured_target_dir =
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: Path::new("."),
+                known_targets: &synthetic_known_targets(),
+            });
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
@@ -1961,7 +2013,11 @@ mod tests {
         let target_dir = Path::new("synthetic-parent");
         let executable = target_dir.join("debug/deps/daemon-tools-test");
         let configured_target_dir =
-            configured_cargo_target_dir_for(&executable, Path::new(".."), &BTreeSet::new());
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: Path::new(".."),
+                known_targets: &BTreeSet::new(),
+            });
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
@@ -1981,11 +2037,12 @@ mod tests {
         let executable = target_dir
             .join(SYNTHETIC_CARGO_TARGET)
             .join("debug/deps/daemon-tools-test");
-        let configured_target_dir = configured_cargo_target_dir_for(
-            &executable,
-            Path::new(".."),
-            &synthetic_known_targets(),
-        );
+        let configured_target_dir =
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: Path::new(".."),
+                known_targets: &synthetic_known_targets(),
+            });
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
