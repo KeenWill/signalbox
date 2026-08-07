@@ -23,12 +23,13 @@ use signalbox_model_runtime::{
 };
 
 use signalbox_model_runtime::{CredentialAccess, CredentialValue, redact_evidence};
+use signalbox_model_runtime::{FastMode, ModelCapabilityCatalog, ModelCapabilityError};
 
 use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
 use crate::status::{classify_error, classify_error_status};
 use crate::stream::{StreamDecoder, StreamStep};
-use crate::translate::build_request;
+use crate::translate::build_request_with_fast_mode;
 use crate::wire::{CountTokensRequest, CountTokensResponse, ErrorEnvelope};
 
 /// The Anthropic Messages adapter.
@@ -44,6 +45,7 @@ pub struct AnthropicRuntime<A> {
     credentials: A,
     version_header: HeaderValue,
     sse_record_limit: usize,
+    model_capabilities: ModelCapabilityCatalog,
 }
 
 /// An opaque, one-shot Anthropic request capability prepared per
@@ -82,6 +84,7 @@ impl<A> std::fmt::Debug for AnthropicRuntime<A> {
             .field("credentials", &"[redacted]")
             .field("version_header", &"[sensitive]")
             .field("sse_record_limit", &self.sse_record_limit)
+            .field("model_capabilities", &self.model_capabilities)
             .finish()
     }
 }
@@ -133,6 +136,23 @@ impl std::fmt::Display for AnthropicConstructionError {
 impl std::error::Error for AnthropicConstructionError {}
 
 impl<A: CredentialAccess> AnthropicRuntime<A> {
+    fn apply_model_capabilities<C>(
+        &self,
+        operation: &mut ModelOperation<C>,
+    ) -> Result<FastMode, ModelCapabilityError> {
+        let mut request_fast_mode = operation.settings.fast_mode;
+        let capabilities = self
+            .model_capabilities
+            .validate_explicit(&operation.resolved_target, &operation.settings)?;
+        if let Some(capabilities) = capabilities {
+            let (target, effective_request_fast_mode) = capabilities
+                .effective_target(&operation.resolved_target, operation.settings.fast_mode)?;
+            operation.resolved_target = target.clone();
+            request_fast_mode = effective_request_fast_mode;
+        }
+        Ok(request_fast_mode)
+    }
+
     /// Builds the adapter and its HTTP client.
     ///
     /// # Transport discipline: one send is one physical request
@@ -273,16 +293,28 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             credentials,
             version_header,
             sse_record_limit: config.sse_record_limit,
+            model_capabilities: config.model_capabilities,
         })
     }
 
     async fn prepare_request<C: Clone + Send + Sync>(
         &self,
-        operation: ModelOperation<C>,
+        mut operation: ModelOperation<C>,
         cancellation: &mut CancellationSignal,
     ) -> PreparationOutcome<C, AnthropicPreparedRequest<C>> {
         let correlation = operation.correlation.clone();
-        let wire_request = match build_request(&operation) {
+        let request_fast_mode = match self.apply_model_capabilities(&mut operation) {
+            Ok(request_fast_mode) => request_fast_mode,
+            Err(error) => {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure: PreparationFailure::UnsupportedOperation {
+                        detail: error.to_string(),
+                    },
+                };
+            }
+        };
+        let wire_request = match build_request_with_fast_mode(&operation, request_fast_mode) {
             Ok(request) => request,
             Err(failure) => {
                 return PreparationOutcome::Failed {
@@ -328,14 +360,17 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         };
         let delivery = operation.delivery;
         let stop_sequences = operation.settings.stop_sequences.clone();
-        let request = match build_http_request(
-            self.client
-                .post(self.messages_url.clone())
-                .header("x-api-key", api_key_header)
-                .header("anthropic-version", self.version_header.clone())
-                .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-                .body(body),
-        ) {
+        let mut builder = self
+            .client
+            .post(self.messages_url.clone())
+            .header("x-api-key", api_key_header)
+            .header("anthropic-version", self.version_header.clone())
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .body(body);
+        if request_fast_mode == FastMode::Enabled {
+            builder = builder.header("anthropic-beta", "fast-mode-2026-02-01");
+        }
+        let request = match build_http_request(builder) {
             Ok(request) => request,
             Err(defect) => {
                 return PreparationOutcome::Defect {
@@ -564,11 +599,15 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
 {
     async fn count_input_tokens(
         &self,
-        operation: ModelOperation<C>,
+        mut operation: ModelOperation<C>,
         mut cancellation: CancellationSignal,
     ) -> InputTokenCountOutcome<C> {
         let correlation = operation.correlation.clone();
-        let wire_request = match build_request(&operation) {
+        let request_fast_mode = match self.apply_model_capabilities(&mut operation) {
+            Ok(request_fast_mode) => request_fast_mode,
+            Err(_) => return InputTokenCountOutcome::Failed { correlation },
+        };
+        let wire_request = match build_request_with_fast_mode(&operation, request_fast_mode) {
             Ok(request) => CountTokensRequest::from(request),
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };
@@ -587,14 +626,17 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
         let Some(api_key_header) = sensitive_header(&credential) else {
             return InputTokenCountOutcome::Failed { correlation };
         };
-        let request = match build_http_request(
-            self.client
-                .post(self.count_tokens_url.clone())
-                .header("x-api-key", api_key_header)
-                .header("anthropic-version", self.version_header.clone())
-                .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-                .body(body),
-        ) {
+        let mut builder = self
+            .client
+            .post(self.count_tokens_url.clone())
+            .header("x-api-key", api_key_header)
+            .header("anthropic-version", self.version_header.clone())
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .body(body);
+        if request_fast_mode == FastMode::Enabled {
+            builder = builder.header("anthropic-beta", "fast-mode-2026-02-01");
+        }
+        let request = match build_http_request(builder) {
             Ok(request) => request,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };

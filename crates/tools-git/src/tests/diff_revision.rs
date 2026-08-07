@@ -3,14 +3,14 @@
 use std::{fs, os::unix::fs::symlink};
 
 use git2::Repository;
-use rustix::fs::{CWD, Mode, mkfifoat};
 
 use crate::arguments::{GitDiffArguments, LocalOperation};
 use crate::failure::LocalGitFailure;
 use crate::tests::planting::{over_budget_tree_commit, oversized_root_tree_commit};
 use crate::tests::support::{
     CHANGED_CONTENT, Fixture, MODEL_MESSAGE, SUBMODULE_PATH, TRACKED_PATH, commit_all,
-    commit_index, deep_full_path_tree_commit, execute, install_gitlink, plant_linear_history,
+    commit_index, create_fifo, deep_full_path_tree_commit, execute, install_gitlink,
+    plant_linear_history,
 };
 
 #[test]
@@ -42,8 +42,7 @@ fn revision_diff_rejects_a_fifo_reference_without_blocking() {
     let executor = fixture.executor();
     let reference_name = "refs/heads/fifo-revision";
     let reference_path = fixture.root().join(".git").join(reference_name);
-    mkfifoat(CWD, &reference_path, Mode::RUSR | Mode::WUSR)
-        .expect("revision fixture FIFO constructs");
+    create_fifo(&reference_path).expect("revision fixture FIFO constructs");
     let failure = executor.repository_authority.repository();
 
     assert!(matches!(failure, Err(LocalGitFailure::Repository)));

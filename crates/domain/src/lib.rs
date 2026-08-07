@@ -20,6 +20,7 @@ mod imported_conversation;
 mod imported_session;
 mod model_call;
 mod model_execution;
+mod model_settings;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
@@ -51,7 +52,7 @@ pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
     ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
-    OriginConfigurationReconstitutionInput, SessionConfigurationDefaults,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionDefaultsVersionMismatch, SessionSystemPrompt,
     SessionSystemPromptError, SessionSystemPromptFailure, TurnConfigurationProvenance,
     UnknownModelAlias, VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
@@ -134,6 +135,15 @@ pub use model_execution::{
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity,
     ToolResultAttemptCorrelation, ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
 };
+pub use model_settings::{
+    AdjustedModelSettings, AnthropicServiceTier, CodexCliServiceTier, CompatibleModelSettings,
+    EffectiveModelSettings, FastMode, FastModeOverlay, FastModeSupport, ModelCapabilities,
+    ModelCapabilityCatalog, ModelCapabilityCatalogError, ModelCapabilityDefinition,
+    ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
+    OpenAiServiceTier, ReasoningLevel, ResolvedModelSettings, ServiceTier,
+    SessionModelSettingsChanged, SettingOverlay, TurnModelSettingsResolved,
+    UnsupportedModelSetting, ValidatedModelSettings,
+};
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,
     ProviderTargetMismatchInvalidationLog, ProviderTargetObservation,
@@ -159,10 +169,11 @@ pub use repo_watch::{
     RepoWatchDispatchContextShape, RepoWatchEvent, RepoWatchEventConstructionError,
     RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher,
     RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleValidationError,
-    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
-    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepositorySlug, ReviewState,
-    ReviewThreadId, WorkflowName,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId,
+    RepoWatchRuleValidationError, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchTemplateContextDeclaration, RepoWatchTemplateContextDeclarationError,
+    RepoWatchTextError, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
+    WorkflowName,
 };
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,
@@ -232,12 +243,15 @@ pub use session_delegation::{
     BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRequest,
     DelegationAwaitRequest, DelegationContent, DelegationContentError, DelegationContentFailure,
     DelegationEvent, DelegationEventOrdinal, DelegationLifecycle, DelegationMessage,
-    DelegationMessageDirection, DelegationMessageRequest, DelegationOutcome, DelegationOutcomeKind,
-    DelegationOutcomeReason, DelegationProvenance, DelegationRequestError,
-    DelegationRequestFailure, DelegationTransitionError, DelegationTransitionFailure,
-    DelegationWait, DelegationWaitMode, DescendantTerminationScope, ParentTerminationAuthority,
-    ParentTerminationCommandSource, ParentTerminationKind, RejectedDelegationTransition,
-    SessionDelegation, TerminalChildTurn,
+    DelegationMessageDirection, DelegationMessageEndpoints, DelegationMessageRequest,
+    DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenance,
+    DelegationProvenanceReconstitutionInput, DelegationRequestError, DelegationRequestFailure,
+    DelegationTransitionError, DelegationTransitionFailure, DelegationWait, DelegationWaitMode,
+    DescendantTerminationScope, ParentTerminationAuthority, ParentTerminationCommandSource,
+    ParentTerminationKind, RejectedDelegationTransition, SessionDelegation,
+    SessionDelegationReconstitutionError, SessionDelegationReconstitutionFailure,
+    SessionDelegationReconstitutionInput, TerminalChildTurn, await_session_tool_name,
+    send_session_message_tool_name, spawn_session_tool_name,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
@@ -332,11 +346,14 @@ pub use turn_eligibility::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities,
     AcceptedInputTurnSchedulingProjection, AcceptedInputTurnSchedulingRecord,
     AcceptedInputTurnSchedulingRecordState, AcceptedInputTurnSchedulingStatus,
-    ActivatedAcceptedInputTurn, ActiveTurnSchedulingReconstitutionInput,
-    CancelledTurnExecutionReconstitutionInput, ConsumedSteeringInput,
-    ConsumedSteeringReconstitutionInput, ContinuationRoundReconstitutionInput,
-    FailedAcceptedInputTurn, FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
+    ActivatedAcceptedInputTurn, ActivatedDelegatedTurn, ActivatedTurn,
+    ActiveTurnSchedulingReconstitutionInput, CancelledTurnExecutionReconstitutionInput,
+    ConsumedSteeringInput, ConsumedSteeringReconstitutionInput,
+    ContinuationRoundReconstitutionInput, DelegatedTurnActivationInput,
+    DelegatedWakeTurnActivationInput, FailedAcceptedInputTurn,
+    FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
     PreparedAcceptedInputTurnActivation, PreparedAcceptedInputTurnFailure,
+    PreparedDelegatedTurnActivation, PreparedTurnActivation,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
     SteeringContinuationRoundReconstitutionInput, TerminalAttemptEndReconstitutionInput,
 };

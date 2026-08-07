@@ -7,21 +7,31 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use serde_json::Value;
 use signalbox_domain::{
-    AcceptedInputId, ContextFrontierId, DirectModelSelection, ImportedConversationId,
-    ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
-    ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef, SessionId, SessionReadScopeDecision, SessionReadScopeRefusal,
-    ToolApprovalDecider, ToolApprovalDecision, ToolAttemptId, ToolDecisionRationale,
-    ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId, VersionedSessionPlacement,
+    AcceptedInputId, ContextFrontierId, DelegationMessageId, DirectModelSelection,
+    FrozenAliasDefinition, FrozenModelSelection, ImportedConversationId, ImportedSourceAttestation,
+    ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias, ModelCallId,
+    ModelSelectionRequest, ProviderModelIdentity, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, SessionReadScopeDecision,
+    SessionReadScopeRefusal, ToolApprovalDecider, ToolApprovalDecision, ToolAttemptId,
+    ToolDecisionRationale, ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId,
+    TurnModelSettingsResolved, VersionedSessionPlacement,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     conversation_import_codec::decode_content,
     mapping::{
-        ToolApprovalDecisionSourceStorageKind, durable_command_id_from_uuid, session_id_from_uuid,
-        session_id_to_uuid, tool_approval_decision_source_from_str,
+        ToolApprovalDecisionSourceStorageKind, defaults_version_from_numeric,
+        durable_command_id_from_uuid, model_change_adjustments_from_json, model_settings_from_json,
+        model_settings_overlay_from_json, session_id_from_uuid, session_id_to_uuid,
+        tool_approval_decision_source_from_str,
+    },
+    outbox::{
+        DispatchedDelegationOutcome, DispatchedDelegationProvenance, DispatchedDelegationReason,
+        DispatchedDelegationWaitMode, decode_delegation_outcome, decode_delegation_provenance,
+        decode_delegation_reason, decode_wait_mode,
     },
 };
 
@@ -160,11 +170,20 @@ fn decode_session_defaults_value(
                 .map_err(|_| ProcessReadCorruption::Inconsistent("system prompt admission"))
         })
         .transpose()?;
-    Ok(signalbox_domain::SessionConfigurationDefaults::complete(
+    let model_settings = row
+        .try_get::<Option<serde_json::Value>, _>("model_settings")?
+        .ok_or(ProcessReadCorruption::Missing("model_settings"))?;
+    let model_settings = model_settings_from_json(model_settings)
+        .map_err(|_| ProcessReadCorruption::Inconsistent("model settings"))?;
+    signalbox_domain::SessionConfigurationDefaults::complete_with_model_settings(
         model,
         dangerous_tool_auto_approval,
         system_prompt,
-    ))
+        model_settings,
+    )
+    .ok_or_else(|| {
+        ProcessReadCorruption::Inconsistent("model settings validation selection").into()
+    })
 }
 
 /// One repeatable-read session-summary cursor that owns at most one decoded row.
@@ -365,6 +384,37 @@ pub enum ProcessTurnState {
         /// Exact accepted user text.
         content: String,
     },
+    /// Delegated work has not activated.
+    QueuedDelegated {
+        /// Tool request that spawned the delegated session.
+        spawning_request: ToolRequestId,
+        /// Parent session that issued the spawn request.
+        parent_session: SessionId,
+        /// Parent turn that issued the spawn request.
+        parent_turn: TurnId,
+        /// Exact delegated task text.
+        content: String,
+    },
+    /// A contiguous range of delivered delegation content is waiting to wake
+    /// an otherwise idle recipient.
+    QueuedDelegationWake {
+        /// First recipient-wide delivery sequence included by the wake.
+        first_delivery_sequence: u64,
+        /// Last recipient-wide delivery sequence included by the wake.
+        through_delivery_sequence: u64,
+    },
+    /// Parent policy logically terminalized the delegated root while any
+    /// retained physical execution evidence remains inert.
+    DelegationTerminated {
+        /// Tool request that spawned the terminalized child.
+        spawning_request: ToolRequestId,
+        /// Typed stopped or cancelled outcome.
+        outcome: DispatchedDelegationOutcome,
+        /// Exact parent terminal reason.
+        reason: DispatchedDelegationReason,
+        /// Exact parent-command provenance.
+        provenance: DispatchedDelegationProvenance,
+    },
     /// The current attempt is running.
     ActiveRunning {
         /// Current live attempt.
@@ -383,6 +433,15 @@ pub enum ProcessTurnState {
     ActiveAwaitingToolApproval {
         /// Earliest undecided tool request.
         request: ToolRequestId,
+    },
+    /// The yielded foreground await is parked on one exact delegated child.
+    ActiveAwaitingChild {
+        /// Tool request that issued the foreground await.
+        awaiting_request: ToolRequestId,
+        /// Spawn request naming the relationship.
+        spawning_request: ToolRequestId,
+        /// Exact child whose terminal result releases this turn.
+        child: SessionId,
     },
     /// The yielded tool batch is parked on an ambiguous external effect.
     ActiveAwaitingToolRecovery {
@@ -454,6 +513,7 @@ pub struct ProcessTranscriptTurn {
     turn: TurnId,
     acceptance_position: u64,
     state: ProcessTurnState,
+    model_settings: Option<TurnModelSettingsResolved>,
 }
 
 /// Exact token fields for one terminal model call.
@@ -591,6 +651,12 @@ impl ProcessTranscriptTurn {
     pub const fn state(&self) -> &ProcessTurnState {
         &self.state
     }
+
+    /// Returns complete frozen settings evidence when the turn was committed
+    /// after settings persistence became available.
+    pub const fn model_settings(&self) -> Option<&TurnModelSettingsResolved> {
+        self.model_settings.as_ref()
+    }
 }
 
 /// Session ancestry relevant to process-protocol compatibility.
@@ -641,6 +707,73 @@ pub enum ProcessImportedContentKind {
 /// One ordered member of the latest authoritative semantic frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTranscriptEntry {
+    /// Exact delegated task that opened one child session.
+    DelegatedTask {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Tool request that spawned the child.
+        spawning_request: ToolRequestId,
+        /// Parent session that issued the spawn request.
+        parent_session: SessionId,
+        /// Parent turn that issued the spawn request.
+        parent_turn: TurnId,
+        /// Exact delegated task text.
+        content: String,
+    },
+    /// Exact bidirectional delegation message delivered to this frontier.
+    DelegationMessage {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Relationship identity.
+        spawning_request: ToolRequestId,
+        /// Immutable message identity.
+        message: DelegationMessageId,
+        /// Sending session.
+        sender: SessionId,
+        /// Receiving session.
+        recipient: SessionId,
+        /// Relationship-local message ordinal.
+        ordinal: u64,
+        /// Recipient-wide delivery sequence.
+        delivery_sequence: u64,
+        /// Exact delivered content.
+        content: String,
+    },
+    /// Exact child result delivered through one registered wait.
+    DelegationResult {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Await request receiving this result.
+        awaiting_request: ToolRequestId,
+        /// Relationship identity.
+        spawning_request: ToolRequestId,
+        /// Terminal child session.
+        child: SessionId,
+        /// Foreground or background delivery mode.
+        mode: DispatchedDelegationWaitMode,
+        /// Recipient-wide position for background delivery only.
+        delivery_sequence: Option<u64>,
+        /// Typed terminal result outcome.
+        outcome: DispatchedDelegationOutcome,
+        /// Delivered content for a successful result only.
+        content: Option<String>,
+        /// Typed lifecycle reason.
+        reason: DispatchedDelegationReason,
+        /// Exact child-turn or parent-command proof.
+        provenance: DispatchedDelegationProvenance,
+    },
     /// Injected boundary declaring the model identity newly in force.
     ModelIdentityChanged {
         /// Zero-based position in the projected frontier.
@@ -1304,7 +1437,8 @@ impl ProcessReadRepository {
                 selected_defaults.direct_model_selection_id,
                 selected_defaults.model_alias_id,
                 selected_defaults.dangerous_tool_auto_approval,
-                selected_defaults.system_prompt
+                selected_defaults.system_prompt,
+                selected_defaults.model_settings
                FROM session AS session_row
                LEFT JOIN session_current_defaults AS current_defaults
                  ON current_defaults.session_id = session_row.session_id
@@ -1472,6 +1606,7 @@ impl ProcessReadRepository {
                        FROM turn_lifecycle
                       WHERE session_id = session.session_id
                         AND state_kind = 'active'
+                        AND NOT delegation_runtime_terminal
                         AND active_phase_kind = 'awaiting_model_call_recovery')
                FROM session
               WHERE session_id = $1",
@@ -1540,6 +1675,33 @@ impl ProcessReadRepository {
                 entry.context_summary_first_entry_id,
                 entry.context_summary_through_source_session_id,
                 entry.context_summary_through_entry_id,
+                entry.delegated_task_spawning_tool_request_id,
+                entry.delegation_message_id,
+                entry.delegation_result_awaiting_tool_request_id,
+                entry.delegation_result_spawning_tool_request_id,
+                delegated_task.task_content AS delegated_task_content,
+                task_relation.parent_session_id AS delegated_task_parent_session_id,
+                task_relation.parent_turn_id AS delegated_task_parent_turn_id,
+                delegated_message.spawning_tool_request_id AS delegation_message_spawning_request_id,
+                delegated_message.event_ordinal AS delegation_message_ordinal,
+                delegated_message.content_text AS delegation_message_content,
+                message_delivery.recipient_session_id AS delegation_message_recipient_session_id,
+                message_delivery.delivery_sequence AS delegation_message_delivery_sequence,
+                CASE delegated_message.direction
+                    WHEN 'parent_to_child' THEN message_relation.parent_session_id
+                    WHEN 'child_to_parent' THEN message_relation.child_session_id
+                END AS delegation_message_sender_session_id,
+                delegated_wait.child_session_id AS delegation_result_child_session_id,
+                delegated_wait.wait_mode AS delegation_result_wait_mode,
+                result_delivery.delivery_sequence AS delegation_result_delivery_sequence,
+                delegated_result.outcome_kind AS delegation_result_outcome_kind,
+                delegated_result.content_text AS delegation_result_content,
+                result_event.reason_kind AS delegation_result_reason_kind,
+                result_event.provenance_kind,
+                result_event.provenance_session_id,
+                result_event.provenance_turn_id,
+                result_event.provenance_goal_generation,
+                result_event.provenance_command_id,
                 imported.source_speaker_kind AS imported_source_speaker_kind,
                 imported.content_encoding AS imported_content_encoding,
                 accepted.content_text AS origin_content,
@@ -1592,6 +1754,44 @@ impl ProcessReadRepository {
                         entry.imported_conversation_id
                 AND imported.imported_transcript_entry_id =
                         entry.imported_transcript_entry_id
+               LEFT JOIN session_delegation_initial_task AS delegated_task
+                 ON delegated_task.spawning_tool_request_id =
+                        entry.delegated_task_spawning_tool_request_id
+                AND delegated_task.child_session_id = entry.source_session_id
+                AND delegated_task.semantic_entry_id = entry.semantic_entry_id
+               LEFT JOIN session_delegation AS task_relation
+                 ON task_relation.spawning_tool_request_id =
+                        delegated_task.spawning_tool_request_id
+               LEFT JOIN session_message_delivery AS message_delivery
+                 ON message_delivery.message_id = entry.delegation_message_id
+                AND message_delivery.recipient_session_id = entry.source_session_id
+               LEFT JOIN session_message AS delegated_message
+                 ON delegated_message.message_id = message_delivery.message_id
+                AND delegated_message.spawning_tool_request_id =
+                        message_delivery.spawning_tool_request_id
+               LEFT JOIN session_delegation AS message_relation
+                 ON message_relation.spawning_tool_request_id =
+                        delegated_message.spawning_tool_request_id
+               LEFT JOIN session_child_result_delivery AS result_delivery
+                 ON result_delivery.awaiting_tool_request_id =
+                        entry.delegation_result_awaiting_tool_request_id
+                AND result_delivery.spawning_tool_request_id =
+                        entry.delegation_result_spawning_tool_request_id
+                AND result_delivery.parent_session_id = entry.source_session_id
+               LEFT JOIN session_delegation_wait AS delegated_wait
+                 ON delegated_wait.awaiting_tool_request_id =
+                        result_delivery.awaiting_tool_request_id
+                AND delegated_wait.spawning_tool_request_id =
+                        result_delivery.spawning_tool_request_id
+                AND delegated_wait.parent_session_id = result_delivery.parent_session_id
+               LEFT JOIN session_child_result AS delegated_result
+                 ON delegated_result.spawning_tool_request_id =
+                        result_delivery.spawning_tool_request_id
+               LEFT JOIN session_delegation_event AS result_event
+                 ON result_event.spawning_tool_request_id =
+                        delegated_result.spawning_tool_request_id
+                AND result_event.event_ordinal = delegated_result.event_ordinal
+                AND result_event.event_kind = delegated_result.event_kind
               ORDER BY selected.selected_ordinal",
         )
         .bind(&stored_positions)
@@ -1909,6 +2109,24 @@ struct DecodedTurn {
     latest_frontier: Option<ContextFrontierId>,
 }
 
+#[derive(Debug)]
+enum DecodedTurnOrigin {
+    AcceptedInput {
+        accepted_input: AcceptedInputId,
+        content: String,
+    },
+    DelegatedTask {
+        spawning_request: ToolRequestId,
+        parent_session: SessionId,
+        parent_turn: TurnId,
+        content: String,
+    },
+    DelegationWake {
+        first_delivery_sequence: u64,
+        through_delivery_sequence: u64,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DecodedStartLineage {
     FirstInSession,
@@ -2030,7 +2248,15 @@ async fn load_transcript_turn_count(
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM turn_lifecycle AS turn
           WHERE turn.session_id = $1
-            AND goal_turn_is_runtime_relevant(turn.session_id, turn.turn_id)",
+            AND (
+                goal_turn_is_runtime_relevant(turn.session_id, turn.turn_id)
+                OR EXISTS (
+                    SELECT 1
+                      FROM session_delegation_logical_terminal AS logical_terminal
+                     WHERE logical_terminal.child_session_id = turn.session_id
+                       AND logical_terminal.child_turn_id = turn.turn_id
+                )
+            )",
     )
     .bind(session_id_to_uuid(session))
     .fetch_one(&mut **transaction)
@@ -2183,7 +2409,9 @@ async fn load_next_transcript_turn(
     sqlx::query(
         "SELECT
             turn.turn_id,
+            turn.session_id AS turn_session_id,
             turn.acceptance_position,
+            turn.origin_kind,
             turn.origin_accepted_input_id,
             turn.state_kind,
             turn.start_lineage_kind,
@@ -2191,6 +2419,7 @@ async fn load_next_transcript_turn(
             turn.starting_frontier_id,
             turn.terminal_frontier_id,
             turn.active_phase_kind,
+            turn.child_wait_request_id,
             turn.current_attempt_id,
             turn.terminal_disposition_kind,
             turn.recovery_model_call_id,
@@ -2208,15 +2437,107 @@ async fn load_next_transcript_turn(
             accepted.acceptance_position AS accepted_position,
             accepted.origin_turn_id,
             accepted.content_text AS accepted_content,
+            task.spawning_tool_request_id AS delegated_spawning_tool_request_id,
+            task.task_content AS delegated_task_content,
+            relation.parent_session_id AS delegated_parent_session_id,
+            relation.parent_turn_id AS delegated_parent_turn_id,
+            wake.first_delivery_sequence AS delegated_wake_first_delivery_sequence,
+            wake.through_delivery_sequence AS delegated_wake_through_delivery_sequence,
+            child_wait.spawning_tool_request_id AS child_wait_spawning_request_id,
+            child_wait.child_session_id AS child_wait_child_session_id,
+            accepted.model_settings_override AS accepted_model_settings_override,
+            settings.accepted_input_id AS settings_accepted_input_id,
+            settings.turn_id AS settings_turn_id,
+            settings.session_id AS settings_session_id,
+            settings.defaults_version AS settings_defaults_version,
+            settings.selected_direct_model_id AS settings_selected_direct_id,
+            settings.per_call_model_settings AS settings_per_call_model_settings,
+            settings.resolved_model_settings AS settings_resolved_model_settings,
+            settings.adjusted_from_selection_id AS settings_adjusted_from_selection_id,
+            settings.adjustments AS settings_adjustments,
+            configuration_origin.defaults_version AS origin_defaults_version,
+            configuration_origin.requested_model_kind AS origin_requested_model_kind,
+            configuration_origin.requested_direct_model_selection_id
+                AS origin_requested_direct_id,
+            configuration_origin.requested_model_alias_id AS origin_requested_alias_id,
+            configuration_origin.frozen_model_kind AS origin_frozen_model_kind,
+            configuration_origin.frozen_direct_model_selection_id AS origin_frozen_direct_id,
+            configuration_origin.frozen_model_alias_id AS origin_frozen_alias_id,
+            configuration_origin.frozen_alias_selected_direct_id
+                AS origin_frozen_alias_selected_direct_id,
+            configuration_origin.model_settings_evidence_required
+                AS origin_model_settings_evidence_required,
+            origin_accepted.model_settings_override
+                AS origin_model_settings_override,
+            origin_defaults.model_settings AS origin_defaults_model_settings,
             current_call.model_call_id AS current_model_call_id,
             current_call.state_kind AS current_model_call_state_kind,
             current_call.context_frontier_id AS current_model_call_frontier_id,
             recovery_call.context_frontier_id AS recovery_model_call_frontier_id,
-            active_tool_round.boundary_frontier_id AS active_tool_round_frontier_id
+            active_tool_round.boundary_frontier_id AS active_tool_round_frontier_id,
+            logical_terminal.spawning_tool_request_id
+                AS logical_terminal_spawning_request_id,
+            logical_terminal.terminal_frontier_id
+                AS logical_terminal_frontier_id,
+            logical_terminal_event.outcome_kind
+                AS logical_terminal_outcome_kind,
+            logical_terminal_event.reason_kind
+                AS logical_terminal_reason_kind,
+            logical_terminal_event.provenance_kind AS provenance_kind,
+            logical_terminal_event.provenance_session_id AS provenance_session_id,
+            logical_terminal_event.provenance_turn_id AS provenance_turn_id,
+            logical_terminal_event.provenance_goal_generation
+                AS provenance_goal_generation,
+            logical_terminal_event.provenance_command_id AS provenance_command_id
            FROM turn_lifecycle AS turn
            LEFT JOIN accepted_input AS accepted
              ON accepted.accepted_input_id = turn.origin_accepted_input_id
             AND accepted.session_id = turn.session_id
+           LEFT JOIN session_delegation_initial_task AS task
+             ON task.turn_id = turn.turn_id
+            AND task.child_session_id = turn.session_id
+           LEFT JOIN session_delegation_wake_turn_origin AS wake
+             ON wake.turn_id = turn.turn_id
+            AND wake.recipient_session_id = turn.session_id
+            AND wake.admission_position = turn.acceptance_position
+           LEFT JOIN session_delegation AS relation
+             ON relation.spawning_tool_request_id = task.spawning_tool_request_id
+            AND relation.child_session_id = task.child_session_id
+           LEFT JOIN session_delegation_wait AS child_wait
+             ON child_wait.awaiting_tool_request_id = turn.child_wait_request_id
+            AND child_wait.parent_turn_id = turn.turn_id
+            AND child_wait.parent_session_id = turn.session_id
+            AND child_wait.wait_mode = 'foreground'
+           LEFT JOIN turn_model_settings_resolved AS settings
+             ON settings.accepted_input_id = turn.origin_accepted_input_id
+            AND settings.turn_id = turn.turn_id
+            AND settings.session_id = turn.session_id
+           LEFT JOIN LATERAL (
+                WITH RECURSIVE configuration_chain AS (
+                    SELECT queued.*
+                      FROM queued_input_origin AS queued
+                     WHERE queued.accepted_input_id = turn.origin_accepted_input_id
+                       AND queued.turn_id = turn.turn_id
+                       AND queued.session_id = turn.session_id
+                    UNION
+                    SELECT source.*
+                      FROM configuration_chain AS current
+                      JOIN queued_input_origin AS source
+                        ON source.turn_id = current.source_configuration_turn_id
+                       AND source.session_id = current.session_id
+                )
+                SELECT *
+                  FROM configuration_chain
+                 WHERE source_configuration_turn_id IS NULL
+           ) AS configuration_origin ON TRUE
+           LEFT JOIN accepted_input AS origin_accepted
+             ON origin_accepted.accepted_input_id =
+                configuration_origin.accepted_input_id
+            AND origin_accepted.session_id = configuration_origin.session_id
+            AND origin_accepted.origin_turn_id = configuration_origin.turn_id
+           LEFT JOIN session_defaults_version AS origin_defaults
+             ON origin_defaults.session_id = configuration_origin.session_id
+            AND origin_defaults.version = configuration_origin.defaults_version
            LEFT JOIN model_call AS current_call
              ON current_call.turn_attempt_id = turn.current_attempt_id
             AND current_call.turn_id = turn.turn_id
@@ -2239,8 +2560,25 @@ async fn load_next_transcript_turn(
                 turn.active_tool_round_call_id
             AND active_tool_round.turn_id = turn.turn_id
             AND active_tool_round.session_id = turn.session_id
+           LEFT JOIN session_delegation_logical_terminal AS logical_terminal
+             ON logical_terminal.child_session_id = turn.session_id
+            AND logical_terminal.child_turn_id = turn.turn_id
+           LEFT JOIN session_delegation_event AS logical_terminal_event
+             ON logical_terminal_event.spawning_tool_request_id =
+                    logical_terminal.spawning_tool_request_id
+            AND logical_terminal_event.event_kind = 'outcome_recorded'
+            AND logical_terminal_event.provenance_command_id =
+                    logical_terminal.root_command_id
+            AND logical_terminal_event.outcome_kind = CASE
+                    logical_terminal.disposition_kind
+                    WHEN 'stopped' THEN 'child_stopped'
+                    WHEN 'cancelled' THEN 'child_cancelled'
+                END
           WHERE turn.session_id = $1
-            AND goal_turn_is_runtime_relevant(turn.session_id, turn.turn_id)
+            AND (
+                goal_turn_is_runtime_relevant(turn.session_id, turn.turn_id)
+                OR logical_terminal.child_turn_id IS NOT NULL
+            )
             AND ($2::numeric IS NULL OR turn.acceptance_position > $2)
           ORDER BY turn.acceptance_position
           LIMIT 1",
@@ -2283,28 +2621,324 @@ fn decode_database_count(
     u64::try_from(count).map_err(|_| ProcessReadCorruption::InvalidOrdinal(field).into())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn decode_transcript_turn_origin(
+    origin_kind: String,
+    origin_accepted_input: Option<Uuid>,
+    accepted_input: Option<Uuid>,
+    accepted_position: Option<Decimal>,
+    accepted_origin: Option<Uuid>,
+    accepted_content: Option<String>,
+    delegated_spawning_request: Option<Uuid>,
+    delegated_parent_session: Option<Uuid>,
+    delegated_parent_turn: Option<Uuid>,
+    delegated_task_content: Option<String>,
+    delegated_wake_first: Option<Decimal>,
+    delegated_wake_through: Option<Decimal>,
+    turn: TurnId,
+    acceptance_position: u64,
+) -> Result<DecodedTurnOrigin, ProcessReadError> {
+    match (
+        origin_kind.as_str(),
+        origin_accepted_input,
+        accepted_input,
+        accepted_position,
+        accepted_origin,
+        accepted_content,
+        delegated_spawning_request,
+        delegated_parent_session,
+        delegated_parent_turn,
+        delegated_task_content,
+        delegated_wake_first,
+        delegated_wake_through,
+    ) {
+        (
+            "accepted_input",
+            Some(origin_accepted_input),
+            Some(accepted_input),
+            Some(accepted_position),
+            Some(accepted_origin),
+            Some(content),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ) => {
+            let accepted_position = decode_positive(accepted_position, "accepted input position")?;
+            if origin_accepted_input != accepted_input
+                || accepted_position != acceptance_position
+                || accepted_origin != turn.into_uuid()
+                || content.is_empty()
+            {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("turn accepted-input correlation").into(),
+                );
+            }
+            Ok(DecodedTurnOrigin::AcceptedInput {
+                accepted_input: AcceptedInputId::from_uuid(accepted_input),
+                content,
+            })
+        }
+        (
+            "delegation",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(spawning_request),
+            Some(parent_session),
+            Some(parent_turn),
+            Some(content),
+            None,
+            None,
+        ) if !content.is_empty() => Ok(DecodedTurnOrigin::DelegatedTask {
+            spawning_request: ToolRequestId::from_uuid(spawning_request),
+            parent_session: SessionId::from_uuid(parent_session),
+            parent_turn: TurnId::from_uuid(parent_turn),
+            content,
+        }),
+        (
+            "delegation",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(first),
+            Some(through),
+        ) => {
+            let first = decode_positive(first, "delegation wake first delivery sequence")?;
+            let through = decode_positive(through, "delegation wake through delivery sequence")?;
+            if first > through {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("delegation wake delivery range").into(),
+                );
+            }
+            Ok(DecodedTurnOrigin::DelegationWake {
+                first_delivery_sequence: first,
+                through_delivery_sequence: through,
+            })
+        }
+        ("accepted_input" | "delegation", ..) => {
+            Err(ProcessReadCorruption::Inconsistent("turn origin correlation").into())
+        }
+        (value, ..) => Err(ProcessReadCorruption::Unsupported {
+            field: "turn origin kind",
+            value: value.to_owned(),
+        }
+        .into()),
+    }
+}
+
+fn decode_transcript_model_selection(
+    kind: String,
+    direct: Option<Uuid>,
+    alias: Option<Uuid>,
+) -> Result<ModelSelectionRequest, ProcessReadError> {
+    match (kind.as_str(), direct, alias) {
+        ("direct", Some(selection), None) => Ok(ModelSelectionRequest::Direct(
+            DirectModelSelection::from_uuid(selection),
+        )),
+        ("alias", None, Some(alias)) => {
+            Ok(ModelSelectionRequest::Alias(ModelAlias::from_uuid(alias)))
+        }
+        ("direct" | "alias", _, _) => {
+            Err(ProcessReadCorruption::Inconsistent("turn requested model shape").into())
+        }
+        _ => Err(ProcessReadCorruption::Unsupported {
+            field: "turn requested model kind",
+            value: kind,
+        }
+        .into()),
+    }
+}
+
+fn decode_transcript_frozen_model(
+    kind: String,
+    direct: Option<Uuid>,
+    alias: Option<Uuid>,
+    alias_selected: Option<Uuid>,
+) -> Result<FrozenModelSelection, ProcessReadError> {
+    match (kind.as_str(), direct, alias, alias_selected) {
+        ("direct", Some(selection), None, None) => Ok(FrozenModelSelection::Direct(
+            DirectModelSelection::from_uuid(selection),
+        )),
+        ("frozen_alias", None, Some(alias), Some(selected)) => {
+            Ok(FrozenModelSelection::FrozenAlias {
+                alias: ModelAlias::from_uuid(alias),
+                definition: FrozenAliasDefinition::selecting(DirectModelSelection::from_uuid(
+                    selected,
+                )),
+            })
+        }
+        ("direct" | "frozen_alias", _, _, _) => {
+            Err(ProcessReadCorruption::Inconsistent("turn frozen model shape").into())
+        }
+        _ => Err(ProcessReadCorruption::Unsupported {
+            field: "turn frozen model kind",
+            value: kind,
+        }
+        .into()),
+    }
+}
+
+fn requested_from_transcript_frozen(selection: &FrozenModelSelection) -> ModelSelectionRequest {
+    match selection {
+        FrozenModelSelection::Direct(selection) => ModelSelectionRequest::Direct(*selection),
+        FrozenModelSelection::FrozenAlias { alias, .. } => ModelSelectionRequest::Alias(*alias),
+    }
+}
+
+fn decode_transcript_turn_model_settings(
+    row: &PgRow,
+    turn: TurnId,
+    accepted_input: AcceptedInputId,
+) -> Result<Option<TurnModelSettingsResolved>, ProcessReadError> {
+    let stored_accepted: Option<Uuid> = row.try_get("settings_accepted_input_id")?;
+    let stored_turn: Option<Uuid> = row.try_get("settings_turn_id")?;
+    let stored_session: Option<Uuid> = row.try_get("settings_session_id")?;
+    let stored_defaults: Option<Decimal> = row.try_get("settings_defaults_version")?;
+    let stored_selected: Option<Uuid> = row.try_get("settings_selected_direct_id")?;
+    let stored_per_call: Option<Value> = row.try_get("settings_per_call_model_settings")?;
+    let stored_settings: Option<Value> = row.try_get("settings_resolved_model_settings")?;
+    let stored_adjustments: Option<Value> = row.try_get("settings_adjustments")?;
+    let absent = stored_accepted.is_none()
+        && stored_turn.is_none()
+        && stored_session.is_none()
+        && stored_defaults.is_none()
+        && stored_selected.is_none()
+        && stored_per_call.is_none()
+        && stored_settings.is_none()
+        && stored_adjustments.is_none();
+    if absent {
+        let evidence_required: bool = required(row, "origin_model_settings_evidence_required")?;
+        return if evidence_required {
+            Err(ProcessReadCorruption::Missing("turn model settings evidence").into())
+        } else {
+            Ok(None)
+        };
+    }
+    let (Some(stored_accepted), Some(stored_turn), Some(stored_session), Some(stored_defaults)) = (
+        stored_accepted,
+        stored_turn,
+        stored_session,
+        stored_defaults,
+    ) else {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings shape").into());
+    };
+    let Some(stored_selected) = stored_selected else {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings shape").into());
+    };
+    let Some(stored_per_call) = stored_per_call else {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings shape").into());
+    };
+    let Some(stored_settings) = stored_settings else {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings shape").into());
+    };
+    let Some(stored_adjustments) = stored_adjustments else {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings shape").into());
+    };
+    let turn_session: Uuid = required(row, "turn_session_id")?;
+    if AcceptedInputId::from_uuid(stored_accepted) != accepted_input
+        || TurnId::from_uuid(stored_turn) != turn
+        || stored_session != turn_session
+    {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings identity").into());
+    }
+    let defaults_version = defaults_version_from_numeric(stored_defaults)
+        .map_err(|_| ProcessReadCorruption::Inconsistent("turn model settings version"))?;
+    let origin_defaults = defaults_version_from_numeric(required(row, "origin_defaults_version")?)
+        .map_err(|_| ProcessReadCorruption::Inconsistent("turn origin defaults version"))?;
+    let requested = decode_transcript_model_selection(
+        required(row, "origin_requested_model_kind")?,
+        row.try_get("origin_requested_direct_id")?,
+        row.try_get("origin_requested_alias_id")?,
+    )?;
+    let frozen = decode_transcript_frozen_model(
+        required(row, "origin_frozen_model_kind")?,
+        row.try_get("origin_frozen_direct_id")?,
+        row.try_get("origin_frozen_alias_id")?,
+        row.try_get("origin_frozen_alias_selected_direct_id")?,
+    )?;
+    let per_call = model_settings_overlay_from_json(stored_per_call)
+        .map_err(|_| ProcessReadCorruption::Inconsistent("turn per-call model settings"))?;
+    let origin_per_call =
+        model_settings_overlay_from_json(required(row, "origin_model_settings_override")?)
+            .map_err(|_| ProcessReadCorruption::Inconsistent("turn accepted model settings"))?;
+    if defaults_version != origin_defaults
+        || requested != requested_from_transcript_frozen(&frozen)
+        || frozen.selected_direct().into_uuid() != stored_selected
+        || per_call != origin_per_call
+    {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings origin").into());
+    }
+    let event = TurnModelSettingsResolved::try_new(
+        accepted_input,
+        turn,
+        defaults_version,
+        frozen,
+        per_call,
+        model_settings_from_json(stored_settings)
+            .map_err(|_| ProcessReadCorruption::Inconsistent("turn resolved model settings"))?,
+        row.try_get::<Option<Uuid>, _>("settings_adjusted_from_selection_id")?
+            .map(DirectModelSelection::from_uuid),
+        model_change_adjustments_from_json(stored_adjustments)
+            .map_err(|_| ProcessReadCorruption::Inconsistent("turn model setting adjustments"))?,
+    )
+    .ok_or(ProcessReadCorruption::Inconsistent(
+        "turn model settings evidence",
+    ))?;
+    let origin_defaults =
+        model_settings_from_json(required(row, "origin_defaults_model_settings")?)
+            .map_err(|_| ProcessReadCorruption::Inconsistent("turn defaults model settings"))?;
+    if !crate::model_settings_resolution::matches_defaults(&event, origin_defaults) {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings defaults").into());
+    }
+    Ok(Some(event))
+}
+
 fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> {
     let turn = TurnId::from_uuid(required(row, "turn_id")?);
     let acceptance_position = decode_positive(
         required(row, "acceptance_position")?,
         "turn acceptance position",
     )?;
-    let origin_accepted_input =
-        AcceptedInputId::from_uuid(required(row, "origin_accepted_input_id")?);
-    let accepted_input = AcceptedInputId::from_uuid(required(row, "accepted_input_id")?);
-    let accepted_position = decode_positive(
-        required(row, "accepted_position")?,
-        "accepted input position",
+    let origin_kind: String = required(row, "origin_kind")?;
+    let origin = decode_transcript_turn_origin(
+        origin_kind,
+        row.try_get("origin_accepted_input_id")?,
+        row.try_get("accepted_input_id")?,
+        row.try_get("accepted_position")?,
+        row.try_get("origin_turn_id")?,
+        row.try_get("accepted_content")?,
+        row.try_get("delegated_spawning_tool_request_id")?,
+        row.try_get("delegated_parent_session_id")?,
+        row.try_get("delegated_parent_turn_id")?,
+        row.try_get("delegated_task_content")?,
+        row.try_get("delegated_wake_first_delivery_sequence")?,
+        row.try_get("delegated_wake_through_delivery_sequence")?,
+        turn,
+        acceptance_position,
     )?;
-    let accepted_origin = TurnId::from_uuid(required(row, "origin_turn_id")?);
-    let accepted_content: String = required(row, "accepted_content")?;
-    if origin_accepted_input != accepted_input
-        || accepted_position != acceptance_position
-        || accepted_origin != turn
-        || accepted_content.is_empty()
-    {
-        return Err(ProcessReadCorruption::Inconsistent("turn accepted-input correlation").into());
-    }
+    let logical_terminal = decode_logical_delegation_terminal(row)?;
+    // The accepted-input correlation checks now live in
+    // `decode_transcript_turn_origin`, which also admits delegation origins.
+    // Model-settings evidence is keyed by the originating accepted input, and
+    // the schema forbids one on a delegation-origin turn, so those decode to no
+    // resolved settings instead of demanding structurally absent evidence.
+    let model_settings = match &origin {
+        DecodedTurnOrigin::AcceptedInput { accepted_input, .. } => {
+            decode_transcript_turn_model_settings(row, turn, *accepted_input)?
+        }
+        DecodedTurnOrigin::DelegatedTask { .. } | DecodedTurnOrigin::DelegationWake { .. } => None,
+    };
     let state_kind: String = required(row, "state_kind")?;
     let start_lineage_kind: Option<String> = row.try_get("start_lineage_kind")?;
     let immediate_predecessor: Option<Uuid> = row.try_get("immediate_predecessor_turn_id")?;
@@ -2337,6 +2971,10 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     let terminal_frontier: Option<Uuid> = row.try_get("terminal_frontier_id")?;
     let active_phase: Option<String> = row.try_get("active_phase_kind")?;
     let current_attempt: Option<Uuid> = row.try_get("current_attempt_id")?;
+    let child_wait_request: Option<Uuid> = row.try_get("child_wait_request_id")?;
+    let child_wait_spawning_request: Option<Uuid> =
+        row.try_get("child_wait_spawning_request_id")?;
+    let child_wait_child: Option<Uuid> = row.try_get("child_wait_child_session_id")?;
     let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
     let recovery_call: Option<Uuid> = row.try_get("recovery_model_call_id")?;
     let active_tool_round_call: Option<Uuid> = row.try_get("active_tool_round_call_id")?;
@@ -2378,6 +3016,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             "running"
                 | "awaiting_model_call_recovery"
                 | "awaiting_tool_approval"
+                | "awaiting_child"
                 | "awaiting_tool_recovery"
         )
     {
@@ -2442,6 +3081,64 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     let recovery_model_call_frontier =
         recovery_model_call_frontier.map(ContextFrontierId::from_uuid);
 
+    if matches!(active_phase.as_deref(), Some("awaiting_child")) {
+        let (
+            Some(starting_frontier),
+            Some(awaiting_request),
+            Some(spawning_request),
+            Some(child),
+            Some(_producing_call),
+            Some(tool_frontier),
+        ) = (
+            starting_frontier,
+            child_wait_request,
+            child_wait_spawning_request,
+            child_wait_child,
+            active_tool_round_call,
+            active_tool_round_frontier,
+        )
+        else {
+            return Err(ProcessReadCorruption::Inconsistent("child wait shape").into());
+        };
+        if state_kind != "active"
+            || terminal_frontier.is_some()
+            || current_attempt.is_some()
+            || terminal_disposition.is_some()
+            || approval_tool_request.is_some()
+            || recovery_call.is_some()
+            || recovery_tool_attempt.is_some()
+            || terminal_attempt.is_some()
+            || terminal_call.is_some()
+            || terminal_tool_attempt.is_some()
+            || current_model_call.is_some()
+            || current_model_call_frontier.is_some()
+            || recovery_model_call_frontier.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("child wait shape").into());
+        }
+        let latest_frontier = ContextFrontierId::from_uuid(tool_frontier);
+        if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
+            return Err(ProcessReadCorruption::Inconsistent("child wait frontier").into());
+        }
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    model_settings,
+                    state: ProcessTurnState::ActiveAwaitingChild {
+                        awaiting_request: ToolRequestId::from_uuid(awaiting_request),
+                        spawning_request: ToolRequestId::from_uuid(spawning_request),
+                        child: SessionId::from_uuid(child),
+                    },
+                },
+                start_lineage,
+                latest_frontier: Some(latest_frontier),
+            },
+            logical_terminal,
+        );
+    }
+
     if matches!(active_phase.as_deref(), Some("awaiting_tool_approval")) {
         let (Some(starting_frontier), Some(_producing_call), Some(request), Some(tool_frontier)) = (
             starting_frontier,
@@ -2470,17 +3167,21 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
             return Err(ProcessReadCorruption::Inconsistent("tool approval frontier").into());
         }
-        return Ok(DecodedTurn {
-            turn: ProcessTranscriptTurn {
-                turn,
-                acceptance_position,
-                state: ProcessTurnState::ActiveAwaitingToolApproval {
-                    request: ToolRequestId::from_uuid(request),
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    model_settings,
+                    state: ProcessTurnState::ActiveAwaitingToolApproval {
+                        request: ToolRequestId::from_uuid(request),
+                    },
                 },
+                start_lineage,
+                latest_frontier: Some(latest_frontier),
             },
-            start_lineage,
-            latest_frontier: Some(latest_frontier),
-        });
+            logical_terminal,
+        );
     }
 
     if matches!(active_phase.as_deref(), Some("awaiting_tool_recovery")) {
@@ -2518,18 +3219,22 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
             return Err(ProcessReadCorruption::Inconsistent("tool recovery frontier").into());
         }
-        return Ok(DecodedTurn {
-            turn: ProcessTranscriptTurn {
-                turn,
-                acceptance_position,
-                state: ProcessTurnState::ActiveAwaitingToolRecovery {
-                    ended_attempt: TurnAttemptId::from_uuid(ended_attempt),
-                    recovery_attempt: ToolAttemptId::from_uuid(recovery_attempt),
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    model_settings,
+                    state: ProcessTurnState::ActiveAwaitingToolRecovery {
+                        ended_attempt: TurnAttemptId::from_uuid(ended_attempt),
+                        recovery_attempt: ToolAttemptId::from_uuid(recovery_attempt),
+                    },
                 },
+                start_lineage,
+                latest_frontier: Some(latest_frontier),
             },
-            start_lineage,
-            latest_frontier: Some(latest_frontier),
-        });
+            logical_terminal,
+        );
     }
 
     if matches!(active_phase.as_deref(), Some("running")) && active_tool_round_call.is_some() {
@@ -2559,18 +3264,22 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
             return Err(ProcessReadCorruption::Inconsistent("running tool frontier").into());
         }
-        return Ok(DecodedTurn {
-            turn: ProcessTranscriptTurn {
-                turn,
-                acceptance_position,
-                state: ProcessTurnState::ActiveRunning {
-                    current_attempt: TurnAttemptId::from_uuid(attempt),
-                    current_model_call: None,
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    model_settings,
+                    state: ProcessTurnState::ActiveRunning {
+                        current_attempt: TurnAttemptId::from_uuid(attempt),
+                        current_model_call: None,
+                    },
                 },
+                start_lineage,
+                latest_frontier: Some(latest_frontier),
             },
-            start_lineage,
-            latest_frontier: Some(latest_frontier),
-        });
+            logical_terminal,
+        );
     }
 
     if state_kind == "terminal"
@@ -2596,21 +3305,25 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         {
             return Err(ProcessReadCorruption::Inconsistent("tool reconciliation shape").into());
         }
-        return Ok(DecodedTurn {
-            turn: ProcessTranscriptTurn {
-                turn,
-                acceptance_position,
-                state: ProcessTurnState::ReconciliationRequired {
-                    terminal_frontier: ContextFrontierId::from_uuid(frontier),
-                    terminal_attempt: TurnAttemptId::from_uuid(attempt),
-                    operation: ProcessReconciliationOperation::ToolAttempt(
-                        ToolAttemptId::from_uuid(tool_attempt),
-                    ),
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    model_settings,
+                    state: ProcessTurnState::ReconciliationRequired {
+                        terminal_frontier: ContextFrontierId::from_uuid(frontier),
+                        terminal_attempt: TurnAttemptId::from_uuid(attempt),
+                        operation: ProcessReconciliationOperation::ToolAttempt(
+                            ToolAttemptId::from_uuid(tool_attempt),
+                        ),
+                    },
                 },
+                start_lineage,
+                latest_frontier: Some(ContextFrontierId::from_uuid(frontier)),
             },
-            start_lineage,
-            latest_frontier: Some(ContextFrontierId::from_uuid(frontier)),
-        });
+            logical_terminal,
+        );
     }
 
     if active_tool_round_call.is_some()
@@ -2635,13 +3348,36 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         terminal_call_disposition.as_deref(),
         current_model_call,
     ) {
-        ("queued", None, None, None, None, None, None, None, None, None, None) => (
-            ProcessTurnState::Queued {
-                accepted_input,
-                content: accepted_content,
-            },
-            None,
-        ),
+        ("queued", None, None, None, None, None, None, None, None, None, None) => {
+            let state = match origin {
+                DecodedTurnOrigin::AcceptedInput {
+                    accepted_input,
+                    content,
+                } => ProcessTurnState::Queued {
+                    accepted_input,
+                    content,
+                },
+                DecodedTurnOrigin::DelegatedTask {
+                    spawning_request,
+                    parent_session,
+                    parent_turn,
+                    content,
+                } => ProcessTurnState::QueuedDelegated {
+                    spawning_request,
+                    parent_session,
+                    parent_turn,
+                    content,
+                },
+                DecodedTurnOrigin::DelegationWake {
+                    first_delivery_sequence,
+                    through_delivery_sequence,
+                } => ProcessTurnState::QueuedDelegationWake {
+                    first_delivery_sequence,
+                    through_delivery_sequence,
+                },
+            };
+            (state, None)
+        }
         (
             "active",
             Some(frontier),
@@ -2869,15 +3605,114 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         }
     };
 
-    Ok(DecodedTurn {
-        turn: ProcessTranscriptTurn {
-            turn,
-            acceptance_position,
-            state,
+    project_logical_delegation_terminal(
+        DecodedTurn {
+            turn: ProcessTranscriptTurn {
+                turn,
+                acceptance_position,
+                model_settings,
+                state,
+            },
+            start_lineage,
+            latest_frontier,
         },
-        start_lineage,
-        latest_frontier,
-    })
+        logical_terminal,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct LogicalDelegationTerminalProjection {
+    spawning_request: ToolRequestId,
+    terminal_frontier: ContextFrontierId,
+    outcome: DispatchedDelegationOutcome,
+    reason: DispatchedDelegationReason,
+    provenance: DispatchedDelegationProvenance,
+}
+
+fn decode_logical_delegation_terminal(
+    row: &PgRow,
+) -> Result<Option<LogicalDelegationTerminalProjection>, ProcessReadError> {
+    let spawning_request: Option<Uuid> = row.try_get("logical_terminal_spawning_request_id")?;
+    let terminal_frontier: Option<Uuid> = row.try_get("logical_terminal_frontier_id")?;
+    let outcome: Option<String> = row.try_get("logical_terminal_outcome_kind")?;
+    let reason: Option<String> = row.try_get("logical_terminal_reason_kind")?;
+    match (spawning_request, outcome.as_deref(), reason.as_deref()) {
+        (None, None, None) => Ok(None),
+        (Some(spawning_request), Some(outcome), Some(reason)) => {
+            let terminal_frontier = terminal_frontier.ok_or(
+                ProcessReadCorruption::Inconsistent("logical delegation terminal frontier"),
+            )?;
+            let outcome = decode_delegation_outcome(outcome).map_err(|_| {
+                ProcessReadCorruption::Inconsistent("logical delegation terminal outcome")
+            })?;
+            let reason = decode_delegation_reason(reason).map_err(|_| {
+                ProcessReadCorruption::Inconsistent("logical delegation terminal reason")
+            })?;
+            let provenance = decode_delegation_provenance(row).map_err(|_| {
+                ProcessReadCorruption::Inconsistent("logical delegation terminal provenance")
+            })?;
+            if !matches!(
+                (outcome, reason),
+                (
+                    DispatchedDelegationOutcome::ChildStopped,
+                    DispatchedDelegationReason::ParentStoppedWithDescendants
+                ) | (
+                    DispatchedDelegationOutcome::ChildStopped,
+                    DispatchedDelegationReason::ParentCancelledWithDescendants
+                ) | (
+                    DispatchedDelegationOutcome::ChildCancelled,
+                    DispatchedDelegationReason::ParentStoppedWithDescendants
+                ) | (
+                    DispatchedDelegationOutcome::ChildCancelled,
+                    DispatchedDelegationReason::ParentCancelledWithDescendants
+                )
+            ) || !matches!(
+                provenance,
+                DispatchedDelegationProvenance::ParentTurnCommand { .. }
+                    | DispatchedDelegationProvenance::ParentGoalCommand { .. }
+            ) {
+                return Err(ProcessReadCorruption::Inconsistent(
+                    "logical delegation terminal shape",
+                )
+                .into());
+            }
+            Ok(Some(LogicalDelegationTerminalProjection {
+                spawning_request: ToolRequestId::from_uuid(spawning_request),
+                terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                outcome,
+                reason,
+                provenance,
+            }))
+        }
+        _ => Err(
+            ProcessReadCorruption::Inconsistent("logical delegation terminal correlation").into(),
+        ),
+    }
+}
+
+fn project_logical_delegation_terminal(
+    mut decoded: DecodedTurn,
+    logical_terminal: Option<LogicalDelegationTerminalProjection>,
+) -> Result<DecodedTurn, ProcessReadError> {
+    if let Some(logical_terminal) = logical_terminal {
+        decoded.turn.state = ProcessTurnState::DelegationTerminated {
+            spawning_request: logical_terminal.spawning_request,
+            outcome: logical_terminal.outcome,
+            reason: logical_terminal.reason,
+            provenance: logical_terminal.provenance,
+        };
+        // The physical decode observed a mid-execution boundary, but the
+        // cascade froze this turn at the logical terminal's frontier and every
+        // successor chains from it. Rendering the physical frontier would show
+        // execution evidence no successor model call ever saw, and would vanish
+        // from the same transcript as soon as a successor activates. A turn
+        // terminalized while still queued started no execution lineage at all,
+        // so it keeps the absent frontier its start lineage pairs with.
+        if decoded.start_lineage.is_some() {
+            decoded.latest_frontier = Some(logical_terminal.terminal_frontier);
+        }
+    }
+    Ok(decoded)
 }
 
 async fn open_transcript_entry_cursor(
@@ -2930,6 +3765,33 @@ async fn open_transcript_entry_cursor(
             entry.context_summary_first_entry_id,
             entry.context_summary_through_source_session_id,
             entry.context_summary_through_entry_id,
+            entry.delegated_task_spawning_tool_request_id,
+            entry.delegation_message_id,
+            entry.delegation_result_awaiting_tool_request_id,
+            entry.delegation_result_spawning_tool_request_id,
+            delegated_task.task_content AS delegated_task_content,
+            task_relation.parent_session_id AS delegated_task_parent_session_id,
+            task_relation.parent_turn_id AS delegated_task_parent_turn_id,
+            delegated_message.spawning_tool_request_id AS delegation_message_spawning_request_id,
+            delegated_message.event_ordinal AS delegation_message_ordinal,
+            delegated_message.content_text AS delegation_message_content,
+            message_delivery.recipient_session_id AS delegation_message_recipient_session_id,
+            message_delivery.delivery_sequence AS delegation_message_delivery_sequence,
+            CASE delegated_message.direction
+                WHEN 'parent_to_child' THEN message_relation.parent_session_id
+                WHEN 'child_to_parent' THEN message_relation.child_session_id
+            END AS delegation_message_sender_session_id,
+            delegated_wait.child_session_id AS delegation_result_child_session_id,
+            delegated_wait.wait_mode AS delegation_result_wait_mode,
+            result_delivery.delivery_sequence AS delegation_result_delivery_sequence,
+            delegated_result.outcome_kind AS delegation_result_outcome_kind,
+            delegated_result.content_text AS delegation_result_content,
+            result_event.reason_kind AS delegation_result_reason_kind,
+            result_event.provenance_kind,
+            result_event.provenance_session_id,
+            result_event.provenance_turn_id,
+            result_event.provenance_goal_generation,
+            result_event.provenance_command_id,
             imported.source_speaker_kind AS imported_source_speaker_kind,
             imported.content_encoding AS imported_content_encoding,
             accepted.content_text AS origin_content,
@@ -2981,6 +3843,44 @@ async fn open_transcript_entry_cursor(
                     entry.imported_conversation_id
             AND imported.imported_transcript_entry_id =
                     entry.imported_transcript_entry_id
+           LEFT JOIN session_delegation_initial_task AS delegated_task
+             ON delegated_task.spawning_tool_request_id =
+                    entry.delegated_task_spawning_tool_request_id
+            AND delegated_task.child_session_id = entry.source_session_id
+            AND delegated_task.semantic_entry_id = entry.semantic_entry_id
+           LEFT JOIN session_delegation AS task_relation
+             ON task_relation.spawning_tool_request_id =
+                    delegated_task.spawning_tool_request_id
+           LEFT JOIN session_message_delivery AS message_delivery
+             ON message_delivery.message_id = entry.delegation_message_id
+            AND message_delivery.recipient_session_id = entry.source_session_id
+           LEFT JOIN session_message AS delegated_message
+             ON delegated_message.message_id = message_delivery.message_id
+            AND delegated_message.spawning_tool_request_id =
+                    message_delivery.spawning_tool_request_id
+           LEFT JOIN session_delegation AS message_relation
+             ON message_relation.spawning_tool_request_id =
+                    delegated_message.spawning_tool_request_id
+           LEFT JOIN session_child_result_delivery AS result_delivery
+             ON result_delivery.awaiting_tool_request_id =
+                    entry.delegation_result_awaiting_tool_request_id
+            AND result_delivery.spawning_tool_request_id =
+                    entry.delegation_result_spawning_tool_request_id
+            AND result_delivery.parent_session_id = entry.source_session_id
+           LEFT JOIN session_delegation_wait AS delegated_wait
+             ON delegated_wait.awaiting_tool_request_id =
+                    result_delivery.awaiting_tool_request_id
+            AND delegated_wait.spawning_tool_request_id =
+                    result_delivery.spawning_tool_request_id
+            AND delegated_wait.parent_session_id = result_delivery.parent_session_id
+           LEFT JOIN session_child_result AS delegated_result
+             ON delegated_result.spawning_tool_request_id =
+                    result_delivery.spawning_tool_request_id
+           LEFT JOIN session_delegation_event AS result_event
+             ON result_event.spawning_tool_request_id =
+                    delegated_result.spawning_tool_request_id
+            AND result_event.event_ordinal = delegated_result.event_ordinal
+            AND result_event.event_kind = delegated_result.event_kind
           ORDER BY member.member_position",
     )
     .bind(session_id_to_uuid(session))
@@ -3076,6 +3976,207 @@ fn decode_transcript_entry(
     let result_error_detail: Option<String> = row.try_get("result_error_detail")?;
     let transcript_decision_kind: Option<String> = row.try_get("transcript_decision_kind")?;
     let transcript_denial_reason: Option<String> = row.try_get("transcript_denial_reason")?;
+    let delegated_task_spawning_request: Option<Uuid> =
+        row.try_get("delegated_task_spawning_tool_request_id")?;
+    let delegation_message: Option<Uuid> = row.try_get("delegation_message_id")?;
+    let delegation_result_awaiting_request: Option<Uuid> =
+        row.try_get("delegation_result_awaiting_tool_request_id")?;
+    let delegation_result_spawning_request: Option<Uuid> =
+        row.try_get("delegation_result_spawning_tool_request_id")?;
+    let delegated_task_content: Option<String> = row.try_get("delegated_task_content")?;
+    let delegated_task_parent_session: Option<Uuid> =
+        row.try_get("delegated_task_parent_session_id")?;
+    let delegated_task_parent_turn: Option<Uuid> = row.try_get("delegated_task_parent_turn_id")?;
+    let delegation_message_spawning_request: Option<Uuid> =
+        row.try_get("delegation_message_spawning_request_id")?;
+    let delegation_message_ordinal: Option<Decimal> = row.try_get("delegation_message_ordinal")?;
+    let delegation_message_content: Option<String> = row.try_get("delegation_message_content")?;
+    let delegation_message_sender: Option<Uuid> =
+        row.try_get("delegation_message_sender_session_id")?;
+    let delegation_message_recipient: Option<Uuid> =
+        row.try_get("delegation_message_recipient_session_id")?;
+    let delegation_message_delivery_sequence: Option<Decimal> =
+        row.try_get("delegation_message_delivery_sequence")?;
+    let delegation_result_child: Option<Uuid> =
+        row.try_get("delegation_result_child_session_id")?;
+    let delegation_result_wait_mode: Option<String> = row.try_get("delegation_result_wait_mode")?;
+    let delegation_result_delivery_sequence: Option<Decimal> =
+        row.try_get("delegation_result_delivery_sequence")?;
+    let delegation_result_outcome: Option<String> =
+        row.try_get("delegation_result_outcome_kind")?;
+    let delegation_result_content: Option<String> = row.try_get("delegation_result_content")?;
+    let delegation_result_reason: Option<String> = row.try_get("delegation_result_reason_kind")?;
+
+    let legacy_payload_present = origin.is_some()
+        || steering_source_turn.is_some()
+        || failed_turn.is_some()
+        || assistant_text.is_some()
+        || producing_call.is_some()
+        || tool_request.is_some()
+        || tool_result_attempt.is_some()
+        || completed_turn.is_some()
+        || cancelled_turn.is_some()
+        || imported_conversation.is_some()
+        || imported_entry.is_some()
+        || model_identity_turn.is_some()
+        || model_identity_defaults_version.is_some()
+        || model_identity_direct_selection.is_some()
+        || context_summary_value.is_some()
+        || context_summary_call.is_some()
+        || context_summary_first_source_session.is_some()
+        || context_summary_first_entry.is_some()
+        || context_summary_through_source_session.is_some()
+        || context_summary_through_entry.is_some();
+
+    if payload_kind == "delegated_task" {
+        let (Some(spawning_request), Some(parent_session), Some(parent_turn), Some(content)) = (
+            delegated_task_spawning_request,
+            delegated_task_parent_session,
+            delegated_task_parent_turn,
+            delegated_task_content,
+        ) else {
+            return Err(ProcessReadCorruption::Inconsistent("delegated-task entry shape").into());
+        };
+        if legacy_payload_present
+            || tool_result_request.is_some()
+            || delegation_message.is_some()
+            || delegation_result_awaiting_request.is_some()
+            || delegation_result_spawning_request.is_some()
+            || content.is_empty()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("delegated-task entry shape").into());
+        }
+        return Ok(ProcessTranscriptEntry::DelegatedTask {
+            entry_index,
+            source_session,
+            entry,
+            spawning_request: ToolRequestId::from_uuid(spawning_request),
+            parent_session: SessionId::from_uuid(parent_session),
+            parent_turn: TurnId::from_uuid(parent_turn),
+            content,
+        });
+    }
+
+    if payload_kind == "delegation_message" {
+        let (
+            Some(message),
+            Some(spawning_request),
+            Some(sender),
+            Some(recipient),
+            Some(ordinal),
+            Some(delivery_sequence),
+            Some(content),
+        ) = (
+            delegation_message,
+            delegation_message_spawning_request,
+            delegation_message_sender,
+            delegation_message_recipient,
+            delegation_message_ordinal,
+            delegation_message_delivery_sequence,
+            delegation_message_content,
+        )
+        else {
+            return Err(
+                ProcessReadCorruption::Inconsistent("delegation-message entry shape").into(),
+            );
+        };
+        if legacy_payload_present
+            || tool_result_request.is_some()
+            || delegated_task_spawning_request.is_some()
+            || delegation_result_awaiting_request.is_some()
+            || delegation_result_spawning_request.is_some()
+            || recipient != source_session.into_uuid()
+            || content.is_empty()
+        {
+            return Err(
+                ProcessReadCorruption::Inconsistent("delegation-message entry shape").into(),
+            );
+        }
+        return Ok(ProcessTranscriptEntry::DelegationMessage {
+            entry_index,
+            source_session,
+            entry,
+            spawning_request: ToolRequestId::from_uuid(spawning_request),
+            message: DelegationMessageId::from_uuid(message),
+            sender: SessionId::from_uuid(sender),
+            recipient: SessionId::from_uuid(recipient),
+            ordinal: decode_positive(ordinal, "delegation message ordinal")?,
+            delivery_sequence: decode_positive(
+                delivery_sequence,
+                "delegation message delivery sequence",
+            )?,
+            content,
+        });
+    }
+
+    if payload_kind == "delegation_result" {
+        let (
+            Some(awaiting_request),
+            Some(spawning_request),
+            Some(child),
+            Some(wait_mode),
+            Some(outcome),
+            Some(reason),
+        ) = (
+            delegation_result_awaiting_request,
+            delegation_result_spawning_request,
+            delegation_result_child,
+            delegation_result_wait_mode.as_deref(),
+            delegation_result_outcome.as_deref(),
+            delegation_result_reason.as_deref(),
+        )
+        else {
+            return Err(
+                ProcessReadCorruption::Inconsistent("delegation-result entry shape").into(),
+            );
+        };
+        let mode = decode_wait_mode(wait_mode)
+            .map_err(|_| ProcessReadCorruption::Inconsistent("delegation-result wait mode"))?;
+        let delivery_sequence = delegation_result_delivery_sequence
+            .map(|value| decode_positive(value, "delegation result delivery sequence"))
+            .transpose()?;
+        let foreground_correlation = tool_result_request == Some(awaiting_request);
+        if legacy_payload_present
+            || delegated_task_spawning_request.is_some()
+            || delegation_message.is_some()
+            || (mode == DispatchedDelegationWaitMode::Foreground
+                && (!foreground_correlation || delivery_sequence.is_some()))
+            || (mode == DispatchedDelegationWaitMode::Background
+                && (tool_result_request.is_some() || delivery_sequence.is_none()))
+        {
+            return Err(
+                ProcessReadCorruption::Inconsistent("delegation-result entry shape").into(),
+            );
+        }
+        return Ok(ProcessTranscriptEntry::DelegationResult {
+            entry_index,
+            source_session,
+            entry,
+            awaiting_request: ToolRequestId::from_uuid(awaiting_request),
+            spawning_request: ToolRequestId::from_uuid(spawning_request),
+            child: SessionId::from_uuid(child),
+            mode,
+            delivery_sequence,
+            outcome: decode_delegation_outcome(outcome)
+                .map_err(|_| ProcessReadCorruption::Inconsistent("delegation-result outcome"))?,
+            content: delegation_result_content,
+            reason: decode_delegation_reason(reason)
+                .map_err(|_| ProcessReadCorruption::Inconsistent("delegation-result reason"))?,
+            provenance: decode_delegation_provenance(row)
+                .map_err(|_| ProcessReadCorruption::Inconsistent("delegation-result provenance"))?,
+        });
+    }
+
+    if delegated_task_spawning_request.is_some()
+        || delegation_message.is_some()
+        || delegation_result_awaiting_request.is_some()
+        || delegation_result_spawning_request.is_some()
+    {
+        return Err(
+            ProcessReadCorruption::Inconsistent("non-delegation semantic entry fields").into(),
+        );
+    }
+
     let transcript_approval = decode_process_tool_approval(row)?;
 
     if payload_kind == "context_summary" {
@@ -3749,12 +4850,13 @@ fn decode_positive(value: Decimal, field: &'static str) -> Result<u64, ProcessRe
 
 #[cfg(test)]
 mod tests {
-    use signalbox_domain::TurnId;
+    use rust_decimal::Decimal;
+    use signalbox_domain::{SessionId, ToolRequestId, TurnId};
     use sqlx::types::Uuid;
 
     use super::{
-        ProcessModelCallInputTokenSemantics, ProcessModelCallUsageProvenance,
-        decode_execution_lineage_tip,
+        DecodedTurnOrigin, ProcessModelCallInputTokenSemantics, ProcessModelCallUsageProvenance,
+        decode_execution_lineage_tip, decode_transcript_turn_origin,
     };
 
     fn turn(value: u128) -> TurnId {
@@ -3779,6 +4881,119 @@ mod tests {
     #[test]
     fn inv032_latest_frontier_rejects_branched_execution_lineage() {
         assert!(decode_execution_lineage_tip(3, 1, 3, 2, true, false, Some(turn(2))).is_err());
+    }
+
+    #[test]
+    fn delegated_transcript_origin_retains_exact_spawn_provenance() {
+        let current_turn = turn(1);
+        let spawning_request = Uuid::from_u128(2);
+        let parent_session = Uuid::from_u128(3);
+        let parent_turn = Uuid::from_u128(4);
+        let content = String::from("delegated task");
+        let decoded = decode_transcript_turn_origin(
+            String::from("delegation"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(spawning_request),
+            Some(parent_session),
+            Some(parent_turn),
+            Some(content.clone()),
+            None,
+            None,
+            current_turn,
+            1,
+        )
+        .expect("a complete delegated task origin is readable");
+        let DecodedTurnOrigin::DelegatedTask {
+            spawning_request: decoded_request,
+            parent_session: decoded_session,
+            parent_turn: decoded_turn,
+            content: decoded_content,
+        } = decoded
+        else {
+            panic!("the delegated fixture retains its origin family")
+        };
+        assert_eq!(decoded_request, ToolRequestId::from_uuid(spawning_request));
+        assert_eq!(decoded_session, SessionId::from_uuid(parent_session));
+        assert_eq!(decoded_turn, TurnId::from_uuid(parent_turn));
+        assert_eq!(decoded_content, content);
+    }
+
+    #[test]
+    fn delegated_transcript_origin_rejects_missing_spawn_provenance() {
+        let error = decode_transcript_turn_origin(
+            String::from("delegation"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Uuid::from_u128(3)),
+            Some(Uuid::from_u128(4)),
+            Some(String::from("delegated task")),
+            None,
+            None,
+            turn(1),
+            1,
+        )
+        .expect_err("delegated origin provenance is all-or-nothing");
+        assert!(error.to_string().contains("turn origin correlation"));
+    }
+
+    #[test]
+    fn delegation_wake_origin_retains_exact_delivery_range() {
+        let decoded = decode_transcript_turn_origin(
+            String::from("delegation"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Decimal::from(2)),
+            Some(Decimal::from(4)),
+            turn(1),
+            2,
+        )
+        .expect("a complete delegation wake origin is readable");
+        let DecodedTurnOrigin::DelegationWake {
+            first_delivery_sequence,
+            through_delivery_sequence,
+        } = decoded
+        else {
+            panic!("the wake fixture retains its origin family")
+        };
+        assert_eq!(first_delivery_sequence, 2);
+        assert_eq!(through_delivery_sequence, 4);
+    }
+
+    #[test]
+    fn delegation_wake_origin_rejects_reversed_delivery_range() {
+        let error = decode_transcript_turn_origin(
+            String::from("delegation"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Decimal::from(4)),
+            Some(Decimal::from(2)),
+            turn(1),
+            2,
+        )
+        .expect_err("a delegation wake range cannot run backward");
+        assert!(error.to_string().contains("delegation wake delivery range"));
     }
 
     #[test]

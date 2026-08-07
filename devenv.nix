@@ -48,7 +48,15 @@ let
   # on whatever the developer keeps in their real home directory.
   daemonHome = "${stateRoot}/home";
 
+  # Everything the dev instance publishes on the daemon's own PATH, and
+  # nothing else. It holds one symlink, to the built MCP bridge, so a
+  # developer who uncomments the example's `[claude_cli]` block can name that
+  # program instead of deriving a path into `target/` by hand. Pointing PATH
+  # at the build directory itself would publish every workspace binary.
+  daemonBinDirectory = "${stateRoot}/bin";
+
   daemonConfigFile = "${stateRoot}/signalboxd.toml";
+  daemonRuntimeConfigFile = "${daemonSocketDirectory}/signalboxd.toml";
   daemonTemplateConfigFile = "${stateRoot}/session-templates.toml";
   daemonBraveApiKeyFile = "${stateRoot}/brave-api-key";
 
@@ -146,6 +154,7 @@ let
   # discover the workspace toolchain file.
   workspaceRustToolchain =
     (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
+  tomlPython = pkgs.python3.withPackages (pythonPackages: [ pythonPackages.tomlkit ]);
 in
 
 {
@@ -208,6 +217,42 @@ in
             signalbox-client signalbox
       )" || exit $?
       exec "$executable" "$@"
+    '';
+  };
+
+  scripts.signalbox-materialize-config = {
+    description = "Resolve the daemon exec-supervisor placeholder in a config copy.";
+    exec = ''
+      if [ "$#" -ne 3 ]; then
+        echo "usage: signalbox-materialize-config <source> <destination> <exec-supervisor>" >&2
+        exit 2
+      fi
+      ${tomlPython}/bin/python3 -c ${shellArg ''
+        import sys
+        from pathlib import Path
+
+        import tomlkit
+
+        source_path = Path(sys.argv[1])
+        destination_path = Path(sys.argv[2])
+        supervisor = sys.argv[3]
+        content = source_path.read_text()
+        document = tomlkit.parse(content)
+        placeholder = "/usr/local/bin/signalbox-exec-supervisor"
+        daemon_tools = document.get("daemon_tools")
+        if daemon_tools is None:
+            daemon_tools = tomlkit.table()
+            daemon_tools["exec_supervisor_executable"] = supervisor
+            document["daemon_tools"] = daemon_tools
+            content = tomlkit.dumps(document)
+        elif (
+            isinstance(daemon_tools, dict)
+            and daemon_tools.get("exec_supervisor_executable") == placeholder
+        ):
+            daemon_tools["exec_supervisor_executable"] = supervisor
+            content = tomlkit.dumps(document)
+        destination_path.write_text(content)
+      ''} "$1" "$2" "$3"
     '';
   };
 
@@ -411,36 +456,37 @@ in
       # registry and the ambient certificate variables to reach crates.io.
       # Only the daemon itself runs scrubbed.
       #
-      # The artifact path comes from Cargo's own build output rather than an
-      # assumed $target_dir/debug: a developer with `build.target` in their
-      # Cargo configuration, or CARGO_BUILD_TARGET in the environment — both
-      # inherited here, because this build is deliberately unscrubbed — gets
-      # the executable under $target_dir/<triple>/debug instead. Diagnostics
-      # still render to stderr; only the JSON artifact stream is captured.
-      daemon_executable="$(
-        cargo build --package signalboxd --bin signalboxd \
-          --message-format=json-render-diagnostics |
-          python3 -c "import json, sys; print([message['executable'] for message in map(json.loads, sys.stdin) if message.get('executable')][-1])"
-      )"
-
-      # Resolving the artifact says where Cargo put it, not whether this host
-      # can run it: a configured foreign target with a working cross toolchain
-      # builds successfully and only the exec below fails. Compare against the
-      # two layouts a host build produces — plain, and an explicitly named host
-      # target — and refuse anything else with an actionable message.
       target_directory="$(
         cargo metadata --no-deps --format-version 1 |
           python3 -c "import json, sys; print(json.load(sys.stdin)['target_directory'])"
       )"
-      host_target="$(rustc -vV | sed -n 's/^host: //p')"
-      if [ "$daemon_executable" != "$target_directory/debug/signalboxd" ] \
-         && [ "$daemon_executable" != "$target_directory/$host_target/debug/signalboxd" ]; then
-        echo "dev instance: cargo built signalboxd for a target this host cannot" \
-             "run:" "$daemon_executable" >&2
-        echo "dev instance: unset build.target and CARGO_BUILD_TARGET, or set" \
-             "them to" "$host_target" >&2
-        exit 1
-      fi
+
+      # Resolve each separately packaged executable through Cargo's artifact
+      # stream. The shared resolver also refuses a configured foreign target
+      # rather than letting a later exec fail or select a stale host artifact
+      # from an assumed target/debug layout.
+      daemon_executable="$(
+        "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
+          "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
+          signalboxd signalboxd
+      )"
+      supervisor_executable="$(
+        "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
+          "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
+          signalbox-tools-exec signalbox-exec-supervisor
+      )"
+      bridge_executable="$(
+        "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
+          "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
+          signalbox-model-runtime-claude-cli signalbox-claude-mcp-bridge
+      )"
+
+      # Republished on every start so the link follows a rebuild that lands
+      # the artifact somewhere else, and so a stale link from an earlier
+      # layout never survives.
+      mkdir -p ${shellArg daemonBinDirectory}
+      ln -sfn "$bridge_executable" \
+        ${shellArg "${daemonBinDirectory}/signalbox-claude-mcp-bridge"}
 
       # Recreated here rather than in the provisioning task because the
       # runtime directory does not survive between runs. Mode 0700 is exact:
@@ -448,6 +494,16 @@ in
       # own runtime directory.
       mkdir -p ${shellArg daemonSocketDirectory}
       chmod 700 ${shellArg daemonSocketDirectory}
+
+      # The checked-in example carries an installation placeholder, while a
+      # dev instance seeded before the exec suite existed has no daemon_tools
+      # table. Materialize a runtime-only copy that resolves the placeholder or
+      # adds the missing dev-managed table. An explicitly configured table is
+      # preserved and remains subject to the ordinary fail-closed parser.
+      signalbox-materialize-config \
+        ${shellArg daemonConfigFile} ${shellArg daemonRuntimeConfigFile} \
+        "$supervisor_executable"
+      chmod 600 ${shellArg daemonRuntimeConfigFile}
 
       # Deployment-owned credential channels: one file per secret. The launcher
       # always passes all three channels; naming a
@@ -465,8 +521,9 @@ in
 
       exec env ${scrub} \
         HOME=${shellArg daemonHome} \
+        PATH=${shellArg daemonBinDirectory}:"$PATH" \
         DATABASE_URL=${shellArg databaseUrl} \
-        SIGNALBOX_CONFIG_FILE=${shellArg daemonConfigFile} \
+        SIGNALBOX_CONFIG_FILE=${shellArg daemonRuntimeConfigFile} \
         SIGNALBOX_TEMPLATE_CONFIG_FILE=${shellArg daemonTemplateConfigFile} \
         ANTHROPIC_API_KEY_FILE="$key_file" \
         BRAVE_API_KEY_FILE="$search_key_file" \

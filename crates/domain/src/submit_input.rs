@@ -24,11 +24,12 @@ use crate::{
     AcceptedInputQueuePriority, AcceptedInputQueueWork, AcceptedInputSchedulingProjection, Actor,
     AppliedInterruptCommandResult, AppliedInterruptState, CurrentTurnAttemptState, DeliveryRequest,
     DurableCommandId, FrozenAliasDefinition, FrozenModelSelection, GoalGeneration, GoalTurnSource,
-    ModelAlias, ModelSelectionRequest, OriginConfiguration, PerInputConfigurationChoices,
-    ReconciliationReason, Session, SessionConfigurationDefaults,
+    ModelAlias, ModelCapabilityCatalog, ModelChangeAdjustment, ModelSelectionRequest,
+    ModelSettingsOverlay, OriginConfiguration, OriginModelSettingsError,
+    PerInputConfigurationChoices, ReconciliationReason, Session, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, SteeringBinding,
-    TurnDisposition, TurnId, UserContent, VersionedSessionConfigurationDefaults,
-    derive_accepted_input_total_order,
+    TurnDisposition, TurnId, UserContent, ValidatedModelSettings,
+    VersionedSessionConfigurationDefaults, derive_accepted_input_total_order,
 };
 
 /// One canonical user-global durable input command.
@@ -116,6 +117,45 @@ impl SubmitInput {
         previous_position: Option<SessionInputPosition>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError> {
+        self.prepare_when_no_active_turn_resolving(
+            session,
+            accepted_input,
+            turn,
+            previous_position,
+            select_definition,
+            None,
+        )
+    }
+
+    /// Prepares no-active-turn handling with settings capability resolution.
+    pub fn prepare_when_no_active_turn_with_model_settings(
+        self,
+        session: &Session,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        previous_position: Option<SessionInputPosition>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError> {
+        self.prepare_when_no_active_turn_resolving(
+            session,
+            accepted_input,
+            turn,
+            previous_position,
+            select_definition,
+            Some(capabilities),
+        )
+    }
+
+    fn prepare_when_no_active_turn_resolving(
+        self,
+        session: &Session,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        previous_position: Option<SessionInputPosition>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: Option<&ModelCapabilityCatalog>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError> {
         if session.id() != self.session {
             return Err(SubmitInputPreparationError {
                 command: Box::new(self),
@@ -162,10 +202,13 @@ impl SubmitInput {
             });
         };
 
-        let checked = match session.current_configuration_defaults().derive_request(
-            configuration.expected_session_defaults_version(),
-            configuration.model(),
-        ) {
+        let checked = match session
+            .current_configuration_defaults()
+            .derive_request_with_model_settings(
+                configuration.expected_session_defaults_version(),
+                configuration.model(),
+                configuration.model_settings(),
+            ) {
             Ok(checked) => checked,
             Err(mismatch) => {
                 let target_session = self.session;
@@ -182,21 +225,28 @@ impl SubmitInput {
             }
         };
 
-        let origin_configuration = match OriginConfiguration::freeze(checked, select_definition) {
-            Ok(configuration) => configuration,
-            Err(unknown) => {
-                let target_session = self.session;
-                return Ok(PreparedSubmitInput {
-                    command: self,
-                    result: SubmitInputResult::Rejected(
-                        SubmitInputRejectedResult::UnknownModelAlias {
-                            session: target_session,
-                            alias: unknown.alias(),
-                        },
-                    ),
-                });
-            }
-        };
+        let origin_configuration =
+            match freeze_origin_configuration(checked, select_definition, capabilities) {
+                Ok(configuration) => configuration,
+                Err(OriginModelSettingsError::UnknownAlias(unknown)) => {
+                    let target_session = self.session;
+                    return Ok(PreparedSubmitInput {
+                        command: self,
+                        result: SubmitInputResult::Rejected(
+                            SubmitInputRejectedResult::UnknownModelAlias {
+                                session: target_session,
+                                alias: unknown.alias(),
+                            },
+                        ),
+                    });
+                }
+                Err(failure) => {
+                    return Err(SubmitInputPreparationError {
+                        command: Box::new(self),
+                        failure: SubmitInputPreparationFailure::ModelSettingsResolution(failure),
+                    });
+                }
+            };
 
         let acceptance_position = match previous_position {
             None => SessionInputPosition::first(),
@@ -227,7 +277,7 @@ impl SubmitInput {
                     acceptance_position,
                     turn,
                     queue_order: AcceptedInputQueueOrder::ordinary(acceptance_position),
-                    origin_configuration,
+                    origin_configuration: Box::new(origin_configuration),
                     applied_interrupt: None,
                 },
             )),
@@ -248,6 +298,41 @@ impl SubmitInput {
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError> {
+        self.prepare_with_active_turn_resolving(
+            scheduling,
+            accepted_input,
+            turn,
+            select_definition,
+            None,
+        )
+    }
+
+    /// Prepares active-turn handling with settings capability resolution.
+    pub fn prepare_with_active_turn_with_model_settings(
+        self,
+        scheduling: &AcceptedInputSchedulingProjection,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError> {
+        self.prepare_with_active_turn_resolving(
+            scheduling,
+            accepted_input,
+            turn,
+            select_definition,
+            Some(capabilities),
+        )
+    }
+
+    fn prepare_with_active_turn_resolving(
+        self,
+        scheduling: &AcceptedInputSchedulingProjection,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: Option<&ModelCapabilityCatalog>,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError> {
         let session = scheduling.session();
         if session.id() != self.session {
@@ -324,7 +409,8 @@ impl SubmitInput {
                 },
                 CurrentTurnAttemptState::Prepared | CurrentTurnAttemptState::Running => None,
             },
-            crate::ActiveTurnPhase::AwaitingApproval { .. } => None,
+            crate::ActiveTurnPhase::AwaitingApproval { .. }
+            | crate::ActiveTurnPhase::AwaitingChild { .. } => None,
             crate::ActiveTurnPhase::AwaitingRecoveryDecision {
                 applied_interrupt, ..
             } => *applied_interrupt,
@@ -369,10 +455,13 @@ impl SubmitInput {
                         failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
                     });
                 }
-                let checked = match session.current_configuration_defaults().derive_request(
-                    configuration.expected_session_defaults_version(),
-                    configuration.model(),
-                ) {
+                let checked = match session
+                    .current_configuration_defaults()
+                    .derive_request_with_model_settings(
+                        configuration.expected_session_defaults_version(),
+                        configuration.model(),
+                        configuration.model_settings(),
+                    ) {
                     Ok(checked) => checked,
                     Err(mismatch) => {
                         return Ok(PreparedSubmitInput {
@@ -388,9 +477,9 @@ impl SubmitInput {
                     }
                 };
                 let origin_configuration =
-                    match OriginConfiguration::freeze(checked, select_definition) {
+                    match freeze_origin_configuration(checked, select_definition, capabilities) {
                         Ok(configuration) => configuration,
-                        Err(unknown) => {
+                        Err(OriginModelSettingsError::UnknownAlias(unknown)) => {
                             return Ok(PreparedSubmitInput {
                                 command: self,
                                 result: SubmitInputResult::Rejected(
@@ -398,6 +487,14 @@ impl SubmitInput {
                                         session: target_session,
                                         alias: unknown.alias(),
                                     },
+                                ),
+                            });
+                        }
+                        Err(failure) => {
+                            return Err(SubmitInputPreparationError {
+                                command: Box::new(self),
+                                failure: SubmitInputPreparationFailure::ModelSettingsResolution(
+                                    failure,
                                 ),
                             });
                         }
@@ -472,7 +569,7 @@ impl SubmitInput {
                             acceptance_position,
                             turn,
                             queue_order,
-                            origin_configuration,
+                            origin_configuration: Box::new(origin_configuration),
                             applied_interrupt: Some(Box::new(applied_interrupt)),
                         },
                     )),
@@ -541,10 +638,13 @@ impl SubmitInput {
                         failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
                     });
                 }
-                let checked = match session.current_configuration_defaults().derive_request(
-                    configuration.expected_session_defaults_version(),
-                    configuration.model(),
-                ) {
+                let checked = match session
+                    .current_configuration_defaults()
+                    .derive_request_with_model_settings(
+                        configuration.expected_session_defaults_version(),
+                        configuration.model(),
+                        configuration.model_settings(),
+                    ) {
                     Ok(checked) => checked,
                     Err(mismatch) => {
                         return Ok(PreparedSubmitInput {
@@ -560,9 +660,9 @@ impl SubmitInput {
                     }
                 };
                 let origin_configuration =
-                    match OriginConfiguration::freeze(checked, select_definition) {
+                    match freeze_origin_configuration(checked, select_definition, capabilities) {
                         Ok(configuration) => configuration,
-                        Err(unknown) => {
+                        Err(OriginModelSettingsError::UnknownAlias(unknown)) => {
                             return Ok(PreparedSubmitInput {
                                 command: self,
                                 result: SubmitInputResult::Rejected(
@@ -570,6 +670,14 @@ impl SubmitInput {
                                         session: target_session,
                                         alias: unknown.alias(),
                                     },
+                                ),
+                            });
+                        }
+                        Err(failure) => {
+                            return Err(SubmitInputPreparationError {
+                                command: Box::new(self),
+                                failure: SubmitInputPreparationFailure::ModelSettingsResolution(
+                                    failure,
                                 ),
                             });
                         }
@@ -607,7 +715,7 @@ impl SubmitInput {
                             acceptance_position,
                             turn,
                             queue_order: AcceptedInputQueueOrder::ordinary(acceptance_position),
-                            origin_configuration,
+                            origin_configuration: Box::new(origin_configuration),
                             applied_interrupt: None,
                         },
                     )),
@@ -621,6 +729,329 @@ impl SubmitInput {
                 }),
             }),
         }
+    }
+
+    /// Prepares input control while a delegation-origin turn owns the session slot.
+    ///
+    /// The active turn has no accepted-input identity, so its authoritative
+    /// lifecycle and the complete session acceptance tail are supplied
+    /// separately. `awaiting_approval` preserves the one parked phase whose
+    /// approval obligation forbids an immediate interrupt transition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_delegated_active_turn(
+        self,
+        session: &Session,
+        actual_active_turn: TurnId,
+        previous_position: Option<SessionInputPosition>,
+        existing_interrupt: Option<DurableCommandId>,
+        awaiting_approval: bool,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError> {
+        if session.id() != self.session {
+            return Err(SubmitInputPreparationError {
+                command: Box::new(self),
+                failure: SubmitInputPreparationFailure::SessionMismatch {
+                    provided_session: session.id(),
+                },
+            });
+        }
+        if delivery_creates_turn(self.delivery) != turn.is_some() {
+            return Err(SubmitInputPreparationError {
+                command: Box::new(self),
+                failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+            });
+        }
+        let expected = match self.delivery {
+            DeliveryRequest::StartWhenNoActiveTurn { .. } => None,
+            DeliveryRequest::Interrupt {
+                expected_active_turn,
+                ..
+            }
+            | DeliveryRequest::NextSafePoint {
+                expected_active_turn,
+            }
+            | DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn,
+                ..
+            } => Some(expected_active_turn),
+        };
+        if let Some(expected_active_turn) = expected
+            && expected_active_turn != actual_active_turn
+        {
+            let target_session = self.session;
+            return Ok(PreparedSubmitInput {
+                command: self,
+                result: SubmitInputResult::Rejected(
+                    SubmitInputRejectedResult::ActiveTurnMismatch {
+                        session: target_session,
+                        expected_active_turn,
+                        actual_active_turn,
+                    },
+                ),
+            });
+        }
+        let target_session = self.session;
+        match self.delivery {
+            DeliveryRequest::StartWhenNoActiveTurn { .. } => Ok(PreparedSubmitInput {
+                command: self,
+                result: SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnPresent {
+                    session: target_session,
+                    active_turn: actual_active_turn,
+                }),
+            }),
+            DeliveryRequest::NextSafePoint { .. } => {
+                if let Some(existing) = existing_interrupt {
+                    return Ok(PreparedSubmitInput {
+                        command: self,
+                        result: SubmitInputResult::Rejected(
+                            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+                                session: target_session,
+                                active_turn: actual_active_turn,
+                                existing_command: existing,
+                            },
+                        ),
+                    });
+                }
+                let acceptance_position = match next_acceptance_position(previous_position) {
+                    Ok(position) => position,
+                    Err(last) => {
+                        return Ok(PreparedSubmitInput {
+                            command: self,
+                            result: SubmitInputResult::Rejected(
+                                SubmitInputRejectedResult::AcceptancePositionExhausted {
+                                    session: target_session,
+                                    last,
+                                },
+                            ),
+                        });
+                    }
+                };
+                Ok(PreparedSubmitInput {
+                    command: self,
+                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(
+                        SubmitInputPendingSteeringAppliedResult {
+                            accepted_input,
+                            session: target_session,
+                            acceptance_position,
+                            binding: SteeringBinding::new(actual_active_turn),
+                        },
+                    )),
+                })
+            }
+            DeliveryRequest::Interrupt { configuration, .. } => {
+                if let Some(existing) = existing_interrupt {
+                    return Ok(PreparedSubmitInput {
+                        command: self,
+                        result: SubmitInputResult::Rejected(
+                            SubmitInputRejectedResult::InterruptAlreadyApplied {
+                                session: target_session,
+                                active_turn: actual_active_turn,
+                                existing_command: existing,
+                            },
+                        ),
+                    });
+                }
+                if awaiting_approval {
+                    return Ok(PreparedSubmitInput {
+                        command: self,
+                        result: SubmitInputResult::Rejected(
+                            SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                                session: target_session,
+                                active_turn: actual_active_turn,
+                            },
+                        ),
+                    });
+                }
+                let turn = turn.ok_or_else(|| SubmitInputPreparationError {
+                    command: Box::new(self.clone()),
+                    failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+                })?;
+                let prepared = prepare_delegated_successor(
+                    &self,
+                    session,
+                    configuration,
+                    previous_position,
+                    select_definition,
+                );
+                let (origin_configuration, acceptance_position) = match prepared {
+                    DelegatedSuccessorPreparation::Prepared {
+                        origin_configuration,
+                        acceptance_position,
+                    } => (origin_configuration, acceptance_position),
+                    DelegatedSuccessorPreparation::Rejected(result) => {
+                        return Ok(PreparedSubmitInput {
+                            command: self,
+                            result: SubmitInputResult::Rejected(result),
+                        });
+                    }
+                    DelegatedSuccessorPreparation::Failed(failure) => {
+                        return Err(SubmitInputPreparationError {
+                            command: Box::new(self),
+                            failure: SubmitInputPreparationFailure::ModelSettingsResolution(
+                                failure,
+                            ),
+                        });
+                    }
+                };
+                let queue_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+                    acceptance_position,
+                    actual_active_turn,
+                );
+                let applied_interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+                    self.command_id,
+                    target_session,
+                    actual_active_turn,
+                    accepted_input,
+                    turn,
+                    queue_order,
+                )
+                .ok_or_else(|| SubmitInputPreparationError {
+                    command: Box::new(self.clone()),
+                    failure: SubmitInputPreparationFailure::InterruptQueueOrderInvalid,
+                })?;
+                Ok(PreparedSubmitInput {
+                    command: self,
+                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                        SubmitInputTurnOriginAppliedResult {
+                            accepted_input,
+                            session: target_session,
+                            acceptance_position,
+                            turn,
+                            queue_order,
+                            origin_configuration: Box::new(origin_configuration),
+                            applied_interrupt: Some(Box::new(applied_interrupt)),
+                        },
+                    )),
+                })
+            }
+            DeliveryRequest::AfterCurrentTurn { configuration, .. } => {
+                let turn = turn.ok_or_else(|| SubmitInputPreparationError {
+                    command: Box::new(self.clone()),
+                    failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+                })?;
+                let prepared = prepare_delegated_successor(
+                    &self,
+                    session,
+                    configuration,
+                    previous_position,
+                    select_definition,
+                );
+                let (origin_configuration, acceptance_position) = match prepared {
+                    DelegatedSuccessorPreparation::Prepared {
+                        origin_configuration,
+                        acceptance_position,
+                    } => (origin_configuration, acceptance_position),
+                    DelegatedSuccessorPreparation::Rejected(result) => {
+                        return Ok(PreparedSubmitInput {
+                            command: self,
+                            result: SubmitInputResult::Rejected(result),
+                        });
+                    }
+                    DelegatedSuccessorPreparation::Failed(failure) => {
+                        return Err(SubmitInputPreparationError {
+                            command: Box::new(self),
+                            failure: SubmitInputPreparationFailure::ModelSettingsResolution(
+                                failure,
+                            ),
+                        });
+                    }
+                };
+                Ok(PreparedSubmitInput {
+                    command: self,
+                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                        SubmitInputTurnOriginAppliedResult {
+                            accepted_input,
+                            session: target_session,
+                            acceptance_position,
+                            turn,
+                            queue_order: AcceptedInputQueueOrder::ordinary(acceptance_position),
+                            origin_configuration: Box::new(origin_configuration),
+                            applied_interrupt: None,
+                        },
+                    )),
+                })
+            }
+        }
+    }
+}
+
+enum DelegatedSuccessorPreparation {
+    Prepared {
+        origin_configuration: OriginConfiguration,
+        acceptance_position: SessionInputPosition,
+    },
+    Rejected(SubmitInputRejectedResult),
+    Failed(OriginModelSettingsError),
+}
+
+fn prepare_delegated_successor(
+    command: &SubmitInput,
+    session: &Session,
+    configuration: PerInputConfigurationChoices,
+    previous_position: Option<SessionInputPosition>,
+    select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+) -> DelegatedSuccessorPreparation {
+    let checked = match session
+        .current_configuration_defaults()
+        .derive_request_with_model_settings(
+            configuration.expected_session_defaults_version(),
+            configuration.model(),
+            configuration.model_settings(),
+        ) {
+        Ok(checked) => checked,
+        Err(mismatch) => {
+            return DelegatedSuccessorPreparation::Rejected(
+                SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
+                    session: command.session,
+                    expected: mismatch.expected(),
+                    current: mismatch.current(),
+                },
+            );
+        }
+    };
+    let origin_configuration = match freeze_origin_configuration(checked, select_definition, None) {
+        Ok(configuration) => configuration,
+        Err(OriginModelSettingsError::UnknownAlias(unknown)) => {
+            return DelegatedSuccessorPreparation::Rejected(
+                SubmitInputRejectedResult::UnknownModelAlias {
+                    session: command.session,
+                    alias: unknown.alias(),
+                },
+            );
+        }
+        Err(failure) => return DelegatedSuccessorPreparation::Failed(failure),
+    };
+    let acceptance_position = match next_acceptance_position(previous_position) {
+        Ok(position) => position,
+        Err(last) => {
+            return DelegatedSuccessorPreparation::Rejected(
+                SubmitInputRejectedResult::AcceptancePositionExhausted {
+                    session: command.session,
+                    last,
+                },
+            );
+        }
+    };
+    DelegatedSuccessorPreparation::Prepared {
+        origin_configuration,
+        acceptance_position,
+    }
+}
+
+fn freeze_origin_configuration(
+    checked: crate::VersionCheckedConfigurationRequest,
+    select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    capabilities: Option<&ModelCapabilityCatalog>,
+) -> Result<OriginConfiguration, OriginModelSettingsError> {
+    match capabilities {
+        Some(capabilities) => OriginConfiguration::freeze_with_model_settings(
+            checked,
+            select_definition,
+            capabilities,
+        ),
+        None => OriginConfiguration::freeze(checked, select_definition),
     }
 }
 
@@ -754,7 +1185,7 @@ pub struct SubmitInputTurnOriginAppliedResult {
     acceptance_position: SessionInputPosition,
     turn: TurnId,
     queue_order: AcceptedInputQueueOrder,
-    origin_configuration: OriginConfiguration,
+    origin_configuration: Box<OriginConfiguration>,
     applied_interrupt: Option<Box<AppliedInterruptCommandResult>>,
 }
 
@@ -801,6 +1232,25 @@ impl SubmitInputTurnOriginAppliedResult {
             Some(result) => Some(result),
             None => None,
         }
+    }
+
+    /// Constructs the durable settings event that belongs to this accepted
+    /// origin and its frozen configuration.
+    pub fn model_settings_event(&self) -> Option<crate::TurnModelSettingsResolved> {
+        crate::TurnModelSettingsResolved::try_new(
+            self.accepted_input,
+            self.turn,
+            self.origin_configuration.session_defaults_version(),
+            *self.origin_configuration.effective().model(),
+            self.origin_configuration
+                .requested()
+                .per_call_model_settings(),
+            self.origin_configuration.effective().model_settings(),
+            self.origin_configuration.model_settings_adjusted_from(),
+            self.origin_configuration
+                .model_settings_adjustments()
+                .to_vec(),
+        )
     }
 }
 
@@ -979,6 +1429,9 @@ pub enum SubmitInputPreparationFailure {
     /// The proposed interrupt successor would violate the checked complete
     /// queue order.
     InterruptQueueOrderInvalid,
+    /// Capability-aware settings resolution failed after authoritative
+    /// selection freezing.
+    ModelSettingsResolution(OriginModelSettingsError),
 }
 
 /// A nonterminal correlation failure during preparation.
@@ -1036,7 +1489,7 @@ struct SubmitInputTurnOriginReconstitutionFacts {
 
 #[derive(Clone, Debug)]
 enum TurnOriginProvenance {
-    Submit(ReconstitutedSubmitInput),
+    Submit(Box<ReconstitutedSubmitInput>),
     Goal(GoalTurnOriginFacts),
 }
 
@@ -1219,7 +1672,7 @@ impl SubmitInputTurnOriginReconstitutionInput {
         } = input;
         Self {
             chain: vec![SubmitInputTurnOriginReconstitutionFacts {
-                provenance: TurnOriginProvenance::Submit(receipt),
+                provenance: TurnOriginProvenance::Submit(Box::new(receipt)),
                 lifecycle,
                 queue_accepted_input,
                 queue_session,
@@ -1286,7 +1739,7 @@ impl SubmitInputTurnOriginReconstitutionInput {
             disposition,
         } = source_terminal;
         origin.chain.push(SubmitInputTurnOriginReconstitutionFacts {
-            provenance: TurnOriginProvenance::Submit(receipt),
+            provenance: TurnOriginProvenance::Submit(Box::new(receipt)),
             lifecycle,
             queue_accepted_input,
             queue_session,
@@ -1324,6 +1777,8 @@ struct SubmitInputTurnOriginAppliedReconstitutionFacts {
     defaults: SessionConfigurationDefaults,
     stored_requested_model: ModelSelectionRequest,
     stored_frozen_model: FrozenModelSelection,
+    stored_model_settings: Option<ValidatedModelSettings>,
+    stored_model_settings_adjustments: Box<[ModelChangeAdjustment]>,
 }
 
 #[derive(Clone, Debug)]
@@ -1446,6 +1901,10 @@ pub struct SubmitInputAppliedTurnOriginReconstitutionInput {
     pub stored_requested_model: ModelSelectionRequest,
     /// The frozen model selection stored with the origin.
     pub stored_frozen_model: FrozenModelSelection,
+    /// The complete resolved model settings stored for the origin.
+    pub stored_model_settings: Option<ValidatedModelSettings>,
+    /// Ordered automatic model-change adjustments stored for the origin.
+    pub stored_model_settings_adjustments: Vec<ModelChangeAdjustment>,
 }
 
 /// Named facts for reconstructing an applied pending-steering submission.
@@ -1676,6 +2135,8 @@ impl SubmitInputReconstitutionInput {
             defaults,
             stored_requested_model,
             stored_frozen_model,
+            stored_model_settings,
+            stored_model_settings_adjustments,
         } = input;
         Self {
             command,
@@ -1701,6 +2162,9 @@ impl SubmitInputReconstitutionInput {
                     defaults,
                     stored_requested_model,
                     stored_frozen_model,
+                    stored_model_settings,
+                    stored_model_settings_adjustments: stored_model_settings_adjustments
+                        .into_boxed_slice(),
                 },
             )),
         }
@@ -2022,6 +2486,8 @@ impl SubmitInputReconstitutionInput {
                     defaults,
                     stored_requested_model,
                     stored_frozen_model,
+                    stored_model_settings,
+                    stored_model_settings_adjustments,
                 } = *facts;
                 let (expected_predecessor, expected_priority, interrupt_predecessor) = match self
                     .command
@@ -2160,11 +2626,16 @@ impl SubmitInputReconstitutionInput {
 
                 let origin_configuration = reconstruct_origin_configuration(
                     &self.command,
-                    defaults_session,
-                    defaults_version,
-                    defaults,
-                    stored_requested_model,
-                    stored_frozen_model,
+                    StoredOriginConfigurationReconstitutionFacts {
+                        defaults_session,
+                        defaults_version,
+                        defaults,
+                        stored_requested_model,
+                        stored_frozen_model,
+                        stored_model_settings,
+                        stored_model_settings_adjustments: stored_model_settings_adjustments
+                            .into_vec(),
+                    },
                 )
                 .map_err(&fail)?;
                 let applied_interrupt = match interrupt_predecessor {
@@ -2193,7 +2664,7 @@ impl SubmitInputReconstitutionInput {
                         acceptance_position: accepted_position,
                         turn: result_turn,
                         queue_order,
-                        origin_configuration,
+                        origin_configuration: Box::new(origin_configuration),
                         applied_interrupt,
                     },
                 ))
@@ -2652,14 +3123,29 @@ fn validate_existing_interrupt(
     Ok(())
 }
 
-fn reconstruct_origin_configuration(
-    command: &SubmitInput,
+struct StoredOriginConfigurationReconstitutionFacts {
     defaults_session: SessionId,
     defaults_version: SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
     stored_requested_model: ModelSelectionRequest,
     stored_frozen_model: FrozenModelSelection,
+    stored_model_settings: Option<ValidatedModelSettings>,
+    stored_model_settings_adjustments: Vec<ModelChangeAdjustment>,
+}
+
+fn reconstruct_origin_configuration(
+    command: &SubmitInput,
+    facts: StoredOriginConfigurationReconstitutionFacts,
 ) -> Result<OriginConfiguration, SubmitInputReconstitutionFailure> {
+    let StoredOriginConfigurationReconstitutionFacts {
+        defaults_session,
+        defaults_version,
+        defaults,
+        stored_requested_model,
+        stored_frozen_model,
+        stored_model_settings,
+        stored_model_settings_adjustments,
+    } = facts;
     let Some(configuration) = explicit_origin_configuration(command.delivery) else {
         return Err(SubmitInputReconstitutionFailure::AppliedDeliveryIsNotTurnOrigin);
     };
@@ -2672,24 +3158,47 @@ fn reconstruct_origin_configuration(
 
     let versioned = VersionedSessionConfigurationDefaults::reconstitute(defaults_version, defaults);
     let checked = versioned
-        .derive_request(defaults_version, configuration.model())
+        .derive_request_with_model_settings(
+            defaults_version,
+            configuration.model(),
+            configuration.model_settings(),
+        )
         .map_err(|_| SubmitInputReconstitutionFailure::DefaultsVersionMismatch)?;
     if checked.request().model() != stored_requested_model {
         return Err(SubmitInputReconstitutionFailure::RequestedModelMismatch);
     }
+    let selected_direct = stored_frozen_model.selected_direct();
+    let legacy_settings_are_safe = checked.request().per_call_model_settings()
+        == ModelSettingsOverlay::inherit_all()
+        && !checked
+            .request()
+            .model_settings()
+            .validated_for()
+            .is_some_and(|validated| validated != selected_direct);
 
-    let frozen = OriginConfiguration::freeze(checked, |alias| match stored_frozen_model {
-        FrozenModelSelection::FrozenAlias {
-            alias: stored_alias,
-            definition,
-        } if stored_alias == alias => Some(definition),
-        FrozenModelSelection::Direct(_) | FrozenModelSelection::FrozenAlias { .. } => None,
-    })
-    .map_err(|_| SubmitInputReconstitutionFailure::FrozenModelMismatch)?;
-    if frozen.effective().model() != &stored_frozen_model {
-        return Err(SubmitInputReconstitutionFailure::FrozenModelMismatch);
+    match stored_model_settings {
+        Some(stored_model_settings) => OriginConfiguration::reconstitute_with_model_settings(
+            checked,
+            stored_frozen_model,
+            stored_model_settings,
+            stored_model_settings_adjustments,
+        )
+        .ok_or(SubmitInputReconstitutionFailure::FrozenModelMismatch),
+        None if stored_model_settings_adjustments.is_empty() && legacy_settings_are_safe => {
+            let frozen = OriginConfiguration::freeze(checked, |alias| match stored_frozen_model {
+                FrozenModelSelection::FrozenAlias {
+                    alias: stored_alias,
+                    definition,
+                } if stored_alias == alias => Some(definition),
+                FrozenModelSelection::Direct(_) | FrozenModelSelection::FrozenAlias { .. } => None,
+            })
+            .map_err(|_| SubmitInputReconstitutionFailure::FrozenModelMismatch)?;
+            (frozen.effective().model() == &stored_frozen_model)
+                .then_some(frozen)
+                .ok_or(SubmitInputReconstitutionFailure::FrozenModelMismatch)
+        }
+        None => Err(SubmitInputReconstitutionFailure::FrozenModelMismatch),
     }
-    Ok(frozen)
 }
 
 fn explicit_origin_configuration(
@@ -2715,6 +3224,7 @@ fn rejection_configuration(
         | DeliveryRequest::Interrupt {
             expected_active_turn,
             configuration,
+            ..
         } => Ok((configuration, Some(expected_active_turn))),
         DeliveryRequest::NextSafePoint { .. } => {
             Err(SubmitInputReconstitutionFailure::RejectionHasNoExplicitOriginConfiguration)
@@ -3116,11 +3626,11 @@ impl ReconstitutedSubmitInput {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::hash_map::DefaultHasher;
+    use std::collections::{BTreeSet, hash_map::DefaultHasher};
     use std::hash::{Hash, Hasher};
 
     use super::{
-        ReconstitutedSubmitInput, SubmitInput,
+        ReconstitutedSubmitInput, StoredOriginConfigurationReconstitutionFacts, SubmitInput,
         SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
         SubmitInputAppliedTurnOriginReconstitutionInput,
         SubmitInputDirectTurnOriginConstructionInput, SubmitInputPreparationFailure,
@@ -3135,7 +3645,8 @@ mod tests {
         SubmitInputRejectedSessionNotFoundReconstitutionInput,
         SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
         SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,
-        SubmitInputTurnOriginReconstitutionInput,
+        SubmitInputTurnOriginReconstitutionInput, freeze_origin_configuration,
+        reconstruct_origin_configuration,
     };
     use crate::applied_interrupt::test_applied_interrupt_proof;
     use crate::test_support::{
@@ -3155,18 +3666,21 @@ mod tests {
         AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
         AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, ActiveTurnPhase,
-        ActiveTurnSchedulingReconstitutionInput, Actor, DeliveryRequest, FrozenAliasDefinition,
+        ActiveTurnSchedulingReconstitutionInput, Actor, DangerousToolAutoApproval, DeliveryRequest,
+        DescendantTerminationScope, FastModeOverlay, FastModeSupport, FrozenAliasDefinition,
         FrozenModelSelection, InitialSemanticTranscriptEntryPayload, IssuedOperationRef,
         ModelCallDisposition, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-        ModelSelectionOverride, ModelSelectionRequest, NonEmptyIssuedOperationRefs,
-        NormalizedToolArguments, OriginConfiguration, PerInputConfigurationChoices,
-        PinnedProviderTargetReconstitutionInput, ReconciliationReason,
+        ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
+        ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay,
+        ModelSettingsPrecedence, NonEmptyIssuedOperationRefs, NormalizedToolArguments,
+        OriginConfiguration, OriginModelSettingsError, PerInputConfigurationChoices,
+        PinnedProviderTargetReconstitutionInput, ReasoningLevel, ReconciliationReason,
         ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
         ResolvedProviderTarget, SemanticTranscriptEntryReconstitutionInput,
         SemanticTranscriptEntryRef, Session, SessionAcceptanceTailEntryReconstitutionInput,
         SessionAcceptanceTailReconstitutionInput, SessionConfigurationDefaults,
         SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-        SessionInputPosition, SessionReconstitutionInput, SteeringBinding,
+        SessionInputPosition, SessionReconstitutionInput, SettingOverlay, SteeringBinding,
         ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolName,
         ToolRequestOrdinal, ToolRequestReconstitutionInput, TranscriptAncestry, TurnDisposition,
         UserContent,
@@ -3225,6 +3739,26 @@ mod tests {
         )
     }
 
+    fn start_command_with_settings(
+        command: u128,
+        text: &str,
+        expected: u64,
+        settings: ModelSettingsOverlay,
+    ) -> SubmitInput {
+        SubmitInput::new(
+            command_id(command),
+            session_id(1),
+            content(text),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::with_model_settings(
+                    version(expected),
+                    ModelSelectionOverride::UseSessionDefault,
+                    settings,
+                ),
+            },
+        )
+    }
+
     fn after_command(command: u128, expected_active_turn: crate::TurnId) -> SubmitInput {
         SubmitInput::new(
             command_id(command),
@@ -3255,6 +3789,7 @@ mod tests {
             content("hello"),
             DeliveryRequest::Interrupt {
                 expected_active_turn,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
                 configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
             },
         )
@@ -3420,6 +3955,8 @@ mod tests {
                 defaults: defaults(ModelSelectionRequest::Direct(direct(2))),
                 stored_requested_model: ModelSelectionRequest::Direct(direct(2)),
                 stored_frozen_model: FrozenModelSelection::Direct(direct(2)),
+                stored_model_settings: None,
+                stored_model_settings_adjustments: Vec::new(),
             },
         )
     }
@@ -3480,17 +4017,21 @@ mod tests {
         source
             .chain
             .push(super::SubmitInputTurnOriginReconstitutionFacts {
-                provenance: super::TurnOriginProvenance::Submit(ReconstitutedSubmitInput {
-                    command,
-                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(
-                        super::SubmitInputPendingSteeringAppliedResult {
-                            accepted_input,
-                            session: session_id(1),
-                            acceptance_position: position,
-                            binding: SteeringBinding::new(source_turn),
-                        },
-                    )),
-                }),
+                provenance: super::TurnOriginProvenance::Submit(Box::new(
+                    ReconstitutedSubmitInput {
+                        command,
+                        result: SubmitInputResult::Applied(
+                            SubmitInputAppliedResult::PendingSteering(
+                                super::SubmitInputPendingSteeringAppliedResult {
+                                    accepted_input,
+                                    session: session_id(1),
+                                    acceptance_position: position,
+                                    binding: SteeringBinding::new(source_turn),
+                                },
+                            ),
+                        ),
+                    },
+                )),
                 lifecycle: AcceptedInputLifecycle::new(
                     accepted_input,
                     AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
@@ -3554,6 +4095,8 @@ mod tests {
                 defaults: defaults(ModelSelectionRequest::Direct(direct(2))),
                 stored_requested_model: ModelSelectionRequest::Direct(direct(2)),
                 stored_frozen_model: FrozenModelSelection::Direct(direct(2)),
+                stored_model_settings: None,
+                stored_model_settings_adjustments: Vec::new(),
             },
         )
         .reconstitute()
@@ -3676,6 +4219,8 @@ mod tests {
                 defaults: defaults(ModelSelectionRequest::Direct(direct(2))),
                 stored_requested_model: ModelSelectionRequest::Direct(direct(2)),
                 stored_frozen_model: FrozenModelSelection::Direct(direct(2)),
+                stored_model_settings: None,
+                stored_model_settings_adjustments: Vec::new(),
             },
         )
     }
@@ -3716,6 +4261,8 @@ mod tests {
                 defaults: defaults(ModelSelectionRequest::Direct(direct(2))),
                 stored_requested_model: ModelSelectionRequest::Direct(direct(2)),
                 stored_frozen_model: FrozenModelSelection::Direct(direct(2)),
+                stored_model_settings: None,
+                stored_model_settings_adjustments: Vec::new(),
             },
         )
     }
@@ -3816,6 +4363,37 @@ mod tests {
     #[test]
     fn s01_inv012_comparison_payload_is_structural() {
         let baseline = start_command(1, "hello", 1);
+        let parent_alone_interrupt = SubmitInput::new(
+            command_id(1),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(9),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        );
+        let equal_interrupt_replay = SubmitInput::new(
+            command_id(1),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(9),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        );
+        let conflicting_interrupt_replay = SubmitInput::new(
+            command_id(1),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(9),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        );
+
         assert_eq!(baseline, start_command(2, "hello", 1));
         assert_eq!(hash(&baseline), hash(&start_command(2, "hello", 1)));
         assert_ne!(baseline, start_command(1, "hello ", 1));
@@ -3841,6 +4419,8 @@ mod tests {
                 },
             )
         );
+        assert_eq!(parent_alone_interrupt, equal_interrupt_replay);
+        assert_ne!(parent_alone_interrupt, conflicting_interrupt_replay);
     }
 
     /// S01 / INV-007 / INV-008 / INV-028: start preparation creates exact
@@ -3884,6 +4464,243 @@ mod tests {
         assert_eq!(
             applied.origin_configuration().effective().model(),
             &FrozenModelSelection::Direct(direct(2))
+        );
+    }
+
+    /// S37 / INV-051 / INV-053: per-call settings participate in authoritative
+    /// origin derivation and remain explicit in the frozen request.
+    #[test]
+    fn s37_inv051_inv053_per_call_settings_are_frozen_for_the_origin() {
+        let selection = direct(2);
+        let per_call = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::High),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let command = start_command_with_settings(1, "settings input", 1, per_call);
+        let catalog =
+            ModelCapabilityCatalog::try_from_definitions([ModelCapabilityDefinition::new(
+                selection,
+                ModelCapabilities::new(
+                    BTreeSet::from([ReasoningLevel::High]),
+                    FastModeSupport::Unsupported,
+                    BTreeSet::new(),
+                ),
+            )])
+            .expect("the fixture catalog has one direct selection");
+
+        let prepared = command
+            .prepare_when_no_active_turn_with_model_settings(
+                &session(1, 1, ModelSelectionRequest::Direct(selection)),
+                accepted_input_id(3),
+                Some(turn_id(4)),
+                None,
+                |_| None,
+                &catalog,
+            )
+            .expect("the explicit level is supported");
+
+        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
+            prepared.result()
+        else {
+            panic!("the supported request applies");
+        };
+        assert_eq!(
+            applied
+                .origin_configuration()
+                .effective()
+                .model_settings()
+                .effective()
+                .reasoning_level(),
+            Some(ReasoningLevel::High)
+        );
+        assert_eq!(
+            applied
+                .origin_configuration()
+                .requested()
+                .per_call_model_settings(),
+            per_call
+        );
+        let event = applied
+            .model_settings_event()
+            .expect("the frozen settings match the selected direct model");
+        assert_eq!(event.per_call_override(), per_call);
+        assert_eq!(
+            event.settings(),
+            applied.origin_configuration().effective().model_settings()
+        );
+    }
+
+    /// S37 / INV-051: the legacy preparation path fails closed when a caller
+    /// supplies settings that require a capability record.
+    #[test]
+    fn s37_inv051_legacy_preparation_rejects_unvalidated_per_call_settings() {
+        let selection = direct(2);
+        let per_call = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::High),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let command = start_command_with_settings(1, "settings input", 1, per_call);
+
+        let error = command
+            .prepare_when_no_active_turn(
+                &session(1, 1, ModelSelectionRequest::Direct(selection)),
+                accepted_input_id(3),
+                Some(turn_id(4)),
+                None,
+                |_| None,
+            )
+            .expect_err("the legacy path has no capability record");
+
+        assert_eq!(
+            error.failure(),
+            SubmitInputPreparationFailure::ModelSettingsResolution(
+                OriginModelSettingsError::MissingCapabilities { selection }
+            )
+        );
+    }
+
+    /// S37 / INV-051 / INV-053: catalog-free preparation cannot carry settings
+    /// validated for an alias's prior direct target across a retarget.
+    #[test]
+    fn s37_inv051_inv053_legacy_preparation_rejects_alias_retarget_settings() {
+        let prior_selection = direct(2);
+        let installed_selection = direct(3);
+        let stored = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            prior_selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the prior model supports the stored level");
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Alias(alias(1)),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            stored,
+        )
+        .expect("an alias retains its prior validation identity");
+        let versioned = crate::VersionedSessionConfigurationDefaults::establish(defaults);
+        let checked = versioned
+            .derive_request_with_model_settings(
+                versioned.version(),
+                ModelSelectionOverride::UseSessionDefault,
+                ModelSettingsOverlay::inherit_all(),
+            )
+            .expect("the fixture names the current defaults epoch");
+
+        let error = freeze_origin_configuration(
+            checked,
+            |requested| {
+                assert_eq!(requested, alias(1));
+                Some(FrozenAliasDefinition::selecting(installed_selection))
+            },
+            None,
+        )
+        .expect_err("alias retargeting requires the new target capability record");
+
+        assert_eq!(
+            error,
+            OriginModelSettingsError::MissingCapabilities {
+                selection: installed_selection,
+            }
+        );
+    }
+
+    /// INV-051: a legacy origin row cannot omit settings evidence while the
+    /// caller contributes an explicit per-call setting.
+    #[test]
+    fn inv051_legacy_reconstitution_rejects_explicit_per_call_settings() {
+        let selection = direct(2);
+        let per_call = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::High),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let command = start_command_with_settings(1, "settings input", 1, per_call);
+        let facts = StoredOriginConfigurationReconstitutionFacts {
+            defaults_session: session_id(1),
+            defaults_version: version(1),
+            defaults: defaults(ModelSelectionRequest::Direct(selection)),
+            stored_requested_model: ModelSelectionRequest::Direct(selection),
+            stored_frozen_model: FrozenModelSelection::Direct(selection),
+            stored_model_settings: None,
+            stored_model_settings_adjustments: Vec::new(),
+        };
+
+        let result = reconstruct_origin_configuration(&command, facts);
+
+        assert_eq!(
+            result.expect_err("explicit settings require stored evidence"),
+            SubmitInputReconstitutionFailure::FrozenModelMismatch
+        );
+    }
+
+    /// INV-051 / INV-053: a legacy origin row cannot carry defaults settings
+    /// validated for an alias's prior direct selection across a retarget.
+    #[test]
+    fn inv051_inv053_legacy_reconstitution_rejects_alias_retarget_settings() {
+        let requested_alias = alias(1);
+        let prior_selection = direct(2);
+        let installed_selection = direct(3);
+        let stored_settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            prior_selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the prior selection supports the stored defaults");
+        let stored_defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Alias(requested_alias),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            stored_settings,
+        )
+        .expect("alias defaults can retain prior validation evidence");
+        let command = start_command(1, "settings input", 1);
+        let facts = StoredOriginConfigurationReconstitutionFacts {
+            defaults_session: session_id(1),
+            defaults_version: version(1),
+            defaults: stored_defaults,
+            stored_requested_model: ModelSelectionRequest::Alias(requested_alias),
+            stored_frozen_model: FrozenModelSelection::FrozenAlias {
+                alias: requested_alias,
+                definition: FrozenAliasDefinition::selecting(installed_selection),
+            },
+            stored_model_settings: None,
+            stored_model_settings_adjustments: Vec::new(),
+        };
+
+        let result = reconstruct_origin_configuration(&command, facts);
+
+        assert_eq!(
+            result.expect_err("retargeted defaults require stored settings evidence"),
+            SubmitInputReconstitutionFailure::FrozenModelMismatch
         );
     }
 
@@ -4114,6 +4931,149 @@ mod tests {
                 active_turn: recorded_active_turn,
             }) if *session == current.id() && *recorded_active_turn == active_turn
         ));
+    }
+
+    #[test]
+    fn delegated_active_turn_blocks_vacant_slot_start() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let delegated_turn = turn_id(7);
+        let prepared = start_command(1, "hello", 1)
+            .prepare_with_delegated_active_turn(
+                &current,
+                delegated_turn,
+                Some(SessionInputPosition::first()),
+                None,
+                false,
+                accepted_input_id(3),
+                Some(turn_id(8)),
+                |_| None,
+            )
+            .expect("delegated slot ownership is authoritative");
+
+        let SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnPresent {
+            active_turn,
+            ..
+        }) = prepared.result()
+        else {
+            panic!("the delegated turn must retain the active slot");
+        };
+        assert_eq!(*active_turn, delegated_turn);
+    }
+
+    #[test]
+    fn delegated_active_turn_accepts_safe_point_steering() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let delegated_turn = turn_id(7);
+        let prepared = safe_point_command(2, delegated_turn)
+            .prepare_with_delegated_active_turn(
+                &current,
+                delegated_turn,
+                Some(SessionInputPosition::first()),
+                None,
+                false,
+                accepted_input_id(3),
+                None,
+                |_| None,
+            )
+            .expect("safe-point input binds to the delegated active turn");
+        let steering = prepared.result();
+        let steering = applied_result(steering)
+            .pending_steering()
+            .expect("the delegated turn receives pending steering");
+
+        assert_eq!(steering.binding().source_turn(), delegated_turn);
+        assert_eq!(
+            steering.acceptance_position(),
+            SessionInputPosition::first()
+                .checked_next()
+                .expect("the second position exists")
+        );
+    }
+
+    #[test]
+    fn delegated_active_turn_accepts_correlated_interrupt_successor() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let delegated_turn = turn_id(7);
+        let successor = turn_id(8);
+        let prepared = interrupt_command(3, delegated_turn)
+            .prepare_with_delegated_active_turn(
+                &current,
+                delegated_turn,
+                Some(SessionInputPosition::first()),
+                None,
+                false,
+                accepted_input_id(3),
+                Some(successor),
+                |_| None,
+            )
+            .expect("the interrupt correlates to the delegated active turn");
+        let origin = prepared.result();
+        let origin = applied_result(origin)
+            .turn_origin()
+            .expect("the interrupt creates an immediate successor");
+
+        assert_eq!(origin.turn(), successor);
+        assert_eq!(
+            origin.queue_order().priority(),
+            AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: delegated_turn,
+            }
+        );
+        assert_eq!(
+            origin
+                .applied_interrupt()
+                .expect("the interrupt carries proof")
+                .proof()
+                .predecessor(),
+            delegated_turn
+        );
+    }
+
+    /// S37 / INV-051: delegation-origin slot ownership cannot bypass the
+    /// capability evidence required by an explicit per-call setting.
+    #[test]
+    fn s37_inv051_delegated_successor_rejects_unvalidated_per_call_settings() {
+        let selection = direct(2);
+        let current = session(1, 1, ModelSelectionRequest::Direct(selection));
+        let delegated_turn = turn_id(7);
+        let per_call = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::High),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let command = SubmitInput::new(
+            command_id(4),
+            current.id(),
+            content("settings successor"),
+            DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn: delegated_turn,
+                configuration: PerInputConfigurationChoices::with_model_settings(
+                    version(1),
+                    ModelSelectionOverride::UseSessionDefault,
+                    per_call,
+                ),
+            },
+        );
+
+        let error = command
+            .prepare_with_delegated_active_turn(
+                &current,
+                delegated_turn,
+                Some(SessionInputPosition::first()),
+                None,
+                false,
+                accepted_input_id(4),
+                Some(turn_id(8)),
+                |_| None,
+            )
+            .expect_err("the legacy delegated path has no capability record");
+
+        assert_eq!(
+            error.failure(),
+            SubmitInputPreparationFailure::ModelSettingsResolution(
+                OriginModelSettingsError::MissingCapabilities { selection }
+            )
+        );
     }
 
     /// S07 / S08 / S09 / INV-012 / INV-028: every active-work delivery mode
@@ -4882,6 +5842,8 @@ mod tests {
                 defaults: defaults(ModelSelectionRequest::Direct(direct(2))),
                 stored_requested_model: ModelSelectionRequest::Direct(direct(2)),
                 stored_frozen_model: FrozenModelSelection::Direct(direct(2)),
+                stored_model_settings: None,
+                stored_model_settings_adjustments: Vec::new(),
             },
         )
         .reconstitute()
@@ -6427,6 +7389,7 @@ mod tests {
             content("hello"),
             DeliveryRequest::Interrupt {
                 expected_active_turn: turn_id(7),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
                 configuration: choices(
                     1,
                     ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Alias(alias(2))),

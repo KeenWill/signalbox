@@ -44,11 +44,14 @@ compaction-call evidence were verified through PR #312
 preparation machinery, configured prompt, and provider-native input-counting
 implementation were verified through PR #314
 (`agent/context-compaction-protocol`). The daemon does not schedule that
-automatic machinery. The runner-placement rendering and executable session-tool
-snapshot paragraphs are the foundation proposal at the bottom of their
-implementing stack and become verified only with those child pull requests, as
-is [availability successor calls](#availability-successor-calls). Invariant tags
-cite [docs/invariants.md](../invariants.md).
+automatic machinery. Session-delegation semantic rendering and its
+provider-neutral bridge were verified against this PR (`agent/delegation`). The
+runner-placement rendering and executable session-tool snapshot paragraphs are
+the foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests. Availability successor calls are
+the foundation proposal at the bottom of their implementing stack and become
+verified only with its child pull requests. Invariant tags cite
+[docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -227,9 +230,7 @@ messages:
   assistant tool calls and user tool results after resolving their referenced
   request, attempt, and decision records through [tool-loop](tool-loop.md).
 
-**Committed unimplemented functionality (session-delegation foundation
-proposal).** No present renderer admits the delegation semantic variants. The
-implementing delegation child pull requests add these mappings:
+The renderer admits the delegation semantic variants with these mappings:
 
 - `DelegatedTask` renders as a structured provider-neutral delegated-task
   message retaining the child, parent session and turn, and exact spawning
@@ -428,6 +429,16 @@ signal as `Cancelled`, and the application returns `NoWork`; it never converts
 authoritative cancellation into the guarded known-failure closure for a call
 that may already be terminal (INV-037).
 
+**SPEC PROPOSAL — parent-cascade cancellation.** The same poll treats an exact
+delegation logical-terminal proof as authoritative cancellation even though the
+retained model-call row may still say `Prepared` or `InFlight`. Capability work
+then returns `NoWork`; invocation cancellation reaches the provider. If a
+provider response wins physically but its observation transaction reloads after
+the parent cascade committed, the transaction discards that response and the
+application returns `NoWork`. It never derives a second turn outcome, overwrites
+the delivered child result, or substitutes provider provenance for the parent
+command. This proposal is accepted with the implementing stack's merge.
+
 1. **Prepare transaction.** Locks the session, reconstitutes the aggregate, and
    either: reports no runnable work; creates and commits the exact `Prepared`
    call with its pinned non-secret credential reference
@@ -576,8 +587,10 @@ qualifies (INV-025): a lost acknowledgement cannot prove the provider did not
 act, so a successor could duplicate both an effect and its spend. Credential
 resolution failure and `provider_credential_rejected` never qualify: both are
 deployment misconfiguration, and moving to another account hides the account
-that is broken. Every other known failure keeps the behavior above, failing its
-attempt and turn.
+that is broken. For each admitted availability cause, the adapter supplies
+distinct typed evidence that the request was not accepted; classification as
+quota exhaustion, rate limiting, or overload alone is insufficient. Every other
+known failure keeps the behavior above, failing its attempt and turn.
 
 The chain is bounded by the pool. A member that produced a qualifying failure is
 excluded from the rest of that turn, so at most one call per member exists per
@@ -585,8 +598,10 @@ turn and the longest possible chain is the pool's member count. When no member
 remains admissible, the pool's `on_pool_exhausted` decides: `fail` fails the
 turn as a known failure carrying the last observed cause, and `park` parks the
 turn in a durable wait carrying the earliest reset its members reported, which
-the scheduler releases when that time passes. A parked turn holds its session
-slot, appends no failure entry, and is not a terminal outcome.
+the scheduler releases when that time passes. If no member reported a reset, the
+wait has no deadline and only a durable member-availability update wakes it. A
+parked turn holds its session slot, appends no failure entry, and is not a
+terminal outcome.
 
 Each successor durably records the predecessor call it follows and the cause
 that authorized it, so a chain reads as evidence rather than as two calls that
@@ -837,13 +852,13 @@ attempt, redispatches a call, or assumes a request was or was not sent.
 
 Production composition wires `PostgresModelCallRepository` (all four transaction
 roles), the in-process gate, and `RuntimeModelCallProvider` over the
-configuration-selected Anthropic HTTP or Codex CLI runtime, with the domain
-target catalog, runtime model catalog, and exact adapter routes built from one
-versioned static configuration file. Anthropic rereads its credential file;
-Codex uses its external CLI login
-([configuration-and-credentials](configuration-and-credentials.md)). The
-`signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`) drives
-one session through the real scheduler and PostgreSQL path with either a
+configuration-selected Anthropic HTTP, OpenAI HTTP, Claude CLI, or Codex CLI
+runtime, with the domain target catalog, runtime model catalog, and exact
+adapter routes built from one versioned static configuration file. Direct HTTP
+runtimes reread their credential files; CLI runtimes use the selected profile's
+delivery ([configuration-and-credentials](configuration-and-credentials.md)).
+The `signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`)
+drives one session through the real scheduler and PostgreSQL path with either a
 deterministic scripted reply or an explicit `--anthropic` smoke mode, then
 prints the semantic transcript; it is deliberately not the client protocol.
 

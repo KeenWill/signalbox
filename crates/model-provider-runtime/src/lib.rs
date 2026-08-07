@@ -28,20 +28,27 @@ use signalbox_application::{
     ModelToolResultContent, OperatorFailureClass, PreparedModelOperation,
 };
 use signalbox_domain::{
-    AssistantResponsePart, AssistantText, AuthorizedModelCall, ContextFrontierId,
+    AnthropicServiceTier as DomainAnthropicServiceTier, AssistantResponsePart, AssistantText,
+    AuthorizedModelCall, CodexCliServiceTier as DomainCodexCliServiceTier, ContextFrontierId,
+    DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, FastMode as DomainFastMode,
     FrozenModelSelection, ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
-    ProviderModelCallFailureCause, ProviderReportedTokenUsage, ResolvedProviderTarget, SessionId,
-    ToolArgumentsKind, ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind,
-    ToolName as DomainToolName, ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId,
-    TurnId,
+    OpenAiServiceTier as DomainOpenAiServiceTier, ProviderModelCallFailureCause,
+    ProviderReportedTokenUsage, ReasoningLevel as DomainReasoningLevel, ResolvedProviderTarget,
+    ServiceTier as DomainServiceTier, SessionId, ToolArgumentsKind,
+    ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind, ToolName as DomainToolName,
+    ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId, TurnId, ValidatedModelSettings,
 };
 use signalbox_model_runtime::{
-    AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
-    CredentialAccessFailure, CredentialReference, DeliveryMode, LossCause, MessagePart,
-    ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact, ObservationSink,
-    PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderReportedModel,
-    RequestedTarget, ResolvedTarget, TerminalEvidence, ToolCallId, ToolCallProposal,
-    ToolDefinition, ToolName as RuntimeToolName, ToolResultRecord, UnsentCause,
+    AnthropicServiceTier as RuntimeAnthropicServiceTier, AssistantPart, CancellationSignal,
+    CodexCliServiceTier as RuntimeCodexCliServiceTier, CompletionFinish, ConversationMessage,
+    ConversationRole, CredentialAccessFailure, CredentialReference, DeliveryMode,
+    FastMode as RuntimeFastMode, LossCause, MessagePart, ModelOperation, ModelRuntime,
+    ModelSettings, Observation, ObservationFact, ObservationSink,
+    OpenAiServiceTier as RuntimeOpenAiServiceTier, PreparationFailure, PreparationOutcome,
+    ProviderErrorKind, ProviderReportedModel, ReasoningLevel as RuntimeReasoningLevel,
+    RequestedTarget, ResolvedTarget, ServiceTier as RuntimeServiceTier, TerminalEvidence,
+    ToolCallId, ToolCallProposal, ToolDefinition, ToolName as RuntimeToolName, ToolResultRecord,
+    UnsentCause,
 };
 
 /// The longest provider-reported model identity retained for operator
@@ -129,6 +136,7 @@ impl ProviderTextDeltaSink for DiscardProviderTextDeltas {
 pub struct RuntimeModelDefinition {
     target: ResolvedProviderTarget,
     provider_model: String,
+    fast_target: Option<ResolvedProviderTarget>,
     max_output_tokens: u32,
     context_window_tokens: u32,
 }
@@ -156,6 +164,7 @@ impl RuntimeModelDefinition {
         Ok(Self {
             target,
             provider_model,
+            fast_target: None,
             max_output_tokens,
             context_window_tokens,
         })
@@ -169,6 +178,18 @@ impl RuntimeModelDefinition {
     /// Returns the exact provider-native model spelling.
     pub fn provider_model(&self) -> &str {
         &self.provider_model
+    }
+
+    /// Declares the separately configured provider target authorized when
+    /// this model's validated settings enable mapped fast serving.
+    pub const fn with_fast_target(mut self, fast_target: ResolvedProviderTarget) -> Self {
+        self.fast_target = Some(fast_target);
+        self
+    }
+
+    /// Returns the authorized mapped fast target, when one is declared.
+    pub const fn fast_target(&self) -> Option<ResolvedProviderTarget> {
+        self.fast_target
     }
 
     /// Returns the required provider output-token ceiling.
@@ -232,6 +253,16 @@ impl RuntimeModelCatalog {
             }
             by_target.insert(definition.target, definition);
         }
+        for definition in by_target.values() {
+            if let Some(fast_target) = definition.fast_target
+                && !by_target.contains_key(&fast_target)
+            {
+                return Err(RuntimeModelCatalogError::MissingFastTarget {
+                    target: definition.target,
+                    fast_target,
+                });
+            }
+        }
         Ok(Self {
             definitions: by_target,
         })
@@ -240,6 +271,18 @@ impl RuntimeModelCatalog {
     /// Looks up the exact runtime delivery mapping for a durable target.
     pub fn resolve(&self, target: ResolvedProviderTarget) -> Option<&RuntimeModelDefinition> {
         self.definitions.get(&target)
+    }
+
+    /// Resolves the exact serving definition selected by validated fast mode.
+    pub fn effective_definition<'catalog>(
+        &'catalog self,
+        definition: &'catalog RuntimeModelDefinition,
+        fast_mode: DomainFastMode,
+    ) -> Option<&'catalog RuntimeModelDefinition> {
+        Some(match (fast_mode, definition.fast_target) {
+            (DomainFastMode::Enabled, Some(target)) => self.resolve(target)?,
+            (DomainFastMode::Disabled, _) | (DomainFastMode::Enabled, None) => definition,
+        })
     }
 }
 
@@ -251,15 +294,37 @@ pub enum RuntimeModelCatalogError {
         /// The target whose immutable meaning conflicted.
         target: ResolvedProviderTarget,
     },
+    /// A mapped fast target has no runtime delivery definition.
+    MissingFastTarget {
+        /// Source target declaring mapped fast serving.
+        target: ResolvedProviderTarget,
+        /// Missing authorized fast target.
+        fast_target: ResolvedProviderTarget,
+    },
 }
 
 impl fmt::Display for RuntimeModelCatalogError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("runtime model catalog contains a conflicting target")
+        formatter.write_str(match self {
+            Self::ConflictingTarget { .. } => "runtime model catalog contains a conflicting target",
+            Self::MissingFastTarget { .. } => {
+                "runtime model catalog contains a missing mapped fast target"
+            }
+        })
     }
 }
 
 impl Error for RuntimeModelCatalogError {}
+
+fn runtime_delivery_definitions(
+    models: &RuntimeModelCatalog,
+    target: ResolvedProviderTarget,
+    fast_mode: DomainFastMode,
+) -> Option<(&RuntimeModelDefinition, &RuntimeModelDefinition)> {
+    let selected = models.resolve(target)?;
+    let serving = models.effective_definition(selected, fast_mode)?;
+    Some((selected, serving))
+}
 
 /// How one provider-reported model identity relates to the configured exact
 /// provider-model spelling for the call's resolved target.
@@ -971,6 +1036,60 @@ impl ClassifyOperatorFailure for RuntimeInputTokenCountError {
     }
 }
 
+fn runtime_model_settings(
+    max_output_tokens: u32,
+    validated: ValidatedModelSettings,
+) -> ModelSettings {
+    let effective = validated.effective();
+    let mut settings = ModelSettings::new(max_output_tokens);
+    settings.reasoning_level = effective.reasoning_level().map(runtime_reasoning_level);
+    settings.fast_mode = runtime_fast_mode(effective.fast_mode());
+    settings.service_tier = effective.service_tier().map(runtime_service_tier);
+    settings
+}
+
+const fn runtime_reasoning_level(value: DomainReasoningLevel) -> RuntimeReasoningLevel {
+    match value {
+        DomainReasoningLevel::None => RuntimeReasoningLevel::None,
+        DomainReasoningLevel::Minimal => RuntimeReasoningLevel::Minimal,
+        DomainReasoningLevel::Low => RuntimeReasoningLevel::Low,
+        DomainReasoningLevel::Medium => RuntimeReasoningLevel::Medium,
+        DomainReasoningLevel::High => RuntimeReasoningLevel::High,
+        DomainReasoningLevel::XHigh => RuntimeReasoningLevel::XHigh,
+        DomainReasoningLevel::Max => RuntimeReasoningLevel::Max,
+        DomainReasoningLevel::Ultra => RuntimeReasoningLevel::Ultra,
+    }
+}
+
+const fn runtime_fast_mode(value: DomainFastMode) -> RuntimeFastMode {
+    match value {
+        DomainFastMode::Disabled => RuntimeFastMode::Disabled,
+        DomainFastMode::Enabled => RuntimeFastMode::Enabled,
+    }
+}
+
+const fn runtime_service_tier(value: DomainServiceTier) -> RuntimeServiceTier {
+    match value {
+        DomainServiceTier::Anthropic(value) => RuntimeServiceTier::Anthropic(match value {
+            DomainAnthropicServiceTier::Auto => RuntimeAnthropicServiceTier::Auto,
+            DomainAnthropicServiceTier::StandardOnly => RuntimeAnthropicServiceTier::StandardOnly,
+        }),
+        DomainServiceTier::OpenAi(value) => RuntimeServiceTier::OpenAi(match value {
+            DomainOpenAiServiceTier::Auto => RuntimeOpenAiServiceTier::Auto,
+            DomainOpenAiServiceTier::Default => RuntimeOpenAiServiceTier::Default,
+            DomainOpenAiServiceTier::Flex => RuntimeOpenAiServiceTier::Flex,
+            DomainOpenAiServiceTier::Scale => RuntimeOpenAiServiceTier::Scale,
+            DomainOpenAiServiceTier::Priority => RuntimeOpenAiServiceTier::Priority,
+            DomainOpenAiServiceTier::Fast => RuntimeOpenAiServiceTier::Fast,
+        }),
+        DomainServiceTier::CodexCli(value) => RuntimeServiceTier::CodexCli(match value {
+            DomainCodexCliServiceTier::Default => RuntimeCodexCliServiceTier::Default,
+            DomainCodexCliServiceTier::Priority => RuntimeCodexCliServiceTier::Priority,
+            DomainCodexCliServiceTier::Flex => RuntimeCodexCliServiceTier::Flex,
+        }),
+    }
+}
+
 impl<R> ModelCallInputTokenCounter for RuntimeModelCallProvider<R>
 where
     R: signalbox_model_runtime::ModelInputTokenCounter<ModelCallId> + Send + Sync,
@@ -988,10 +1107,12 @@ where
         let request = operation.request();
         let call = request.call();
         let correlation = call.id();
-        let definition = self
-            .models
-            .resolve(call.target())
-            .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
+        let (definition, effective_definition) = runtime_delivery_definitions(
+            &self.models,
+            call.target(),
+            request.model_settings().effective().fast_mode(),
+        )
+        .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
         let messages = render_runtime_messages(operation.messages());
         let tools = operation
             .tools()
@@ -1012,7 +1133,10 @@ where
             RequestedTarget::new(render_requested_target(call.selection())),
             ResolvedTarget::new(definition.provider_model().to_owned()),
             messages,
-            ModelSettings::new(definition.max_output_tokens()),
+            runtime_model_settings(
+                effective_definition.max_output_tokens(),
+                request.model_settings(),
+            ),
         );
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
@@ -1067,7 +1191,12 @@ where
             attempt: request.attempt(),
             call: correlation,
         };
-        let definition = self.models.resolve(call.target()).ok_or_else(|| {
+        let (definition, effective_definition) = runtime_delivery_definitions(
+            &self.models,
+            call.target(),
+            request.model_settings().effective().fast_mode(),
+        )
+        .ok_or_else(|| {
             fail_closed(
                 telemetry,
                 RuntimeModelCallProviderError::UnconfiguredTarget,
@@ -1103,14 +1232,18 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let resolved_target = ResolvedTarget::new(definition.provider_model().to_owned());
+        let selected_target = ResolvedTarget::new(definition.provider_model().to_owned());
+        let resolved_target = ResolvedTarget::new(effective_definition.provider_model().to_owned());
         let mut runtime_operation = ModelOperation::new(
             correlation,
             credential,
             RequestedTarget::new(render_requested_target(call.selection())),
-            resolved_target.clone(),
+            selected_target,
             messages,
-            ModelSettings::new(definition.max_output_tokens()),
+            runtime_model_settings(
+                effective_definition.max_output_tokens(),
+                request.model_settings(),
+            ),
         );
         // The session system prompt frozen through the calling turn's
         // defaults epoch rides every operation; adapters translate a `None`
@@ -1366,6 +1499,42 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 assistant_call = None;
                 collecting_tool_results = false;
             }
+            ModelConversationMessage::DelegatedTask { content, .. } => {
+                rendered.push(ConversationMessage::user_text(format!(
+                    "Signalbox delegated task:\n{}",
+                    content.as_str()
+                )));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::DelegationMessage {
+                sender, content, ..
+            } => {
+                rendered.push(ConversationMessage::user_text(format!(
+                    "Signalbox delegation message from session {}:\n{}",
+                    sender.into_uuid(),
+                    content.as_str()
+                )));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::BackgroundDelegationResult { child, outcome, .. } => {
+                let content = match (outcome.kind(), outcome.content()) {
+                    (DelegationOutcomeKind::ResultReturned, Some(content)) => format!(
+                        "Signalbox background child result from session {}:\n{}",
+                        child.into_uuid(),
+                        content.as_str()
+                    ),
+                    _ => format!(
+                        "Signalbox background child outcome from session {}: {}",
+                        child.into_uuid(),
+                        render_delegation_outcome(outcome)
+                    ),
+                };
+                rendered.push(ConversationMessage::user_text(content));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
             ModelConversationMessage::Assistant {
                 producing_call,
                 content,
@@ -1548,7 +1717,62 @@ fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
             .to_string(),
             true,
         ),
+        ModelToolResultContent::Delegation(outcome) => match (outcome.kind(), outcome.content()) {
+            (DelegationOutcomeKind::ResultReturned, Some(content)) => {
+                (content.as_str().to_owned(), false)
+            }
+            _ => (render_delegation_outcome(outcome), true),
+        },
     }
+}
+
+fn render_delegation_outcome(outcome: &DelegationOutcome) -> String {
+    let outcome_kind = match outcome.kind() {
+        DelegationOutcomeKind::ResultReturned => "returned",
+        DelegationOutcomeKind::ChildFailed => "failed",
+        DelegationOutcomeKind::ChildStopped => "stopped",
+        DelegationOutcomeKind::ChildCancelled => "cancelled",
+        DelegationOutcomeKind::AlreadyTerminal => "already_terminal",
+        DelegationOutcomeKind::ContinueRunning => "continue_running",
+    };
+    let reason = match outcome.reason() {
+        DelegationOutcomeReason::ChildCompleted => "child_completed",
+        DelegationOutcomeReason::ChildExecutionFailed => "child_execution_failed",
+        DelegationOutcomeReason::ChildResultUnavailable => "child_result_unavailable",
+        DelegationOutcomeReason::ChildCancelled => "child_cancelled",
+        DelegationOutcomeReason::ParentStopped { .. } => "parent_stopped",
+        DelegationOutcomeReason::ParentCancelled { .. } => "parent_cancelled",
+    };
+    let provenance = match outcome.reconstitution_provenance() {
+        signalbox_domain::DelegationProvenanceReconstitutionInput::ChildTurn { session, turn } => {
+            format!(
+                r#"{{"type":"child_turn","child_session_id":"{}","child_turn_id":"{}"}}"#,
+                session.into_uuid(),
+                turn.into_uuid()
+            )
+        }
+        signalbox_domain::DelegationProvenanceReconstitutionInput::ParentTurnCommand {
+            session,
+            turn,
+            command,
+        } => format!(
+            r#"{{"type":"parent_turn_command","parent_session_id":"{}","parent_turn_id":"{}","command_id":"{}","descendant_scope":"parent_and_descendants"}}"#,
+            session.into_uuid(),
+            turn.into_uuid(),
+            command.into_uuid()
+        ),
+        signalbox_domain::DelegationProvenanceReconstitutionInput::ParentGoalCommand {
+            session,
+            generation,
+            command,
+        } => format!(
+            r#"{{"type":"parent_goal_command","parent_session_id":"{}","goal_generation":"{}","command_id":"{}","descendant_scope":"parent_and_descendants"}}"#,
+            session.into_uuid(),
+            generation.get(),
+            command.into_uuid()
+        ),
+    };
+    format!(r#"{{"outcome":"{outcome_kind}","reason":"{reason}","provenance":{provenance}}}"#)
 }
 
 /// One classified terminal outcome plus the sanitized diagnostics that
@@ -1798,20 +2022,27 @@ fn provider_reported_token_usage(evidence: &TerminalEvidence) -> ProviderReporte
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
     use expect_test::expect;
-    use signalbox_application::{ClassifyOperatorFailure, ModelConversationMessage};
+    use signalbox_application::{
+        ClassifyOperatorFailure, ModelConversationMessage, ModelToolResultContent,
+    };
     use signalbox_domain::{
-        AssistantText, DirectModelSelection, ImportedText, ImportedTranscriptEntryId, ModelCallId,
-        ModelCallTerminalObservation, NormalizedToolArguments, ProviderModelCallFailureCause,
-        ProviderModelIdentity, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
-        SessionConfigurationDefaultsVersion, SessionId, ToolExecutionError, ToolExecutionErrorKind,
-        ToolRequest, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput,
-        TurnAttemptId, TurnId,
+        AssistantText, DelegationContent, DelegationMessageId, DelegationOutcome,
+        DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenanceReconstitutionInput,
+        DirectModelSelection, FastMode, FastModeOverlay, FastModeSupport, ImportedText,
+        ImportedTranscriptEntryId, ModelCallId, ModelCallTerminalObservation, ModelCapabilities,
+        ModelSettingsOverlay, ModelSettingsPrecedence, NormalizedToolArguments, OpenAiServiceTier,
+        ProviderModelCallFailureCause, ProviderModelIdentity, ReasoningLevel,
+        SemanticTranscriptEntryId, SemanticTranscriptEntryRef, ServiceTier,
+        SessionConfigurationDefaultsVersion, SessionId, SettingOverlay, ToolExecutionError,
+        ToolExecutionErrorKind, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+        ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
     };
     use signalbox_expect_table::table;
     use signalbox_model_runtime::{
@@ -1819,7 +2050,8 @@ mod tests {
         CompletionFinish, ConversationMessage, CredentialAccessError, CredentialAccessFailure,
         ExchangeFacts, LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
         PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
-        ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId,
+        ProviderReportedModel, ReasoningLevel as RuntimeReasoningLevel, RefusalEvidence,
+        ServiceTier as RuntimeServiceTier, TerminalEvidence, TokenUsage, ToolCallId,
         ToolCallProposal, ToolName, TransportFacts, UnsentCause,
     };
     use uuid::Uuid;
@@ -1829,7 +2061,8 @@ mod tests {
         ProviderTextDeltaSink, RuntimeInputTokenCountError, RuntimeModelCallProviderError,
         RuntimeModelCatalog, RuntimeModelCatalogError, RuntimeModelDefinition,
         RuntimeModelDefinitionError, classify_terminal, decode_checked_raw_json,
-        provider_reported_token_usage, render_runtime_messages,
+        provider_reported_token_usage, render_runtime_messages, runtime_delivery_definitions,
+        runtime_model_settings,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -1865,6 +2098,119 @@ mod tests {
             SessionId::from_uuid(Uuid::from_u128(10)),
             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value)),
         )
+    }
+
+    #[test]
+    fn delegation_inputs_render_with_exact_provider_neutral_prefixes() {
+        let parent = SessionId::from_uuid(Uuid::from_u128(20));
+        let child = SessionId::from_uuid(Uuid::from_u128(21));
+        let spawning_request = ToolRequestId::from_uuid(Uuid::from_u128(22));
+        let awaiting_request = ToolRequestId::from_uuid(Uuid::from_u128(23));
+        let task_content =
+            DelegationContent::try_new("task bytes".into()).expect("fixture task is valid");
+        let message_content =
+            DelegationContent::try_new("message bytes".into()).expect("fixture message is valid");
+        let result_content =
+            DelegationContent::try_new("child result".into()).expect("fixture result is valid");
+        let outcome = DelegationOutcome::reconstitute(
+            DelegationOutcomeKind::ResultReturned,
+            Some(result_content.clone()),
+            DelegationOutcomeReason::ChildCompleted,
+            DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: child,
+                turn: TurnId::from_uuid(Uuid::from_u128(24)),
+            },
+        )
+        .expect("fixture result is correlated");
+
+        let rendered = render_runtime_messages(&[
+            ModelConversationMessage::DelegatedTask {
+                source: source(25),
+                spawning_request,
+                parent_session: parent,
+                parent_turn: TurnId::from_uuid(Uuid::from_u128(26)),
+                content: task_content.clone(),
+            },
+            ModelConversationMessage::DelegationMessage {
+                source: source(27),
+                spawning_request,
+                message: DelegationMessageId::from_uuid(Uuid::from_u128(28)),
+                sender: parent,
+                recipient: child,
+                delivery_sequence: std::num::NonZeroU64::MIN,
+                content: message_content.clone(),
+            },
+            ModelConversationMessage::BackgroundDelegationResult {
+                source: source(29),
+                awaiting_request,
+                spawning_request,
+                child,
+                delivery_sequence: std::num::NonZeroU64::new(2).expect("two is positive"),
+                outcome,
+            },
+        ]);
+
+        assert_eq!(
+            rendered,
+            vec![
+                ConversationMessage::user_text(format!(
+                    "Signalbox delegated task:\n{}",
+                    task_content.as_str()
+                )),
+                ConversationMessage::user_text(format!(
+                    "Signalbox delegation message from session {}:\n{}",
+                    parent.into_uuid(),
+                    message_content.as_str()
+                )),
+                ConversationMessage::user_text(format!(
+                    "Signalbox background child result from session {}:\n{}",
+                    child.into_uuid(),
+                    result_content.as_str()
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn foreground_child_failure_renders_compact_typed_tool_result() {
+        let child = SessionId::from_uuid(Uuid::from_u128(30));
+        let child_turn = TurnId::from_uuid(Uuid::from_u128(31));
+        let request = ToolRequestId::from_uuid(Uuid::from_u128(32));
+        let outcome = DelegationOutcome::reconstitute(
+            DelegationOutcomeKind::ChildFailed,
+            None,
+            DelegationOutcomeReason::ChildExecutionFailed,
+            DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: child,
+                turn: child_turn,
+            },
+        )
+        .expect("fixture failure is correlated");
+
+        let rendered = render_runtime_messages(&[ModelConversationMessage::ToolResult {
+            source: source(33),
+            request,
+            content: ModelToolResultContent::Delegation(outcome),
+        }]);
+
+        assert_eq!(
+            rendered[0].role,
+            signalbox_model_runtime::ConversationRole::User
+        );
+        assert_eq!(
+            rendered[0].parts,
+            vec![signalbox_model_runtime::MessagePart::ToolResult(
+                signalbox_model_runtime::ToolResultRecord {
+                    tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
+                    content: format!(
+                        r#"{{"outcome":"failed","reason":"child_execution_failed","provenance":{{"type":"child_turn","child_session_id":"{}","child_turn_id":"{}"}}}}"#,
+                        child.into_uuid(),
+                        child_turn.into_uuid()
+                    ),
+                    is_error: true,
+                },
+            )]
+        );
     }
 
     fn request(value: u128, arguments: &str) -> ToolRequest {
@@ -3047,6 +3393,151 @@ mod tests {
                     .expect("fixture definition is valid"),
             ]),
             Err(RuntimeModelCatalogError::ConflictingTarget { target: target(1) })
+        );
+    }
+
+    #[test]
+    fn validated_domain_settings_map_completely_into_runtime_settings() {
+        let selection = DirectModelSelection::from_uuid(Uuid::from_u128(1));
+        let capabilities = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::Max]),
+            FastModeSupport::RequestControl,
+            BTreeSet::from([ServiceTier::OpenAi(OpenAiServiceTier::Priority)]),
+        );
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::new(
+                SettingOverlay::Value(ReasoningLevel::Max),
+                FastModeOverlay::Value(FastMode::Enabled),
+                SettingOverlay::Value(ServiceTier::OpenAi(OpenAiServiceTier::Priority)),
+            ),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let validated = capabilities
+            .validate_precedence(selection, precedence)
+            .expect("fixture settings are declared by the capability record");
+
+        let mapped = runtime_model_settings(512, validated);
+
+        assert_eq!(mapped.max_output_tokens, 512);
+        assert_eq!(mapped.reasoning_level, Some(RuntimeReasoningLevel::Max));
+        assert_eq!(mapped.fast_mode, signalbox_model_runtime::FastMode::Enabled);
+        assert_eq!(
+            mapped.service_tier,
+            Some(RuntimeServiceTier::OpenAi(
+                signalbox_model_runtime::OpenAiServiceTier::Priority
+            ))
+        );
+    }
+
+    #[test]
+    fn mapped_fast_target_preserves_the_toggle_for_adapter_mapping() {
+        let selection = DirectModelSelection::from_uuid(Uuid::from_u128(1));
+        let capabilities = ModelCapabilities::new(
+            BTreeSet::new(),
+            FastModeSupport::AlternateTarget(target(2)),
+            BTreeSet::new(),
+        );
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::new(
+                SettingOverlay::Inherit,
+                FastModeOverlay::Value(FastMode::Enabled),
+                SettingOverlay::Inherit,
+            ),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let validated = capabilities
+            .validate_precedence(selection, precedence)
+            .expect("mapped fast serving is declared by the capability record");
+
+        let mapped = runtime_model_settings(512, validated);
+
+        assert_eq!(mapped.fast_mode, signalbox_model_runtime::FastMode::Enabled);
+    }
+
+    #[test]
+    fn mapped_fast_target_supplies_the_authorized_delivery_identity_and_limit() {
+        let selected_model = "fixture-standard";
+        let serving_model = "fixture-fast";
+        let selected_output_limit = 64;
+        let serving_output_limit = 32;
+        let ordinary = RuntimeModelDefinition::try_new(
+            target(1),
+            String::from(selected_model),
+            selected_output_limit,
+            200_000,
+        )
+        .expect("ordinary fixture definition is valid")
+        .with_fast_target(target(2));
+        let fast = RuntimeModelDefinition::try_new(
+            target(2),
+            String::from(serving_model),
+            serving_output_limit,
+            200_000,
+        )
+        .expect("fast fixture definition is valid");
+        let catalog = RuntimeModelCatalog::try_from_definitions([ordinary, fast])
+            .expect("mapped target is present");
+        let source = catalog
+            .resolve(target(1))
+            .expect("source target is present");
+        let (selected, serving) =
+            runtime_delivery_definitions(&catalog, target(1), FastMode::Enabled)
+                .expect("mapped delivery resolves");
+
+        assert_eq!(selected.provider_model(), selected_model);
+        assert_eq!(serving.provider_model(), serving_model);
+
+        assert_eq!(
+            catalog
+                .effective_definition(source, FastMode::Disabled)
+                .expect("ordinary target resolves")
+                .provider_model(),
+            selected_model
+        );
+        assert_eq!(
+            catalog
+                .effective_definition(source, FastMode::Disabled)
+                .expect("ordinary target resolves")
+                .max_output_tokens(),
+            selected_output_limit
+        );
+        assert_eq!(
+            catalog
+                .effective_definition(source, FastMode::Enabled)
+                .expect("mapped fast target resolves")
+                .provider_model(),
+            serving_model
+        );
+        assert_eq!(
+            catalog
+                .effective_definition(source, FastMode::Enabled)
+                .expect("mapped fast target resolves")
+                .max_output_tokens(),
+            serving_output_limit
+        );
+    }
+
+    #[test]
+    fn runtime_catalog_rejects_a_missing_mapped_fast_target() {
+        let ordinary = RuntimeModelDefinition::try_new(
+            target(1),
+            String::from("fixture-standard"),
+            64,
+            200_000,
+        )
+        .expect("ordinary fixture definition is valid")
+        .with_fast_target(target(2));
+
+        assert_eq!(
+            RuntimeModelCatalog::try_from_definitions([ordinary]),
+            Err(RuntimeModelCatalogError::MissingFastTarget {
+                target: target(1),
+                fast_target: target(2),
+            })
         );
     }
 }

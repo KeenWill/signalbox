@@ -3,7 +3,6 @@
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
 use git2::Repository;
-use rustix::fs::{CWD, Mode, mkfifoat};
 
 use crate::arguments::{GitDiffArguments, LocalOperation};
 use crate::failure::LocalGitFailure;
@@ -15,7 +14,7 @@ use crate::tests::planting::{
 use crate::tests::support::{
     CHANGED_CONTENT, EMBEDDED_REPOSITORY_PATH, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE,
     MODEL_MESSAGE, NESTED_TRACKED_DIRECTORY, NESTED_TRACKED_PATH, TRACKED_PATH, commit_all,
-    execute, install_deleted_conflict, install_missing_skip_worktree_entry,
+    create_fifo, execute, install_deleted_conflict, install_missing_skip_worktree_entry,
     status_uses_bound_index_without_fifo_wait,
 };
 
@@ -285,7 +284,7 @@ fn status_rejects_a_live_index_replacement_after_binding_its_snapshot() {
 fn status_never_opens_a_worktree_ignore_fifo() {
     let fixture = Fixture::new();
     let ignore_path = fixture.root().join(".gitignore");
-    mkfifoat(CWD, &ignore_path, Mode::RUSR | Mode::WUSR).expect("worktree ignore FIFO constructs");
+    create_fifo(&ignore_path).expect("worktree ignore FIFO constructs");
     let executor = fixture.executor();
 
     let status = execute(&executor, LocalOperation::Status);

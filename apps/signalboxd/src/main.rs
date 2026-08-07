@@ -13,7 +13,7 @@ use std::{
     ffi::OsString,
     fmt, fs,
     future::Future,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::ExitCode,
     sync::Arc,
     time::Duration,
@@ -36,9 +36,11 @@ use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{
     AnthropicConfig, AnthropicConstructionError, AnthropicRuntime,
 };
+use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 use signalbox_persistence::{
     conversation_import::backfill_imported_conversation_display_titles, migrate,
-    model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
+    model_execution::PostgresModelCallRepository,
+    repo_watch_dispatch::PostgresRepoWatchDispatchStore, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
 use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
@@ -52,8 +54,9 @@ use signalboxd::{
     DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, FatalExecutionSupervisor,
     FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport,
     HubModelConfiguration, HubModelConfigurationError, LocalProcessListener, LocalSocketError,
-    MappedDaemonCredentialInputs, OtlpRuntime, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
+    MappedDaemonCredentialInputs, OPENAI_CREDENTIAL_REFERENCE, OtlpRuntime,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, PrometheusServer, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
     SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
     SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
     TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
@@ -73,6 +76,7 @@ const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
 const DATABASE_URL_ENVIRONMENT: &str = "DATABASE_URL";
 const TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_TEMPLATE_CONFIG_FILE";
 const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
+const OPENAI_API_KEY_FILE_ENVIRONMENT: &str = "OPENAI_API_KEY_FILE";
 const BRAVE_API_KEY_FILE_ENVIRONMENT: &str = "BRAVE_API_KEY_FILE";
 const GITHUB_TOKEN_FILE_ENVIRONMENT: &str = "GITHUB_TOKEN_FILE";
 const LOG_FILTER_ENVIRONMENT: &str = "RUST_LOG";
@@ -162,6 +166,7 @@ struct HubConfiguration {
     model_configuration_file: PathBuf,
     template_configuration_file: PathBuf,
     anthropic_api_key_file: Option<PathBuf>,
+    openai_api_key_file: Option<PathBuf>,
     brave_api_key_file: PathBuf,
     github_token_file: PathBuf,
     process_socket_path: PathBuf,
@@ -173,6 +178,7 @@ struct HubConfigurationValues {
     model_configuration_file: Option<OsString>,
     template_configuration_file: Option<OsString>,
     anthropic_api_key_file: Option<OsString>,
+    openai_api_key_file: Option<OsString>,
     brave_api_key_file: Option<OsString>,
     github_token_file: Option<OsString>,
     process_socket_path: Option<OsString>,
@@ -186,6 +192,7 @@ impl HubConfiguration {
             model_configuration_file: env::var_os(MODEL_CONFIGURATION_FILE_ENVIRONMENT),
             template_configuration_file: env::var_os(TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT),
             anthropic_api_key_file: env::var_os(ANTHROPIC_API_KEY_FILE_ENVIRONMENT),
+            openai_api_key_file: env::var_os(OPENAI_API_KEY_FILE_ENVIRONMENT),
             brave_api_key_file: env::var_os(BRAVE_API_KEY_FILE_ENVIRONMENT),
             github_token_file: env::var_os(GITHUB_TOKEN_FILE_ENVIRONMENT),
             process_socket_path: env::var_os(PROCESS_SOCKET_PATH_ENVIRONMENT),
@@ -199,6 +206,7 @@ impl HubConfiguration {
             model_configuration_file,
             template_configuration_file,
             anthropic_api_key_file,
+            openai_api_key_file,
             brave_api_key_file,
             github_token_file,
             process_socket_path,
@@ -234,6 +242,8 @@ impl HubConfiguration {
         )?;
         let anthropic_api_key_file =
             optional_path(ANTHROPIC_API_KEY_FILE_ENVIRONMENT, anthropic_api_key_file)?;
+        let openai_api_key_file =
+            optional_path(OPENAI_API_KEY_FILE_ENVIRONMENT, openai_api_key_file)?;
         let brave_api_key_file = required_path(BRAVE_API_KEY_FILE_ENVIRONMENT, brave_api_key_file)?;
         let github_token_file = required_path(GITHUB_TOKEN_FILE_ENVIRONMENT, github_token_file)?;
         let process_socket_path =
@@ -254,6 +264,7 @@ impl HubConfiguration {
             model_configuration_file,
             template_configuration_file,
             anthropic_api_key_file,
+            openai_api_key_file,
             brave_api_key_file,
             github_token_file,
             process_socket_path,
@@ -286,8 +297,29 @@ impl HubConfiguration {
         Ok(self.anthropic_api_key_file.clone())
     }
 
+    fn openai_api_key_file(
+        &self,
+        required: bool,
+    ) -> Result<Option<PathBuf>, HubConfigurationError> {
+        if required && self.openai_api_key_file.is_none() {
+            return Err(HubConfigurationError::new(
+                OPENAI_API_KEY_FILE_ENVIRONMENT,
+                RequiredSettingFailure::Missing,
+            ));
+        }
+        Ok(self.openai_api_key_file.clone())
+    }
+
     fn github_token_file(&self) -> PathBuf {
         self.github_token_file.clone()
+    }
+
+    fn repository_watch_credential_conflicts(&self, configuration: &HubModelConfiguration) -> bool {
+        configuration.repository_watch().is_some_and(|watch| {
+            watch.repositories().iter().any(|repository| {
+                credential_files_conflict(&self.github_token_file, repository.credential_file())
+            })
+        })
     }
 
     fn brave_api_key_file(&self) -> PathBuf {
@@ -329,6 +361,88 @@ fn socket_artifacts_conflict(process_path: &Path, runner_path: &Path) -> bool {
     process_artifacts
         .iter()
         .any(|process| runner_artifacts.iter().any(|runner| runner == process))
+}
+
+fn credential_files_conflict(left: &Path, right: &Path) -> bool {
+    let left = resolved_file_reference(left);
+    let right = resolved_file_reference(right);
+    left == right || same_file_identity(&left, &right)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(_left: &Path, _right: &Path) -> bool {
+    false
+}
+
+fn resolved_file_reference(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let mut resolved = normalize_file_reference(&absolute);
+    for _ in 0..40 {
+        let mut prefix = PathBuf::new();
+        let mut components = resolved.components();
+        let mut replacement = None;
+        while let Some(component) = components.next() {
+            prefix.push(component.as_os_str());
+            let Ok(metadata) = fs::symlink_metadata(&prefix) else {
+                return resolved;
+            };
+            if !metadata.file_type().is_symlink() {
+                continue;
+            }
+            let Ok(target) = fs::read_link(&prefix) else {
+                return resolved;
+            };
+            let mut target = if target.is_absolute() {
+                target
+            } else {
+                prefix
+                    .parent()
+                    .map_or(target.clone(), |parent| parent.join(target))
+            };
+            target.extend(components.map(|remaining| remaining.as_os_str()));
+            replacement = Some(normalize_file_reference(&target));
+            break;
+        }
+        let Some(replacement) = replacement else {
+            return fs::canonicalize(&resolved).unwrap_or(resolved);
+        };
+        resolved = replacement;
+    }
+    resolved
+}
+
+fn normalize_file_reference(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !path.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+    }
+    normalized
 }
 
 fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
@@ -411,6 +525,19 @@ const fn anthropic_construction_cause(error: &AnthropicConstructionError) -> &'s
     }
 }
 
+/// Converts OpenAI construction evidence to a closed classification.
+///
+/// The adapter's dynamic parser/client detail is deliberately excluded because
+/// an adapter-owned string is not admitted to operator telemetry.
+const fn openai_construction_cause(error: &OpenAiConstructionError) -> &'static str {
+    match error {
+        OpenAiConstructionError::InvalidBaseUrl { .. } => "openai_invalid_base_url",
+        OpenAiConstructionError::InvalidExchangeTimeout => "openai_invalid_timeout",
+        OpenAiConstructionError::InvalidSseRecordLimit => "openai_invalid_record_limit",
+        OpenAiConstructionError::ClientConstruction { .. } => "openai_client_construction",
+    }
+}
+
 const fn configured_approval_posture_cause(error: &ConfiguredApprovalPostureError) -> &'static str {
     match error {
         ConfiguredApprovalPostureError::UnknownTool { .. } => {
@@ -483,6 +610,7 @@ enum RuntimeTaskExit {
     Scheduler(SchedulerLoopExit),
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
+    RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -522,6 +650,7 @@ enum RuntimeTaskDefect {
     SchedulerCompletedBeforeShutdown,
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
+    RepositoryWatchCompletedBeforeShutdown,
     TaskCancelled,
     TaskPanicked,
     TaskJoinFailed,
@@ -534,6 +663,9 @@ impl RuntimeTaskDefect {
             Self::SchedulerCompletedBeforeShutdown => "scheduler_completed_before_shutdown",
             Self::ProcessCompletedBeforeShutdown => "process_runtime_completed_before_shutdown",
             Self::RunnerCompletedBeforeShutdown => "runner_runtime_completed_before_shutdown",
+            Self::RepositoryWatchCompletedBeforeShutdown => {
+                "repository_watch_completed_before_shutdown"
+            }
             Self::TaskCancelled => "runtime_task_cancelled",
             Self::TaskPanicked => "runtime_task_panicked",
             Self::TaskJoinFailed => "runtime_task_join_failed",
@@ -742,6 +874,15 @@ fn report_runner_runtime_failure(error: &RunnerProtocolRuntimeError) {
     );
 }
 
+fn report_repository_watch_runtime_defect(error: &RepositoryWatchRuntimeError) {
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        failure_class = ?OperatorFailureClass::CallerOrHubBug,
+        cause = %error,
+        "repository-watch runtime violated its lifecycle contract"
+    );
+}
+
 /// Records an unexpected top-level task state using closed evidence only.
 ///
 /// The cause names the task-control condition without formatting `JoinError`,
@@ -769,7 +910,8 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
     match completed {
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
         | Ok(RuntimeTaskExit::Process(Ok(())))
-        | Ok(RuntimeTaskExit::Runner(Ok(()))) => RuntimeTaskCompletion::Clean,
+        | Ok(RuntimeTaskExit::Runner(Ok(())))
+        | Ok(RuntimeTaskExit::RepositoryWatch(Ok(()))) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
@@ -777,6 +919,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         Ok(RuntimeTaskExit::Runner(Err(error))) => {
             report_runner_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
+        }
+        Ok(RuntimeTaskExit::RepositoryWatch(Err(error))) => {
+            report_repository_watch_runtime_defect(&error);
+            RuntimeTaskCompletion::Defect
         }
         Err(error) => {
             report_runtime_task_defect(joined_task_defect(&error));
@@ -919,6 +1065,16 @@ async fn run_hub(
                 SanitizedStartupCause::ModelConfiguration(&error),
             )
         })?;
+    if configuration.repository_watch_credential_conflicts(&model_configuration) {
+        let error = HubConfigurationError::new(
+            GITHUB_TOKEN_FILE_ENVIRONMENT,
+            RequiredSettingFailure::Conflicts,
+        );
+        return Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Configuration(&error),
+        ));
+    }
     let daemon_tool_configuration = model_configuration.daemon_tools();
     let tool_composition = match daemon_tool_configuration {
         Some(_) => DaemonToolComposition::WithMappedFamilies,
@@ -945,6 +1101,24 @@ async fn run_hub(
             SanitizedStartupCause::TemplateConfiguration(&error),
         )
     })?;
+    if let Some(repository_watch) = model_configuration.repository_watch() {
+        let declarations = template_configuration
+            .repo_watch_context_declarations()
+            .map_err(|error| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::TemplateConfiguration(&error),
+                )
+            })?;
+        repository_watch
+            .validate_template_contexts(&declarations)
+            .map_err(|error| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::ModelConfiguration(&error),
+                )
+            })?;
+    }
     let anthropic_api_key_file = configuration
         .anthropic_api_key_file(model_configuration.uses_anthropic_adapter())
         .map_err(|error| {
@@ -958,6 +1132,17 @@ async fn run_hub(
             path,
             CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
         )
+    });
+    let openai_api_key_file = configuration
+        .openai_api_key_file(model_configuration.uses_openai_adapter())
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Configuration(&error),
+            )
+        })?;
+    let openai_credential_access = openai_api_key_file.map(|path| {
+        FileCredentialAccess::new(path, CredentialReference::new(OPENAI_CREDENTIAL_REFERENCE))
     });
     let credential_reference = ModelCallCredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE);
     let code_host_credentials = FileCredentialAccess::new(
@@ -978,13 +1163,42 @@ async fn run_hub(
                 SanitizedStartupCause::Static(anthropic_construction_cause(&error)),
             )
         })?;
+    let compaction_openai = openai_credential_access
+        .clone()
+        .map(|credential_access| OpenAiRuntime::new(OpenAiConfig::new(), credential_access))
+        .transpose()
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static(openai_construction_cause(&error)),
+            )
+        })?;
+    let anthropic_model_capabilities = model_configuration.runtime_model_capability_catalog();
+    let openai_model_capabilities = model_configuration.runtime_model_capability_catalog();
     let anthropic = credential_access
-        .map(|credential_access| AnthropicRuntime::new(AnthropicConfig::new(), credential_access))
+        .map(|credential_access| {
+            let mut adapter_configuration = AnthropicConfig::new();
+            adapter_configuration.model_capabilities = anthropic_model_capabilities;
+            AnthropicRuntime::new(adapter_configuration, credential_access)
+        })
         .transpose()
         .map_err(|error| {
             erase_startup_cause(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Static(anthropic_construction_cause(&error)),
+            )
+        })?;
+    let openai = openai_credential_access
+        .map(|credential_access| {
+            let mut adapter_configuration = OpenAiConfig::new();
+            adapter_configuration.model_capabilities = openai_model_capabilities;
+            OpenAiRuntime::new(adapter_configuration, credential_access)
+        })
+        .transpose()
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static(openai_construction_cause(&error)),
             )
         })?;
     let code_host_transport = GitHubCodeHostTransport::try_new().map_err(|_| {
@@ -994,19 +1208,24 @@ async fn run_hub(
         )
     })?;
     let runtime_models = model_configuration.runtime_model_catalog();
-    let compaction_runtime =
-        ConfiguredModelRuntime::new(compaction_anthropic, &model_configuration).map_err(|_| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("codex_cli_construction_failed"),
-            )
-        })?;
-    let runtime = ConfiguredModelRuntime::new(anthropic, &model_configuration).map_err(|_| {
+    let compaction_runtime = ConfiguredModelRuntime::new(
+        compaction_anthropic,
+        compaction_openai,
+        &model_configuration,
+    )
+    .map_err(|error| {
         erase_startup_cause(
             RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("codex_cli_construction_failed"),
+            SanitizedStartupCause::Static(error.cause_code()),
         )
     })?;
+    let runtime =
+        ConfiguredModelRuntime::new(anthropic, openai, &model_configuration).map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static(error.cause_code()),
+            )
+        })?;
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
         RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
     );
@@ -1041,6 +1260,8 @@ async fn run_hub(
             code_host_transport,
             tool_configuration.github_egress_policy(),
             tool_configuration.workspace_root(),
+            tool_configuration.git_identity().clone(),
+            tool_configuration.exec_supervisor_executable(),
             model_configuration.web_fetch_egress_policy(),
         ),
         None => DaemonTools::try_new_without_tool_mappings(
@@ -1191,12 +1412,62 @@ async fn run_hub(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
     );
-    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
-
+    let configured_repositories =
+        model_configuration
+            .repository_watch()
+            .map_or_else(Vec::new, |configuration| {
+                configuration
+                    .repositories()
+                    .iter()
+                    .map(|repository| repository.repository().clone())
+                    .collect()
+            });
+    let repository_watch_store = PostgresRepoWatchDispatchStore::new(
+        pool.clone(),
+        model_configuration.session_credential_pin(),
+    );
+    if repository_watch_store
+        .deactivate_unconfigured_repositories(&configured_repositories)
+        .await
+        .is_err()
+    {
+        let failure = erase_startup_cause(
+            RuntimePhase::StartupScan,
+            SanitizedStartupCause::Static("repository_watch_configuration_reconciliation_failed"),
+        );
+        let _ = listener.cleanup();
+        let _ = runner_listener.cleanup();
+        let _ = database.close().await;
+        return Err(failure);
+    }
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
+    let repository_watch_runtime = match model_configuration.repository_watch() {
+        Some(configuration) => match RepositoryWatchRuntime::try_new(
+            pool.clone(),
+            configuration,
+            template_configuration.clone(),
+            model_configuration.clone(),
+            model_configuration.session_credential_pin(),
+            eligibility_nudge.clone(),
+        ) {
+            Ok(runtime) => Some(runtime),
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("repository_watch_transport_construction_failed"),
+                );
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        },
+        None => None,
+    };
+    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
         scheduler_pool.clone(),
@@ -1254,6 +1525,7 @@ async fn run_hub(
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
+    let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Scheduler(
@@ -1270,6 +1542,15 @@ async fn run_hub(
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Runner(runner_runtime.run(runner_shutdown_receiver).await)
     });
+    if let Some(repository_watch_runtime) = repository_watch_runtime {
+        runtime_tasks.spawn(async move {
+            RuntimeTaskExit::RepositoryWatch(
+                repository_watch_runtime
+                    .run(repository_watch_shutdown_receiver)
+                    .await,
+            )
+        });
+    }
     tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
 
     let mut outcome = {
@@ -1307,6 +1588,16 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatch(Err(error)))) => {
+                        report_repository_watch_runtime_defect(&error);
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::RepositoryWatchCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
@@ -1333,6 +1624,7 @@ async fn run_hub(
             let _ = scheduler_shutdown.send(());
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
+            let _ = repository_watch_shutdown.send(true);
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),
@@ -1651,16 +1943,17 @@ mod tests {
         ANTHROPIC_API_KEY_FILE_ENVIRONMENT, AnthropicConstructionError,
         BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT, GITHUB_TOKEN_FILE_ENVIRONMENT,
         HubConfiguration, HubConfigurationError, HubConfigurationValues, HubRuntimeError,
-        MODEL_CONFIGURATION_FILE_ENVIRONMENT, OperatorFilterDisposition,
-        PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
+        MODEL_CONFIGURATION_FILE_ENVIRONMENT, OPENAI_API_KEY_FILE_ENVIRONMENT,
+        OpenAiConstructionError, OperatorFilterDisposition, PROCESS_SOCKET_PATH_ENVIRONMENT,
+        ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RepositoryWatchRuntimeError,
         RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
         RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause,
         ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
         anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
-        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
-        migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
-        report_database_close_failure, run_scheduler_until_shutdown,
-        runner_lifecycle_failure_class, should_close_pool,
+        credential_files_conflict, database_close_failure_outcome, drain_runtime_tasks,
+        erase_startup_cause, migrate_scan_then_schedule, openai_construction_cause,
+        operator_filter, process_runtime_failure_class, report_database_close_failure,
+        run_scheduler_until_shutdown, runner_lifecycle_failure_class, should_close_pool,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
@@ -1672,6 +1965,7 @@ mod tests {
             model_configuration_file: Some(OsString::from("models.toml")),
             template_configuration_file: Some(OsString::from("templates.toml")),
             anthropic_api_key_file: Some(OsString::from("key")),
+            openai_api_key_file: Some(OsString::from("openai-key")),
             brave_api_key_file: Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
             github_token_file: Some(OsString::from("github-token")),
             process_socket_path: Some(OsString::from("/tmp/signalbox.sock")),
@@ -1790,6 +2084,20 @@ mod tests {
         let cause_code = anthropic_construction_cause(&error);
         let encoded = capture_startup_cause(SanitizedStartupCause::Static(cause_code));
         assert!(encoded.contains("anthropic_invalid_base_url"));
+        assert!(!encoded.contains(adapter_detail));
+    }
+
+    #[test]
+    fn openai_startup_failure_omits_dynamic_adapter_detail() {
+        let adapter_detail = "synthetic-credential-and-prompt-content";
+        let error = OpenAiConstructionError::InvalidBaseUrl {
+            detail: adapter_detail.to_owned(),
+        };
+
+        let cause_code = openai_construction_cause(&error);
+        let encoded = capture_startup_cause(SanitizedStartupCause::Static(cause_code));
+
+        assert!(encoded.contains("openai_invalid_base_url"));
         assert!(!encoded.contains(adapter_detail));
     }
 
@@ -2076,6 +2384,68 @@ mod tests {
     }
 
     #[test]
+    fn repository_watch_credential_cannot_equal_the_github_tool_credential() {
+        let credential = std::path::Path::new("/tmp/signalbox-github-token");
+
+        assert!(credential_files_conflict(credential, credential));
+    }
+
+    #[test]
+    fn repository_watch_credential_alias_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("github-token");
+        std::fs::write(&credential, []).expect("the credential fixture exists");
+        let alias = directory.path().join("watch-token");
+        std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
+
+        assert!(credential_files_conflict(&credential, &alias));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_watch_hard_link_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("github-token");
+        std::fs::write(&credential, []).expect("the credential fixture exists");
+        let hard_link = directory.path().join("watch-token");
+        std::fs::hard_link(&credential, &hard_link).expect("the credential hard link exists");
+
+        assert!(credential_files_conflict(&credential, &hard_link));
+    }
+
+    #[test]
+    fn dangling_repository_watch_alias_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("github-token");
+        let alias = directory.path().join("watch-token");
+        std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
+
+        assert!(credential_files_conflict(&credential, &alias));
+    }
+
+    #[test]
+    fn unresolved_lexical_alias_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("github-token");
+        let alias = directory.path().join("pending/../github-token");
+
+        assert!(credential_files_conflict(&credential, &alias));
+    }
+
+    #[test]
+    fn dangling_intermediate_alias_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let target_directory = directory.path().join("pending-target");
+        let alias_directory = directory.path().join("pending-alias");
+        std::os::unix::fs::symlink(&target_directory, &alias_directory)
+            .expect("the intermediate credential alias exists");
+        let credential = target_directory.join("github-token");
+        let alias = alias_directory.join("github-token");
+
+        assert!(credential_files_conflict(&credential, &alias));
+    }
+
+    #[test]
     fn runner_socket_cannot_collide_with_a_process_socket_sidecar() {
         let process_socket = std::path::PathBuf::from("/tmp/signalbox.sock");
         let mut runner_socket = process_socket.as_os_str().to_owned();
@@ -2111,6 +2481,27 @@ mod tests {
             codex_only.anthropic_api_key_file(true),
             Err(HubConfigurationError::new(
                 ANTHROPIC_API_KEY_FILE_ENVIRONMENT,
+                RequiredSettingFailure::Missing,
+            ))
+        );
+    }
+
+    /// The OpenAI key path follows the Anthropic channel exactly: optional at
+    /// environment parsing, required only once a route selects that adapter.
+    #[test]
+    fn openai_credentials_are_required_only_for_an_openai_route() {
+        let without_openai = HubConfiguration::from_values(HubConfigurationValues {
+            openai_api_key_file: None,
+            runner_socket_path: None,
+            ..hub_configuration_values()
+        })
+        .expect("OpenAI credentials are optional before routes are loaded");
+
+        assert_eq!(without_openai.openai_api_key_file(false), Ok(None));
+        assert_eq!(
+            without_openai.openai_api_key_file(true),
+            Err(HubConfigurationError::new(
+                OPENAI_API_KEY_FILE_ENVIRONMENT,
                 RequiredSettingFailure::Missing,
             ))
         );
@@ -2486,6 +2877,15 @@ mod tests {
             completed_runtime_outcome(cause, drain),
             ShutdownOutcome::RuntimeFailedAfterGraceWindow
         );
+    }
+
+    #[test]
+    fn repository_watch_supervisor_failure_is_a_runtime_lifecycle_defect() {
+        let completion = super::runtime_task_completion(Ok(RuntimeTaskExit::RepositoryWatch(Err(
+            RepositoryWatchRuntimeError::RepositoryTaskExited,
+        ))));
+
+        assert_eq!(completion, RuntimeTaskCompletion::Defect);
     }
 
     #[test]

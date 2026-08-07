@@ -3,7 +3,6 @@
 use std::{fs, os::unix::fs::FileTypeExt};
 
 use git2::{Index, IndexEntry, IndexTime, ObjectFormat};
-use rustix::fs::{CWD, Mode, mkfifoat};
 use sha1::{Digest, Sha1};
 
 use crate::failure::LocalGitFailure;
@@ -13,7 +12,9 @@ use crate::index_lock::{
 use crate::layout::validate_repository_layout;
 use crate::limits::{MAX_INDEX_BYTES, MAX_INDEX_ENTRIES};
 use crate::pinning::PinnedRepository;
-use crate::tests::support::{Fixture, Sha256Fixture, TRACKED_PATH, workspace_root_identity};
+use crate::tests::support::{
+    Fixture, Sha256Fixture, TRACKED_PATH, create_fifo, workspace_root_identity,
+};
 
 #[test]
 fn index_lock_acquisition_failure_removes_the_created_lock() {
@@ -109,7 +110,7 @@ fn index_lock_rejects_a_replaced_lock_path_without_touching_it() {
     let (mut index_lock, mut index) =
         IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
     fs::remove_file(&lock_path).expect("owned fixture lock unlinks");
-    mkfifoat(CWD, &lock_path, Mode::RUSR | Mode::WUSR).expect("replacement lock FIFO constructs");
+    create_fifo(&lock_path).expect("replacement lock FIFO constructs");
 
     index_lock
         .write(&mut index)
@@ -135,8 +136,7 @@ fn index_lock_rolls_back_a_replacement_racing_publication() {
     let failure = index_lock
         .commit_with_test_hook(|| {
             fs::remove_file(&lock_path).expect("owned fixture lock unlinks during publication");
-            mkfifoat(CWD, &lock_path, Mode::RUSR | Mode::WUSR)
-                .expect("racing replacement lock FIFO constructs");
+            create_fifo(&lock_path).expect("racing replacement lock FIFO constructs");
         })
         .expect_err("racing replacement rejects publication");
     let replacement = fs::symlink_metadata(&lock_path).expect("replacement FIFO remains");

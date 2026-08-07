@@ -282,8 +282,14 @@ where
                         .render(tools.definitions())
                         .map_err(|source| ContextGuardedTurnPassError::Render { turn, source })?;
                     let target = operation.request().call().target();
-                    let model = runtime_models
+                    let selected_model = runtime_models
                         .resolve(target)
+                        .ok_or(ContextGuardedTurnPassError::ContextWindowUnavailable(turn))?;
+                    let model = runtime_models
+                        .effective_definition(
+                            selected_model,
+                            operation.request().model_settings().effective().fast_mode(),
+                        )
                         .ok_or(ContextGuardedTurnPassError::ContextWindowUnavailable(turn))?;
                     let input_tokens = match counter
                         .count_input_tokens(operation, std::future::pending())
@@ -457,7 +463,7 @@ mod tests {
     };
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
-    use signalbox_domain::{ActivatedAcceptedInputTurn, TurnId};
+    use signalbox_domain::{ActivatedTurn, TurnId};
     use signalbox_persistence::{
         context_compaction::ContextCompactionRepositoryError,
         start_eligible_turn::StartEligibleTurnRepositoryError,
@@ -497,7 +503,7 @@ mod tests {
 
         fn execute(
             &self,
-            _activated: Box<ActivatedAcceptedInputTurn>,
+            _activated: Box<ActivatedTurn>,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }

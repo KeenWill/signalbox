@@ -20,7 +20,7 @@ use rustix::{
 
 use crate::descriptor::{
     FileIdentity, QuarantineDirectory, descriptor_entry_exists, file_identity,
-    remove_entry_if_identity, stat_file_identity,
+    mode_from_metadata_bits, permission_bits, remove_entry_if_identity, stat_file_identity,
 };
 use crate::failure::LocalGitFailure;
 use crate::layout::valid_reference_name;
@@ -162,8 +162,9 @@ impl ReferenceLock {
             _created_directories: bound.created_directories,
             committed: false,
         };
-        let permissions = reference_permissions(&guard.parent, &guard.leaf)?
-            .or_else(|| creation_file_mode.map(|mode| fs::Permissions::from_mode(mode.bits())));
+        let permissions = reference_permissions(&guard.parent, &guard.leaf)?.or_else(|| {
+            creation_file_mode.map(|mode| fs::Permissions::from_mode(permission_bits(mode)))
+        });
         if let Some(permissions) = permissions {
             guard
                 .lock
@@ -1162,8 +1163,8 @@ pub(super) fn reference_installation_modes(
     let directory_mode = (metadata.mode() & 0o2777) | 0o700;
     let file_mode = (metadata.mode() & 0o666) | 0o600;
     Ok(ReferenceInstallationModes {
-        directory: Mode::from_raw_mode(directory_mode),
-        file: Mode::from_raw_mode(file_mode),
+        directory: mode_from_metadata_bits(directory_mode),
+        file: mode_from_metadata_bits(file_mode),
     })
 }
 
@@ -1191,6 +1192,7 @@ fn open_or_create_ref_directory_with_mode_tracked(
     open_or_create_ref_directory_with_mode_tracked_and_hook_inner(parent, name, mode, || Ok(()))
 }
 
+#[cfg(test)]
 pub(super) fn open_or_create_ref_directory_with_mode_tracked_and_hook<PostCreate>(
     parent: &OwnedFd,
     name: &OsStr,
@@ -1248,7 +1250,7 @@ where
                     .metadata()
                     .map_err(|_| LocalGitFailure::Operation)?;
             if file_identity(&created_metadata) != created_identity
-                || created_metadata.mode() & 0o2777 != mode.bits() & 0o2777
+                || created_metadata.mode() & 0o2777 != permission_bits(mode) & 0o2777
             {
                 return Err(LocalGitFailure::Operation);
             }

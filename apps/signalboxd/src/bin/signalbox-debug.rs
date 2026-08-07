@@ -434,7 +434,10 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
             let credential_reference = ModelCallCredentialReference::new(
                 credential_access.credential_reference().as_str(),
             );
-            let runtime = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)
+            let mut adapter_configuration = AnthropicConfig::new();
+            adapter_configuration.model_capabilities =
+                configuration.runtime_model_capability_catalog();
+            let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)
                 .map_err(|_| DebugDriverError::Configuration)?;
             let provider =
                 RuntimeModelCallProvider::new(runtime, configuration.runtime_model_catalog());

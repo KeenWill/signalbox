@@ -179,16 +179,21 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
 ## Configuration categories
 
-- **Additional effective-configuration categories.** Prompt composition and
-  custom parameters, instructions, tool enablement/configuration, placement
+- **Additional effective-configuration categories.** Prompt composition,
+  sampling and output-shape parameters beyond the implemented model/session
+  settings contract, instructions, tool enablement/configuration, placement
   constraints, per-turn resources, and interpreting-policy selections remain
   unavailable; a future subsystem decision must extend the request,
   session-default, override, and effective-value algebras together
   ([configuration-and-credentials](spec/configuration-and-credentials.md)).
-  Static copy-on-create session templates compose only the already-implemented
-  model selection, bounded system prompt, and dangerous-tool blanket; every
+  Reasoning level, fast mode, and provider-tagged service tier are owned by
+  [model and session settings](spec/model-session-settings.md). Compaction
+  threshold, target size, and never-compact/full-context controls remain
+  deferred here for a separate follow-on slice. Static copy-on-create session
+  templates compose model selection, bounded system prompt, dangerous-tool
+  blanket, and the model-settings layer owned by that contract; every other
   richer composition or configuration category stays blocked here. (S02, S05,
-  S13–S16, S34, S35)
+  S13–S16, S34, S35, S37)
 
 ## Template storage and authoring
 
@@ -213,6 +218,21 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   how the resulting artifact is reviewed. Blocks claiming fixture-corpus review
   as an enforced pin-bump gate; it does not block the existing mechanical pin or
   live compatibility gates.
+
+## Claude Code CLI smoke credential delivery
+
+- **How the compatibility-smoke credential reaches the wrapped CLI.** The
+  adapter clears the child environment and forwards only an allowlist that
+  deliberately carries no direct credential value, with a unit test asserting
+  `ANTHROPIC_API_KEY` never reaches the child; the CLI is expected to resolve
+  its own login from the forwarded credential home. An environment-scoped API
+  key therefore reaches the smoke's test process but not the CLI it spawns.
+  Decide whether the adapter's allowlist gains an explicit direct-credential
+  variable — a deliberate narrowing of that contract, with the accepted exposure
+  recorded — or the workflow writes a credential store the CLI reads under the
+  already-forwarded credential home. Blocks the live Claude compatibility smoke
+  from authenticating; it blocks neither the derived pin nor the credential-free
+  version gate, both of which are in force.
 
 ## Model fallback and provenance
 
@@ -268,12 +288,13 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   the durable per-call provenance schema that would record the concrete served
   identity and a substitution as evidence rather than as operator diagnostics
   and a fail-closed error. Blocks the provider provenance schema. (S20–S23)
-- **Future same-target retry.** Repeating a known or ambiguous provider failure
-  against the target and credential profile that produced it remains outside
-  every accepted policy; the successor-call decision above authorizes another
-  profile, never a repeat of the same one. Any later same-target retry command
-  or policy, including backoff and resource limits, is a separate decision the
-  accepted no-retry policy leaves open. Blocks retry features. (S02, S04, S22)
+- **Future same-profile retry.** Repeating a known provider failure or ambiguous
+  outcome against the target and credential profile that produced it remains
+  outside every accepted policy; the successor-call decision above authorizes
+  same-target failover through another eligible profile, never a repeat of the
+  same profile. Any later same-profile retry command or policy, including
+  backoff and resource limits, is a separate decision the accepted no-retry
+  policy leaves open. Blocks retry features. (S02, S04, S22)
 
 ## Scheduling and runners
 
@@ -300,10 +321,7 @@ creation carrying placement in
 transcript boundary in
 [sessions-and-transcript](spec/sessions-and-transcript.md#semantic-transcript-entries);
 capability-derived tool advertisement in
-[model-call-execution](spec/model-call-execution.md#frontier-rendering); and Git
-subprocess deadlines, full-ref branch validation, unborn-HEAD clones, and honest
-output truncation in
-[tool-loop](spec/tool-loop.md#version-one-workstation-tool-contracts). Why: a
+[model-call-execution](spec/model-call-execution.md#frontier-rendering). Why: a
 decided question is a contract, and a contract binds only where the implementer
 of that contract reads it; a decision restated on this page would be a second
 authority over prose that already owns it, free to drift from the page it
@@ -313,6 +331,19 @@ defers rather than open questions
 ([runner protocol and placement](spec/runner-protocol.md#the-singleton-runner-rule-is-temporary)).
 The questions below remain open.
 
+- **Runner workstation tool execution.** No present runner surface executes a
+  workstation tool. Registry choices not already constrained by committed
+  functionality — including its remaining inventory, any additional names, and
+  per-tool deadlines — remain undecided. Existing per-tool compatibility
+  constraints remain binding. The committed unimplemented runner protocol
+  remains the owner of placement, sandbox, approval, workspace, credential, and
+  generic dispatch behavior; this question cannot redefine those constraints.
+  Blocks runner-side tool registry and executor implementation.
+- **Daemon Git push transport.** `git_push_configured` is implemented as a
+  declaration and executor over an injected transport, but no production
+  `GitPushTransport` exists. The remote authority, credential and destination
+  policy, and production transport remain undecided; until they are decided the
+  tool stays absent from the daemon registry. Blocks daemon-side Git push.
 - **Workspace portability between runners.** Moving a session that owns a
   workspace to another runner requires that workspace to exist, or to be
   reconstructible, on the destination. Version one never carries a workspace
@@ -427,18 +458,18 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
 - **Large durable payload architecture.** Tool evidence is bounded by storage
   policy rather than by physics: 1 MiB of result text, 1 MiB of arguments, 4,096
   bytes of error detail, and 4,096 bytes of exact runner value, all held in
-  PostgreSQL `text` columns with no physical ceiling near those values. Version
-  one derives its
-  [process output caps](spec/tool-loop.md#version-one-workstation-tool-contracts)
-  from exactly those bounds, so oversized executor output is truncated honestly
-  before result admission rather than turning a working command into a failure;
-  `ResultTooLarge` remains the admission classification for an admitted result
-  that still exceeds the durable bound. Deliberately delivering larger payloads
-  — files well past 1 MiB — needs its own design: where the bytes live, how a
-  result references rather than embeds them, what the model and each client see,
-  and the abuse and denial-of-service controls a larger bound requires. Recorded
-  as a design question rather than a blocker; the truncating caps remain correct
-  until it is answered.
+  PostgreSQL `text` columns with no physical ceiling near those values. Under
+  [tool-loop result authority](spec/tool-loop.md#result-authority-and-the-continuation-boundary),
+  every admitted result fits those bounds. A family may compact output with its
+  crate-owned truncation and completeness evidence, or its bounded transport may
+  reject an oversized response before result admission; the family contract owns
+  that choice. `ResultTooLarge` remains the admission classification for an
+  admitted result that still exceeds the durable bound. Deliberately delivering
+  larger payloads — files well past 1 MiB — needs its own design: where the
+  bytes live, how a result references rather than embeds them, what the model
+  and each client see, and the abuse and denial-of-service controls a larger
+  bound requires. Recorded as a design question rather than a blocker; the
+  existing family caps remain correct until it is answered.
 - **Repository configuration outside the model's writable root.** A session's
   `.git` sits inside its writable root, so repository-local Git configuration is
   model-writable, and version one answers that key by key: a forced transport

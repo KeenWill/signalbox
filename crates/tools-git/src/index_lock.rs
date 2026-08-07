@@ -4,8 +4,11 @@ use std::{
     io::{Read, Seek, Write},
     os::fd::{AsFd, OwnedFd},
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
+
+#[cfg(test)]
+use std::path::Path;
 
 use git2::{Index, ObjectFormat};
 use rustix::{
@@ -17,7 +20,8 @@ use sha2::Sha256;
 
 use crate::descriptor::{
     FileIdentity, QuarantineDirectory, descriptor_path, file_identity, file_snapshot_identity,
-    remove_entry_if_identity, unsupported_common_directory_is_absent,
+    mode_from_metadata_bits, permission_bits, remove_entry_if_identity,
+    unsupported_common_directory_is_absent,
 };
 use crate::failure::LocalGitFailure;
 use crate::layout::object_id_bytes;
@@ -208,6 +212,7 @@ impl IndexLock {
         )
     }
 
+    #[cfg(test)]
     fn acquire_with_private_directory_and_mode<Create, AfterPrepare>(
         index_path: &Path,
         lock_path: &Path,
@@ -296,7 +301,9 @@ impl IndexLock {
         };
         guard
             .lock
-            .set_permissions(fs::Permissions::from_mode(missing_index_mode.bits()))
+            .set_permissions(fs::Permissions::from_mode(permission_bits(
+                missing_index_mode,
+            )))
             .map_err(|_| LocalGitFailure::Operation)?;
         let (expected_index, prepared_content) = copy_index_snapshot_at(
             &guard.parent,
@@ -902,7 +909,7 @@ pub(super) fn index_installation_mode(
         fs::File::from(dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?)
             .metadata()
             .map_err(|_| LocalGitFailure::Operation)?;
-    Ok(Mode::from_raw_mode((metadata.mode() & 0o666) | 0o600))
+    Ok(mode_from_metadata_bits((metadata.mode() & 0o666) | 0o600))
 }
 
 pub(super) fn write_index_entries(
@@ -971,36 +978,6 @@ pub(super) fn write_index_entries(
         .and_then(|()| destination.sync_all())
         .map_err(|_| LocalGitFailure::Operation)?;
     index_content_identity(&bytes)
-}
-
-fn copy_index_snapshot(
-    index_path: &Path,
-    destination: &mut fs::File,
-    permissions: IndexSnapshotPermissions,
-    object_format: ObjectFormat,
-) -> Result<(), LocalGitFailure> {
-    let expected = match openat(
-        CWD,
-        index_path,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(descriptor) => Some(copy_open_index_snapshot(
-            descriptor,
-            destination,
-            permissions,
-            object_format,
-        )?),
-        Err(rustix::io::Errno::NOENT) => {
-            write_empty_index(destination, object_format).map(drop)?;
-            None
-        }
-        Err(_) => return Err(LocalGitFailure::Repository),
-    };
-    if index_snapshot_identity_at_path(index_path)? != expected {
-        return Err(LocalGitFailure::Repository);
-    }
-    Ok(())
 }
 
 fn copy_open_index_snapshot(
@@ -1171,6 +1148,7 @@ fn index_snapshot_identity_at(
     }
 }
 
+#[cfg(test)]
 fn index_snapshot_identity_at_path(
     path: &Path,
 ) -> Result<Option<IndexSnapshotIdentity>, LocalGitFailure> {

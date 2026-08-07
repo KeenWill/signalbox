@@ -21,7 +21,7 @@ INV-tagged test names and attached doc comments.
 - **User intent:** Start an empty conversation from a terminal and make it
   available on every client.
 - **Durable commands:**
-  `CreateSession(cause: user_initiated, ancestry: none, initial_model_selection_defaults)`
+  `CreateSession(cause: user_initiated, ancestry: none, initial_configuration_defaults)`
   establishes defaults version one.
   `SubmitInput(delivery: start_when_no_active_turn, ...)` resolves its model
   request against that exact version and atomically persists the accepted input,
@@ -63,10 +63,10 @@ INV-tagged test names and attached doc comments.
 - **User intent:** Receive a responsive answer while retaining an authoritative
   final transcript.
 - **Durable commands:** Accept input and create a turn with frozen direct or
-  alias model-selection configuration, provider defaults, and disabled
-  retry/fallback; activate it and create a turn attempt; freeze a context
-  frontier; resolve and pin the exact model target; only then create a model
-  call; finally commit the complete ordered assistant-text and logical
+  alias model-selection configuration and resolved model settings; activate it
+  and create a turn attempt; freeze a context frontier; resolve and pin the
+  exact model target and credential profile; only then create a model call;
+  finally commit the complete ordered assistant-text and logical
   tool-use-reference sequence with its producing-call provenance and the call
   outcome. A tool-using response yields the attempt but retains the same turn;
   result projection and continuation create later rounds. Only a response with
@@ -84,14 +84,17 @@ INV-tagged test names and attached doc comments.
   owns durable provenance and final content; clients render drafts.
 - **Failure behavior:** A client disconnect does not cancel the call.
   Target-resolution failure creates no model call. Send preparation failure
-  leaves the already-created call known-failed. Version one performs no
-  automatic retry after any known or ambiguous provider failure; no partial
-  draft becomes final content. A future authorized call must retain steering
-  already committed to turn history.
+  leaves the already-created call known-failed. No durable authorization is
+  retried, and an ambiguous outcome never creates a successor. When pool policy
+  selects `switch_now`, a proven availability failure may create the S22
+  successor on a new attempt against the same target and a different credential
+  profile. No partial draft becomes final content. A later authorized call must
+  retain steering already committed to turn history.
 - **Required invariants:** INV-005, INV-008, INV-014, INV-015, INV-032, INV-035.
 - **Remaining questions:** Whether a future known-failure retry command is
   introduced, streaming checkpoints, transient provider-delta relay, browser
-  transport, rich assistant content, and provider/client rendering.
+  transport, rich assistant content, provider/client rendering, and transient
+  presentation while an availability successor is selected.
 
 ## S03 — Daemon restarts after accepting queued work
 
@@ -699,27 +702,34 @@ INV-tagged test names and attached doc comments.
 ## S22 — Apply an availability fallback
 
 - **User intent:** If explicitly configured, continue through a classified
-  capacity/availability failure using an allowed alternate model.
-- **Durable commands:** Record the primary call's requested selection, exact
-  daemon-resolved target, provider-reported identity when available, and failure
-  classification; evaluate explicit fallback policy; create a distinct model
-  call with an exact daemon-resolved fallback target and reason. Each call
-  appends provider-reported identity or mismatch when available.
-- **State transitions:** Primary call → known availability failure; turn/attempt
-  → fallback eligible; fallback call → terminal.
-- **Transient updates:** Client shows that fallback is being considered/applied.
-- **Owning component:** Daemon policy authorizes; provider adapters classify
-  evidence but do not silently select targets.
-- **Failure behavior:** If version one has no accepted fallback policy, stop
-  explicitly instead. If fallback is later authorized, the alternate target is
-  attempted only through its distinct call; a provider-reported mismatch against
-  either call's own exact target follows the accepted timing-sensitive mismatch
-  failure rule ([model-call-execution](spec/model-call-execution.md)) and is
-  never an allowed substitution. The scenario does not establish automatic
-  fallback as accepted behavior.
+  capacity/availability failure using another account without changing models.
+- **Durable commands:** Record the predecessor call's exact requested selection,
+  daemon-resolved target, credential profile, provider-reported identity when
+  available, failure classification, and typed non-acceptance evidence; evaluate
+  the session-pinned pool policy; create a distinct successor attempt and model
+  call that pin the same target, a different eligible profile from that pool,
+  the predecessor call, and the qualifying cause.
+- **State transitions:** Predecessor call → known availability failure and
+  predecessor attempt → known failed; turn → successor eligible; successor
+  attempt/call → terminal. The chain is bounded to at most one call per pool
+  member for the turn.
+- **Transient updates:** No current client update announces that a successor is
+  being considered or selected; the durable call chain exposes it afterward.
+- **Owning component:** Daemon pool policy authorizes and selects the profile;
+  provider adapters supply the typed classification and separate evidence that
+  the request was not accepted. Adapters do not select successors.
+- **Failure behavior:** Only quota exhaustion, rate limiting, or overload with
+  distinct non-acceptance evidence may authorize the successor. Classification
+  alone is insufficient. Ambiguity, refusal, credential resolution failure, and
+  credential rejection never do. The successor cannot cross adapters or change
+  the exact target. Exhausting the pool follows its configured durable park or
+  known-failure outcome. A provider-reported mismatch against either call's own
+  target follows the accepted timing-sensitive mismatch failure rule
+  ([model-call-execution](spec/model-call-execution.md)) and is never an allowed
+  substitution.
 - **Required invariants:** INV-014, INV-018.
-- **Remaining questions:** Whether fallback ships, qualifying failures,
-  configuration, model-change identity, cost limits, and user confirmation.
+- **Remaining questions:** Transient client presentation of successor selection
+  and whether a future pool may cross adapter kinds.
 
 ## S23 — Encounter a model safety refusal
 
@@ -1162,6 +1172,41 @@ INV-tagged test names and attached doc comments.
   than empty successful results.
 - **Required invariants:** INV-008, INV-012, INV-050.
 - **Remaining questions:** None.
+
+## S37 — Change model and session settings
+
+- **User intent:** Choose a supported reasoning level, fast mode, or service
+  tier for a session or one new turn without relying on a provider to repair an
+  incompatible request.
+- **Durable commands:** Creation establishes the first complete settings
+  snapshot from global, model-profile, and session layers.
+  `ReplaceSessionDefaults` carries a provenance-preserving settings override and
+  compare-and-sets the complete next epoch. Origin-producing `SubmitInput`
+  carries an optional per-call override and freezes one complete effective
+  value. Steering inherits its source turn and carries no override.
+- **State transitions:** An explicit unsupported value rejects before command
+  effects or provider preparation. A model-change-induced incompatibility uses
+  the greatest supported reasoning level no higher than the prior level, or the
+  lowest supported level when none is lower; it disables fast mode or clears
+  service tier, then records the exact adjustment. Alias retargeting applies the
+  same rule at input acceptance. A declared fast serving target is authorized
+  lineage; no undeclared target or suffix is.
+- **Transient updates:** None. Capability discovery is a read-only projection;
+  settings, provenance, and adjustments are durable facts.
+- **Owning component:** Domain owns setting values, precedence, compatibility,
+  and adjustment events; daemon configuration owns model capabilities and copied
+  global/profile layers; Postgres owns epochs and origin records; the process
+  protocol exposes the catalog and commands; provider adapters own exhaustive
+  translations.
+- **Failure behavior:** Explicit unsupported reasoning, fast, service-tier, or
+  adapter-specific combinations remain distinct typed invalid requests. Missing
+  or contradictory capability declarations reject configuration. A provider
+  CLI's silent clamp, open effort string, or dropped tier is never validation.
+- **Required invariants:** INV-008, INV-012, INV-014, INV-051, INV-052, INV-053,
+  INV-054.
+- **Remaining questions:** Context compaction and the other settings listed in
+  [model and session settings](spec/model-session-settings.md#open-edges) remain
+  outside this scenario.
 
 ## Coverage note
 

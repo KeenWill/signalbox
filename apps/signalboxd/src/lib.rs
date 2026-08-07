@@ -17,8 +17,8 @@ use signalbox_application::{
     UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
-    ActivatedAcceptedInputTurn, AssistantText, DirectModelSelection, ModelCallId,
-    ProviderReportedTokenUsage, SessionId, ToolArgumentsKind, TurnAttemptId, TurnId,
+    ActivatedTurn, AssistantText, DirectModelSelection, ModelCallId, ProviderReportedTokenUsage,
+    SessionId, ToolArgumentsKind, TurnAttemptId, TurnId,
 };
 use signalbox_model_provider_runtime::{
     ApprovalJudgeModel, ApprovalJudgeModelError, ApprovalJudgeModelRequest,
@@ -45,6 +45,7 @@ mod goal_mode;
 mod local_socket;
 pub mod model_adapter;
 mod process_runtime;
+mod repo_watch_runtime;
 mod review_orchestration_runtime;
 pub mod runner_protocol_runtime;
 mod session_template_configuration;
@@ -55,6 +56,7 @@ pub mod usage_limits;
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DaemonToolConfiguration, DerivedModelCallCost,
     FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError, ModelBillingRates,
+    OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
 };
 pub use context_guard::{ContextGuardedTurnPass, ContextGuardedTurnPassError};
 pub use conversation_introspection::{
@@ -69,6 +71,9 @@ pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use goal_mode::{PostgresGoalPassDisposition, PostgresGoalPassDispositionError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError};
+pub use repo_watch_runtime::{
+    RepositoryWatchRuntime, RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError,
+};
 pub use session_template_configuration::{
     ResolvedSessionTemplate, SessionTemplateConfiguration, SessionTemplateConfigurationError,
 };
@@ -151,7 +156,7 @@ pub trait ActivatedTurnExecution {
     /// Consumes one exact activation outcome and drives its initial call.
     fn execute(
         &self,
-        activated: Box<ActivatedAcceptedInputTurn>,
+        activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
 
     /// Reconciles a durable active tool turn for one scheduler hint.
@@ -268,7 +273,7 @@ where
 
     fn execute(
         &self,
-        activated: Box<ActivatedAcceptedInputTurn>,
+        activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let execution = self.execution.execute(activated);
         supervise_execution(self.fatal_signal.clone(), execution)
@@ -886,7 +891,7 @@ where
 
     fn execute(
         &self,
-        activated: Box<ActivatedAcceptedInputTurn>,
+        activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let repository = self.repository.clone();
         let gate = self.gate.clone();
@@ -1205,6 +1210,7 @@ where
                     };
                     match tool_outcome {
                         ToolExecutionServiceOutcome::AttemptCheckpointed(_)
+                        | ToolExecutionServiceOutcome::ChildWaitResumed(_)
                         | ToolExecutionServiceOutcome::PreflightFailed(_)
                         | ToolExecutionServiceOutcome::ObservationCommitted(_)
                         | ToolExecutionServiceOutcome::ObservationAlreadyCommitted(_)
@@ -1297,7 +1303,7 @@ where
 
     fn execute(
         &self,
-        activated: Box<ActivatedAcceptedInputTurn>,
+        activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let session = activated.session();
         let turn = activated.turn();
@@ -1378,7 +1384,7 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
 
     fn execute(
         &self,
-        activated: Box<ActivatedAcceptedInputTurn>,
+        activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let repository = self.repository.clone();
         let gate = self.gate.clone();
@@ -1441,7 +1447,7 @@ mod tests {
         StartEligibleTurnTransaction,
     };
     use signalbox_domain::{
-        AcceptedInputTurnActivationIdentities, ActivatedAcceptedInputTurn, ContextFrontierId,
+        AcceptedInputTurnActivationIdentities, ActivatedTurn, ContextFrontierId,
         SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
     };
     use tokio::sync::watch;
@@ -1607,7 +1613,7 @@ mod tests {
 
         fn execute(
             &self,
-            _activated: Box<ActivatedAcceptedInputTurn>,
+            _activated: Box<ActivatedTurn>,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }
@@ -1621,7 +1627,7 @@ mod tests {
 
         fn execute(
             &self,
-            _activated: Box<ActivatedAcceptedInputTurn>,
+            _activated: Box<ActivatedTurn>,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }
@@ -1652,7 +1658,7 @@ mod tests {
 
         fn execute(
             &self,
-            _activated: Box<ActivatedAcceptedInputTurn>,
+            _activated: Box<ActivatedTurn>,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }
@@ -1700,7 +1706,7 @@ mod tests {
 
         fn execute(
             &self,
-            _activated: Box<ActivatedAcceptedInputTurn>,
+            _activated: Box<ActivatedTurn>,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }
