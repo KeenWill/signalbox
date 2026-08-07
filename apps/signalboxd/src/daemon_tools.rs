@@ -1369,6 +1369,7 @@ mod tests {
     const BRIDGE_BUILD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
     const BRIDGE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
     const BRIDGE_EXIT_TIMEOUT: Duration = Duration::from_secs(12);
+    const BRIDGE_CHILD_TEST_TIMEOUT: Duration = Duration::from_millis(25);
     const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
     static BRIDGE_BUILD_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1388,6 +1389,38 @@ mod tests {
     fn terminate_child(child: &mut Child) {
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for the bounded child-wait regression test"]
+    fn bridge_wait_child_fixture() {
+        thread::sleep(Duration::from_secs(2));
+    }
+
+    #[test]
+    fn wait_for_child_returns_none_at_its_deadline_and_cleanup_reaps() {
+        let current = std::env::current_exe().expect("test executable path is available");
+        let mut child = Command::new(current)
+            .arg("daemon_tools::tests::bridge_wait_child_fixture")
+            .args(["--exact", "--ignored"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("bounded-wait child starts");
+
+        assert!(
+            wait_for_child(&mut child, BRIDGE_CHILD_TEST_TIMEOUT)
+                .expect("bounded wait observes the live child")
+                .is_none()
+        );
+        terminate_child(&mut child);
+        assert!(
+            child
+                .try_wait()
+                .expect("cleaned child status is readable")
+                .is_some()
+        );
     }
 
     fn ensure_claude_mcp_bridge_executable() -> PathBuf {
@@ -1579,6 +1612,10 @@ mod tests {
         }
 
         fn request(&mut self, request: &serde_json::Value) -> serde_json::Value {
+            let request_id = request
+                .get("id")
+                .expect("MCP request has an identity")
+                .clone();
             let input = self.input.as_mut().expect("bridge stdin remains open");
             serde_json::to_writer(&mut *input, request).expect("MCP request serializes");
             input.write_all(b"\n").expect("MCP request is written");
@@ -1594,7 +1631,12 @@ mod tests {
                     panic!("MCP bridge response exceeded its timeout")
                 }
             };
-            serde_json::from_str(&response).expect("MCP response is JSON")
+            let response = serde_json::from_str(&response).expect("MCP response is JSON");
+            assert!(
+                valid_mcp_response_envelope(&response, &request_id),
+                "MCP response has the exact JSON-RPC version and request identity"
+            );
+            response
         }
 
         fn notify(&mut self, notification: &serde_json::Value) {
@@ -1621,6 +1663,30 @@ mod tests {
                 reader.join().expect("bridge response reader exits");
             }
         }
+    }
+
+    fn valid_mcp_response_envelope(
+        response: &serde_json::Value,
+        request_id: &serde_json::Value,
+    ) -> bool {
+        response.get("jsonrpc").and_then(serde_json::Value::as_str) == Some("2.0")
+            && response.get("id") == Some(request_id)
+    }
+
+    #[test]
+    fn mcp_response_envelope_rejects_a_wrong_protocol_version() {
+        let request_id = serde_json::json!(7);
+        let response = serde_json::json!({"jsonrpc": "1.0", "id": request_id.clone()});
+
+        assert!(!valid_mcp_response_envelope(&response, &request_id));
+    }
+
+    #[test]
+    fn mcp_response_envelope_rejects_a_mismatched_request_identity() {
+        let request_id = serde_json::json!(7);
+        let response = serde_json::json!({"jsonrpc": "2.0", "id": 8});
+
+        assert!(!valid_mcp_response_envelope(&response, &request_id));
     }
 
     impl Drop for McpBridgeProcess {
@@ -2065,6 +2131,16 @@ mod tests {
             }))
         }
 
+        fn synchronize_without_listing(&mut self) {
+            let response = self.bridge.request(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "ping",
+                "params": {},
+            }));
+            assert_eq!(response["error"]["code"], -32601);
+        }
+
         fn call_write_file(&mut self) -> serde_json::Value {
             self.bridge.request(&serde_json::json!({
                 "jsonrpc": "2.0",
@@ -2113,6 +2189,8 @@ mod tests {
         let mut fixture = McpBridgeFixture::start();
         assert!(!fixture.ready_path.exists());
         fixture.initialize();
+        fixture.synchronize_without_listing();
+        assert!(!fixture.ready_path.exists());
         fixture.list_tools();
         wait_for_bridge_ready(
             &fixture.executable,
