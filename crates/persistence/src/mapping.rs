@@ -7,21 +7,178 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
 use signalbox_domain::{
-    AcceptedInputId, AnthropicServiceTier, CheckConclusion, ChecksOutcome, CodexCliServiceTier,
-    DangerousToolAutoApproval, DelegateApprovalRecommendation, DirectModelSelection,
-    DurableCommandId, EffectiveModelSettings, FastMode, FastModeOverlay, GoalBlockedReasonKind,
-    GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
-    MergeableState, ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay,
-    ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange, ReactionSubject, ReasoningLevel,
-    RepoWatchEventKindNameV1, ReviewState, ServiceTier, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
-    SettingOverlay, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault, ToolRequestId,
-    TurnId, UpdateSessionPlacementRejectionKind, ValidatedModelSettings,
+    AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
+    CodexCliServiceTier, DangerousToolAutoApproval, DelegateApprovalRecommendation,
+    DelegationMessageDirection, DelegationOutcomeKind, DelegationOutcomeReason, DelegationWaitMode,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId, EffectiveModelSettings,
+    FastMode, FastModeOverlay, GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind,
+    GoalModelBlockedReasonKind, GoalUserAction, MergeableState, ModelChangeAdjustment,
+    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
+    ReactionChange, ReactionSubject, ReasoningLevel, RepoWatchEventKindNameV1, ReviewState,
+    ServiceTier, SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId,
+    SessionInputPosition, SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture,
+    ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
+    UpdateSessionPlacementRejectionKind, ValidatedModelSettings,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
 use crate::approval_judge::FailedApprovalJudgeDisposition;
+
+/// Closed delegated-session relationship policy discriminators in PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DelegationPolicyStorageKind {
+    Background,
+    Bound,
+}
+
+#[allow(
+    dead_code,
+    reason = "delegation relationship inserts are owned by the deferred placement writer"
+)]
+pub(crate) const fn delegation_policy_kind_to_str(
+    value: DelegationPolicyStorageKind,
+) -> &'static str {
+    match value {
+        DelegationPolicyStorageKind::Background => "background",
+        DelegationPolicyStorageKind::Bound => "bound",
+    }
+}
+
+pub(crate) fn delegation_policy_kind_from_str(value: &str) -> Option<DelegationPolicyStorageKind> {
+    match value {
+        "background" => Some(DelegationPolicyStorageKind::Background),
+        "bound" => Some(DelegationPolicyStorageKind::Bound),
+        _ => None,
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "delegation relationship inserts are owned by the deferred placement writer"
+)]
+pub(crate) const fn bound_child_action_to_str(value: BoundChildAction) -> &'static str {
+    match value {
+        BoundChildAction::KeepRunning => "keep_running",
+        BoundChildAction::Stop => "stop",
+        BoundChildAction::Cancel => "cancel",
+    }
+}
+
+pub(crate) fn bound_child_action_from_str(value: &str) -> Option<BoundChildAction> {
+    match value {
+        "keep_running" => Some(BoundChildAction::KeepRunning),
+        "stop" => Some(BoundChildAction::Stop),
+        "cancel" => Some(BoundChildAction::Cancel),
+        _ => None,
+    }
+}
+
+pub(crate) const fn delegation_wait_mode_to_str(value: DelegationWaitMode) -> &'static str {
+    match value {
+        DelegationWaitMode::Foreground => "foreground",
+        DelegationWaitMode::Background => "background",
+    }
+}
+
+pub(crate) fn delegation_wait_mode_from_str(value: &str) -> Option<DelegationWaitMode> {
+    match value {
+        "foreground" => Some(DelegationWaitMode::Foreground),
+        "background" => Some(DelegationWaitMode::Background),
+        _ => None,
+    }
+}
+
+pub(crate) const fn delegation_message_direction_to_str(
+    value: DelegationMessageDirection,
+) -> &'static str {
+    match value {
+        DelegationMessageDirection::ParentToChild => "parent_to_child",
+        DelegationMessageDirection::ChildToParent => "child_to_parent",
+    }
+}
+
+pub(crate) fn delegation_message_direction_from_str(
+    value: &str,
+) -> Option<DelegationMessageDirection> {
+    match value {
+        "parent_to_child" => Some(DelegationMessageDirection::ParentToChild),
+        "child_to_parent" => Some(DelegationMessageDirection::ChildToParent),
+        _ => None,
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "delegation outcome rows are currently written by PostgreSQL lifecycle triggers"
+)]
+pub(crate) const fn delegation_outcome_kind_to_str(value: DelegationOutcomeKind) -> &'static str {
+    match value {
+        DelegationOutcomeKind::ResultReturned => "result_returned",
+        DelegationOutcomeKind::ChildFailed => "child_failed",
+        DelegationOutcomeKind::ChildStopped => "child_stopped",
+        DelegationOutcomeKind::ChildCancelled => "child_cancelled",
+        DelegationOutcomeKind::ContinueRunning => "continue_running",
+        DelegationOutcomeKind::AlreadyTerminal => "already_terminal",
+    }
+}
+
+pub(crate) fn delegation_outcome_kind_from_str(value: &str) -> Option<DelegationOutcomeKind> {
+    match value {
+        "result_returned" => Some(DelegationOutcomeKind::ResultReturned),
+        "child_failed" => Some(DelegationOutcomeKind::ChildFailed),
+        "child_stopped" => Some(DelegationOutcomeKind::ChildStopped),
+        "child_cancelled" => Some(DelegationOutcomeKind::ChildCancelled),
+        "continue_running" => Some(DelegationOutcomeKind::ContinueRunning),
+        "already_terminal" => Some(DelegationOutcomeKind::AlreadyTerminal),
+        _ => None,
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "delegation outcome rows are currently written by PostgreSQL lifecycle triggers"
+)]
+pub(crate) const fn delegation_outcome_reason_to_str(
+    value: DelegationOutcomeReason,
+) -> Option<&'static str> {
+    match value {
+        DelegationOutcomeReason::ChildCompleted => Some("child_completed"),
+        DelegationOutcomeReason::ChildExecutionFailed => Some("child_execution_failed"),
+        DelegationOutcomeReason::ChildResultUnavailable => Some("child_result_unavailable"),
+        DelegationOutcomeReason::ChildCancelled => Some("child_cancelled"),
+        DelegationOutcomeReason::ParentStopped {
+            scope: DescendantTerminationScope::ParentAndDescendants,
+        } => Some("parent_stopped_parent_and_descendants"),
+        DelegationOutcomeReason::ParentCancelled {
+            scope: DescendantTerminationScope::ParentAndDescendants,
+        } => Some("parent_cancelled_parent_and_descendants"),
+        DelegationOutcomeReason::ParentStopped {
+            scope: DescendantTerminationScope::ParentAlone,
+        }
+        | DelegationOutcomeReason::ParentCancelled {
+            scope: DescendantTerminationScope::ParentAlone,
+        } => None,
+    }
+}
+
+pub(crate) fn delegation_outcome_reason_from_str(value: &str) -> Option<DelegationOutcomeReason> {
+    match value {
+        "child_completed" => Some(DelegationOutcomeReason::ChildCompleted),
+        "child_execution_failed" => Some(DelegationOutcomeReason::ChildExecutionFailed),
+        "child_result_unavailable" => Some(DelegationOutcomeReason::ChildResultUnavailable),
+        "child_cancelled" => Some(DelegationOutcomeReason::ChildCancelled),
+        "parent_stopped_parent_and_descendants" => Some(DelegationOutcomeReason::ParentStopped {
+            scope: DescendantTerminationScope::ParentAndDescendants,
+        }),
+        "parent_cancelled_parent_and_descendants" => {
+            Some(DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            })
+        }
+        _ => None,
+    }
+}
 
 /// Closed session-creation cause discriminators stored in PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1450,7 +1607,9 @@ mod tests {
     use rust_decimal::Decimal;
     use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
     use signalbox_domain::{
-        AcceptedInputId, CheckConclusion, ChecksOutcome, DelegateApprovalRecommendation,
+        AcceptedInputId, BoundChildAction, CheckConclusion, ChecksOutcome,
+        DelegateApprovalRecommendation, DelegationMessageDirection, DelegationOutcomeKind,
+        DelegationOutcomeReason, DelegationWaitMode, DescendantTerminationScope,
         DirectModelSelection, DurableCommandId, FastMode, FastModeOverlay, FastModeSupport,
         MergeableState, ModelCapabilities, ModelChangeAdjustment, ModelSettingsOverlay,
         ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange, ReasoningLevel,
@@ -1462,19 +1621,24 @@ mod tests {
 
     use super::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
-        DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
-        PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
+        DelegationPolicyStorageKind, DurableCommandIdMappingError, DurableCommandKind,
+        PlanEventStorageKind, PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
         SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
         StoredModelSettingsError, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
         approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
         approval_judge_state_from_str, approval_judge_state_to_str,
         approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
-        defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
-        durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
-        input_position_from_numeric, input_position_to_numeric, model_change_adjustments_from_json,
-        model_change_adjustments_to_json, model_settings_from_json,
-        model_settings_overlay_from_json, model_settings_to_json, plan_event_kind_from_str,
-        plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
+        bound_child_action_from_str, bound_child_action_to_str, defaults_version_from_numeric,
+        defaults_version_to_numeric, delegation_message_direction_from_str,
+        delegation_message_direction_to_str, delegation_outcome_kind_from_str,
+        delegation_outcome_kind_to_str, delegation_outcome_reason_from_str,
+        delegation_outcome_reason_to_str, delegation_policy_kind_from_str,
+        delegation_policy_kind_to_str, delegation_wait_mode_from_str, delegation_wait_mode_to_str,
+        durable_command_id_from_uuid, durable_command_id_to_uuid, durable_command_kind_from_str,
+        durable_command_kind_to_str, input_position_from_numeric, input_position_to_numeric,
+        model_change_adjustments_from_json, model_change_adjustments_to_json,
+        model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
+        plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
         repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
         repo_watch_checks_outcome_to_str, repo_watch_event_kind_from_str,
         repo_watch_event_kind_to_str, repo_watch_mergeable_state_from_str,
@@ -1495,6 +1659,191 @@ mod tests {
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
     const DELEGATED_REQUEST_ID: u128 = 1;
     const UNKNOWN_DISCRIMINATOR: &str = "outside-closed-set";
+
+    #[test]
+    fn delegation_policy_kind_mapping_is_closed() {
+        assert_eq!(
+            delegation_policy_kind_from_str(delegation_policy_kind_to_str(
+                DelegationPolicyStorageKind::Background,
+            )),
+            Some(DelegationPolicyStorageKind::Background)
+        );
+        assert_eq!(
+            delegation_policy_kind_from_str(delegation_policy_kind_to_str(
+                DelegationPolicyStorageKind::Bound,
+            )),
+            Some(DelegationPolicyStorageKind::Bound)
+        );
+        assert_eq!(delegation_policy_kind_from_str(UNKNOWN_DISCRIMINATOR), None);
+    }
+
+    #[test]
+    fn delegation_bound_action_mapping_is_closed() {
+        assert_eq!(
+            bound_child_action_from_str(bound_child_action_to_str(BoundChildAction::KeepRunning,)),
+            Some(BoundChildAction::KeepRunning)
+        );
+        assert_eq!(
+            bound_child_action_from_str(bound_child_action_to_str(BoundChildAction::Stop)),
+            Some(BoundChildAction::Stop)
+        );
+        assert_eq!(
+            bound_child_action_from_str(bound_child_action_to_str(BoundChildAction::Cancel)),
+            Some(BoundChildAction::Cancel)
+        );
+        assert_eq!(bound_child_action_from_str(UNKNOWN_DISCRIMINATOR), None);
+    }
+
+    #[test]
+    fn delegation_wait_mode_mapping_is_closed() {
+        assert_eq!(
+            delegation_wait_mode_from_str(delegation_wait_mode_to_str(
+                DelegationWaitMode::Foreground,
+            )),
+            Some(DelegationWaitMode::Foreground)
+        );
+        assert_eq!(
+            delegation_wait_mode_from_str(delegation_wait_mode_to_str(
+                DelegationWaitMode::Background,
+            )),
+            Some(DelegationWaitMode::Background)
+        );
+        assert_eq!(delegation_wait_mode_from_str(UNKNOWN_DISCRIMINATOR), None);
+    }
+
+    #[test]
+    fn delegation_message_direction_mapping_is_closed() {
+        assert_eq!(
+            delegation_message_direction_from_str(delegation_message_direction_to_str(
+                DelegationMessageDirection::ParentToChild,
+            )),
+            Some(DelegationMessageDirection::ParentToChild)
+        );
+        assert_eq!(
+            delegation_message_direction_from_str(delegation_message_direction_to_str(
+                DelegationMessageDirection::ChildToParent,
+            )),
+            Some(DelegationMessageDirection::ChildToParent)
+        );
+        assert_eq!(
+            delegation_message_direction_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+    }
+
+    #[test]
+    fn delegation_outcome_kind_mapping_is_closed() {
+        assert_eq!(
+            delegation_outcome_kind_from_str(delegation_outcome_kind_to_str(
+                DelegationOutcomeKind::ResultReturned,
+            )),
+            Some(DelegationOutcomeKind::ResultReturned)
+        );
+        assert_eq!(
+            delegation_outcome_kind_from_str(delegation_outcome_kind_to_str(
+                DelegationOutcomeKind::ChildFailed,
+            )),
+            Some(DelegationOutcomeKind::ChildFailed)
+        );
+        assert_eq!(
+            delegation_outcome_kind_from_str(delegation_outcome_kind_to_str(
+                DelegationOutcomeKind::ChildStopped,
+            )),
+            Some(DelegationOutcomeKind::ChildStopped)
+        );
+        assert_eq!(
+            delegation_outcome_kind_from_str(delegation_outcome_kind_to_str(
+                DelegationOutcomeKind::ChildCancelled,
+            )),
+            Some(DelegationOutcomeKind::ChildCancelled)
+        );
+        assert_eq!(
+            delegation_outcome_kind_from_str(delegation_outcome_kind_to_str(
+                DelegationOutcomeKind::ContinueRunning,
+            )),
+            Some(DelegationOutcomeKind::ContinueRunning)
+        );
+        assert_eq!(
+            delegation_outcome_kind_from_str(delegation_outcome_kind_to_str(
+                DelegationOutcomeKind::AlreadyTerminal,
+            )),
+            Some(DelegationOutcomeKind::AlreadyTerminal)
+        );
+        assert_eq!(
+            delegation_outcome_kind_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+    }
+
+    #[test]
+    fn delegation_outcome_reason_mapping_is_closed() {
+        assert_eq!(
+            delegation_outcome_reason_from_str(
+                delegation_outcome_reason_to_str(DelegationOutcomeReason::ChildCompleted)
+                    .expect("child completion is stored"),
+            ),
+            Some(DelegationOutcomeReason::ChildCompleted)
+        );
+        assert_eq!(
+            delegation_outcome_reason_from_str(
+                delegation_outcome_reason_to_str(DelegationOutcomeReason::ChildExecutionFailed)
+                    .expect("child failure is stored"),
+            ),
+            Some(DelegationOutcomeReason::ChildExecutionFailed)
+        );
+        assert_eq!(
+            delegation_outcome_reason_from_str(
+                delegation_outcome_reason_to_str(DelegationOutcomeReason::ChildResultUnavailable)
+                    .expect("unavailable child result is stored"),
+            ),
+            Some(DelegationOutcomeReason::ChildResultUnavailable)
+        );
+        assert_eq!(
+            delegation_outcome_reason_from_str(
+                delegation_outcome_reason_to_str(DelegationOutcomeReason::ChildCancelled)
+                    .expect("child cancellation is stored"),
+            ),
+            Some(DelegationOutcomeReason::ChildCancelled)
+        );
+        assert_eq!(
+            delegation_outcome_reason_from_str(
+                delegation_outcome_reason_to_str(DelegationOutcomeReason::ParentStopped {
+                    scope: DescendantTerminationScope::ParentAndDescendants,
+                })
+                .expect("descendant stop is stored"),
+            ),
+            Some(DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            })
+        );
+        assert_eq!(
+            delegation_outcome_reason_from_str(
+                delegation_outcome_reason_to_str(DelegationOutcomeReason::ParentCancelled {
+                    scope: DescendantTerminationScope::ParentAndDescendants,
+                })
+                .expect("descendant cancellation is stored"),
+            ),
+            Some(DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            })
+        );
+        assert_eq!(
+            delegation_outcome_reason_to_str(DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAlone,
+            }),
+            None
+        );
+        assert_eq!(
+            delegation_outcome_reason_to_str(DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAlone,
+            }),
+            None
+        );
+        assert_eq!(
+            delegation_outcome_reason_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+    }
 
     #[test]
     fn session_creation_cause_mapping_is_closed() {
