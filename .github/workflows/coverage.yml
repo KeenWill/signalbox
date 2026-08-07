@@ -322,15 +322,40 @@ jobs:
             # fails to load at render time.
             # Every field the loader consumes is checked, not just the line
             # total: `read_file_summaries` indexes `entry["filename"]` directly
-            # and raises `KeyError` when it is absent, so an export whose file
-            # entries carry counts but no name passes a counts-only predicate
-            # and still fails to load. The counters themselves are not required
-            # — `read_counter` defaults a missing one to empty on purpose, so
-            # the report survives a toolchain that grew a new counter.
+            # and raises `KeyError` when it is absent, and `read_counter`
+            # coerces each present counter value with `int()`, which raises on
+            # a value like "broken" or "5.5". An export failing either passes a
+            # counts-only predicate and still fails to load, ending the scan
+            # while an older usable artifact goes unexamined.
+            #
+            # A counter that is absent, or not an object, stays acceptable:
+            # `read_counter` defaults those to empty on purpose so the report
+            # survives a toolchain that grows a counter. Only values that are
+            # present are required to be ones `int()` accepts — a number, or a
+            # string of digits. `tonumber` is deliberately not the test: it
+            # accepts "5.5", which `int()` rejects.
+            #
+            # One divergence from the loader is deliberate: it rejects only a
+            # zero line total, while this rejects any total that is not
+            # positive. A negative total is not something llvm-cov can emit,
+            # and treating one as a baseline would render nonsense deltas
+            # rather than fall through to an artifact that measures something.
             if ! jq -e '
+                  def okint: (type == "number")
+                    or (type == "string" and test("^[+-]?[0-9]+$"));
+                  def okfield($k): (has($k) | not) or (.[$k] | okint);
+                  def okcounter: (type != "object")
+                    or (okfield("count") and okfield("covered"));
                   .type == "llvm.coverage.json.export"
                   and all(.data[]?.files[]?; has("filename"))
-                  and (([.data[]?.files[]?.summary.lines.count // 0] | add) // 0) > 0
+                  and all(.data[]?.files[]?;
+                        (.summary // {})
+                        | (type == "object")
+                          and (.lines | okcounter)
+                          and (.functions | okcounter)
+                          and (.regions | okcounter))
+                  and (([.data[]?.files[]?.summary.lines.count // 0 | tonumber]
+                        | add) // 0) > 0
                 ' "$baseline_dir/$SUMMARY_FILE" > /dev/null 2>&1; then
               [ -n "$reason" ] || reason="the \`$SUMMARY_FILE\` from run $run_id is not a readable coverage export"
               rm -f "$baseline_dir/$SUMMARY_FILE"

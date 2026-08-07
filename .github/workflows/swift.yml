@@ -308,18 +308,21 @@ jobs:
             # `coveredLines` and `executableLines` off each product target and
             # raises `KeyError` on a missing one, so a target carrying only
             # `executableLines` passes an executable-only predicate and still
-            # fails to load. Both are required to be convertible rather than to
-            # be JSON numbers: the loader coerces with `int()`, which also
-            # accepts a numeric string, and a predicate stricter than its
-            # loader would discard a usable baseline for an older one.
+            # fails to load. Both are required to be values `int()` accepts — a
+            # number, or a string of digits — matching the loader in both
+            # directions: a numeric string is accepted because `int()` accepts
+            # it, and "5.5" is not, because `int()` rejects it. A predicate
+            # stricter than its loader would discard a usable baseline for an
+            # older one, which is the same defect in the other direction.
             if ! jq -e '
+                  def okint: (type == "number")
+                    or (type == "string" and test("^[+-]?[0-9]+$"));
                   [.targets[]?
                     | select(((.name // "") | endswith(".xctest")) | not)
                   ] as $products
                   | ($products | length) > 0
                   and all($products[];
-                        (.coveredLines | tonumber? // null) != null
-                        and (.executableLines | tonumber? // null) != null)
+                        (.coveredLines | okint) and (.executableLines | okint))
                   and (([$products[].executableLines | tonumber] | add) // 0) > 0
                 ' "$baseline_dir/$SUMMARY_FILE" > /dev/null 2>&1; then
               [ -n "$reason" ] || reason="the \`$SUMMARY_FILE\` from run $run_id is not a readable coverage report"
