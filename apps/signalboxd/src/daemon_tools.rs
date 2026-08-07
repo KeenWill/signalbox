@@ -2389,10 +2389,6 @@ mod tests {
     const BRIDGE_WAIT_CHILD_FIXTURE_LIFETIME: Duration = Duration::from_secs(2);
     const BRIDGE_WAIT_DESCENDANT_FIXTURE_LIFETIME: Duration = Duration::from_secs(30);
     #[cfg(target_os = "linux")]
-    const LINUX_NANOSLEEP_WAIT_CHANNEL: &str = "nanosleep";
-    #[cfg(target_os = "linux")]
-    const LINUX_PIPE_WAIT_CHANNEL_FRAGMENT: &str = "pipe";
-    #[cfg(target_os = "linux")]
     const SYNTHETIC_BLOCKING_DESCRIPTION_FRAGMENT: &str = "synthetic-padding";
     #[cfg(target_os = "linux")]
     const SYNTHETIC_BLOCKING_DESCRIPTION_REPETITIONS: usize = 300_000;
@@ -3005,34 +3001,6 @@ mod tests {
             Self { child }
         }
 
-        #[cfg(target_os = "linux")]
-        #[track_caller]
-        fn await_polling(&mut self) {
-            let wait_channel = Path::new("/proc")
-                .join(self.child.id().to_string())
-                .join("wchan");
-            let deadline = Instant::now() + BRIDGE_RESPONSE_TIMEOUT;
-            loop {
-                assert!(
-                    self.child
-                        .try_wait()
-                        .expect("bridge readiness waiter status is readable")
-                        .is_none(),
-                    "bridge readiness waiter remains active while synchronizing"
-                );
-                let observed = fs::read_to_string(&wait_channel)
-                    .expect("bridge readiness waiter exposes its Linux wait channel");
-                if observed.contains(LINUX_NANOSLEEP_WAIT_CHANNEL) {
-                    return;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "bridge readiness waiter reaches its polling sleep"
-                );
-                thread::sleep(CHILD_POLL_INTERVAL);
-            }
-        }
-
         #[track_caller]
         fn finish_success(mut self) {
             let Some(status) = wait_for_child(&mut self.child, BRIDGE_EXIT_TIMEOUT)
@@ -3164,30 +3132,18 @@ mod tests {
         }
 
         #[track_caller]
-        fn await_blocked_response_write(&mut self) {
-            let wait_channel = Path::new("/proc")
-                .join(self.child.id().to_string())
-                .join("wchan");
-            let deadline = Instant::now() + BRIDGE_RESPONSE_TIMEOUT;
-            loop {
-                assert!(
-                    self.child
-                        .try_wait()
-                        .expect("blocking bridge status is readable")
-                        .is_none(),
-                    "bridge remains active while its list response is blocked"
-                );
-                let observed = fs::read_to_string(&wait_channel)
-                    .expect("blocking bridge exposes its Linux wait channel");
-                if observed.contains(LINUX_PIPE_WAIT_CHANNEL_FRAGMENT) {
-                    return;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "bridge blocks while writing the oversized list response"
-                );
-                thread::sleep(CHILD_POLL_INTERVAL);
-            }
+        fn await_list_response_started(&mut self) {
+            let output = self
+                .output
+                .as_mut()
+                .expect("blocking bridge output is present");
+            assert!(
+                !output
+                    .fill_buf()
+                    .expect("blocking bridge response prefix is readable")
+                    .is_empty(),
+                "bridge starts writing the oversized list response"
+            );
         }
 
         #[track_caller]
@@ -3855,12 +3811,11 @@ mod tests {
         fixture.initialize();
         fixture.synchronize_without_listing();
         assert!(!fixture.ready_path.exists());
-        let mut waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
+        let waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
             executable: &fixture.executable,
             ready: &fixture.ready_path,
             workspace: fixture.workspace.path(),
         });
-        waiter.await_polling();
         assert!(!fixture.ready_path.exists());
         fixture.list_tools();
         waiter.finish_success();
@@ -3873,14 +3828,13 @@ mod tests {
     fn claude_mcp_bridge_writes_the_list_response_before_publishing_readiness() {
         let mut fixture = BlockingListResponseFixture::start();
         let expected_tools = fixture.expected_tools.clone();
-        fixture.await_blocked_response_write();
+        fixture.await_list_response_started();
         assert!(!fixture.ready_path.exists());
-        let mut waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
+        let waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
             executable: &fixture.executable,
             ready: &fixture.ready_path,
             workspace: fixture._support.path(),
         });
-        waiter.await_polling();
         let listed = fixture.read_list_response();
         waiter.finish_success();
         assert!(fixture.ready_path.is_file());
