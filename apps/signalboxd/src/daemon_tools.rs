@@ -1143,7 +1143,7 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::{
         collections::BTreeSet,
-        ffi::OsString,
+        ffi::{OsStr, OsString},
         fmt, fs,
         io::{self, BufRead, BufReader, Cursor, ErrorKind, Read, Write},
         path::{Path, PathBuf},
@@ -1551,14 +1551,6 @@ mod tests {
                         invocation_directory: Path::new(&directory),
                     })
                 })
-                .or_else(|| {
-                    std::env::current_dir().ok().and_then(|directory| {
-                        resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
-                            configured: &configured,
-                            invocation_directory: &directory,
-                        })
-                    })
-                })
                 .unwrap_or(configured)
         };
         let configured = configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
@@ -1591,7 +1583,10 @@ mod tests {
             .and_then(Path::parent)
             .and_then(Path::parent)
             .expect("test executable has a Cargo artifact parent");
-        if configured.as_os_str().is_empty() || configured.file_name().is_none() {
+        if configured.as_os_str().is_empty() {
+            return artifact_parent.to_path_buf();
+        }
+        if configured.file_name().is_none() {
             return target_root_from_artifact_parent(artifact_parent, known_targets);
         }
         let Some(closest) = artifact_parent
@@ -1682,7 +1677,9 @@ mod tests {
 
     #[track_caller]
     fn rustc_target_names() -> BTreeSet<OsString> {
-        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+        let configured_rustc = std::env::var_os("RUSTC");
+        let invocation_directory = std::env::var_os("PWD").map(PathBuf::from);
+        let rustc = rustc_command_for(configured_rustc.as_deref(), invocation_directory.as_deref());
         let output = Command::new(rustc)
             .args(["--print", "target-list"])
             .output()
@@ -1693,6 +1690,22 @@ mod tests {
             .lines()
             .map(OsString::from)
             .collect()
+    }
+
+    fn rustc_command_for(
+        configured: Option<&OsStr>,
+        invocation_directory: Option<&Path>,
+    ) -> PathBuf {
+        let Some(configured) = configured else {
+            return PathBuf::from("rustc");
+        };
+        let configured = Path::new(configured);
+        if configured.is_absolute() {
+            return configured.to_path_buf();
+        }
+        invocation_directory
+            .map(|directory| directory.join(configured))
+            .unwrap_or_else(|| PathBuf::from("rustc"))
     }
 
     fn lexically_normalized(path: &Path) -> PathBuf {
@@ -1735,13 +1748,13 @@ mod tests {
         let artifact_parent = profile_dir
             .parent()
             .expect("Cargo profile has an artifact parent");
-        let artifact_parent_name = artifact_parent
-            .file_name()
-            .expect("Cargo artifact parent has a name");
         let (target_dir, target) = if let Some(target_dir) = configured_target_dir.as_deref() {
             if artifact_parent == target_dir {
                 (target_dir.to_path_buf(), None)
             } else {
+                let artifact_parent_name = artifact_parent
+                    .file_name()
+                    .expect("target-specific Cargo artifact parent has a name");
                 assert_eq!(
                     artifact_parent.parent(),
                     Some(target_dir),
@@ -1756,18 +1769,23 @@ mod tests {
                     Some(artifact_parent_name.to_os_string()),
                 )
             }
-        } else if artifact_parent.parent() == Some(default_target_dir.as_path())
-            && input.known_targets.contains(artifact_parent_name)
-        {
-            (
-                artifact_parent
-                    .parent()
-                    .expect("Cargo target-specific artifacts have a target directory")
-                    .to_path_buf(),
-                Some(artifact_parent_name.to_os_string()),
-            )
         } else {
-            (artifact_parent.to_path_buf(), None)
+            let recognized_target = artifact_parent.file_name().filter(|name| {
+                artifact_parent.parent() == Some(default_target_dir.as_path())
+                    && input.known_targets.contains(*name)
+            });
+            recognized_target.map_or_else(
+                || (artifact_parent.to_path_buf(), None),
+                |target| {
+                    (
+                        artifact_parent
+                            .parent()
+                            .expect("Cargo target-specific artifacts have a target directory")
+                            .to_path_buf(),
+                        Some(target.to_os_string()),
+                    )
+                },
+            )
         };
         BridgeArtifactSelection {
             profile,
@@ -2257,11 +2275,10 @@ mod tests {
     }
 
     #[test]
-    fn bridge_artifact_selection_preserves_a_target_with_a_dot_relative_directory() {
+    fn bridge_artifact_selection_treats_an_ambiguous_dot_target_layout_as_a_host_root() {
         let target_dir = Path::new("synthetic-workspace");
-        let executable = target_dir
-            .join(SYNTHETIC_CARGO_TARGET)
-            .join("debug/deps/daemon-tools-test");
+        let artifact_root = target_dir.join(SYNTHETIC_CARGO_TARGET);
+        let executable = artifact_root.join("debug/deps/daemon-tools-test");
         let configured_target_dir =
             configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
                 current_executable: &executable,
@@ -2271,14 +2288,49 @@ mod tests {
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
-            target_dir,
+            target_dir: &artifact_root,
             configured_target_dir: Some(&configured_target_dir),
             default_target_dir: Path::new("synthetic-default-target"),
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: CARGO_TEST_PROFILE,
-            expected_target: Some(SYNTHETIC_CARGO_TARGET),
+            expected_target: None,
             recognized_target: Some(SYNTHETIC_CARGO_TARGET),
         });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_accepts_a_filesystem_root_target_directory() {
+        let executable = Path::new("/debug/deps/daemon-tools-test");
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable,
+            target_dir: Path::new("/"),
+            configured_target_dir: Some(Path::new("/")),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: None,
+        });
+    }
+
+    #[test]
+    fn bridge_rustc_command_resolves_a_relative_override_from_the_invocation_directory() {
+        assert_eq!(
+            rustc_command_for(
+                Some(OsStr::new("tooling/rustc-wrapper")),
+                Some(Path::new("synthetic-workspace")),
+            ),
+            PathBuf::from("synthetic-workspace/tooling/rustc-wrapper")
+        );
+    }
+
+    #[test]
+    fn bridge_rustc_command_uses_path_rustc_when_the_invocation_directory_is_unknown() {
+        assert_eq!(
+            rustc_command_for(Some(OsStr::new("tooling/rustc-wrapper")), None),
+            PathBuf::from("rustc")
+        );
     }
 
     #[test]
