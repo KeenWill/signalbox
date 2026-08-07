@@ -637,6 +637,24 @@ fn foreground_decoder_returns_the_exact_sealed_request() {
 }
 
 #[test]
+fn background_receipt_rejects_a_foreground_wait() {
+    let child = session(810);
+    let raw = await_request(811, child, "foreground");
+    let awaiting = decoded_await(&raw);
+    let child_turn = turn(812);
+    let (relation, _) = terminal_relation(
+        background_spawn_for_parent(813, awaiting.request().session()),
+        child,
+        child_turn,
+        failed_outcome(child, child_turn),
+    );
+    let wait = DelegationWait::reconstitute(&relation, &awaiting)
+        .expect("fixture foreground wait reconstitutes");
+
+    assert_eq!(AwaitSessionReceipt::from_wait(&awaiting, wait), None);
+}
+
+#[test]
 fn validator_rejects_noncanonical_child_uuid_text() {
     let catalog = catalog();
     let name = ToolName::try_new(AWAIT_SESSION_NAME.to_owned()).expect("fixture name is admitted");
