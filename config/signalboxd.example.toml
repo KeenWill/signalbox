@@ -66,8 +66,14 @@ credential_profile = "anthropic-primary"
 # is involved. `mcp_bridge_executable` names the `signalbox-claude-mcp-bridge`
 # program this workspace builds: the adapter spawns it as Claude Code's only
 # tool server, and the deployment names it explicitly rather than having the
-# daemon guess a path from its own image. Claude Code exposes no service tier,
-# so a Claude model declares reasoning levels and fast mode only. Uncomment the
+# daemon guess a path from its own image. That name takes either form. A bare
+# program name, as below, is resolved once at startup against the daemon's own
+# PATH: the form for a deployment that installs the bridge alongside the daemon,
+# which is what `devenv up` does for the dev instance. Any other value is a
+# path, is used verbatim, and consults no PATH: the form for a bridge the
+# daemon's PATH does not reach. Either way it must end at an absolute path
+# naming an existing regular file. Claude Code exposes no service tier, so a
+# Claude model declares reasoning levels and fast mode only. Uncomment the
 # Claude Code catalog rows below with it.
 
 # [[credential_profiles]]
@@ -81,7 +87,7 @@ credential_profile = "anthropic-primary"
 #
 # [claude_cli]
 # executable = "/absolute/path/to/claude"
-# mcp_bridge_executable = "/absolute/path/to/signalbox-claude-mcp-bridge"
+# mcp_bridge_executable = "signalbox-claude-mcp-bridge"
 # working_directory = "/absolute/path/to/workspace"
 
 # To serve an OpenAI model family, add this profile and mapping and set
