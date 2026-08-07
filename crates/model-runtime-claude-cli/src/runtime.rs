@@ -550,6 +550,7 @@ fn create_support_files(
     let ready = directory.path().join("mcp-ready");
     let mcp_config = directory.path().join("mcp.json");
     let settings = directory.path().join("settings.json");
+    let credential_file = directory.path().join("credential");
     let bridge_text = bridge
         .to_str()
         .ok_or_else(|| "MCP bridge path is not valid UTF-8".to_string())?;
@@ -587,10 +588,12 @@ fn create_support_files(
         }]}]}
     });
     if let Some(credential) = credential {
-        isolated_settings["env"] = serde_json::json!({
-            CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY: std::str::from_utf8(credential.expose_bytes())
-                .map_err(|_| "Claude file credential is not UTF-8".to_string())?
-        });
+        write_private_file(&credential_file, credential.expose_bytes())?;
+        let credential_text = credential_file
+            .to_str()
+            .ok_or_else(|| "Claude credential-store path is not valid UTF-8".to_string())?;
+        isolated_settings["apiKeyHelper"] =
+            serde_json::json!(format!("cat {}", shell_quote(credential_text)));
     }
     write_private_file(
         &settings,
@@ -613,9 +616,9 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     }
     let mut file = options
         .open(path)
-        .map_err(|error| format!("could not create private settings: {error}"))?;
+        .map_err(|error| format!("could not create private support file: {error}"))?;
     std::io::Write::write_all(&mut file, contents)
-        .map_err(|error| format!("could not write private settings: {error}"))
+        .map_err(|error| format!("could not write private support file: {error}"))
 }
 
 fn shell_quote(value: &str) -> String {

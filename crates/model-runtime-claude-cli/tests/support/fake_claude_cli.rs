@@ -416,6 +416,7 @@ fn record_credential_delivery(arguments: &[String]) -> std::io::Result<()> {
     let settings_contents = std::fs::read_to_string(settings).unwrap_or_default();
     std::fs::write("fake-claude-settings", settings_contents)?;
     record_settings_mode(settings)?;
+    record_helper_delivery(settings)?;
     std::fs::write(
         "fake-claude-config-dir",
         std::env::var_os("CLAUDE_CONFIG_DIR")
@@ -427,6 +428,37 @@ fn record_credential_delivery(arguments: &[String]) -> std::io::Result<()> {
         "fake-claude-direct-credential-present",
         std::env::var_os("ANTHROPIC_API_KEY").is_some().to_string(),
     )
+}
+
+fn record_helper_delivery(settings: &str) -> std::io::Result<()> {
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(settings).unwrap_or_default())
+            .unwrap_or_default();
+    let Some(helper) = settings["apiKeyHelper"].as_str() else {
+        return Ok(());
+    };
+    let output = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(helper)
+        .output()?;
+    std::fs::write("fake-claude-helper-credential", output.stdout)?;
+    record_credential_mode()
+}
+
+#[cfg(unix)]
+fn record_credential_mode() -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let credential =
+        std::path::PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR").unwrap_or_default())
+            .join("credential");
+    let mode = std::fs::metadata(credential)?.permissions().mode() & 0o777;
+    std::fs::write("fake-claude-credential-mode", format!("{mode:o}"))
+}
+
+#[cfg(not(unix))]
+fn record_credential_mode() -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]

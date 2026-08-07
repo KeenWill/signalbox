@@ -776,9 +776,10 @@ value, including forwarded and process-control names such as `HOME`,
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `PATH`.
 
 Claude file delivery resolves the selected value during cancellable request
-preparation, writes it into the `env` mapping of a mode-0600 request-scoped
-`settings.json`, and replaces only the already allowlisted `CLAUDE_CONFIG_DIR`
-child value with that settings store's private directory. The key itself never
+preparation, writes it into a mode-0600 credential file in a private
+request-scoped Claude settings store, and configures that store's `apiKeyHelper`
+to read it. The adapter replaces only the already allowlisted
+`CLAUDE_CONFIG_DIR` child value with the store's directory; the key itself never
 enters the child environment assembled by the adapter. The prepared capability
 retains the exact value for observation and terminal-evidence redaction and
 deletes the store when the capability is dropped.

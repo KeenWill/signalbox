@@ -104,8 +104,11 @@ async fn file_delivery_materializes_private_claude_settings_without_direct_child
             .expect("the fake CLI recorded its explicit settings"),
     )
     .expect("the explicit settings are JSON");
+    assert!(settings.get("env").is_none());
+    assert!(settings["apiKeyHelper"].as_str().is_some());
     assert_eq!(
-        settings["env"][CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY],
+        std::fs::read_to_string(temporary.path().join("fake-claude-helper-credential"))
+            .expect("the fake CLI invoked the configured API-key helper"),
         fixtures::FILE_DELIVERED_CREDENTIAL
     );
     assert_eq!(
@@ -120,6 +123,11 @@ async fn file_delivery_materializes_private_claude_settings_without_direct_child
     assert_eq!(
         std::fs::read_to_string(temporary.path().join("fake-claude-settings-mode"))
             .expect("the fake CLI recorded its settings mode"),
+        "600"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("fake-claude-credential-mode"))
+            .expect("the fake CLI recorded its credential mode"),
         "600"
     );
     let argv = std::fs::read_to_string(temporary.path().join("fake-claude-argv"))

@@ -639,7 +639,8 @@ service_tiers = ["priority"]
             &executable,
             r#"#!/bin/sh
 test -z "${ANTHROPIC_API_KEY+x}" || exit 41
-grep -q '<file-credential>' "${CLAUDE_CONFIG_DIR}/settings.json" || exit 42
+grep -q '"apiKeyHelper"' "${CLAUDE_CONFIG_DIR}/settings.json" || exit 42
+test "$(cat "${CLAUDE_CONFIG_DIR}/credential")" = '<file-credential>' || exit 43
 cat >/dev/null
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"019c0000-0000-7000-8000-000000000002","tools":[],"mcp_servers":[{"name":"signalbox_tools","status":"connected"}],"model":"<provider-model>","slash_commands":[],"skills":[],"plugins":[],"claude_code_version":"2.1.220"}'
 printf '%s\n' '{"type":"assistant","parent_tool_use_id":null,"message":{"model":"<provider-model>","id":"message-1","role":"assistant","content":[{"type":"text","text":"<completion-text>"}],"usage":{"input_tokens":8,"output_tokens":4}}}'
