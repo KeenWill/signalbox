@@ -760,18 +760,19 @@ TOML string discriminant, common fields are exactly `name`, `adapter`,
 `billing_kind`, and `delivery`, and the selected variant admits only its fields
 below. A field owned by another variant is unknown and rejected.
 
-**`ambient`** is spelled `delivery = "ambient"` and is fieldless. The CLI
-resolves the one login already visible in the daemon user's process environment;
-the daemon supplies no credential value or profile-specific home. A profile
-declaring `ambient` therefore rejects every delivery-specific field. Because one
-CLI adapter process environment exposes only one such authentication context, a
-document may declare at most one `ambient` profile for `claude_cli` and at most
-one for `codex_cli`, regardless of which pools contain it. Giving that same
-login two profile names would not make two credentials and could not authorize a
-successor call. A document that declares an `ambient` `codex_cli` profile may
-not also declare a `codex_home` profile: static configuration cannot prove that
-the ambient login store and the explicitly named directory differ, so admitting
-both could give one physical login two availability and capacity identities.
+**`ambient`** is spelled `delivery = "ambient"` and is fieldless. For ambient
+delivery, the CLI resolves the one login already visible in the daemon user's
+process environment; the daemon supplies no credential value or profile-specific
+home. A profile declaring `ambient` therefore rejects every delivery-specific
+field. Because one CLI adapter process environment exposes only one such
+authentication context, a document may declare at most one `ambient` profile for
+`claude_cli` and at most one for `codex_cli`, regardless of which pools contain
+it. Giving that same login two profile names would not make two credentials and
+could not authorize a successor call. A document that declares an `ambient`
+`codex_cli` profile may not also declare a `codex_home` profile: static
+configuration cannot prove that the ambient login store and the explicitly named
+directory differ, so admitting both could give one physical login two
+availability and capacity identities.
 
 **`file`** is spelled `delivery = "file"` with required TOML string `file`
 naming an absolute deployment-owned path and, only for a CLI adapter, required
@@ -786,9 +787,12 @@ its adapter contract names — `ANTHROPIC_API_KEY` for `claude_cli` and
 forwarded and process-control names such as `HOME`, `CLAUDE_CONFIG_DIR`,
 `CODEX_HOME`, and `PATH`.
 
-Claude file delivery resolves the selected value during cancellable request
-preparation, writes it into a mode-0600 credential file in a private
-request-scoped Claude settings store, and configures that store's `apiKeyHelper`
+Claude file delivery receives the complete adapter-scoped catalog of declared
+`claude_cli` file-profile references described by the
+[credential-access boundary](runtime-substrate.md#credential-access-boundary),
+and resolves the operation's selected reference during cancellable request
+preparation. It writes that value into a mode-0600 credential file in a private
+request-scoped Claude settings store and configures that store's `apiKeyHelper`
 to read it through a mode-0600 request-scoped script interpreted by the fixed
 `/bin/sh` path; the script uses only shell builtins and resolves no executable
 through `PATH`. The adapter replaces only the already allowlisted
