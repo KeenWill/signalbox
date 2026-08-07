@@ -14,6 +14,7 @@ pub const MODEL_RECONSTRUCTED_CREDENTIAL: &str = "api_key=synthetic-model-contin
 pub const CREDENTIAL_SHAPED_SESSION_ID: &str = "api_key=synthetic-session-secret";
 pub const CREDENTIAL_SHAPED_MODEL: &str = "secret=synthetic-model-secret";
 pub const ANSWER: &str = "synthetic completion";
+pub const FILE_DELIVERED_CREDENTIAL: &str = "violet-circuit-synthetic-value";
 pub const SAFE_CREDENTIAL_PREFIX: &str = "API";
 pub const REFUSAL: &str = "synthetic refusal";
 pub const SENSITIVE_TEXT: &str = "Authorization: synthetic-credential-value";

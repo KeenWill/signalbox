@@ -38,12 +38,12 @@ version = 1
 # produces metered-equivalent cost. Keep a name's billing meaning stable, and use
 # a new name when an authentication update changes it. `delivery` states how the
 # secret reaches the provider and which further fields the profile carries;
-# anthropic and openai admit "file", claude_cli admits "ambient", and codex_cli
-# admits "ambient", "file", "codex_home", and "oauth". This build supplies
-# "file" on the direct-HTTP adapters and "ambient" on both CLI adapters. The
-# other Codex deliveries are rejected at startup until their delivery slices
-# land, rather than accepted and ignored. No credential path is opened and no
-# provider is contacted at startup.
+# anthropic and openai admit "file", claude_cli admits "ambient" and "file",
+# and codex_cli admits "ambient", "file", "codex_home", and "oauth". This build
+# supplies "file" on the direct-HTTP and Claude CLI adapters and "ambient" on
+# both CLI adapters. The other Codex deliveries are rejected at startup until
+# their delivery slices land, rather than accepted and ignored. No credential
+# path is opened and no provider is contacted at startup.
 [[credential_profiles]]
 name = "anthropic-primary"
 adapter = "anthropic"
@@ -184,16 +184,18 @@ credential_pool = "anthropic-main"
 # Claude Code catalog rows below with it.
 
 # [[credential_profiles]]
-# name = "claude-subscription-primary"
+# name = "claude-api-primary"
 # adapter = "claude_cli"
-# billing_kind = "subscription"
-# delivery = "ambient"
+# billing_kind = "api_metered"
+# delivery = "file"
+# file = "/run/secrets/claude-api-primary"
+# env_key = "ANTHROPIC_API_KEY"
 #
 # [[credential_pools]]
 # name = "claude-code-main"
 # tie_break = "first_listed"
 # on_pool_exhausted = "fail"
-# members = [{ profile = "claude-subscription-primary", priority = 1 }]
+# members = [{ profile = "claude-api-primary", priority = 1 }]
 #
 # [[adapter_mappings]]
 # model_family = "claude_code"

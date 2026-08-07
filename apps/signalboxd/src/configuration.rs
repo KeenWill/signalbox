@@ -58,7 +58,8 @@ use toml_edit::{DocumentMut, Item, Table};
 use uuid::Uuid;
 
 use crate::credential_pools::{
-    CredentialPool, CredentialProfile, parse_credential_pools, parse_credential_profiles,
+    CredentialDelivery, CredentialPool, CredentialProfile, parse_credential_pools,
+    parse_credential_profiles,
 };
 
 /// Non-secret reference the process binds its Anthropic key file to when no
@@ -115,7 +116,7 @@ impl ModelAdapter {
     pub(crate) fn admits_delivery(self, delivery: &str) -> bool {
         match self {
             Self::Anthropic | Self::OpenAi => matches!(delivery, "file"),
-            Self::ClaudeCli => matches!(delivery, "ambient"),
+            Self::ClaudeCli => matches!(delivery, "ambient" | "file"),
             Self::CodexCli => matches!(delivery, "ambient" | "file" | "codex_home" | "oauth"),
         }
     }
@@ -128,7 +129,8 @@ impl ModelAdapter {
     pub(crate) fn delivers(self, delivery: &str) -> bool {
         match self {
             Self::Anthropic | Self::OpenAi => matches!(delivery, "file"),
-            Self::ClaudeCli | Self::CodexCli => matches!(delivery, "ambient"),
+            Self::ClaudeCli => matches!(delivery, "ambient" | "file"),
+            Self::CodexCli => matches!(delivery, "ambient"),
         }
     }
 
@@ -1376,7 +1378,24 @@ impl HubModelConfiguration {
                     CredentialReference::new(credential_profile),
                 );
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
-                ClaudeCliRuntime::new(runtime_configuration)
+                let profile = self.credential_profiles.get(credential_profile);
+                match profile.map(CredentialProfile::delivery) {
+                    Some(CredentialDelivery::File { env_key, .. }) => {
+                        let credentials = FileCredentialAccess::from_files(
+                            self.file_credential_profiles().map(|(reference, path)| {
+                                (CredentialReference::new(reference), path.to_path_buf())
+                            }),
+                        );
+                        ClaudeCliRuntime::new_with_file_delivery(
+                            runtime_configuration,
+                            credentials,
+                            env_key.as_deref().unwrap_or_default(),
+                        )
+                    }
+                    Some(CredentialDelivery::Ambient) | None => {
+                        ClaudeCliRuntime::new(runtime_configuration)
+                    }
+                }
             })
             .transpose()
     }
@@ -5627,6 +5646,56 @@ scopes = ["model:invoke"]"#,
 
         assert_eq!(
             HubModelConfiguration::parse(&environment_key).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_admits_claude_file_delivery_with_its_fixed_environment_key() {
+        const CLAUDE_FILE: &str = "/run/secrets/claude-api-primary";
+        const CLAUDE_ENV_KEY: &str = "ANTHROPIC_API_KEY";
+        let claude_file = CONFIGURATION.replace(
+            r#"adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            &format!(
+                r#"adapter = "claude_cli"
+billing_kind = "api_metered"
+delivery = "file"
+file = "{CLAUDE_FILE}"
+env_key = "{CLAUDE_ENV_KEY}""#,
+            ),
+        );
+
+        let configured = HubModelConfiguration::parse(&claude_file)
+            .expect("Claude file delivery is part of the supplied grammar");
+        let profile = configured
+            .credential_profile(CODEX_SUBSCRIPTION_PROFILE)
+            .expect("the replaced fixture profile remains declared");
+        assert_eq!(
+            profile.delivery(),
+            &CredentialDelivery::File {
+                path: PathBuf::from(CLAUDE_FILE),
+                env_key: Some(Arc::from(CLAUDE_ENV_KEY)),
+            }
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_another_claude_file_environment_key() {
+        let claude_file = CONFIGURATION.replace(
+            r#"adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            r#"adapter = "claude_cli"
+billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/claude-api-primary"
+env_key = "HOME""#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&claude_file).err(),
             Some(HubModelConfigurationError::InvalidCredentialDelivery)
         );
     }

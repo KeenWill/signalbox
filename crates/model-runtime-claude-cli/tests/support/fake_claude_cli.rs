@@ -8,6 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     record_spawn()?;
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     std::fs::write("fake-claude-argv", arguments.join("\n"))?;
+    record_credential_delivery(&arguments)?;
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt)?;
     std::fs::write("fake-claude-prompt", &prompt)?;
@@ -90,6 +91,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "normal_completion" => {
             assistant_text(fixtures::ANSWER)?;
             success("end_turn", Some(fixtures::ANSWER))?;
+        }
+        "file_credential_redaction" => {
+            assistant_text(fixtures::FILE_DELIVERED_CREDENTIAL)?;
+            success("end_turn", Some(fixtures::FILE_DELIVERED_CREDENTIAL))?;
         }
         "safe_terminal_prefix" => {
             assistant_text(fixtures::SAFE_CREDENTIAL_PREFIX)?;
@@ -404,6 +409,37 @@ fn argument_after<'a>(arguments: &'a [String], name: &str) -> Option<&'a str> {
         .windows(2)
         .find(|pair| pair[0] == name)
         .map(|pair| pair[1].as_str())
+}
+
+fn record_credential_delivery(arguments: &[String]) -> std::io::Result<()> {
+    let settings = argument_after(arguments, "--settings").unwrap_or_default();
+    let settings_contents = std::fs::read_to_string(settings).unwrap_or_default();
+    std::fs::write("fake-claude-settings", settings_contents)?;
+    record_settings_mode(settings)?;
+    std::fs::write(
+        "fake-claude-config-dir",
+        std::env::var_os("CLAUDE_CONFIG_DIR")
+            .unwrap_or_default()
+            .to_string_lossy()
+            .as_bytes(),
+    )?;
+    std::fs::write(
+        "fake-claude-direct-credential-present",
+        std::env::var_os("ANTHROPIC_API_KEY").is_some().to_string(),
+    )
+}
+
+#[cfg(unix)]
+fn record_settings_mode(settings: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = std::fs::metadata(settings)?.permissions().mode() & 0o777;
+    std::fs::write("fake-claude-settings-mode", format!("{mode:o}"))
+}
+
+#[cfg(not(unix))]
+fn record_settings_mode(_settings: &str) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn scenario(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {

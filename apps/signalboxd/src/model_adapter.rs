@@ -629,17 +629,24 @@ service_tiers = ["priority"]
         let temporary = tempfile::tempdir().expect("temporary working directory is available");
         let executable = temporary.path().join("fake-claude");
         let bridge = temporary.path().join("fake-claude-mcp-bridge");
+        let credential_file = temporary.path().join("claude-api-primary");
         let expected_completion = "routed through Claude";
         let provider_model = "claude-cli-offline-exact";
+        let file_credential = "synthetic-claude-file-value";
+        std::fs::write(&credential_file, file_credential)
+            .expect("the Claude credential fixture is writable");
         std::fs::write(
             &executable,
             r#"#!/bin/sh
+test -z "${ANTHROPIC_API_KEY+x}" || exit 41
+grep -q '<file-credential>' "${CLAUDE_CONFIG_DIR}/settings.json" || exit 42
 cat >/dev/null
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"019c0000-0000-7000-8000-000000000002","tools":[],"mcp_servers":[{"name":"signalbox_tools","status":"connected"}],"model":"<provider-model>","slash_commands":[],"skills":[],"plugins":[],"claude_code_version":"2.1.220"}'
 printf '%s\n' '{"type":"assistant","parent_tool_use_id":null,"message":{"model":"<provider-model>","id":"message-1","role":"assistant","content":[{"type":"text","text":"<completion-text>"}],"usage":{"input_tokens":8,"output_tokens":4}}}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"019c0000-0000-7000-8000-000000000002","stop_reason":"end_turn","terminal_reason":"completed","result":"<completion-text>","errors":[],"usage":{"input_tokens":8,"output_tokens":4,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'
 "#
             .replace("<completion-text>", expected_completion)
+            .replace("<file-credential>", file_credential)
             .replace("<provider-model>", provider_model),
         )
         .expect("fake Claude executable is writable");
@@ -662,10 +669,12 @@ delivery = "file"
 file = "/run/secrets/anthropic-primary"
 
 [[credential_profiles]]
-name = "claude-subscription-primary"
+name = "claude-api-primary"
 adapter = "claude_cli"
-billing_kind = "subscription"
-delivery = "ambient"
+billing_kind = "api_metered"
+delivery = "file"
+file = "{}"
+env_key = "ANTHROPIC_API_KEY"
 
 [[credential_pools]]
 name = "anthropic-main"
@@ -677,7 +686,7 @@ members = [{{ profile = "anthropic-primary", priority = 1 }}]
 name = "claude-main"
 tie_break = "first_listed"
 on_pool_exhausted = "fail"
-members = [{{ profile = "claude-subscription-primary", priority = 1 }}]
+members = [{{ profile = "claude-api-primary", priority = 1 }}]
 
 [[adapter_mappings]]
 model_family = "anthropic"
@@ -715,6 +724,7 @@ context_window_tokens = 200000
 reasoning_levels = ["high"]
 fast_mode = "request_control"
 "#,
+            credential_file.display(),
             executable.display(),
             bridge.display(),
             temporary.path().display(),
@@ -732,7 +742,7 @@ fast_mode = "request_control"
         settings.fast_mode = FastMode::Enabled;
         let operation = ModelOperation::new(
             String::from("claude-route"),
-            CredentialReference::new("claude-subscription-primary"),
+            CredentialReference::new("claude-api-primary"),
             RequestedTarget::new("claude-cli-selection"),
             ResolvedTarget::new(provider_model),
             vec![ConversationMessage::user_text("respond")],

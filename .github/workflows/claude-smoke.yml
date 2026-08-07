@@ -12,17 +12,16 @@
 # cannot resolve its secret and the required aggregate stays red for any pull
 # request that changes the adapter crate.
 #
-# Owner decision, also required. The adapter clears the child environment and
-# forwards only an allowlist (`CLAUDE_ENVIRONMENT` in src/runtime.rs), which
-# deliberately excludes direct credential values and carries a unit test
-# asserting `ANTHROPIC_API_KEY` never reaches the child. The step
-# below therefore places the key in the *test process* environment, and the
-# adapter drops it before spawning the CLI, so the exchange runs
-# unauthenticated. Closing that gap means deciding how the credential should
-# reach the CLI — extending the adapter's allowlist with an explicit
-# direct-credential variable, or writing a credential store under the
-# already-forwarded `CLAUDE_CONFIG_DIR` — and both change the adapter's
-# credential contract, so neither is taken here.
+# Credential delivery. The adapter clears the child environment and forwards
+# only an allowlist (`CLAUDE_ENVIRONMENT` in src/runtime.rs), which deliberately
+# excludes direct credential values and carries a unit test asserting
+# `ANTHROPIC_API_KEY` never reaches the child. The workflow writes that value to
+# a mode-0600 deployment-owned source file before starting the test process.
+# Per preparation, the adapter reads that file through `CredentialAccess`,
+# writes a private request-scoped Claude `settings.json` containing the fixed
+# environment mapping, and forwards only its containing directory as
+# `CLAUDE_CONFIG_DIR`. Claude applies its own settings store and authenticates;
+# the adapter never adds the key to the child process environment.
 #
 # Accepted trust boundary. The live exchange must execute the proposed
 # repository adapter code against the pinned CLI; that is the purpose of this
@@ -42,12 +41,13 @@
 # refs can enter. That availability setting admits fork and same-repository refs
 # alike and supplies no security boundary; the defenses above exclude forks.
 #
-# The credential is referenced only in the step that spends the exchange, as a
-# step-scoped environment value, and is never echoed, never passed in argv, and
-# never written to a file. npm lifecycle scripts are disabled, and repository
-# code is compiled and the credential-free real-CLI probe runs before any step
-# carries the credential. The later live test's access to its own environment is
-# intentional under the accepted same-repository-writer boundary above.
+# The credential is referenced only in the source-file materialization step, as
+# a step-scoped environment value, and is never echoed or passed in argv. That
+# step runs only shell builtins and writes the exact value with mode 0600. npm
+# lifecycle scripts are disabled, and repository code is compiled and the
+# credential-free real-CLI probe runs before any step carries the credential.
+# The later live test receives only the source path and rereads the value through
+# the adapter boundary; the always-running cleanup removes the source file.
 name: Claude CLI smoke
 
 on:
@@ -68,11 +68,6 @@ on:
   # and drift one hour under standard time, which is accepted — the canary
   # cares about the daily interval, not the exact hour.
   #
-  # Expected red until the credential-delivery open question is resolved.
-  # Scheduled runs take the same credentialed path as pull-request runs, so
-  # they fail at the same authentication step for the same reason, and will
-  # keep doing so until the claude_cli delivery mappings land on the
-  # credential-pools stack. See the owner-decision note in the header above.
   schedule:
     - cron: "0 13 * * *"
     - cron: "0 1 * * *"
@@ -169,13 +164,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      # Keeps the CLI's own configuration and any login state inside the job's
-      # workspace instead of the runner home directory, so the cleanup step
-      # below can remove it and nothing survives into a later step. The adapter
-      # forwards this variable to the child as its credential home.
-      CLAUDE_CONFIG_DIR: ${{ github.workspace }}/.claude-smoke-home
       SIGNALBOX_CLAUDE_SMOKE_EXECUTABLE: >-
         ${{ github.workspace }}/crates/model-runtime-claude-cli/node_modules/.bin/claude
+      SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE: >-
+        ${{ runner.temp }}/signalbox-claude-smoke-credential
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -210,11 +202,6 @@ jobs:
         run: >-
           cargo test --no-fail-fast -p signalbox-model-runtime-claude-cli
           --test live_smoke --no-run
-      - name: Prepare the isolated CLI configuration directory
-        run: |
-          set -euo pipefail
-          mkdir -p "${CLAUDE_CONFIG_DIR}"
-          chmod 700 "${CLAUDE_CONFIG_DIR}"
       - name: Run credential-free pre-spend probes
         run: |
           set -euo pipefail
@@ -230,22 +217,28 @@ jobs:
             echo "::error::Expected exactly one pre-spend test to execute; libtest reported '${passed_count:-no passed count}'."
             exit 1
           fi
-      # The test repeats the pre-spend version gate immediately before the model
-      # operation, then spends exactly one exchange through the adapter. The
-      # credential is scoped to this step alone, is never echoed, and is never
-      # passed in argv: the CLI is expected to read it from the environment the
-      # adapter hands its child.
-      - name: Run one live exchange through the adapter
+      - name: Materialize the file-delivered credential
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${ANTHROPIC_API_KEY}" \
+            || { echo "the claude-smoke environment provides no API key"; exit 1; }
+          umask 077
+          printf '%s' "${ANTHROPIC_API_KEY}" > "${SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE}"
+      # The test repeats the pre-spend version gate immediately before the model
+      # operation, then spends exactly one exchange through the adapter. Its
+      # environment carries only the non-secret source path; preparation reads
+      # that file, creates the private Claude settings store, and passes the
+      # store directory — never the direct credential — to the child.
+      - name: Run one live exchange through the adapter
+        env:
           # Optional, and a plain variable rather than a secret because a model
           # name is not sensitive. Which models a credential can address is
           # account-scoped, so the environment may override the code default.
           SIGNALBOX_CLAUDE_SMOKE_MODEL: ${{ vars.CLAUDE_SMOKE_MODEL }}
         run: |
           set -euo pipefail
-          test -n "${ANTHROPIC_API_KEY}" \
-            || { echo "the claude-smoke environment provides no API key"; exit 1; }
           test_name=the_pinned_claude_cli_completes_one_exchange
           result="${RUNNER_TEMP}/claude-smoke-live-result"
           cargo test --color never --no-fail-fast \
@@ -258,9 +251,9 @@ jobs:
             echo "::error::Expected exactly one live smoke test to execute; libtest reported '${passed_count:-no passed count}'."
             exit 1
           fi
-      - name: Remove the CLI configuration directory
+      - name: Remove the file-delivered credential
         if: ${{ always() }}
-        run: rm -rf "${CLAUDE_CONFIG_DIR}"
+        run: rm -f "${SIGNALBOX_CLAUDE_SMOKE_CREDENTIAL_FILE}"
 
   required:
     name: Claude smoke compatibility

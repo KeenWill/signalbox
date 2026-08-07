@@ -51,15 +51,17 @@ templates, and orchestration template digests are verified through PR #349
 verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
 export contract is verified through PR #347 (`agent/telemetry-export`). The
 static model-to-adapter mapping and append-only session credential history are
-verified through PR #373 (`agent/adapter-wiring`); the `claude_cli` mapping, its
-process paths, and its ambient-login profile rule are verified against this PR
-(`agent/wire-claude-cli-adapter`), and the `openai` mapping with its pinned
-profile and conditional key path against this PR (`agent/wire-openai-adapter`).
-The composed code-host, pull-request, workspace, and conversation tool families
-are verified through PR #377 (`agent/tools-daemon-wiring`). The mapped local Git
-identity and repository-root requirements are verified through this PR
-(`agent/daemon-wiring`). Placement-scoped native conversation reads are verified
-through PR #400 (`agent/scoped-visibility-wiring`). Invariant law lives in
+verified through PR #373 (`agent/adapter-wiring`); the `claude_cli` mapping and
+process paths are verified against this PR (`agent/wire-claude-cli-adapter`),
+and its file-delivery mapping against this PR
+(`agent/claude-cli-credential-delivery`). The `openai` mapping with its pinned
+profile and conditional key path is verified against this PR
+(`agent/wire-openai-adapter`). The composed code-host, pull-request, workspace,
+and conversation tool families are verified through PR #377
+(`agent/tools-daemon-wiring`). The mapped local Git identity and repository-root
+requirements are verified through this PR (`agent/daemon-wiring`).
+Placement-scoped native conversation reads are verified through PR #400
+(`agent/scoped-visibility-wiring`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are verified through PR #376 (`agent/runner-daemon`).
@@ -663,10 +665,11 @@ Each `[[models]]` entry defines one direct selection:
 This build provides exactly `anthropic`, `openai`, `claude_cli`, and
 `codex_cli`. No adapter pins a profile name, and a pool may hold several
 profiles for any one adapter. Anthropic and OpenAI admit `file`; Claude CLI
-admits `ambient`; and Codex CLI admits `ambient`, `file`, `codex_home`, and
-`oauth`. OpenAI admits the reasoning levels `none` through `max` — `ultra` is
-the Codex effort value and is rejected — and the provider-tagged tiers `auto`,
-`default`, `flex`, `scale`, `priority`, and `fast`.
+admits `ambient` and `file`; and Codex CLI admits `ambient`, `file`,
+`codex_home`, and `oauth`. OpenAI admits the reasoning levels `none` through
+`max` — `ultra` is the Codex effort value and is rejected — and the
+provider-tagged tiers `auto`, `default`, `flex`, `scale`, `priority`, and
+`fast`.
 
 A Codex mapping also requires `[codex_cli]` with an absolute executable path
 naming an existing regular file and an absolute, existing `working_directory`;
@@ -697,10 +700,11 @@ unchanged, so a configured path never silently resolves to a different program.
 Both spellings yield the same absolute path downstream: what the adapter
 receives, and writes into that MCP server configuration, is always the resolved
 absolute path. Construction validates that shape and platform support without
-invoking Claude Code or inspecting login state, and Claude Code owns its
-external login exactly as its adapter contract specifies. Because Claude Code
-exposes no service tier, any `service_tiers` entry on a Claude model is a typed
-startup failure, while its reasoning set and either fast-mode form are admitted.
+invoking Claude Code or inspecting login state. An ambient profile leaves login
+resolution inside Claude Code; a file profile resolves its value per preparation
+as described below. Because Claude Code exposes no service tier, any
+`service_tiers` entry on a Claude model is a typed startup failure, while its
+reasoning set and either fast-mode form are admitted.
 
 Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling
@@ -763,20 +767,30 @@ successor call.
 naming an absolute deployment-owned path and, only for a CLI adapter, required
 TOML string `env_key`. The path is read per preparation and never cached,
 narrowed by the trailing-line-termination rule below. The `anthropic` adapter
-forms an HTTP header from the value; `codex_cli` supplies it to the fresh
-process under `env_key`. A direct-HTTP adapter rejects `env_key` because it does
-not use a child environment. A CLI adapter requires the one credential variable
-its adapter contract names — `OPENAI_API_KEY` for `codex_cli` — and rejects
-every other value, including forwarded and process-control names such as `HOME`,
-`CODEX_HOME`, and `PATH`. This is the delivery for every credential that has an
-external source of truth — provider API keys, and any long-lived bearer token a
-provider's own tooling mints for unattended use. Before comparing paths, startup
-lexically normalizes each absolute path by removing redundant separators and `.`
-components and folding each `..` component without permitting it to cross the
-root; that operation performs no filesystem lookup and follows no symlink. For
-one adapter, one normalized absolute file path may appear on only one profile in
-a document: two names for the same bytes are not independent credentials and
-cannot authorize two attempts in one successor chain.
+forms an HTTP header from the value. A direct-HTTP adapter rejects `env_key`
+because it does not use a child environment. A CLI adapter requires the one
+credential variable its adapter contract names — `ANTHROPIC_API_KEY` for
+`claude_cli` and `OPENAI_API_KEY` for `codex_cli` — and rejects every other
+value, including forwarded and process-control names such as `HOME`,
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `PATH`.
+
+Claude file delivery resolves the selected value during cancellable request
+preparation, writes it into the `env` mapping of a mode-0600 request-scoped
+`settings.json`, and replaces only the already allowlisted `CLAUDE_CONFIG_DIR`
+child value with that settings store's private directory. The key itself never
+enters the child environment assembled by the adapter. The prepared capability
+retains the exact value for observation and terminal-evidence redaction and
+deletes the store when the capability is dropped.
+
+This is the delivery for every credential that has an external source of truth —
+provider API keys, and any long-lived bearer token a provider's own tooling
+mints for unattended use. Before comparing paths, startup lexically normalizes
+each absolute path by removing redundant separators and `.` components and
+folding each `..` component without permitting it to cross the root; that
+operation performs no filesystem lookup and follows no symlink. For one adapter,
+one normalized absolute file path may appear on only one profile in a document:
+two names for the same bytes are not independent credentials and cannot
+authorize two attempts in one successor chain.
 [Credential operations policy](#credential-operations-policy) applies to it
 unchanged.
 
@@ -933,10 +947,10 @@ classification: treating a mid-run lapse as a rejected credential would
 quarantine a healthy account for the offence of being given a long task, and
 automatic repetition could duplicate an accepted request.
 
-This build supplies `file` for the `anthropic` and `openai` direct-HTTP
-adapters, and `ambient` for the `claude_cli` and `codex_cli` process adapters. A
-Codex profile naming `file`, `codex_home`, or `oauth` parses and is then
-rejected at startup as undelivered, on the same principle as the
+This build supplies `file` for the `anthropic` and `openai` direct-HTTP adapters
+and for `claude_cli`; it supplies `ambient` for the `claude_cli` and `codex_cli`
+process adapters. A Codex profile naming `file`, `codex_home`, or `oauth` parses
+and is then rejected at startup as undelivered, on the same principle as the
 capacity-dependent pool keys below — configuration whose effect no surface
 provides is refused rather than admitted inert. The grammar admits all four so
 that a slice supplying one of the reserved Codex deliveries needs no
