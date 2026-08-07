@@ -12,6 +12,8 @@ struct SignalboxNativeApp: App {
     #if os(macOS)
     @NSApplicationDelegateAdaptor(MacScreenshotExportAppDelegate.self) private var macScreenshotExportAppDelegate
     #endif
+    // AppCoordinator only honors isMockMode in Debug, where the harness it
+    // selects actually compiles; --mock-server is a silent no-op in Release.
     @StateObject private var coordinator = AppCoordinator(
         isMockMode: launchArguments.contains("--mock-server"),
         screenshotScenario: launchScreenshotScenario,
