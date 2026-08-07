@@ -30,8 +30,8 @@ use signalbox_application::{
     ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
     StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
     ToolCatalog, ToolCatalogValidationFailure, ToolDefinition, ToolExecutionInvocation,
-    ToolExecutor, UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
+    ToolExecutor, ToolExecutorEvidence, UuidV7SessionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
     DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult, DeliveryRequest,
@@ -855,7 +855,7 @@ impl ToolExecutor for SharedFamilyExecutor {
                 case,
             } => {
                 if !case.admits(name.as_str(), invocation.request().arguments()) {
-                    return Err(FamilyExecutorError);
+                    return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed { detail: None }));
                 }
                 match name.as_str() {
                     SANDBOXED_EXEC_NAME => sandboxed
