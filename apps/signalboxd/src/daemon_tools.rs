@@ -1401,9 +1401,9 @@ mod tests {
 
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
+        let known_targets = rustc_target_names();
         let configured_target_dir = configured_cargo_target_dir(&current);
         let default_target_dir = cargo_metadata_target_dir();
-        let known_targets = rustc_target_names();
         reject_unrecognized_default_target(
             &current,
             configured_target_dir.as_deref(),
@@ -1433,6 +1433,12 @@ mod tests {
         current
             .ancestors()
             .find(|ancestor| ancestor.ends_with(&configured))
+            .or_else(|| {
+                let configured_name = configured.file_name()?;
+                current
+                    .ancestors()
+                    .find(|ancestor| ancestor.file_name() == Some(configured_name))
+            })
             .expect("relative Cargo target directory is an ancestor of the test executable")
             .to_path_buf()
     }
@@ -1798,6 +1804,27 @@ mod tests {
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
             target_dir: &target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: Some(SYNTHETIC_CARGO_TARGET),
+            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
+        });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_resolves_a_parent_relative_configured_directory() {
+        let target_dir = Path::new("synthetic-parent/artifact");
+        let executable = target_dir
+            .join(SYNTHETIC_CARGO_TARGET)
+            .join("debug/deps/daemon-tools-test");
+        let configured_target_dir =
+            configured_cargo_target_dir_for(&executable, Path::new("../artifact"));
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir,
             configured_target_dir: Some(&configured_target_dir),
             default_target_dir: Path::new("synthetic-default-target"),
             debug_profile: CARGO_TEST_PROFILE,
@@ -2231,6 +2258,7 @@ mod tests {
     }
 
     impl McpBridgeProcess {
+        #[track_caller]
         fn spawn(config: McpBridgeSpawn<'_>) -> Self {
             let mut child = Command::new(config.executable)
                 .arg("--serve")
@@ -2810,6 +2838,7 @@ mod tests {
     const MCP_CALL_WRITE_FILE_REQUEST_ID: u64 = 3;
     const MCP_SYNCHRONIZATION_REQUEST_ID: u64 = 4;
     const MCP_UNDECLARED_TOOL_REQUEST_ID: u64 = 5;
+    const MCP_NON_OBJECT_ARGUMENTS_REQUEST_ID: u64 = 6;
     const MCP_ENVELOPE_REQUEST_ID: u64 = 7;
     const MCP_OTHER_REQUEST_ID: u64 = 8;
     const MCP_UNDECLARED_TOOL_NAME: &str = "synthetic_undeclared_tool";
@@ -2817,6 +2846,13 @@ mod tests {
     const MCP_PROPOSAL_CONTENT: &str = "proposal only\n";
     const MCP_PROPOSAL_ACKNOWLEDGEMENT: &str =
         "Signalbox recorded this tool proposal for external execution.";
+
+    fn invalid_tool_call_error() -> serde_json::Value {
+        serde_json::json!({
+            "code": -32602,
+            "message": "undeclared tool or non-object arguments",
+        })
+    }
 
     struct McpBridgeFixture {
         workspace: tempfile::TempDir,
@@ -2949,6 +2985,22 @@ mod tests {
         }
 
         #[track_caller]
+        fn call_write_file_with_non_object_arguments(&mut self) -> serde_json::Value {
+            self.bridge
+                .as_mut()
+                .expect("bridge remains active")
+                .request(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": MCP_NON_OBJECT_ARGUMENTS_REQUEST_ID,
+                    "method": "tools/call",
+                    "params": {
+                        "name": WRITE_FILE_NAME,
+                        "arguments": null,
+                    },
+                }))
+        }
+
+        #[track_caller]
         fn finish(&mut self) {
             self.bridge.take().expect("bridge remains active").finish();
         }
@@ -3047,12 +3099,17 @@ mod tests {
         let called = fixture.call_undeclared_tool();
         fixture.finish();
 
-        assert_eq!(
-            called["error"],
-            serde_json::json!({
-                "code": -32602,
-                "message": "undeclared tool or non-object arguments",
-            })
-        );
+        assert_eq!(called["error"], invalid_tool_call_error());
+    }
+
+    #[test]
+    fn claude_mcp_bridge_rejects_non_object_arguments_for_a_declared_tool() {
+        let mut fixture = McpBridgeFixture::start();
+        fixture.initialize();
+        fixture.list_tools();
+        let called = fixture.call_write_file_with_non_object_arguments();
+        fixture.finish();
+
+        assert_eq!(called["error"], invalid_tool_call_error());
     }
 }
