@@ -720,8 +720,10 @@ impl HubModelConfiguration {
                     &["executable", "mcp_bridge_executable", "working_directory"],
                 )?;
                 let executable = PathBuf::from(required_string(table, "executable")?);
-                let mcp_bridge_executable =
-                    PathBuf::from(required_string(table, "mcp_bridge_executable")?);
+                let mcp_bridge_executable = resolved_mcp_bridge_reference(
+                    required_string(table, "mcp_bridge_executable")?,
+                    std::env::var_os("PATH").as_deref(),
+                )?;
                 let working_directory = PathBuf::from(required_string(table, "working_directory")?);
                 if !executable.is_absolute()
                     || !executable.is_file()
@@ -1854,6 +1856,64 @@ fn resolved_credential_file_reference(path: &Path) -> Result<PathBuf, HubModelCo
     Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
 }
 
+/// Resolves the configured Claude MCP bridge reference to one path.
+///
+/// The bridge is a program this workspace builds and a deployment installs, so
+/// unlike the Claude executable it can be named the way an installed program is
+/// named. Two spellings are admitted, told apart by whether the configured
+/// value is a bare program name — a value equal to its own final path
+/// component:
+///
+/// - a bare name is looked up in `search_path`, the daemon's own `PATH`, and
+///   resolves to the first entry holding an executable regular file of that
+///   name;
+/// - any other value is a path, returned verbatim for the caller's
+///   absolute-existing-file rule to judge, so a configured path never resolves
+///   through `PATH` to a different program.
+///
+/// Only absolute search entries participate. A relative entry — including the
+/// empty entry POSIX reads as the working directory — is skipped rather than
+/// joined, because the resolved path is written into the MCP server
+/// configuration Claude Code spawns from a working directory of its own.
+fn resolved_mcp_bridge_reference(
+    value: &str,
+    search_path: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, HubModelConfigurationError> {
+    let reference = PathBuf::from(value);
+    if reference.file_name() != Some(std::ffi::OsStr::new(value)) {
+        return Ok(reference);
+    }
+    absolute_search_entries(search_path)
+        .into_iter()
+        .map(|entry| entry.join(value))
+        .find(|candidate| is_executable_file(candidate))
+        .ok_or(HubModelConfigurationError::UnresolvedClaudeMcpBridgeExecutable)
+}
+
+/// Absolute directories of one search path, in their configured order.
+fn absolute_search_entries(search_path: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    search_path
+        .map(|value| {
+            std::env::split_paths(value)
+                .filter(|entry| entry.is_absolute())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 fn normalize_absolute_reference(path: &Path) -> Result<PathBuf, HubModelConfigurationError> {
     if !path.is_absolute() {
         return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
@@ -2697,6 +2757,8 @@ pub enum HubModelConfigurationError {
     MissingClaudeCliConfiguration,
     /// Claude paths were malformed, relative, or named no existing directory.
     InvalidClaudeCliConfiguration,
+    /// The named Claude MCP bridge executable is on no absolute PATH entry.
+    UnresolvedClaudeMcpBridgeExecutable,
     /// The provider-native model spelling was empty or padded.
     InvalidProviderModel,
     /// Only part of a model's five-field versioned rate set was declared.
@@ -2828,6 +2890,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidClaudeCliConfiguration => {
                 "model configuration contains invalid Claude CLI settings"
+            }
+            Self::UnresolvedClaudeMcpBridgeExecutable => {
+                "model configuration names an unresolvable Claude MCP bridge executable"
             }
             Self::InvalidProviderModel => "model configuration contains an invalid provider model",
             Self::IncompleteBillingRates => {
@@ -3039,8 +3104,8 @@ mod tests {
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
         FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError,
         MAX_COMPACTION_PROMPT_UTF8_BYTES, MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter,
-        ModelCallInputUsage, UnknownSessionModel, credential_bytes, validate_alias_count,
-        validate_model_count,
+        ModelCallInputUsage, UnknownSessionModel, absolute_search_entries, credential_bytes,
+        resolved_mcp_bridge_reference, validate_alias_count, validate_model_count,
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
@@ -3169,6 +3234,50 @@ max_output_tokens = 256
 context_window_tokens = 200000
 reasoning_levels = ["high"]
 "#;
+
+    const CLAUDE_MCP_BRIDGE_NAME: &str = "signalbox-claude-mcp-bridge";
+
+    /// A bridge name no installation holds, so a fixture naming it fails
+    /// resolution because of the fixture and not the developer's own `PATH`.
+    const ABSENT_MCP_BRIDGE_NAME: &str = "signalbox-synthetic-absent-mcp-bridge";
+
+    fn synthetic_search_directory(root: &Path, name: &str) -> PathBuf {
+        let directory = root.join(name);
+        std::fs::create_dir(&directory).expect("fixture search entry is creatable");
+        directory
+    }
+
+    fn synthetic_search_path(entries: &[&Path]) -> std::ffi::OsString {
+        std::env::join_paths(entries.iter().copied()).expect("fixture search entries join")
+    }
+
+    fn synthetic_executable(directory: &Path, name: &str) -> PathBuf {
+        let path = synthetic_file(directory, name);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("fixture program is markable executable");
+        }
+        path
+    }
+
+    #[cfg(unix)]
+    fn synthetic_unexecutable_file(directory: &Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = synthetic_file(directory, name);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("fixture file is markable unexecutable");
+        path
+    }
+
+    fn synthetic_file(directory: &Path, name: &str) -> PathBuf {
+        let path = directory.join(name);
+        std::fs::write(&path, b"").expect("fixture file is writable");
+        path
+    }
 
     fn configuration_with_claude_paths(
         executable: &Path,
@@ -4669,6 +4778,128 @@ context_window_tokens = 200000
         );
     }
 
+    /// A bare name is the second admitted spelling, so a name the daemon's own
+    /// search path does not hold fails startup as its own diagnosis rather
+    /// than as a malformed path.
+    #[test]
+    fn configuration_rejects_a_claude_mcp_bridge_name_no_search_entry_holds() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = configuration_with_claude_paths(
+            &executable,
+            Path::new(ABSENT_MCP_BRIDGE_NAME),
+            temporary.path(),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::UnresolvedClaudeMcpBridgeExecutable)
+        );
+    }
+
+    /// A relative value carries a path separator, so it is a path and keeps
+    /// the absolute-path rule instead of being looked up as a program name.
+    #[test]
+    fn configuration_rejects_a_relative_claude_mcp_bridge_path() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = configuration_with_claude_paths(
+            &executable,
+            Path::new("bin/signalbox-claude-mcp-bridge"),
+            temporary.path(),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidClaudeCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn mcp_bridge_name_resolves_through_the_first_search_entry_holding_it() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let earlier = synthetic_search_directory(temporary.path(), "earlier");
+        let later = synthetic_search_directory(temporary.path(), "later");
+        let expected = synthetic_executable(&earlier, CLAUDE_MCP_BRIDGE_NAME);
+        let shadowed = synthetic_executable(&later, CLAUDE_MCP_BRIDGE_NAME);
+
+        let resolved = resolved_mcp_bridge_reference(
+            CLAUDE_MCP_BRIDGE_NAME,
+            Some(&synthetic_search_path(&[&earlier, &later])),
+        )
+        .expect("the fixture search path holds the bridge");
+
+        assert_eq!(resolved, expected);
+        assert_ne!(resolved, shadowed);
+    }
+
+    /// Resolution matches what executing the name would do: a same-named file
+    /// no one can execute shadows nothing.
+    #[cfg(unix)]
+    #[test]
+    fn mcp_bridge_name_skips_a_search_entry_whose_file_is_not_executable() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let earlier = synthetic_search_directory(temporary.path(), "earlier");
+        let later = synthetic_search_directory(temporary.path(), "later");
+        let unexecutable = synthetic_unexecutable_file(&earlier, CLAUDE_MCP_BRIDGE_NAME);
+        let expected = synthetic_executable(&later, CLAUDE_MCP_BRIDGE_NAME);
+
+        let resolved = resolved_mcp_bridge_reference(
+            CLAUDE_MCP_BRIDGE_NAME,
+            Some(&synthetic_search_path(&[&earlier, &later])),
+        )
+        .expect("the later search entry holds an executable bridge");
+
+        assert_eq!(resolved, expected);
+        assert_ne!(resolved, unexecutable);
+    }
+
+    #[test]
+    fn mcp_bridge_name_without_a_search_path_resolves_to_nothing() {
+        assert_eq!(
+            resolved_mcp_bridge_reference(CLAUDE_MCP_BRIDGE_NAME, None),
+            Err(HubModelConfigurationError::UnresolvedClaudeMcpBridgeExecutable)
+        );
+    }
+
+    /// A configured path is the operator's exact choice, so a same-named
+    /// program on the search path never displaces it.
+    #[test]
+    fn mcp_bridge_path_is_used_verbatim_over_a_search_entry_holding_the_name() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let entry = synthetic_search_directory(temporary.path(), "entry");
+        let shadowing = synthetic_executable(&entry, CLAUDE_MCP_BRIDGE_NAME);
+        let configured = temporary
+            .path()
+            .join("install")
+            .join(CLAUDE_MCP_BRIDGE_NAME);
+
+        let resolved = resolved_mcp_bridge_reference(
+            configured
+                .to_str()
+                .expect("the fixture install path is UTF-8"),
+            Some(&synthetic_search_path(&[&entry])),
+        )
+        .expect("a configured path needs no search entry");
+
+        assert_eq!(resolved, configured);
+        assert_ne!(resolved, shadowing);
+    }
+
+    /// The resolved path is written into a configuration another process
+    /// reads from a working directory of its own, so an entry that only means
+    /// something relative to this process is not a place to look.
+    #[cfg(unix)]
+    #[test]
+    fn search_entries_drop_the_relative_and_empty_ones() {
+        let search_path = std::ffi::OsString::from(":relative/bin:/absolute/bin");
+
+        assert_eq!(
+            absolute_search_entries(Some(&search_path)),
+            vec![PathBuf::from("/absolute/bin")]
+        );
+    }
+
     #[test]
     fn configuration_rejects_a_claude_mapping_without_process_settings() {
         let temporary = tempfile::tempdir().expect("fixture directory is available");
@@ -5439,19 +5670,30 @@ mod checked_in_example {
 
     /// Binds the example's documented placeholder paths to paths that exist,
     /// which the wrapped-CLI process tables require of a real deployment.
+    ///
+    /// The bridge is not a placeholder: the example names it the way a
+    /// deployment that installs it on the daemon's own search path does, which
+    /// this test process is not, so the whole assignment is rebound to a path.
     fn with_existing_paths(document: &str, executable: &Path, working_directory: &Path) -> String {
         let executable = executable.to_string_lossy();
         let working_directory = working_directory.to_string_lossy();
         document
             .replace(CLAUDE_EXECUTABLE_PLACEHOLDER, &executable)
-            .replace(CLAUDE_BRIDGE_PLACEHOLDER, &executable)
+            .replace(
+                &bridge_assignment(CLAUDE_BRIDGE_NAME),
+                &bridge_assignment(&executable),
+            )
             .replace(CODEX_EXECUTABLE_PLACEHOLDER, &executable)
             .replace(EXAMPLE_EXEC_SUPERVISOR, &executable)
             .replace(WORKING_DIRECTORY_PLACEHOLDER, &working_directory)
     }
 
+    fn bridge_assignment(value: &str) -> String {
+        format!("mcp_bridge_executable = \"{value}\"")
+    }
+
     const CLAUDE_EXECUTABLE_PLACEHOLDER: &str = "/absolute/path/to/claude";
-    const CLAUDE_BRIDGE_PLACEHOLDER: &str = "/absolute/path/to/signalbox-claude-mcp-bridge";
+    const CLAUDE_BRIDGE_NAME: &str = "signalbox-claude-mcp-bridge";
     const CODEX_EXECUTABLE_PLACEHOLDER: &str = "/absolute/path/to/codex";
     const WORKING_DIRECTORY_PLACEHOLDER: &str = "/absolute/path/to/workspace";
 

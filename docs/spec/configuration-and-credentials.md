@@ -19,6 +19,9 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The credential billing-kind registry and versioned per-model rate catalog are
 verified against PR #389 (`agent/cost-accounting`).
 
+The `PATH` spelling of `mcp_bridge_executable` and its resolution precedence are
+verified against this PR (`agent/mcp-bridge-wiring`).
+
 The rule binding one provider-model spelling to one adapter is verified against
 this PR (`agent/adapter-model-catalogs`).
 
@@ -654,13 +657,27 @@ Claude Code mappings follow that same CLI shape. They may select any declared
 profile under the same one-ambient-login rule — every `claude_cli` family in one
 daemon configuration must select the same profile — and the checked-in example
 names `claude-subscription-primary`. A Claude mapping requires `[claude_cli]`
-with three deployment-named absolute paths: `executable` and
-`mcp_bridge_executable` must each name an existing regular file, and
+with three deployment-named paths: `executable` and `mcp_bridge_executable` must
+each resolve to an absolute path naming an existing regular file, and
 `working_directory` must name an existing directory. The bridge is the separate
 `signalbox-claude-mcp-bridge` program the adapter spawns as Claude Code's only
 tool server; the deployment names it exactly the way it names the CLI, so the
-daemon derives no executable path from its own image. Construction validates
-that shape and platform support without invoking Claude Code or inspecting login
+daemon derives no executable path from its own image. Because that program is
+one this workspace builds and installs rather than one the operator already
+placed, `mcp_bridge_executable` alone admits a second spelling: a bare program
+name — a value equal to its own final path component — is resolved once at
+startup against the daemon's own `PATH`, entry by entry in configured order, to
+the first entry holding an executable regular file of that name. Only absolute
+search entries participate; a relative entry, including the empty entry POSIX
+reads as the working directory, is skipped, because the resolved path is written
+into the MCP server configuration Claude Code spawns from a working directory of
+its own. A name `PATH` does not resolve is a typed startup failure distinct from
+a malformed path. Any other value is a path, consults no `PATH`, and faces the
+absolute-existing-file rule unchanged, so a configured path never silently
+resolves to a different program. Both spellings yield the same absolute path
+downstream: what the adapter receives, and writes into that MCP server
+configuration, is always the resolved absolute path. Construction validates that
+shape and platform support without invoking Claude Code or inspecting login
 state, and Claude Code owns its external login exactly as its adapter contract
 specifies. Because Claude Code exposes no service tier, any `service_tiers`
 entry on a Claude model is a typed startup failure, while its reasoning set and
