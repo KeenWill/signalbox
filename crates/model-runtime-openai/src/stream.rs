@@ -96,12 +96,14 @@ impl StreamDecoder {
             return self.apply_done();
         }
         if let Err(error) = validate_provider_json_nesting(record.data.as_bytes()) {
-            return self.violation(format!("stream chunk exceeds the JSON bound: {error}"));
+            return self
+                .undecoded_violation(format!("stream chunk exceeds the JSON bound: {error}"));
         }
         let chunk: ChatChunk = match serde_json::from_str(&record.data) {
             Ok(chunk) => chunk,
             Err(error) => {
-                return self.violation(format!("malformed stream chunk payload: {error}"));
+                return self
+                    .undecoded_violation(format!("malformed stream chunk payload: {error}"));
             }
         };
         // Recorded the moment the chunk deserializes, before any of the checks
@@ -385,14 +387,52 @@ impl StreamDecoder {
 
     /// Whether a tool call had opened in the records decoded so far.
     ///
-    /// The decoder reads every record it receives, so the negative case is the
-    /// stated fact rather than an absence.
+    /// Every record that deserialized was scanned for tool material before any
+    /// check could reject it, so across decoded records the negative case is
+    /// the stated fact rather than an absence. Records that never deserialized
+    /// are answered by [`Self::tool_calls_at_decode_failure`] instead.
     fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
         if self.opened_tool_calls {
             ToolCallsAtLoss::Opened
         } else {
             ToolCallsAtLoss::NoneOpened
         }
+    }
+
+    /// The tool fact for a violation raised by a record that never decoded.
+    ///
+    /// A record rejected by the JSON bound or by `ChatChunk` deserialization —
+    /// and a stream whose framing ended inside an incomplete record — was never
+    /// scanned, so it could itself have carried the tool-call delta. "None
+    /// opened" would claim a negative about bytes the decoder never read. A
+    /// tool call an earlier record already established still stands.
+    fn tool_calls_at_decode_failure(&self) -> ToolCallsAtLoss {
+        if self.opened_tool_calls {
+            ToolCallsAtLoss::Opened
+        } else {
+            ToolCallsAtLoss::Unobserved
+        }
+    }
+
+    /// Protocol-violation evidence for a record that never decoded.
+    pub(crate) fn undecoded_violation_evidence(
+        &self,
+        detail: impl Into<String>,
+    ) -> TerminalEvidence {
+        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::StreamProtocolViolation {
+                detail: detail.into(),
+            },
+            exchange: self.exchange.clone(),
+            reported_model: self.reported_model.clone(),
+            finish_reported: self.finish.clone(),
+            tool_calls: self.tool_calls_at_decode_failure(),
+            usage: self.usage,
+        })
+    }
+
+    fn undecoded_violation(&self, detail: impl Into<String>) -> StreamStep {
+        StreamStep::Terminal(Box::new(self.undecoded_violation_evidence(detail)))
     }
 
     /// Evidence for a stream that ended without `[DONE]`.
@@ -811,7 +851,8 @@ mod tests {
         assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::NoneOpened);
     }
 
-    /// A stream that simply stops carries the negative fact, not an absence.
+    /// A stream that simply stops carries the negative fact, not an absence:
+    /// every record it received deserialized and was scanned.
     #[test]
     fn a_stream_lost_before_any_tool_call_reports_none_opened() {
         let (terminal, _) = drive_to_eof(&[first_chunk()]);
@@ -820,6 +861,38 @@ mod tests {
             panic!("an unterminated stream is boundary loss");
         };
         assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// A record that never deserialized withholds the fact: the bytes the
+    /// decoder could not read could themselves have carried the tool delta.
+    #[test]
+    fn a_record_that_never_deserializes_withholds_the_tool_fact() {
+        let (terminal, _) = drive(&[first_chunk(), b"data: {not-json\n\n"]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// The JSON bound rejects the record before deserialization, so it is the
+    /// same withholding rather than a serde-specific case.
+    #[test]
+    fn a_record_rejected_by_the_json_bound_withholds_the_tool_fact() {
+        let deep = format!("data: {}1{}\n\n", "[".repeat(2048), "]".repeat(2048));
+        let (terminal, _) = drive(&[first_chunk(), deep.as_bytes()]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// An undecodable record does not erase a tool call an earlier record
+    /// already established, so the withholding is not a blanket refusal.
+    #[test]
+    fn an_undecodable_record_after_a_tool_call_still_reports_it() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n",
+            b"data: {not-json\n\n",
+        ]);
+
+        assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Opened);
     }
 
     #[test]

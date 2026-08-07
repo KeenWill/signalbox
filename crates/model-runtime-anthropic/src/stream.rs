@@ -103,10 +103,11 @@ impl StreamDecoder {
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> StreamStep {
         let Some(event) = record.event.as_deref() else {
-            return self.violation("SSE record without an event name");
+            return self.undecoded_violation("SSE record without an event name");
         };
         if let Err(error) = validate_provider_json_nesting(record.data.as_bytes()) {
-            return self.violation(format!("SSE event payload exceeds the JSON bound: {error}"));
+            return self
+                .undecoded_violation(format!("SSE event payload exceeds the JSON bound: {error}"));
         }
         match event {
             "ping" => StreamStep::Continue,
@@ -126,15 +127,53 @@ impl StreamDecoder {
     /// Whether a tool call had opened in the events decoded so far.
     ///
     /// `tool_call_ids` records every `tool_use` block the stream opened and is
-    /// never drained, so it answers this at any point in the decode. The
-    /// decoder reads every event it receives, which makes the negative case
-    /// the stated fact rather than an absence.
+    /// never drained, so it answers this at any point in the decode. Across
+    /// events the decoder read and classified, the negative case is the stated
+    /// fact rather than an absence; material that never decoded is answered by
+    /// [`Self::tool_calls_at_decode_failure`] instead.
     fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
         if self.tool_call_ids.is_empty() {
             ToolCallsAtLoss::NoneOpened
         } else {
             ToolCallsAtLoss::Opened
         }
+    }
+
+    /// The tool fact for a violation raised by material that never decoded.
+    ///
+    /// An SSE record with no event name, a payload rejected by the JSON bound
+    /// or by typed-event parsing, a `content_block_start` whose own payload is
+    /// malformed, and a stream whose framing ended inside an incomplete record
+    /// all leave their content unexamined. A `tool_use` block opens inside
+    /// exactly that material, so "none opened" would claim a negative about
+    /// bytes the decoder never read. A block already recorded still stands.
+    fn tool_calls_at_decode_failure(&self) -> ToolCallsAtLoss {
+        if self.tool_call_ids.is_empty() {
+            ToolCallsAtLoss::Unobserved
+        } else {
+            ToolCallsAtLoss::Opened
+        }
+    }
+
+    /// Protocol-violation evidence for material that never decoded.
+    pub(crate) fn undecoded_violation_evidence(
+        &self,
+        detail: impl Into<String>,
+    ) -> TerminalEvidence {
+        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::StreamProtocolViolation {
+                detail: detail.into(),
+            },
+            exchange: self.exchange.clone(),
+            reported_model: self.reported_model.clone(),
+            finish_reported: self.finish.clone(),
+            tool_calls: self.tool_calls_at_decode_failure(),
+            usage: self.usage,
+        })
+    }
+
+    fn undecoded_violation(&self, detail: impl Into<String>) -> StreamStep {
+        StreamStep::Terminal(Box::new(self.undecoded_violation_evidence(detail)))
     }
 
     /// Evidence for a stream that ended without `message_stop`.
@@ -209,7 +248,7 @@ impl StreamDecoder {
         event: &str,
     ) -> Result<T, Box<StreamStep>> {
         serde_json::from_str(&record.data).map_err(|error| {
-            Box::new(self.violation(format!("malformed {event} event payload: {error}")))
+            Box::new(self.undecoded_violation(format!("malformed {event} event payload: {error}")))
         })
     }
 
@@ -344,7 +383,9 @@ impl StreamDecoder {
         let content_block = match parse_response_block(&event.content_block) {
             Ok(block) => block,
             Err(error) => {
-                return self.violation(format!("malformed content_block_start payload: {error}"));
+                return self.undecoded_violation(format!(
+                    "malformed content_block_start payload: {error}"
+                ));
             }
         };
         let builder = match content_block {
@@ -1134,6 +1175,70 @@ mod tests {
             panic!("EOF before message_stop must never read as success");
         };
         assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// An event that never decoded withholds the fact rather than stating a
+    /// negative: a `tool_use` block opens inside a `content_block_start`
+    /// payload, so an unparsed event could itself have been one.
+    #[test]
+    fn an_event_that_never_decodes_withholds_the_tool_fact() {
+        let (evidence, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\ndata: {not-json\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("an undecodable event is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// The nested `content_block_start` payload is the block's own material, so
+    /// a malformed one leaves exactly the tool question unexamined.
+    #[test]
+    fn a_malformed_content_block_start_payload_withholds_the_tool_fact() {
+        let (evidence, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"tool_use\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("a malformed content_block_start is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// An undecodable event does not erase a block already recorded, so the
+    /// withholding above is not a blanket refusal to answer.
+    #[test]
+    fn an_undecodable_event_after_a_tool_call_still_reports_it() {
+        let (evidence, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\
+              \"name\":\"lookup\",\"input\":{}}}\n\n",
+            b"event: content_block_delta\ndata: {not-json\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("an undecodable event is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    /// A semantic rejection of a *decoded* event still states the negative, so
+    /// the withholding is scoped to material that never parsed.
+    #[test]
+    fn a_decoded_event_rejected_on_semantics_still_reports_none_opened() {
+        let (evidence, _) = drive(&[message_start(), message_start()]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("a duplicate message_start is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
     }
 
     #[test]

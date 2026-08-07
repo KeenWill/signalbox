@@ -493,7 +493,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                             decoder.lost(StreamInterruption::EndOfStream)
                         }
                         signalbox_model_runtime::SseTermination::TruncatedRecord => decoder
-                            .violation_evidence(
+                            .undecoded_violation_evidence(
                                 "transport ended inside an incomplete SSE record".to_string(),
                             ),
                     };

@@ -254,9 +254,17 @@ it reports the decoded prefix and nothing beyond it: none opened says no tool
 call opened in what the adapter decoded, never that the provider sent none.
 `Unobserved` is the honest answer where an adapter is not positioned to know — a
 body that never parsed, a decode abandoned with content blocks unexamined, a
-loss raised by a layer that reads no response material, and every Codex CLI loss
-raised before the agent-message envelope parses, since that adapter's item
-lifecycle carries no tool item.
+streamed record or CLI event that failed its framing, JSON-bound, or typed-event
+decode, a stream whose framing ended inside an incomplete record, a loss raised
+by a layer that reads no response material, and every Codex CLI loss raised
+before the agent-message envelope parses, since that adapter's item lifecycle
+carries no tool item.
+
+The dividing line is whether the material parsed, not whether it was accepted: a
+record the decoder read and then rejected on semantics has been examined, so it
+states none opened, while a record that never decoded could itself have carried
+the tool call and withholds. A tool call an earlier record already established
+outranks the withholding in every adapter.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss
