@@ -210,8 +210,13 @@ enum DelegationResponse {
 #[derive(Clone, Copy)]
 enum DelegationRejectionOperation {
     Spawn,
-    Await { child: CanonicalUuid },
-    Message { peer: CanonicalUuid },
+    Await {
+        child: CanonicalUuid,
+        mode: DelegationWaitMode,
+    },
+    Message {
+        peer: CanonicalUuid,
+    },
 }
 
 impl DelegationRejectionOperation {
@@ -239,7 +244,7 @@ impl DelegationRejectionOperation {
     const fn peer(self) -> Option<CanonicalUuid> {
         match self {
             Self::Spawn => None,
-            Self::Await { child } => Some(child),
+            Self::Await { child, .. } => Some(child),
             Self::Message { peer } => Some(peer),
         }
     }
@@ -273,6 +278,14 @@ fn delegation_rejection_matches(
         RejectionDetail::DelegationToolRequestNotExecutable {
             tool_request_id, ..
         } => tool_request_id == expected.tool_request,
+        RejectionDetail::SessionNotFound { session_id } => session_id == expected.session,
+        RejectionDetail::ToolRequestNotFound { tool_request_id } => {
+            tool_request_id == expected.tool_request
+        }
+        RejectionDetail::ToolRequestNotInSession {
+            session_id,
+            tool_request_id,
+        } => session_id == expected.session && tool_request_id == expected.tool_request,
         RejectionDetail::DelegationSpawnConflict { tool_request_id } => {
             expected.operation.is_spawn() && tool_request_id == expected.tool_request
         }
@@ -302,13 +315,19 @@ fn delegation_rejection_matches(
             ..
         } => match expected.operation {
             DelegationRejectionOperation::Spawn => false,
-            DelegationRejectionOperation::Await { .. } => recipient_session_id == expected.session,
+            DelegationRejectionOperation::Await {
+                mode: DelegationWaitMode::Background,
+                ..
+            } => recipient_session_id == expected.session,
+            DelegationRejectionOperation::Await {
+                mode: DelegationWaitMode::Foreground,
+                ..
+            } => false,
             DelegationRejectionOperation::Message { peer } => recipient_session_id == peer,
         },
         RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
-        | RejectionDetail::SessionNotFound { .. }
         | RejectionDetail::SessionPlacementCurrentVersionMismatch { .. }
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
@@ -319,10 +338,8 @@ fn delegation_rejection_matches(
         | RejectionDetail::InterruptAlreadyApplied { .. }
         | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
-        | RejectionDetail::ToolRequestNotFound { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
-        | RejectionDetail::ToolRequestNotInSession { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
         | RejectionDetail::UnknownModelAlias { .. }
         | RejectionDetail::AcceptancePositionExhausted { .. }
@@ -1402,6 +1419,7 @@ async fn session_delegation(
                                 tool_request: tool_request_id,
                                 operation: DelegationRejectionOperation::Await {
                                     child: child_session_id,
+                                    mode,
                                 },
                             },
                         )
@@ -5383,8 +5401,10 @@ mod tests {
     #[test]
     fn inv033_await_rejection_requires_exact_request_tuple() {
         let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
-        let expected =
-            delegation_rejection_expectation(DelegationRejectionOperation::Await { child });
+        let expected = delegation_rejection_expectation(DelegationRejectionOperation::Await {
+            child,
+            mode: DelegationWaitMode::Background,
+        });
         let exact = RejectionDetail::DelegationRequestNotInTurn {
             session_id: expected.session,
             turn_id: expected.turn,
@@ -5400,13 +5420,62 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(cross_wired), expected));
     }
 
+    /// INV-033: delegation-wide missing-identity rejections repeat the exact
+    /// request-supplied session and logical tool request identities.
+    #[test]
+    fn inv033_delegation_missing_identity_rejections_require_exact_request() {
+        let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let expected =
+            delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
+        let other = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+
+        assert!(delegation_rejection_matches(
+            Some(RejectionDetail::SessionNotFound {
+                session_id: expected.session,
+            }),
+            expected
+        ));
+        assert!(!delegation_rejection_matches(
+            Some(RejectionDetail::SessionNotFound { session_id: other }),
+            expected
+        ));
+        assert!(delegation_rejection_matches(
+            Some(RejectionDetail::ToolRequestNotFound {
+                tool_request_id: expected.tool_request,
+            }),
+            expected
+        ));
+        assert!(!delegation_rejection_matches(
+            Some(RejectionDetail::ToolRequestNotFound {
+                tool_request_id: other,
+            }),
+            expected
+        ));
+        assert!(delegation_rejection_matches(
+            Some(RejectionDetail::ToolRequestNotInSession {
+                session_id: expected.session,
+                tool_request_id: expected.tool_request,
+            }),
+            expected
+        ));
+        assert!(!delegation_rejection_matches(
+            Some(RejectionDetail::ToolRequestNotInSession {
+                session_id: expected.session,
+                tool_request_id: other,
+            }),
+            expected
+        ));
+    }
+
     /// INV-033: await missing-relationship evidence repeats both requested
     /// endpoints.
     #[test]
     fn inv033_await_rejection_requires_exact_relationship_endpoints() {
         let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
-        let expected =
-            delegation_rejection_expectation(DelegationRejectionOperation::Await { child });
+        let expected = delegation_rejection_expectation(DelegationRejectionOperation::Await {
+            child,
+            mode: DelegationWaitMode::Background,
+        });
         let exact = RejectionDetail::DelegationRelationNotFound {
             session_id: expected.session,
             peer_session_id: child,
@@ -5420,13 +5489,15 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(cross_wired), expected));
     }
 
-    /// INV-033: await delivery exhaustion names the requesting parent as the
-    /// result recipient.
+    /// INV-033: background-await delivery exhaustion names the requesting
+    /// parent as the result recipient.
     #[test]
-    fn inv033_await_delivery_exhaustion_requires_parent_recipient() {
+    fn inv033_background_await_delivery_exhaustion_requires_parent_recipient() {
         let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
-        let expected =
-            delegation_rejection_expectation(DelegationRejectionOperation::Await { child });
+        let expected = delegation_rejection_expectation(DelegationRejectionOperation::Await {
+            child,
+            mode: DelegationWaitMode::Background,
+        });
         let exact = RejectionDetail::DelegationDeliverySequenceExhausted {
             recipient_session_id: expected.session,
             last: CanonicalU64::new(u64::MAX),
@@ -5438,6 +5509,26 @@ mod tests {
 
         assert!(delegation_rejection_matches(Some(exact), expected));
         assert!(!delegation_rejection_matches(Some(cross_wired), expected));
+    }
+
+    /// INV-033: a foreground await cannot report background-only delivery
+    /// sequence exhaustion.
+    #[test]
+    fn inv033_foreground_await_rejects_delivery_sequence_exhaustion() {
+        let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let expected = delegation_rejection_expectation(DelegationRejectionOperation::Await {
+            child,
+            mode: DelegationWaitMode::Foreground,
+        });
+        let background_only = RejectionDetail::DelegationDeliverySequenceExhausted {
+            recipient_session_id: expected.session,
+            last: CanonicalU64::new(u64::MAX),
+        };
+
+        assert!(!delegation_rejection_matches(
+            Some(background_only),
+            expected
+        ));
     }
 
     /// INV-033: message missing-relationship evidence repeats both requested
