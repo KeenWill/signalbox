@@ -1345,9 +1345,19 @@ impl<Credentials, Transport> GitHubPullRequestCreateExecutor<Credentials, Transp
     ) -> Result<CorrelatedToolExecutorEvidence, GitHubExecutorError> {
         let correlation = invocation.correlation();
         report_transport_failure(&failure, &correlation);
+        let detail = self.failure_detail(&failure)?;
+        Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+            detail: Some(detail),
+        }))
+    }
+
+    fn failure_detail(
+        &self,
+        failure: &GitHubTransportFailure,
+    ) -> Result<ToolExecutionErrorDetail, GitHubExecutorError> {
         let detail = match failure {
             GitHubTransportFailure::InvalidCredential => self.credential_detail.clone(),
-            GitHubTransportFailure::Rejected { status, .. } if status_is_definitive(status) => {
+            GitHubTransportFailure::Rejected { status, .. } if status_is_definitive(*status) => {
                 self.rejected_detail.clone()
             }
             GitHubTransportFailure::GraphQlRejected | GitHubTransportFailure::EgressRejected => {
@@ -1364,9 +1374,7 @@ impl<Credentials, Transport> GitHubPullRequestCreateExecutor<Credentials, Transp
                 return Err(infrastructure(CommitOutcome::Ambiguous));
             }
         };
-        Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
-            detail: Some(detail),
-        }))
+        Ok(detail)
     }
 }
 
@@ -2968,8 +2976,10 @@ mod tests {
     const GITHUB_FILE_CEILING: usize = 3_000;
     const FILES_BEYOND_CEILING: usize = 3_001;
     const CLIENT_ERROR_STATUS: u16 = 422;
+    const FORBIDDEN_STATUS: u16 = 403;
     const REDIRECT_STATUS: u16 = 302;
     const SERVER_ERROR_STATUS: u16 = 503;
+    const BAD_GATEWAY_STATUS: u16 = 502;
     const SYNTHETIC_TOKEN: &str = "github_pat_synthetic_fixture_secret";
     const SYNTHETIC_UNICODE_TOKEN: &str = "github_pat_synthétic_fixture_secret";
     const SYNTHETIC_UNICODE_PREFIX: &str = "github_pat_synth";
@@ -3408,6 +3418,53 @@ mod tests {
         assert_eq!(body["body"], arguments.body());
         assert_eq!(body["head"], arguments.head());
         assert_eq!(body["base"], arguments.base());
+    }
+
+    fn create_executor()
+    -> GitHubPullRequestCreateExecutor<SyntheticCredentials, RecordingCreateTransport> {
+        let repository = GitHubRepository::try_from(CONFIGURED_REPOSITORY.to_owned())
+            .expect("configured repository is admitted");
+        GitHubPullRequestCreateTools::try_new(
+            SyntheticCredentials,
+            RecordingCreateTransport::default(),
+            GitHubEgressPolicy::github_api_only(),
+            repository,
+        )
+        .expect("creation suite constructs")
+        .into_parts()
+        .1
+    }
+
+    /// INV-025: a rejection GitHub answered definitively closes creation as a
+    /// known failure, so the workflow reports the denial instead of stalling
+    /// in reconciliation for an effect that never happened.
+    #[test]
+    fn inv_025_definitive_create_rejection_is_a_known_failure() {
+        let executor = create_executor();
+        let expected = make_detail(REQUEST_REJECTED_DETAIL).expect("fixed detail is valid");
+
+        assert_eq!(
+            executor.failure_detail(&GitHubTransportFailure::rejected(FORBIDDEN_STATUS)),
+            Ok(expected)
+        );
+    }
+
+    /// INV-025: a server-side rejection cannot establish whether the pull
+    /// request was created, so it surfaces as an ambiguous commit rather than
+    /// a definite failure the agent would retry into a duplicate pull request.
+    #[test]
+    fn inv_025_server_side_create_rejection_is_an_ambiguous_commit() {
+        let executor = create_executor();
+        let error = executor
+            .failure_detail(&GitHubTransportFailure::rejected(BAD_GATEWAY_STATUS))
+            .expect_err("a server-side rejection cannot establish the commit outcome");
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
     }
 
     #[test]

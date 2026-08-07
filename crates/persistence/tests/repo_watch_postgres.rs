@@ -13,9 +13,11 @@ use signalbox_application::{
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, derive_repo_watch_events,
 };
 use signalbox_domain::{
-    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
     MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
-    PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepoWatchEventId, RepositorySlug,
+    PullRequestNumber, PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindV1, RepositorySlug,
+    ReviewState, ReviewThreadId, WorkflowName,
 };
 use signalbox_persistence::{
     local_test_connection_options, migrate,
@@ -51,9 +53,14 @@ const U64_OVERFLOW_NUMERIC: &str = "18446744073709551616";
 const OVERLONG_LABEL: &str = "123456789012345678901234567890123456789012345678901";
 const CHECK_COMPLETION_GENERATION: &str = "2026-08-02T12:00:00Z";
 const CHECK_RUN_NAME: &str = "required";
+const WORKFLOW_NAME: &str = "required checks";
+const REVIEW_THREAD: &str = "review-thread-1";
+const REACTION_CONTENT: &str = "+1";
 const PULL_REQUEST: u64 = 41;
 const CHECK_SUITE_ID: u64 = 51;
 const CHECK_RUN_ID: u64 = 52;
+const ISSUE_COMMENT_ID: u64 = 61;
+const REVIEW_COMMENT_ID: u64 = 62;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -1293,5 +1300,267 @@ async fn label_name_constraint_rejects_an_overlong_value() -> Result<(), Box<dyn
 
     assert!(insert.is_err());
     transaction.rollback().await?;
+    Ok(())
+}
+
+/// The canonical pull-request context every hand-built fixture event carries:
+/// the fixture pull request at `CHANGED_HEAD` on `BASE_BRANCH`, carrying
+/// exactly `labels`.
+fn event_context(labels: Vec<LabelName>) -> Result<PullRequestEventContext, Box<dyn Error>> {
+    Ok(PullRequestEventContext::new(PullRequestEventContextInput {
+        number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+        head_sha: CommitSha::try_new(CHANGED_HEAD.to_owned())?,
+        head_repository: RepositorySlug::try_new(HEAD_REPOSITORY.to_owned())?,
+        base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+        head_branch: BranchName::try_new(HEAD_BRANCH.to_owned())?,
+        title: PullRequestTitle::try_new(TITLE.to_owned())?,
+        body: PullRequestBody::try_new(BODY.to_owned())?,
+        labels,
+        draft: false,
+        author: Some(RepoWatchAuthorLogin::try_new(AUTHOR.to_owned())?),
+    }))
+}
+
+fn label() -> Result<LabelName, Box<dyn Error>> {
+    Ok(LabelName::try_new(LABEL.to_owned())?)
+}
+
+/// One fixture event of `kind` against the canonical pull request carrying no
+/// labels; the generator supplies its durable identity.
+fn unlabeled_event(
+    ids: &mut FixedEventIds,
+    kind: RepoWatchEventKindV1,
+) -> Result<RepoWatchEvent, Box<dyn Error>> {
+    Ok(RepoWatchEvent::try_pull_request(
+        ids.next_event_id(),
+        repository()?,
+        event_context(Vec::new())?,
+        kind,
+    )?)
+}
+
+/// One fixture event of `kind` against the canonical pull request already
+/// carrying `LABEL`, which only a `Labeled` fact is admitted against.
+fn labeled_event(
+    ids: &mut FixedEventIds,
+    kind: RepoWatchEventKindV1,
+) -> Result<RepoWatchEvent, Box<dyn Error>> {
+    Ok(RepoWatchEvent::try_pull_request(
+        ids.next_event_id(),
+        repository()?,
+        event_context(vec![label()?])?,
+        kind,
+    )?)
+}
+
+/// One fixture `ReactionChanged` event whose only meaningful variation is the
+/// object the configured reviewer reacted to.
+fn reaction_event(
+    ids: &mut FixedEventIds,
+    subject: ReactionSubject,
+) -> Result<RepoWatchEvent, Box<dyn Error>> {
+    unlabeled_event(
+        ids,
+        RepoWatchEventKindV1::ReactionChanged {
+            subject,
+            reactor: RepoWatchAuthorLogin::try_new(AUTHOR.to_owned())?,
+            content: ReactionContent::try_new(REACTION_CONTENT.to_owned())?,
+            change: ReactionChange::Added,
+        },
+    )
+}
+
+/// Commits `events` in the generation that advances the fixture cursor from
+/// its baseline, and returns the store they are durable in.
+async fn committed_event_fixture(
+    events: Vec<RepoWatchEvent>,
+) -> Result<
+    (
+        ContainerAsync<Postgres>,
+        PostgresRepoWatchStore,
+        RepositorySlug,
+    ),
+    Box<dyn Error>,
+> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool);
+    let baseline = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, candidate(None)?, Vec::new()),
+            )
+            .await?,
+    );
+    committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(Some(baseline), candidate(Some(CHANGED_HEAD))?, events),
+            )
+            .await?,
+    );
+    Ok((container, store, repository))
+}
+
+/// Loads `expected` back through the closed event decoder and requires the
+/// durable fact to equal the one that was committed. A decode that drops, or
+/// silently rewrites, any field of a kind stalls repository-watch dispatch on
+/// that event forever, because the evaluation row is only written after a
+/// successful dispatch.
+async fn assert_event_round_trips(
+    store: &PostgresRepoWatchStore,
+    repository: &RepositorySlug,
+    expected: &RepoWatchEvent,
+) -> Result<(), Box<dyn Error>> {
+    let loaded = store.load_event(repository, expected.id()).await?;
+
+    assert_eq!(
+        loaded.as_ref(),
+        Some(expected),
+        "a committed repository-watch event must load back unchanged: {:?}",
+        expected.kind()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn every_event_kind_survives_a_commit_and_load_round_trip() -> Result<(), Box<dyn Error>> {
+    let mut ids = FixedEventIds::default();
+    let opened = unlabeled_event(&mut ids, RepoWatchEventKindV1::PullRequestOpened)?;
+    let closed = unlabeled_event(&mut ids, RepoWatchEventKindV1::PullRequestClosed)?;
+    let merged = unlabeled_event(&mut ids, RepoWatchEventKindV1::PullRequestMerged)?;
+    let head_changed = unlabeled_event(
+        &mut ids,
+        RepoWatchEventKindV1::HeadChanged {
+            previous: CommitSha::try_new(INITIAL_HEAD.to_owned())?,
+            current: CommitSha::try_new(CHANGED_HEAD.to_owned())?,
+        },
+    )?;
+    let mergeable_state_changed = unlabeled_event(
+        &mut ids,
+        RepoWatchEventKindV1::MergeableStateChanged {
+            current: MergeableState::Conflicting,
+        },
+    )?;
+    let checks_completed = unlabeled_event(
+        &mut ids,
+        RepoWatchEventKindV1::ChecksCompleted {
+            outcome: ChecksOutcome::Failure,
+        },
+    )?;
+    let check_run_completed = unlabeled_event(
+        &mut ids,
+        RepoWatchEventKindV1::CheckRunCompleted {
+            name: CheckRunName::try_new(CHECK_RUN_NAME.to_owned())?,
+            conclusion: CheckConclusion::TimedOut,
+        },
+    )?;
+    let review_submitted = unlabeled_event(
+        &mut ids,
+        RepoWatchEventKindV1::ReviewSubmitted {
+            reviewer: RepoWatchAuthorLogin::try_new(AUTHOR.to_owned())?,
+            state: ReviewState::ChangesRequested,
+            commit: CommitSha::try_new(CHANGED_HEAD.to_owned())?,
+        },
+    )?;
+    let thread_opened = unlabeled_event(
+        &mut ids,
+        RepoWatchEventKindV1::ThreadOpened {
+            thread: ReviewThreadId::try_new(REVIEW_THREAD.to_owned())?,
+        },
+    )?;
+    let thread_resolved = unlabeled_event(
+        &mut ids,
+        RepoWatchEventKindV1::ThreadResolved {
+            thread: ReviewThreadId::try_new(REVIEW_THREAD.to_owned())?,
+        },
+    )?;
+    let labeled = labeled_event(&mut ids, RepoWatchEventKindV1::Labeled { label: label()? })?;
+    let unlabeled = unlabeled_event(
+        &mut ids,
+        RepoWatchEventKindV1::Unlabeled { label: label()? },
+    )?;
+    let base_advanced = unlabeled_event(
+        &mut ids,
+        RepoWatchEventKindV1::BaseAdvanced {
+            branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+        },
+    )?;
+    let reaction_changed = reaction_event(&mut ids, ReactionSubject::PullRequestBody)?;
+    let branch_workflow_run_completed = RepoWatchEvent::branch_workflow(
+        ids.next_event_id(),
+        repository()?,
+        BranchName::try_new(BASE_BRANCH.to_owned())?,
+        WorkflowName::try_new(WORKFLOW_NAME.to_owned())?,
+        CheckConclusion::ActionRequired,
+    );
+    let (_container, store, repository) = committed_event_fixture(vec![
+        opened.clone(),
+        closed.clone(),
+        merged.clone(),
+        head_changed.clone(),
+        mergeable_state_changed.clone(),
+        checks_completed.clone(),
+        check_run_completed.clone(),
+        review_submitted.clone(),
+        thread_opened.clone(),
+        thread_resolved.clone(),
+        labeled.clone(),
+        unlabeled.clone(),
+        base_advanced.clone(),
+        reaction_changed.clone(),
+        branch_workflow_run_completed.clone(),
+    ])
+    .await?;
+
+    assert_event_round_trips(&store, &repository, &opened).await?;
+    assert_event_round_trips(&store, &repository, &closed).await?;
+    assert_event_round_trips(&store, &repository, &merged).await?;
+    assert_event_round_trips(&store, &repository, &head_changed).await?;
+    assert_event_round_trips(&store, &repository, &mergeable_state_changed).await?;
+    assert_event_round_trips(&store, &repository, &checks_completed).await?;
+    assert_event_round_trips(&store, &repository, &check_run_completed).await?;
+    assert_event_round_trips(&store, &repository, &review_submitted).await?;
+    assert_event_round_trips(&store, &repository, &thread_opened).await?;
+    assert_event_round_trips(&store, &repository, &thread_resolved).await?;
+    assert_event_round_trips(&store, &repository, &labeled).await?;
+    assert_event_round_trips(&store, &repository, &unlabeled).await?;
+    assert_event_round_trips(&store, &repository, &base_advanced).await?;
+    assert_event_round_trips(&store, &repository, &reaction_changed).await?;
+    assert_event_round_trips(&store, &repository, &branch_workflow_run_completed).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn every_reaction_subject_survives_a_commit_and_load_round_trip() -> Result<(), Box<dyn Error>>
+{
+    let mut ids = FixedEventIds::default();
+    let pull_request_body = reaction_event(&mut ids, ReactionSubject::PullRequestBody)?;
+    let issue_comment = reaction_event(
+        &mut ids,
+        ReactionSubject::IssueComment {
+            id: GitHubObjectId::new(ISSUE_COMMENT_ID.try_into()?),
+        },
+    )?;
+    let review_comment = reaction_event(
+        &mut ids,
+        ReactionSubject::ReviewComment {
+            id: GitHubObjectId::new(REVIEW_COMMENT_ID.try_into()?),
+        },
+    )?;
+    let (_container, store, repository) = committed_event_fixture(vec![
+        pull_request_body.clone(),
+        issue_comment.clone(),
+        review_comment.clone(),
+    ])
+    .await?;
+
+    assert_event_round_trips(&store, &repository, &pull_request_body).await?;
+    assert_event_round_trips(&store, &repository, &issue_comment).await?;
+    assert_event_round_trips(&store, &repository, &review_comment).await?;
     Ok(())
 }

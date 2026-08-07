@@ -2287,6 +2287,105 @@ mod tests {
         assert_eq!(*events.lock().expect("event lock"), ["preflight"]);
     }
 
+    /// What one execution against a possibly drifted catalog produced.
+    struct ExecutionUnderCatalog {
+        result:
+            Result<ToolExecutionServiceOutcome, ToolExecutionServiceError<FakeError, FakeError>>,
+        executor_calls: usize,
+        transaction_events: Vec<&'static str>,
+    }
+
+    /// Prepares one attempt whose durable authorization froze
+    /// `prepared_effect`, then executes it against a live catalog declaring
+    /// the same tool `catalog_effect` — the daemon-restart shape in which a
+    /// rebuilt catalog can disagree with a parked approval.
+    async fn execute_under_catalog_effect_class(
+        prepared_effect: ToolEffectClass,
+        catalog_effect: ToolEffectClass,
+    ) -> ExecutionUnderCatalog {
+        let (batch, _) = prepared_batch("{}", prepared_effect);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let transaction = FakeTransaction {
+            prepared: current_attempt_fixture(&batch),
+            batch: batch.clone(),
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition("known", ToolPermissionDefault::Auto, catalog_effect),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let executor = RecordingExecutor {
+            events: Arc::clone(&events),
+            calls: 0,
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+        let result = service.execute(batch.session(), batch.turn()).await;
+        let (_, _, _, executor, _, _) = service.into_parts();
+        let transaction_events = events.lock().expect("event lock").clone();
+        ExecutionUnderCatalog {
+            result,
+            executor_calls: executor.calls,
+            transaction_events,
+        }
+    }
+
+    /// The effect class frozen at preparation is what the approval gate
+    /// authorized, so a catalog that now declares another class stops the call
+    /// before authorization rather than running it under a class no approval
+    /// ever covered.
+    #[tokio::test]
+    async fn drifted_catalog_effect_class_never_reaches_authorization_or_the_executor() {
+        let drifted = execute_under_catalog_effect_class(
+            ToolEffectClass::EffectFree,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await;
+
+        assert!(matches!(
+            drifted.result,
+            Err(ToolExecutionServiceError::CatalogDrift)
+        ));
+        assert_eq!(drifted.executor_calls, 0);
+        assert!(
+            drifted.transaction_events.is_empty(),
+            "drift stops before authorization, preflight commit, and observation commit"
+        );
+    }
+
+    /// Catalog drift is an operator-visible caller-or-hub bug carrying its own
+    /// stable cause token, so a wedged turn is attributable without formatting
+    /// adapter detail.
+    #[tokio::test]
+    async fn drifted_catalog_effect_class_reports_its_declared_operator_failure() {
+        let drifted = execute_under_catalog_effect_class(
+            ToolEffectClass::ExternalEffect,
+            ToolEffectClass::EffectFree,
+        )
+        .await;
+        let error = drifted
+            .result
+            .expect_err("a prepared call cannot execute under a drifted effect class");
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
+        );
+        assert_eq!(error.operator_failure_cause_code(), "tool_catalog_drift");
+    }
+
     /// INV-011 / INV-021 / INV-024: durable authorization precedes the
     /// executor, and only its exact correlation can commit returned evidence.
     #[tokio::test]

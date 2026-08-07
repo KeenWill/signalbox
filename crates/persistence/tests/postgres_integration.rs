@@ -7930,6 +7930,84 @@ async fn s02_s07_s10_inv006_inv037_interrupted_continuation_call_reloads_and_act
     Ok(())
 }
 
+/// S06 / INV-025 / INV-026: an executor that cannot establish whether its
+/// external effect happened terminalizes the attempt ambiguous and parks the
+/// turn on a durable recovery wait naming that exact attempt, so the effect is
+/// never silently repeated and the batch is never reported definitively
+/// failed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s06_inv025_inv026_ambiguous_external_effect_parks_a_durable_recovery_wait()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8180;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || continuation_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    let authorized_attempt = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+
+    let ended = tool_repository
+        .commit_observation(
+            authorized_attempt
+                .executor_fence()
+                .bind(ToolAttemptObservation::Ambiguous),
+        )
+        .await?;
+    let parked_attempt: Uuid = sqlx::query_scalar(
+        "SELECT recovery_tool_attempt_id
+           FROM turn_lifecycle
+          WHERE turn_id = $1
+            AND session_id = $2
+            AND active_phase_kind = 'awaiting_tool_recovery'",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let mut dispatched = Vec::new();
+    drain_outbox(&pool, |event| dispatched.push(event.kind().clone())).await?;
+
+    assert_eq!(ended.attempt(), tool_attempt);
+    assert_eq!(ended.end(), &ToolAttemptEnd::Ambiguous);
+    assert_eq!(parked_attempt, tool_attempt.into_uuid());
+    assert!(
+        dispatched.contains(&DispatchedOutboxEventKind::ToolBatchTransition {
+            turn: fixture.turn,
+            producing_call: fixture.call,
+            state: DispatchedToolBatchState::RecoveryRequired {
+                attempt: tool_attempt,
+            },
+        }),
+        "an ambiguous external effect announces the recovery the reconciliation gate waits on"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Drives one checkpoint-confirmed tool round through approval, execution,
 /// and the steering-free continuation transaction, then authorizes the
 /// prepared continuation call for send, leaving it durably in flight.

@@ -1722,6 +1722,196 @@ mod tests {
         assert_eq!(pending, "ke");
     }
 
+    /// INV-035: a credential the provider echoes back with ordinary JSON
+    /// escapes is caught even when the arrival boundary falls inside the
+    /// escape itself, which is where `input_json_delta` is free to split.
+    #[test]
+    fn inv_035_simple_escaped_credential_split_mid_escape_is_redacted() {
+        let key = credential("fixture/secret");
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"{"path":"fixture\"#.to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"/secret"}"#.to_string(),
+            },
+        });
+        sink.flush();
+        drop(sink);
+
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ToolArgumentsDelta {
+                        index: 0,
+                        fragment: r#"{"path":""#.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ToolArgumentsDelta {
+                        index: 0,
+                        fragment: r#"[redacted]"}"#.to_string(),
+                    },
+                },
+            ]
+        );
+    }
+
+    /// INV-035: a credential spelled as a surrogate pair survives a boundary
+    /// that falls between the pair's two halves.
+    #[test]
+    fn inv_035_surrogate_pair_credential_split_mid_escape_is_redacted() {
+        let key = credential("key\u{1f600}loop");
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"{"emoji":"key\ud83d\ud"#.to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"e00loop"}"#.to_string(),
+            },
+        });
+        sink.flush();
+        drop(sink);
+
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ToolArgumentsDelta {
+                        index: 0,
+                        fragment: r#"{"emoji":""#.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ToolArgumentsDelta {
+                        index: 0,
+                        fragment: r#"[redacted]"}"#.to_string(),
+                    },
+                },
+            ]
+        );
+    }
+
+    /// INV-035: a held credential prefix ending inside an escape is replaced
+    /// rather than forwarded when another tool call's arguments arrive, so no
+    /// later observation can reassemble it across the fact boundary.
+    #[test]
+    fn inv_035_held_partial_escape_is_flushed_closed_before_another_tool_index() {
+        let key = credential("fixture/secret");
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"{"path":"fixture\"#.to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 1,
+                fragment: r#"{"other":1}"#.to_string(),
+            },
+        });
+        sink.flush();
+        drop(sink);
+
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ToolArgumentsDelta {
+                        index: 0,
+                        fragment: r#"{"path":""#.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ToolArgumentsDelta {
+                        index: 0,
+                        fragment: "[redacted]".to_string(),
+                    },
+                },
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ToolArgumentsDelta {
+                        index: 1,
+                        fragment: r#"{"other":1}"#.to_string(),
+                    },
+                },
+            ]
+        );
+    }
+
+    /// Escapes the scrubber decodes but never matches are re-emitted from the
+    /// raw fragment, so tool arguments carrying a multi-line string or a
+    /// quoted path reach the model byte for byte across a mid-escape split.
+    #[test]
+    fn streamed_tool_arguments_preserve_non_credential_escapes_byte_for_byte() {
+        let key = credential("fixture_secret");
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"{"text":"first\"#.to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"nsecond \"quoted\" \\ \t last"}"#.to_string(),
+            },
+        });
+        sink.flush();
+        drop(sink);
+
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ToolArgumentsDelta {
+                        index: 0,
+                        fragment: r#"{"text":"first"#.to_string(),
+                    },
+                },
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ToolArgumentsDelta {
+                        index: 0,
+                        fragment: r#"\nsecond \"quoted\" \\ \t last"}"#.to_string(),
+                    },
+                },
+            ]
+        );
+    }
+
     #[test]
     fn native_error_code_is_credential_sanitized() {
         let key = credential("key_loop");
