@@ -141,6 +141,7 @@ const ARBITRARY_EVAL_SESSION_ID: u128 = 0x9107;
 const ARBITRARY_EVAL_MODEL_CALL_ID: u128 = 0x9108;
 const ARBITRARY_EVAL_APPROVAL_COMMAND_ID: u128 = 0x9109;
 const ARBITRARY_SECOND_EVAL_REQUEST_ID: u128 = 0x910a;
+const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x910b;
 const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
 
 type EvalResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -602,10 +603,7 @@ impl FamilySuite {
                     && snapshot.git_natural_requests_passed()?)
             }
             EvalFamily::Workspace => {
-                let bytes_match = fs::read(self.workspace.path().join(WORKSPACE_ANSWER_PATH))
-                    .ok()
-                    .as_deref()
-                    == Some(WORKSPACE_ANSWER.as_bytes());
+                let bytes_match = self.workspace_answer_matches()?;
                 Ok(bytes_match && snapshot.workspace_natural_requests_passed())
             }
             EvalFamily::Web => snapshot.web_natural_requests_passed(),
@@ -613,6 +611,14 @@ impl FamilySuite {
                 .ok()
                 .as_deref()
                 == Some(EXEC_RESULT.as_bytes())),
+        }
+    }
+
+    fn workspace_answer_matches(&self) -> EvalResult<bool> {
+        match fs::read(self.workspace.path().join(WORKSPACE_ANSWER_PATH)) {
+            Ok(bytes) => Ok(bytes == WORKSPACE_ANSWER.as_bytes()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
         }
     }
 }
@@ -1361,6 +1367,7 @@ struct CaseSnapshot {
 #[derive(sqlx::FromRow)]
 struct RequestSnapshot {
     request_id: Uuid,
+    producing_model_call_id: Uuid,
     name: String,
     arguments_text: String,
     #[sqlx(skip)]
@@ -1389,6 +1396,7 @@ impl CaseSnapshot {
         let successful_requests = successful_tool_requests(transcript.entries());
         let requests = sqlx::query_as::<_, RequestSnapshot>(
             "SELECT request.request_id,
+                    request.producing_model_call_id,
                     request.tool_name AS name,
                     request.arguments_text
                FROM tool_request AS request
@@ -1445,7 +1453,11 @@ impl CaseSnapshot {
                         && arguments["content"] == WORKSPACE_ANSWER
                 })
         });
-        read.zip(write).is_some_and(|(read, write)| read < write)
+        read.zip(write).is_some_and(|(read, write)| {
+            read < write
+                && self.requests[read].producing_model_call_id
+                    != self.requests[write].producing_model_call_id
+        })
     }
 
     fn git_natural_requests_passed(&self) -> EvalResult<bool> {
@@ -1457,9 +1469,11 @@ impl CaseSnapshot {
         let commit = self.requests.iter().position(|request| {
             request.name == GIT_CREATE_COMMIT_NAME && request.arguments_text == expected_commit
         });
-        Ok(stage
-            .zip(commit)
-            .is_some_and(|(stage, commit)| stage < commit))
+        Ok(stage.zip(commit).is_some_and(|(stage, commit)| {
+            stage < commit
+                && self.requests[stage].producing_model_call_id
+                    != self.requests[commit].producing_model_call_id
+        }))
     }
 
     fn web_natural_requests_passed(&self) -> EvalResult<bool> {
@@ -1471,9 +1485,11 @@ impl CaseSnapshot {
         let fetch = self.requests.iter().position(|request| {
             request.name == WEB_FETCH_NAME && request.arguments_text == expected_url
         });
-        Ok(search
-            .zip(fetch)
-            .is_some_and(|(search, fetch)| search < fetch))
+        Ok(search.zip(fetch).is_some_and(|(search, fetch)| {
+            search < fetch
+                && self.requests[search].producing_model_call_id
+                    != self.requests[fetch].producing_model_call_id
+        }))
     }
 }
 
@@ -1698,6 +1714,7 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
                 attempt_succeeded: true,
@@ -1721,6 +1738,7 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
                 attempt_succeeded: true,
@@ -1747,6 +1765,7 @@ fn forced_tier_reports_a_miss_for_a_known_failed_attempt() {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
                 attempt_succeeded: false,
@@ -1772,6 +1791,7 @@ fn unforced_git_tier_requires_both_task_tools() {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_STAGE_NAME),
                 arguments_text: String::from(r#"{"paths":["eval.txt"]}"#),
                 attempt_succeeded: true,
@@ -1873,6 +1893,7 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(target),
                 arguments_text: String::from(r#"{"unexpected":true}"#),
                 attempt_succeeded: true,
@@ -1943,6 +1964,7 @@ fn forced_exec_tier_rejects_a_nonzero_process_result() {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(target),
                 arguments_text: String::from(EXEC_FORCED_SANDBOXED_ARGUMENTS),
                 attempt_succeeded: true,
@@ -1969,12 +1991,14 @@ fn unforced_exec_tier_rejects_an_additional_tool_call() {
             requests: vec![
                 RequestSnapshot {
                     request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                     name: String::from(SANDBOXED_EXEC_NAME),
                     arguments_text: String::from("{}"),
                     attempt_succeeded: true,
                 },
                 RequestSnapshot {
                     request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                     name: String::from(CARGO_DIAGNOSTICS_NAME),
                     arguments_text: String::from("{}"),
                     attempt_succeeded: true,
@@ -1997,6 +2021,7 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
         requests: vec![
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(WRITE_FILE_NAME),
                 arguments_text: String::from(
                     r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
@@ -2005,6 +2030,7 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(READ_FILE_NAME),
                 arguments_text: String::from(r#"{"path":"brief.txt"}"#),
                 attempt_succeeded: true,
@@ -2017,18 +2043,118 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
 }
 
 #[test]
+fn workspace_natural_state_requires_a_later_model_call_for_the_write() {
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(READ_FILE_NAME),
+                arguments_text: String::from(r#"{"path":"brief.txt"}"#),
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(WRITE_FILE_NAME),
+                arguments_text: String::from(
+                    r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
+                ),
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!snapshot.workspace_natural_requests_passed());
+}
+
+#[test]
+fn workspace_natural_state_propagates_inspection_failures() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    fs::create_dir(suite.workspace.path().join(WORKSPACE_ANSWER_PATH))?;
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: Vec::new(),
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(suite.natural_state_passed(&snapshot).is_err());
+    Ok(())
+}
+
+#[test]
+fn git_natural_state_requires_a_later_model_call_for_the_commit() -> EvalResult {
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(GIT_STAGE_NAME),
+                arguments_text: normalized_arguments_text(r#"{"paths":["eval.txt"]}"#)?,
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(GIT_CREATE_COMMIT_NAME),
+                arguments_text: normalized_arguments_text(r#"{"message":"tool eval commit"}"#)?,
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!snapshot.git_natural_requests_passed()?);
+    Ok(())
+}
+
+#[test]
+fn web_natural_state_requires_a_later_model_call_for_the_fetch() -> EvalResult {
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(WEB_SEARCH_NAME),
+                arguments_text: normalized_arguments_text(
+                    r#"{"query":"Signalbox tool evaluation"}"#,
+                )?,
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(WEB_FETCH_NAME),
+                arguments_text: normalized_arguments_text(r#"{"url":"https://example.com/eval"}"#)?,
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!snapshot.web_natural_requests_passed()?);
+    Ok(())
+}
+
+#[test]
 fn web_natural_state_requires_the_exact_query() -> EvalResult {
     let snapshot = CaseSnapshot {
         turn_disposition: SnapshotTurnDisposition::Completed,
         requests: vec![
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_SEARCH_NAME),
                 arguments_text: String::from(r#"{"query":"different query"}"#),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_FETCH_NAME),
                 arguments_text: String::from(r#"{"url":"https://example.com/eval"}"#),
                 attempt_succeeded: true,
