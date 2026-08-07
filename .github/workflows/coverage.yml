@@ -281,12 +281,18 @@ jobs:
               "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
               | jq -r --arg name "$ARTIFACT_NAME" '
                   [.artifacts[] | select(.name == $name)] | first
-                  | if . == null then "" else "\(.id)\t\(.expired)" end')"
+                  | if . == null then ""
+                    else "\(.id)\t\(.expired)\t\(.created_at)" end')"
             if [ -z "$artifact" ]; then
               [ -n "$reason" ] || reason="run $run_id uploaded no \`$ARTIFACT_NAME\` artifact"
               continue
             fi
-            IFS=$'\t' read -r artifact_id expired <<<"$artifact"
+            # The artifact's own creation time, not the run's. A run that is
+            # re-run days later keeps its original `created_at` while the
+            # artifact comes from the later attempt, and the date is the
+            # report's staleness signal — the one number a reader uses to
+            # judge how much the baseline is worth.
+            IFS=$'\t' read -r artifact_id expired artifact_date <<<"$artifact"
             if [ "$expired" = 'true' ]; then
               [ -n "$reason" ] || reason="the artifact from run $run_id has expired"
               continue
@@ -328,6 +334,12 @@ jobs:
             # counts-only predicate and still fails to load, ending the scan
             # while an older usable artifact goes unexamined.
             #
+            # The containers must be the arrays the loader iterates. `.data[]`
+            # walks an object's *values* just as happily as an array's
+            # elements, so an object-shaped `data` or `files` passes every
+            # element check below and then fails in `read_file_summaries`,
+            # which calls `.get` on what it was handed.
+            #
             # `summary` absent defaults to `{}` the way `entry.get("summary",
             # {})` does, but `summary: null` does not: the loader gets `None`
             # back and raises `AttributeError`. `// {}` would have conflated
@@ -359,6 +371,8 @@ jobs:
                   def okcounter: (type != "object")
                     or (okfield("count") and okfield("covered"));
                   .type == "llvm.coverage.json.export"
+                  and ((.data | type) == "array")
+                  and all(.data[]; (.files | type) == "array")
                   and all(.data[]?.files[]?; has("filename"))
                   and all(.data[]?.files[]?;
                         (if has("summary") then .summary else {} end)
@@ -375,7 +389,7 @@ jobs:
               continue
             fi
 
-            available "$label" "$run_sha" "$run_date"
+            available "$label" "$run_sha" "$artifact_date"
           done <<<"$candidates"
 
           if [ -z "$reason" ]; then

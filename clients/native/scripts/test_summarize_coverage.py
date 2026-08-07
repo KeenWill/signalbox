@@ -343,16 +343,18 @@ class BaselineDeltaTests(unittest.TestCase):
         """Native coverage is measured on a main push only when that push
         touched the native client, so a baseline can be far behind `main`.
         The date is the only thing that tells a reader how far."""
+        baseline = baseline_of(executable=100, covered=50)
+
         rendered = summarize_coverage.render(
             one_target_report(executable=100, covered=60),
             REPOSITORY_ROOT,
             0,
             TITLE,
-            baseline=baseline_of(executable=100, covered=50),
+            baseline=baseline,
         )
 
-        self.assertIn("`abc1234`", rendered)
-        self.assertIn("2026-08-01T09:00:00Z", rendered)
+        self.assertIn(f"`{baseline.sha}`", rendered)
+        self.assertIn(baseline.date, rendered)
         self.assertIn("only when that push touched", rendered)
 
 
@@ -375,12 +377,19 @@ class BaselineAbsenceTests(unittest.TestCase):
         """A push to main measures the tree that becomes the next baseline
         and compares against nothing, so its report must be unchanged from
         what it was before deltas existed."""
-        rendered = summarize_coverage.render(
-            one_target_report(executable=100, covered=60), REPOSITORY_ROOT, 0, TITLE
-        )
+        document = one_target_report(executable=100, covered=60)
+
+        rendered = summarize_coverage.render(document, REPOSITORY_ROOT, 0, TITLE)
 
         self.assertNotIn("baseline", rendered.lower())
-        self.assertIn("**60.00%** of product lines covered (60/100).", rendered)
+        product = document["targets"][0]
+        covered = product["coveredLines"]
+        executable = product["executableLines"]
+        share = 100.0 * covered / executable
+        self.assertIn(
+            f"**{share:.2f}%** of product lines covered ({covered}/{executable}).",
+            rendered,
+        )
 
 
 class BaselineLoadingTests(unittest.TestCase):

@@ -360,17 +360,18 @@ class BaselineDeltaTests(unittest.TestCase):
         """A baseline is only judgeable with its provenance: which commit it
         measured, and how long ago it did."""
         document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+        baseline = baseline_of(lines=100, covered=50)
 
         report = render(
             document,
             REPO_ROOT,
             0,
             "Rust coverage (report only)",
-            baseline=baseline_of(lines=100, covered=50),
+            baseline=baseline,
         )
 
-        self.assertIn("`abc1234`", report)
-        self.assertIn("2026-08-01T09:00:00Z", report)
+        self.assertIn(f"`{baseline.sha}`", report)
+        self.assertIn(baseline.date, report)
 
     def test_the_partial_measurement_hazard_is_stated(self) -> None:
         """Every measured suite in this workflow continues on error, so a

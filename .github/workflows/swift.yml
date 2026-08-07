@@ -280,12 +280,18 @@ jobs:
               "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
               | jq -r --arg name "$ARTIFACT_NAME" '
                   [.artifacts[] | select(.name == $name)] | first
-                  | if . == null then "" else "\(.id)\t\(.expired)" end')"
+                  | if . == null then ""
+                    else "\(.id)\t\(.expired)\t\(.created_at)" end')"
             if [ -z "$artifact" ]; then
               [ -n "$reason" ] || reason="run $run_id measured no native coverage"
               continue
             fi
-            IFS=$'\t' read -r artifact_id expired <<<"$artifact"
+            # The artifact's own creation time, not the run's. A run that is
+            # re-run days later keeps its original `created_at` while the
+            # artifact comes from the later attempt, and the date is the
+            # report's staleness signal — the one number a reader uses to
+            # judge how much the baseline is worth.
+            IFS=$'\t' read -r artifact_id expired artifact_date <<<"$artifact"
             if [ "$expired" = 'true' ]; then
               [ -n "$reason" ] || reason="the artifact from run $run_id has expired"
               continue
@@ -362,27 +368,28 @@ jobs:
                   def okint: (type == "number")
                     or (type == "string" and test("^[+-]?[0-9]+$"));
                   def trunc: if . < 0 then -((-.) | floor) else floor end;
-                  [.targets[]?
+                  ((.targets | type) == "array")
+                  and ([.targets[]
                     | select(((.name // "") | endswith(".xctest")) | not)
                   ] as $products
                   | ($products | length) > 0
                   and all($products[];
                         (.coveredLines | okint) and (.executableLines | okint))
                   and (([$products[].executableLines | tonumber | trunc]
-                        | add) // 0) > 0
+                        | add) // 0) > 0)
                 ' "$baseline_dir/$SUMMARY_FILE" > /dev/null 2>&1; then
               [ -n "$reason" ] || reason="the \`$SUMMARY_FILE\` from run $run_id is not a readable coverage report"
               rm -f "$baseline_dir/$SUMMARY_FILE"
               continue
             fi
 
-            available "$label" "$run_sha" "$run_date"
+            available "$label" "$run_sha" "$artifact_date"
           done <<<"$candidates"
 
           if [ -z "$reason" ]; then
             unavailable "no completed \`main\` run of this workflow was found"
           fi
-          unavailable "$reason (up to the $CANDIDATE_LIMIT most recent successful \`main\` runs were examined)"
+          unavailable "$reason (up to the $CANDIDATE_LIMIT most recent completed \`main\` runs were examined)"
       # Report only, and structurally incapable of gating: it never fails the
       # job, and it runs even when the tests failed, because a partial
       # measurement still names untested code. No step compares the reported
