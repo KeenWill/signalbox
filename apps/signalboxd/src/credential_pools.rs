@@ -25,6 +25,9 @@ use crate::configuration::{
 /// Maximum admitted headroom reserve, leaving at least one percent usable.
 const MAX_HEADROOM_RESERVE_PERCENT: i64 = 99;
 
+/// Maximum UTF-8 byte length admitted for a credential-delivery path.
+pub(crate) const MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES: usize = 4_096;
+
 /// Every delivery spelling the grammar recognizes, whether or not this build
 /// supplies a surface for it.
 const DELIVERY_KEYS: [&str; 4] = ["ambient", "file", "codex_home", "oauth"];
@@ -98,7 +101,7 @@ impl CredentialDelivery {
                 let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
                 allowed.extend_from_slice(&["file", "env_key"]);
                 reject_unknown_fields(profile, &allowed)?;
-                let path = normalize_absolute_path(Path::new(required_string(profile, "file")?))?;
+                let path = normalize_absolute_path(required_string(profile, "file")?)?;
                 let env_key = parse_file_env_key(profile, adapter)?;
                 reject_undelivered(adapter, key)?;
                 Ok(Self::File { path, env_key })
@@ -107,7 +110,7 @@ impl CredentialDelivery {
                 let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
                 allowed.extend_from_slice(&["codex_home", "max_concurrent_invocations"]);
                 reject_unknown_fields(profile, &allowed)?;
-                normalize_absolute_path(Path::new(required_string(profile, "codex_home")?))?;
+                normalize_absolute_path(required_string(profile, "codex_home")?)?;
                 parse_max_concurrent_invocations(profile)?;
                 Err(undelivered(key))
             }
@@ -173,7 +176,14 @@ fn parse_file_env_key(
     }
 }
 
-fn normalize_absolute_path(path: &Path) -> Result<PathBuf, HubModelConfigurationError> {
+fn normalize_absolute_path(value: &str) -> Result<PathBuf, HubModelConfigurationError> {
+    if value.is_empty()
+        || value.len() > MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES
+        || value.contains('\0')
+    {
+        return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+    }
+    let path = Path::new(value);
     if !path.is_absolute() {
         return Err(HubModelConfigurationError::InvalidCredentialDelivery);
     }

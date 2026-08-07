@@ -3379,7 +3379,7 @@ mod tests {
 
     use crate::credential_pools::{
         CredentialDelivery, CredentialPoolAction, CredentialPoolExhaustion, CredentialPoolTieBreak,
-        CredentialPoolTrigger,
+        CredentialPoolTrigger, MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES,
     };
 
     use super::{
@@ -5582,6 +5582,33 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
 
         assert_eq!(
             HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_oversized_credential_home_before_refusing_it() {
+        let oversized_path = format!("/{}", "a".repeat(MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES));
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!("delivery = \"codex_home\"\ncodex_home = \"{oversized_path}\""),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_nul_containing_credential_file_path() {
+        let credential_file = CONFIGURATION.replace(
+            "file = \"/run/secrets/anthropic-primary\"",
+            "file = \"/run/secrets/contains\\u0000nul\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_file).err(),
             Some(HubModelConfigurationError::InvalidCredentialDelivery)
         );
     }
