@@ -1078,9 +1078,12 @@ The workflow reports on every pull request without a path filter, and its
 secretless eligibility job, the credentialed job condition, and the
 always-running required aggregate apply the same three repository-name
 comparisons and the same fork exclusions the Codex smoke section describes,
-against a path gate of `crates/model-runtime-claude-cli/**`. Manual dispatch
-remains available, and a path-filtered push to `main` reruns the smoke after
-merge.
+against a path gate of `crates/model-runtime-claude-cli/**` together with the
+shared `crates/model-runtime/src/cli_process.rs`. That shared file is in the
+gate because the child environment assembly the credential delivery depends on
+lives there rather than in the adapter crate, so a change to it moves the
+surface this smoke proves. Manual dispatch remains available, and a
+path-filtered push to `main` reruns the smoke after merge.
 
 Installation differs from the Codex smoke in one respect. The Codex package
 ships its platform binary as an optional dependency and needs no lifecycle

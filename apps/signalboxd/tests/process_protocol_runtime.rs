@@ -6935,6 +6935,16 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
             summary_runtime,
             runtime_models.clone(),
         ));
+    // The parsed fixture, not an independent literal, is the authority on the
+    // reference automatic compaction must reuse; it pins exactly one family.
+    let pinned_references: Vec<String> = guarded_configuration
+        .session_credential_pin()
+        .credentials()
+        .map(|credential| credential.credential_reference().to_owned())
+        .collect();
+    let [expected_compaction_credential] = pinned_references.as_slice() else {
+        panic!("the fixture pins exactly one credential family")
+    };
     let mut pass = ContextGuardedTurnPass::new(
         StartEligibleTurnRepository::new(runtime.pool.clone()),
         guarded_repository,
@@ -6958,7 +6968,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         summary_probe.received_operations()[0]
             .credential_reference
             .as_str(),
-        "anthropic-primary"
+        expected_compaction_credential.as_str()
     );
     let compaction_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM context_compaction WHERE session_id = $1")

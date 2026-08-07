@@ -2055,13 +2055,14 @@ mod tests {
 
     #[test]
     fn adapter_environment_override_cannot_replace_an_inherited_value() {
-        let overrides = vec![CliEnvironmentOverride::new("PATH", "fixture-path")];
+        let inherited_name = TEST_ENVIRONMENT[7].name();
+        let overrides = vec![CliEnvironmentOverride::new(inherited_name, "fixture-path")];
 
         let rejected = validated_environment_overrides(overrides, TEST_ENVIRONMENT)
             .err()
             .expect("an ordinary override cannot replace an inherited value");
 
-        assert_eq!(rejected, "PATH");
+        assert_eq!(rejected, inherited_name);
     }
 
     #[test]

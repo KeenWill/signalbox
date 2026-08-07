@@ -831,6 +831,15 @@ CLI owns, reads, and writes. That path is likewise 1 through 4,096 UTF-8 bytes
 and NUL-free, and malformed static input fails startup. Its only optional field
 is `max_concurrent_invocations`, a TOML integer from 1 through 4,294,967,295;
 zero, a negative or larger integer, and every non-integer value are rejected.
+
+**Committed unimplemented functionality — `codex_home` delivery.** The parser
+validates the field grammar above and then rejects every such profile as an
+undelivered delivery, so no `codex_home` profile is usable in this build. No
+present configuration composition, runtime path, or adapter opens a credential
+home, records its identity, reserves its capacity, or starts a child through it.
+The rest of this section states the compatibility contract for its implementing
+child; no present surface provides it.
+
 The daemon supplies the directory as that process's credential home and never
 opens or interprets its entries. Static parsing records only the lexically
 normalized path. After the configuration-independent recovery scan completes but
