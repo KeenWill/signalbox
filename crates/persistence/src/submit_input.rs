@@ -1290,7 +1290,7 @@ async fn prepare_against_locked_state(
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     model_capabilities: Option<&ModelCapabilityCatalog>,
 ) -> Result<PreparedAgainstLockedState, SubmitInputRepositoryError> {
-    // Lock-mode constraint: this session-row lock must use the no-key-update
+    // Lock-mode constraint: these session-row locks must use the no-key-update
     // mode, not PostgreSQL's strongest row-lock mode. Submit orders the session row before the
     // scheduler row and current-defaults pointer row, while a concurrent
     // defaults replacement holds the pointer row (its compare-and-set) when its
@@ -1300,11 +1300,40 @@ async fn prepare_against_locked_state(
     // cycle into a deadlock (40P01); `FOR NO KEY UPDATE` does not conflict
     // with referential-integrity `KEY SHARE` locks while remaining
     // self-exclusive, so per-session position assignment stays serialized.
-    let session_exists = sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SESSION)
-        .bind(session_id_to_uuid(command.session()))
+    // A delegated child can terminalize while processing input. Such a
+    // terminalization later locks the parent endpoint, so delegated input must
+    // join peer-message ordering before it acquires the child scheduler.
+    let parent = sqlx::query_scalar::<_, Uuid>(
+        "SELECT parent_session_id
+           FROM session_delegation
+          WHERE child_session_id = $1",
+    )
+    .bind(session_id_to_uuid(command.session()))
+    .fetch_optional(&mut *connection)
+    .await?
+    .map(session_id_from_uuid);
+    let (first, second) = parent
+        .map(|parent| crate::lock_inventory::ordered_session_pair(command.session(), parent))
+        .unwrap_or((command.session(), command.session()));
+    let first_exists = sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SESSION)
+        .bind(session_id_to_uuid(first))
         .fetch_optional(&mut *connection)
         .await?
         .is_some();
+    let second_exists = if second == first {
+        first_exists
+    } else {
+        sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SESSION)
+            .bind(session_id_to_uuid(second))
+            .fetch_optional(&mut *connection)
+            .await?
+            .is_some()
+    };
+    let session_exists = if command.session() == first {
+        first_exists
+    } else {
+        second_exists
+    };
     if !session_exists {
         return Ok(PreparedAgainstLockedState {
             prepared: command.prepare_session_not_found(),

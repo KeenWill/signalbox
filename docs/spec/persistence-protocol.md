@@ -38,10 +38,10 @@ head, and creation transaction were verified through PR #415
 scopes, delegated transcript origins, foreground-result closure, pre-outbox
 cascade locks, typed delegation wake origins, and exact delegation update and
 wake obligations were verified through this PR
-(`agent/delegation-persistence-schema`); the delegated await, peer-message,
-terminal-observation locks, and wait-replay satellites were verified through PR
-#461 (`agent/delegation-runtime-persistence-v2`), and the broader child-
-terminal endpoint locks were verified through PR #462
+(`agent/delegation-persistence-schema`); the delegated child-input, await,
+peer-message, and terminal-observation locks plus wait/message replay satellites
+were verified through PR #461 (`agent/delegation-runtime-persistence-v2`), and
+the broader child-terminal endpoint locks were verified through PR #462
 (`agent/delegation-runtime-daemon-v2`); the model-settings command fields,
 immutable evidence, snapshot projection, and typed outbox records were verified
 through this PR (`agent/model-settings-persistence`); the defaults-replacement
@@ -671,13 +671,20 @@ Locks per transaction, in acquisition order:
   This session-before-scheduler prefix matches input transitions that can race
   with await registration.
 
+- **Input submitted to a delegated child**: after a nonlocking immutable
+  relationship read, submission locks both endpoint session rows
+  `FOR NO KEY UPDATE` in ascending session-identity order, then the child's
+  `session_scheduler` row `FOR UPDATE`. Nondelegated input retains its single-
+  session prefix. The endpoint prefix precedes the scheduler because processing
+  the input can terminalize the delegated turn and publish its parent result.
+
 - **Delegated peer-message transactions**: after a nonlocking peer-existence
   read, message recording locks both endpoint session rows `FOR NO KEY UPDATE`
   in ascending session-identity order, then both endpoint `session_scheduler`
   rows `FOR UPDATE` in that same order, and only then the exact
   `session_delegation` row `FOR UPDATE`. An absent peer instead locks the
   issuing session and scheduler before returning the typed rejection. This
-  common endpoint order is acyclic with simultaneous input and opposite-
+  common endpoint order is acyclic with delegated-child input and opposite-
   direction message transactions. Child terminalization uses the same canonical
   endpoint-session prefix before taking the child scheduler, so message,
   completion, and input submission never hold those row classes in reverse
