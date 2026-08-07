@@ -80,7 +80,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from check_docs_consistency import mask_block_content, mask_inline_code
+from check_docs_consistency import (
+    REFERENCE_DEFINITION,
+    is_escaped,
+    mask_block_content,
+    mask_inline_code,
+    mask_range,
+    parse_inline_link_at,
+)
 from generate_invariants import has_non_authoritative_planning_banner
 
 INVARIANTS = Path("docs/invariants.md")
@@ -107,13 +114,12 @@ SCENARIO_HEADING = re.compile(r"^##\s+(S[0-9]+)\b", re.MULTILINE)
 # skipped, never the words between them, so "51 and 3 invariants" still reads
 # as two separate tokens rather than one span.
 #
-# A complete link around either token is markup as well: "There are
-# [51](invariants.md) invariants" links the number, so the gap has to cross the
-# entire destination rather than a lone bracket. Inline and reference forms
-# both. Each alternative starts with a two-character literal and its body
-# excludes the closing delimiter and newlines, so the repetition is anchored
-# and cannot run away across a document.
-MARKUP_CONSTRUCT = re.compile(r"\]\([^()\s]*\)|\]\[[^\]\n]*\]|[*_~`\[\]]")
+# A link around either token is markup as well: "There are
+# [51](invariants.md) invariants" links the number. Inline destinations are
+# already blanked by `mask_link_metadata`, so only the reference form needs
+# spelling out here; its body excludes the closing delimiter and newlines, so
+# the repetition is anchored and cannot run away across a document.
+MARKUP_CONSTRUCT = re.compile(r"\]\[[^\]\n]*\]|[*_~`\[\]]")
 MARKUP = rf"(?:{MARKUP_CONSTRUCT.pattern})*"
 WRAPPED_GAP = rf"(?:{MARKUP}(?:[ \t]+|[ \t]*\r?\n[ \t]*(?:>[ \t]*)*){MARKUP})"
 
@@ -152,11 +158,12 @@ NUMBER_BEFORE_NOUN = re.compile(
 )
 # The noun stated as an explicit count: "invariant count: 50", "scenario
 # count is 37". The connector before the digits is optional so bare
-# "invariant count 50" still matches. `count` itself may carry markup —
-# "scenario **count**: 9" puts the closing `**` between the keyword and the
-# colon, where no whitespace follows to let the gap absorb it.
+# "invariant count 50" still matches. Either word may carry markup —
+# "scenario **count**: 9" and "count of **scenarios**: 9" both put a closing
+# delimiter directly before the punctuation, where no whitespace follows for
+# the gap to absorb it.
 NOUN_COUNT_PHRASE = re.compile(
-    rf"\b(?P<noun>invariant|scenario)s?{WRAPPED_GAP}count{MARKUP}{WRAPPED_GAP}?"
+    rf"\b(?P<noun>invariant|scenario)s?{MARKUP}{WRAPPED_GAP}count{MARKUP}{WRAPPED_GAP}?"
     rf"(?:is|of|:|=)?{WRAPPED_GAP}?(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
     re.IGNORECASE,
 )
@@ -165,7 +172,7 @@ NOUN_COUNT_PHRASE = re.compile(
 # noun follows `count` rather than leading it, and the number is too far from
 # the noun for `NUMBER_BEFORE_NOUN` to bridge.
 COUNT_OF_NOUN_PHRASE = re.compile(
-    rf"\bcount{MARKUP}{WRAPPED_GAP}of{WRAPPED_GAP}(?P<noun>invariant|scenario)s?"
+    rf"\bcount{MARKUP}{WRAPPED_GAP}of{WRAPPED_GAP}(?P<noun>invariant|scenario)s?{MARKUP}"
     rf"{WRAPPED_GAP}?(?:is|of|:|=)?{WRAPPED_GAP}?(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
     re.IGNORECASE,
 )
@@ -200,6 +207,24 @@ def tracked_markdown_files() -> list[Path]:
     return [Path(label) for label in labels]
 
 
+def distinct_identifiers(found: list[str], source: Path, kind: str) -> set[str]:
+    """Return the identifiers, refusing to define a catalog size by collapsing.
+
+    `set()` on its own turns a duplicated identifier into a silent no-op: a
+    scenario section copied without renaming its heading would leave the
+    catalog one section larger while the reported total stayed put, so every
+    accurate stated count would still pass and the ambiguity would never
+    surface. A duplicate is a defect in the catalog, and the size is not
+    answerable until it is fixed.
+    """
+    duplicates = sorted({tag for tag in found if found.count(tag) > 1})
+    if duplicates:
+        raise CountCheckError(
+            f"{source} declares {kind} more than once: {', '.join(duplicates)}"
+        )
+    return set(found)
+
+
 def actual_invariant_count() -> int:
     """Return the number of distinct rows in the generated invariant index.
 
@@ -210,7 +235,7 @@ def actual_invariant_count() -> int:
     accurate stated count in the tree — the loudest possible failure mode.
     """
     text = mask_block_content(INVARIANTS.read_text(encoding="utf-8"))
-    tags = set(INVARIANT_ROW.findall(text))
+    tags = distinct_identifiers(INVARIANT_ROW.findall(text), INVARIANTS, "an invariant")
     if not tags:
         raise CountCheckError(f"{INVARIANTS} has no parseable INV-NNN rows")
     return len(tags)
@@ -223,12 +248,55 @@ def actual_scenario_count() -> int:
     `actual_invariant_count`: a `## S99 — Example` inside a fence or an HTML
     comment renders as code or not at all, names no scenario, and must not
     enlarge the catalog it is only illustrating.
+
+    A repeated identifier is an error rather than a duplicate to collapse; see
+    `distinct_identifiers`.
     """
     text = mask_block_content(SCENARIOS.read_text(encoding="utf-8"))
-    tags = set(SCENARIO_HEADING.findall(text))
+    tags = distinct_identifiers(SCENARIO_HEADING.findall(text), SCENARIOS, "a scenario")
     if not tags:
         raise CountCheckError(f"{SCENARIOS} has no parseable scenario headings")
     return len(tags)
+
+
+def mask_link_metadata(text: str) -> str:
+    r"""Blank what a link contributes to source but not to rendered prose.
+
+    A destination and title are not read by anyone reading the document, so a
+    catalog path or a title like `"5 invariants"` must not be scanned as a
+    claim — and a reference definition line renders as nothing at all. The
+    label is kept, because it *is* rendered: "There are [51](catalog.md)
+    invariants" states a total, and blanking the whole construct would delete
+    the number the sentence depends on.
+
+    Masking the destination rather than teaching the gap to cross it is also
+    what keeps this file out of the link-grammar business. `parse_inline_link_at`
+    already handles balanced parentheses, angle-bracketed destinations, and
+    titles; duplicating a subset of that in a regex is how the earlier
+    `[^()\s]*` destination came to reject `catalog_(current).md`.
+
+    Offsets and line breaks are preserved, so reported line numbers still hold.
+    """
+    buffer = list(text)
+    index = 0
+    while index < len(text):
+        if text[index] != "[" or is_escaped(text, index):
+            index += 1
+            continue
+        parsed = parse_inline_link_at(text, index)
+        if parsed is None:
+            index += 1
+            continue
+        link, closing = parsed
+        # From the label's closing bracket through the destination's `)`.
+        mask_range(buffer, index + 1 + len(link.label), closing + 1)
+        index = closing + 1
+    masked = "".join(buffer)
+    # Reference definitions render as nothing, so the whole declaration goes.
+    buffer = list(masked)
+    for match in REFERENCE_DEFINITION.finditer(masked):
+        mask_range(buffer, match.start(), match.end())
+    return "".join(buffer)
 
 
 def line_number_at(text: str, offset: int) -> int:
@@ -276,7 +344,7 @@ def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
     raw = path.read_text(encoding="utf-8", errors="replace")
     if has_non_authoritative_planning_banner(raw):
         return []
-    text = mask_inline_code(mask_block_content(raw))
+    text = mask_link_metadata(mask_inline_code(mask_block_content(raw)))
     found: list[tuple[int, str, int, str]] = []
     # Every pattern names its two captures `noun` and `number`, so the three
     # can be read the same way regardless of which order the words fall in.

@@ -486,7 +486,7 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
         )
 
     def test_a_stale_count_with_an_underscore_emphasised_number_fails(self) -> None:
-        """`_` is Markdown's other emphasis delimiter and a `\w` character, so
+        r"""`_` is Markdown's other emphasis delimiter and a `\w` character, so
         it hid a total that `**` did not."""
         self.assert_stale_invariant_count_caught(
             f"There are _{STALE_INVARIANT_COUNT}_ invariants."
@@ -602,6 +602,77 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
         self.assert_stale_scenario_count_caught(
             f"**count** of scenarios: {STALE_SCENARIO_COUNT}"
         )
+
+    def test_a_stale_count_with_a_parenthesised_destination_fails(self) -> None:
+        """A destination may contain balanced parentheses; the earlier
+        hand-rolled `[^()\\s]*` rejected one and let the total pass."""
+        self.assert_stale_invariant_count_caught(
+            f"There are [{STALE_INVARIANT_COUNT}](catalog_(current).md) invariants."
+        )
+
+    def test_a_stale_count_with_a_titled_destination_fails(self) -> None:
+        self.assert_stale_invariant_count_caught(
+            f'There are [{STALE_INVARIANT_COUNT}](catalog.md "current") invariants.'
+        )
+
+    def test_a_count_in_a_link_title_is_not_prose(self) -> None:
+        """A title is not rendered, so it states nothing."""
+        self.assert_no_count_read_from(
+            f'See [Catalog](index.md "{STALE_INVARIANT_COUNT} invariants").'
+        )
+
+    def test_a_count_in_a_reference_definition_is_not_prose(self) -> None:
+        self.assert_no_count_read_from(
+            f'[catalog]: index.md "{STALE_INVARIANT_COUNT} invariants"'
+        )
+
+    def test_a_count_in_a_destination_is_not_prose(self) -> None:
+        self.assert_no_count_read_from(
+            f"See [Catalog](a-{STALE_INVARIANT_COUNT}-invariants.md)."
+        )
+
+    def test_a_stale_count_of_a_formatted_noun_fails(self) -> None:
+        """`count of **scenarios**: N` closes markup directly before the
+        colon, where no whitespace follows for the gap to absorb it."""
+        self.assert_stale_scenario_count_caught(
+            f"count of **scenarios**: {STALE_SCENARIO_COUNT}"
+        )
+
+    def test_a_stale_count_of_a_linked_noun_fails(self) -> None:
+        self.assert_stale_scenario_count_caught(
+            f"count of [scenarios](catalog.md): {STALE_SCENARIO_COUNT}"
+        )
+
+    def test_a_duplicate_scenario_identifier_fails_loudly(self) -> None:
+        """Collapsing a repeated heading into a set would leave the catalog a
+        section larger while the reported total stayed put, so every accurate
+        stated count would still pass and the ambiguity would never surface."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                scenarios_text=SCENARIOS_TEXT
+                + f"## {SCENARIO_TAGS[0]} — Accidentally copied\n\nBody.\n",
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("more than once", result.stdout)
+        self.assertIn(SCENARIO_TAGS[0], result.stdout)
+
+    def test_a_duplicate_invariant_identifier_fails_loudly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                invariants_text=INVARIANTS_TEXT
+                + f"| {INVARIANT_TAGS[0]} | tests in [`src/dup.rs`](../src/dup.rs) |\n",
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("more than once", result.stdout)
+        self.assertIn(INVARIANT_TAGS[0], result.stdout)
 
     def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
         """A tracked path can vanish between `git ls-files` and the read.
