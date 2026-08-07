@@ -9,20 +9,18 @@
 //! What it proves is protocol compatibility, which is what a public API
 //! change actually breaks: `POST /v1/chat/completions` still accepts the
 //! request the adapter builds, and its response still decodes through the
-//! adapter's own types. Three outcomes pass, and they do not carry the same
-//! guarantee:
+//! adapter's own types. Three outcomes pass, each carrying reported usage:
 //!
-//! - a completed outcome, with usage reported;
-//! - the adapter's downgraded-refusal `ProviderError` shape, also with usage
-//!   (this transport exposes no independent proof that a response arrived
-//!   only after the complete request was sent, so `OpenAiRuntime::execute`
-//!   never returns a raw `Refused` — see `require_decoded_response` below);
-//! - the exchange that stopped at this smoke's output ceiling, which reports
-//!   *no* usage at all, because the decoder ends the stream on the finish
-//!   chunk and the trailing usage-only chunk never arrives. It is accepted
-//!   because answer length is not this smoke's business; see
-//!   `assert_well_formed_response`, which applies the usage bar only to the
-//!   outcomes that can meet it.
+//! - a completed outcome;
+//! - the adapter's downgraded-refusal `ProviderError` shape (this transport
+//!   exposes no independent proof that a response arrived only after the
+//!   complete request was sent, so `OpenAiRuntime::execute` never returns a
+//!   raw `Refused` — see `require_decoded_response` below);
+//! - the exchange that stopped at this smoke's output ceiling, accepted
+//!   because answer length is not this smoke's business. The decoder defers
+//!   that verdict to `[DONE]` and refuses it outright if the requested final
+//!   usage chunk never arrived, so this shape is held to the same usage bar
+//!   as the other two.
 //!
 //! It deliberately asserts nothing about answer quality.
 //!
@@ -219,12 +217,6 @@ fn require_prepared<C, P>(outcome: PreparationOutcome<C, P>) -> P {
 struct DecodedResponse {
     exchange: ExchangeFacts,
     usage: TokenUsage,
-    /// Whether the decoder reached this outcome only after consuming the
-    /// provider's final usage chunk, and therefore carries usage worth
-    /// asserting. False for the output-ceiling shape: the unrecognized-finish
-    /// branch ends the stream the moment it sees `length`, and the usage-only
-    /// chunk is valid only *after* a finish, so that record never arrives.
-    usage_is_final: bool,
 }
 
 /// Accepts a completion, or the adapter's own decoded-refusal shape, as
@@ -282,10 +274,10 @@ struct DecodedResponse {
 /// decoder ends the stream as `BoundaryLoss` carrying the token verbatim.
 /// That outcome is a truthful report about answer length, not a protocol
 /// break: the request was accepted, the SSE body framed and decoded, and the
-/// model identity reported. Usage is *not* among what it proves — the decoder
-/// ends the stream on the finish chunk, before the trailing usage-only chunk —
-/// so this arm marks the result `usage_is_final: false` and
-/// `assert_well_formed_response` holds it only to the success status. Failing a
+/// model identity and usage reported. It carries usage like the other two
+/// accepted shapes, because the decoder defers this verdict to `[DONE]` and
+/// refuses it outright if the requested final usage chunk never arrived, so
+/// `assert_well_formed_response` holds all three to the same bar. Failing a
 /// required, twice-daily paid check on it would be asserting something about
 /// answer quality, which the owning specification says this smoke does not do.
 /// The arm is keyed to that exact token from a 200 exchange that also reported
@@ -302,7 +294,6 @@ fn require_decoded_response(
             DecodedResponse {
                 exchange: completed.exchange,
                 usage: completed.usage,
-                usage_is_final: true,
             }
         }
         TerminalEvidence::ProviderError(error)
@@ -314,7 +305,6 @@ fn require_decoded_response(
             DecodedResponse {
                 exchange: error.exchange,
                 usage: error.usage,
-                usage_is_final: true,
             }
         }
         TerminalEvidence::BoundaryLoss(loss)
@@ -326,7 +316,6 @@ fn require_decoded_response(
             DecodedResponse {
                 exchange: loss.exchange,
                 usage: loss.usage,
-                usage_is_final: false,
             }
         }
         // Adapter-produced evidence is already credential-shape redacted, so
@@ -499,9 +488,6 @@ fn assert_well_formed_response(decoded: &DecodedResponse) {
         Some(200),
         "the adapter no longer records the documented success status"
     );
-    if !decoded.usage_is_final {
-        return;
-    }
     assert!(
         decoded.usage.input_tokens.is_some_and(|tokens| tokens > 0),
         "the Chat Completions API no longer reports input usage the adapter can decode"
@@ -823,9 +809,9 @@ mod require_decoded_response_tests {
     /// unrecognized-finish violation, carrying the token verbatim and the
     /// model identity the stream had already reported.
     ///
-    /// Usage is `unreported` because that is what the decoder can actually
-    /// retain here: it ends the stream on the finish chunk, before the
-    /// trailing usage-only chunk this smoke's request asks for.
+    /// Usage is present: deferring the verdict to `[DONE]` means the decoder
+    /// consumes the trailing usage chunk first, and it now refuses the
+    /// deferred verdict outright if that chunk never arrived.
     fn stopped_at_ceiling() -> BoundaryLossEvidence {
         BoundaryLossEvidence {
             cause: LossCause::StreamProtocolViolation {
@@ -836,7 +822,7 @@ mod require_decoded_response_tests {
             finish_reported: Some(FinishReason::Unrecognized {
                 provider_token: "length".to_string(),
             }),
-            usage: TokenUsage::unreported(),
+            usage: usage(),
         }
     }
 
@@ -851,10 +837,7 @@ mod require_decoded_response_tests {
             require_decoded_response(TerminalEvidence::BoundaryLoss(expected.clone()), &[]);
 
         assert_eq!(decoded.exchange, expected.exchange);
-        assert!(
-            !decoded.usage_is_final,
-            "the ceiling shape never consumed the trailing usage chunk"
-        );
+        assert_eq!(decoded.usage, expected.usage);
     }
 
     #[test]
@@ -971,37 +954,12 @@ mod assert_well_formed_response_tests {
                 output_tokens: Some(1),
                 ..TokenUsage::default()
             },
-            usage_is_final: true,
         }
     }
 
     #[test]
     fn positive_usage_passes() {
         assert_well_formed_response(&well_formed());
-    }
-
-    #[test]
-    fn absent_usage_passes_when_the_outcome_never_carried_it() {
-        // The output-ceiling shape: the decoder ended the stream before the
-        // trailing usage chunk, so usage is unreported and must not be held
-        // to a bar the outcome cannot meet. The status check still applies.
-        let mut decoded = well_formed();
-        decoded.usage_is_final = false;
-        decoded.usage = TokenUsage::unreported();
-
-        assert_well_formed_response(&decoded);
-    }
-
-    #[test]
-    #[should_panic(expected = "documented success status")]
-    fn a_non_200_status_still_panics_without_final_usage() {
-        // Relaxing the usage bar must not relax the status bar with it.
-        let mut decoded = well_formed();
-        decoded.usage_is_final = false;
-        decoded.usage = TokenUsage::unreported();
-        decoded.exchange.http_status = Some(500);
-
-        assert_well_formed_response(&decoded);
     }
 
     #[test]

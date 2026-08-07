@@ -531,12 +531,12 @@ loss cause, still fails, as does a `length` finish from a stream that never
 reported a model identity: that branch returns before the decoder's own
 end-of-stream validations, so the reported identity is checked here instead.
 
-That shape alone carries no usage, and the smoke does not demand any from it:
-the trailing usage-only chunk is valid only after a finish, and the decoder ends
-the stream on the finish chunk itself, so the record never arrives. The usage
-requirements above therefore apply to the two decoded shapes, which reach the
-caller only after that chunk is consumed; the ceiling shape is held to the
-success status and its own finish token.
+That shape carries usage like the other two, and is held to the same
+requirements above. The trailing usage-only chunk is valid only after a finish,
+and the decoder defers the unrecognized-finish verdict to `[DONE]` precisely so
+that chunk is consumed first; a stream that never sends it fails the
+`include_usage` contract and reports that missing chunk instead of an
+output-bound stop.
 
 Accepting that shape is what makes the OpenAI smoke's reasoning-capable target
 safe as a required check. Hidden reasoning tokens bill against the same ceiling

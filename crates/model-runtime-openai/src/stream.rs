@@ -594,6 +594,14 @@ impl StreamDecoder {
             // Nothing between the finish and `[DONE]` superseded it, so the
             // deferred verdict stands. Reported here rather than at the finish
             // chunk so a trailing error record gets its chance first.
+            //
+            // The requested final usage chunk is still required: deferring to
+            // `[DONE]` means it normally arrives, so a stream that omits it is
+            // failing the `include_usage` contract and must not pass as an
+            // ordinary stop at an output bound.
+            if !self.final_usage_reported {
+                return self.violation("stream terminated without the requested final usage chunk");
+            }
             return self.violation(detail);
         }
         if !self.saw_assistant_role {
@@ -1239,6 +1247,26 @@ mod tests {
 
         assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
         assert_eq!(error.native.message, Some(expected_message.to_string()));
+    }
+
+    #[test]
+    fn a_length_finish_without_final_usage_is_protocol_loss() {
+        // Deferring to `[DONE]` means the usage chunk normally arrives, so a
+        // stream that omits it is failing the `include_usage` contract rather
+        // than stopping cleanly at an output bound.
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            b"data: [DONE]\n\n",
+        ]);
+
+        let loss = expect_boundary_loss(terminal);
+
+        assert_eq!(
+            loss.cause,
+            protocol_violation("stream terminated without the requested final usage chunk")
+        );
     }
 
     #[test]
