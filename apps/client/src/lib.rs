@@ -289,7 +289,7 @@ fn delegation_rejection_matches(
         RejectionDetail::DelegationSpawnConflict { tool_request_id } => {
             expected.operation.is_spawn() && tool_request_id == expected.tool_request
         }
-        RejectionDetail::DelegatedChildIdentityCollision { .. } => expected.operation.is_spawn(),
+        RejectionDetail::DelegatedChildIdentityCollision { .. } => false,
         RejectionDetail::DelegationRelationNotFound {
             session_id,
             peer_session_id,
@@ -304,9 +304,7 @@ fn delegation_rejection_matches(
         RejectionDetail::DelegationMessageConflict { tool_request_id } => {
             expected.operation.is_message() && tool_request_id == expected.tool_request
         }
-        RejectionDetail::DelegationMessageIdentityCollision { .. } => {
-            expected.operation.is_message()
-        }
+        RejectionDetail::DelegationMessageIdentityCollision { .. } => false,
         RejectionDetail::DelegationEventOrdinalExhausted { .. } => false,
         RejectionDetail::DelegationDeliverySequenceExhausted {
             recipient_session_id,
@@ -5394,6 +5392,18 @@ mod tests {
         ));
     }
 
+    /// INV-033: a child identity collision names only daemon-minted state and
+    /// cannot authenticate which spawn mutation produced the rejection.
+    #[test]
+    fn inv033_spawn_rejects_uncorrelated_child_identity_collision() {
+        let expected = delegation_rejection_expectation(DelegationRejectionOperation::Spawn);
+        let uncorrelated = RejectionDetail::DelegatedChildIdentityCollision {
+            child_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+        };
+
+        assert!(!delegation_rejection_matches(Some(uncorrelated), expected));
+    }
+
     /// INV-033: common delegation rejection evidence repeats the exact
     /// request-supplied session, turn, and logical request identities.
     #[test]
@@ -5576,6 +5586,20 @@ mod tests {
         let uncorrelated = RejectionDetail::DelegationEventOrdinalExhausted {
             spawning_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
             last: CanonicalU64::new(u64::MAX),
+        };
+
+        assert!(!delegation_rejection_matches(Some(uncorrelated), expected));
+    }
+
+    /// INV-033: a message identity collision names only daemon-minted state
+    /// and cannot authenticate which message mutation produced the rejection.
+    #[test]
+    fn inv033_message_rejects_uncorrelated_identity_collision() {
+        let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let expected =
+            delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
+        let uncorrelated = RejectionDetail::DelegationMessageIdentityCollision {
+            message_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
         };
 
         assert!(!delegation_rejection_matches(Some(uncorrelated), expected));
