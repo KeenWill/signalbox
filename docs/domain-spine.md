@@ -2894,6 +2894,27 @@ impl AcceptedInputTurnSchedulingRecord {
     // origin_delivery(), origin_configuration(), configuration_provenance(), state()
 }
 
+pub enum DelegatedTurnSchedulingState {
+    Active,
+    RuntimeTerminal,
+    TerminalCompleted,
+    TerminalRefused,
+    TerminalFailed,
+    TerminalCancelled,
+    TerminalReconciliationRequired,
+}
+
+pub struct DelegatedTurnSchedulingFact { /* private */ }
+impl DelegatedTurnSchedulingFact {
+    pub const fn new(
+        turn: TurnId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        selected: DirectModelSelection,
+        state: DelegatedTurnSchedulingState,
+    ) -> Self;
+    // accessors: turn(), defaults_version(), selected(), state()
+}
+
 pub struct AcceptedInputSchedulingReconstitutionInput { /* private */ }
 impl AcceptedInputSchedulingReconstitutionInput {
     pub fn new(
@@ -2928,7 +2949,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
     ) -> Self;
     pub fn with_delegated_turn_facts(
         self,
-        delegated_turns: Vec<TurnId>,
+        delegated_turns: Vec<DelegatedTurnSchedulingFact>,
     ) -> Self;
     pub fn with_steering_continuation_rounds(
         self,
@@ -9721,7 +9742,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: queue_order                                | 5 (+1 free fn)        |
 | domain: repo_watch                                 | 49                    |
 | domain: turn_lifecycle                             | 10                    |
-| domain: turn_eligibility                           | 35                    |
+| domain: turn_eligibility                           | 37                    |
 | domain: turn_attempt                               | 13                    |
 | domain: model_call                                 | 12                    |
 | domain: context_compaction                         | 12                    |
@@ -9740,7 +9761,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 63                    |
-| **signalbox-domain total**                         | **749 (+10 free fn)** |
+| **signalbox-domain total**                         | **751 (+10 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

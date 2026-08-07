@@ -914,7 +914,13 @@ impl PostgresModelCallRepository {
                         source_frontier,
                     )
                     .await?;
-                    if transition_history_matches && closure_matches {
+                    let delegated_result_matches = delegated_capability_failure_result_matches(
+                        &mut transaction,
+                        session,
+                        turn_id_from_uuid(turn),
+                    )
+                    .await?;
+                    if transition_history_matches && closure_matches && delegated_result_matches {
                         Ok(RetainedCapabilityFailureStatus::AlreadyCommitted)
                     } else {
                         Err(ModelCallRepositoryError::InvalidTransition(
@@ -1234,6 +1240,90 @@ impl PostgresModelCallRepository {
         .await;
         finish_commit(transaction, result).await
     }
+}
+
+async fn delegated_capability_failure_result_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<bool, ModelCallRepositoryError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "WITH delegated AS (
+            SELECT task.spawning_tool_request_id,
+                   task.child_session_id,
+                   task.turn_id,
+                   relation.parent_session_id
+              FROM session_delegation_initial_task AS task
+              JOIN session_delegation AS relation
+                ON relation.spawning_tool_request_id = task.spawning_tool_request_id
+               AND relation.child_session_id = task.child_session_id
+             WHERE task.child_session_id = $1
+               AND task.turn_id = $2
+        )
+        SELECT NOT EXISTS (
+                    SELECT 1
+                      FROM session_delegation_initial_task
+                     WHERE child_session_id = $1 AND turn_id = $2
+               )
+            OR (
+                SELECT count(*) = 1
+                  FROM delegated
+                  JOIN session_child_result AS result
+                    ON result.spawning_tool_request_id =
+                       delegated.spawning_tool_request_id
+                   AND result.event_kind = 'outcome_recorded'
+                   AND result.outcome_kind = 'child_failed'
+                   AND result.content_text IS NULL
+                  JOIN session_delegation_event AS outcome
+                    ON outcome.spawning_tool_request_id =
+                       result.spawning_tool_request_id
+                   AND outcome.event_ordinal = result.event_ordinal
+                   AND outcome.event_kind = result.event_kind
+                   AND outcome.outcome_kind = result.outcome_kind
+                   AND outcome.reason_kind = 'child_execution_failed'
+                   AND outcome.provenance_kind = 'child_turn'
+                   AND outcome.provenance_session_id = delegated.child_session_id
+                   AND outcome.provenance_turn_id = delegated.turn_id
+                  JOIN delegation_update_outbox_event AS parent_update
+                    ON parent_update.result_spawning_request_id =
+                       delegated.spawning_tool_request_id
+                   AND parent_update.session_id = delegated.parent_session_id
+                   AND parent_update.update_kind = 'child_result'
+                   AND parent_update.spawning_tool_request_id =
+                       delegated.spawning_tool_request_id
+                   AND parent_update.child_session_id = delegated.child_session_id
+                   AND parent_update.outcome_kind = 'child_failed'
+                   AND parent_update.reason_kind = 'child_execution_failed'
+                   AND parent_update.provenance_kind = 'child_turn'
+                   AND parent_update.provenance_session_id =
+                       delegated.child_session_id
+                   AND parent_update.provenance_turn_id = delegated.turn_id
+                   AND parent_update.content_text IS NULL
+                  JOIN delegation_outbox_event AS update_header
+                    ON update_header.event_sequence = parent_update.event_sequence
+                   AND update_header.event_kind = parent_update.event_kind
+                   AND update_header.storage_version = parent_update.storage_version
+                   AND update_header.session_id = parent_update.session_id
+                  JOIN delegation_wake_outbox_event AS parent_wake
+                    ON parent_wake.result_spawning_request_id =
+                       delegated.spawning_tool_request_id
+                   AND parent_wake.session_id = delegated.parent_session_id
+                   AND parent_wake.spawning_tool_request_id =
+                       delegated.spawning_tool_request_id
+                   AND parent_wake.subject_kind = 'result'
+                   AND parent_wake.awaiting_tool_request_id IS NULL
+                   AND parent_wake.message_id IS NULL
+                  JOIN delegation_outbox_event AS wake_header
+                    ON wake_header.event_sequence = parent_wake.event_sequence
+                   AND wake_header.event_kind = parent_wake.event_kind
+                   AND wake_header.storage_version = parent_wake.storage_version
+                   AND wake_header.session_id = parent_wake.session_id
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_one(connection)
+    .await?)
 }
 
 /// Prepares one continuation call inside a caller-owned tool-result

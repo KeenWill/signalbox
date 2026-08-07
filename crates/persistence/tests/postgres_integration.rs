@@ -20084,6 +20084,7 @@ async fn attach_delegation_relationship_fixture(
 struct DelegatedToolCrashFixture {
     parent: SessionId,
     child: SessionId,
+    turn: TurnId,
     spawning_request: ToolRequestId,
 }
 
@@ -20152,8 +20153,187 @@ async fn prepare_delegated_tool_crash_fixture(
     Ok(DelegatedToolCrashFixture {
         parent: fixture.parent,
         child: fixture.child,
+        turn: fixture.authorized.turn(),
         spawning_request: fixture.spawning_request,
     })
+}
+
+struct DelegatedCapabilityFailureFixture {
+    repository: PostgresModelCallRepository,
+    child: SessionId,
+    call: ModelCallId,
+    spawning_request: ToolRequestId,
+}
+
+async fn delegated_capability_failure_fixture(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<DelegatedCapabilityFailureFixture, Box<dyn Error>> {
+    let (_parent, child, _turn, spawning_request, selection) =
+        activate_delegated_result_fixture(pool, seed).await?;
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 20));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one delegated capability target forms a catalog");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 21));
+    let prepared = repository
+        .prepare_initial_call(
+            child,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 23)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 26)),
+                )
+            },
+        )
+        .await?;
+    assert_eq!(prepared, PrepareInitialModelCallOutcome::Checkpointed(call));
+    repository
+        .fail_prepared_call(
+            child,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 27)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 28)),
+            ),
+            |_| panic!("the delegated capability fixture has no steering"),
+        )
+        .await?;
+    Ok(DelegatedCapabilityFailureFixture {
+        repository,
+        child,
+        call,
+        spawning_request,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum DelegatedCapabilityResultDamage {
+    Result,
+    Update,
+    Wake,
+}
+
+async fn assert_delegated_capability_reread_rejects_damage(
+    seed: u128,
+    damage: DelegatedCapabilityResultDamage,
+) -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = delegated_capability_failure_fixture(&pool, seed).await?;
+    assert_eq!(
+        fixture
+            .repository
+            .reread_capability_failure(fixture.child, fixture.call)
+            .await?,
+        RetainedCapabilityFailureStatus::AlreadyCommitted
+    );
+    match damage {
+        DelegatedCapabilityResultDamage::Result => {
+            sqlx::query("ALTER TABLE session_child_result DISABLE TRIGGER ALL")
+                .execute(&pool)
+                .await?;
+            sqlx::query("DELETE FROM session_child_result WHERE spawning_tool_request_id = $1")
+                .bind(fixture.spawning_request.into_uuid())
+                .execute(&pool)
+                .await?;
+            sqlx::query("ALTER TABLE session_child_result ENABLE TRIGGER ALL")
+                .execute(&pool)
+                .await?;
+        }
+        DelegatedCapabilityResultDamage::Update => {
+            sqlx::query("ALTER TABLE delegation_update_outbox_event DISABLE TRIGGER ALL")
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "DELETE FROM delegation_update_outbox_event
+                  WHERE update_kind = 'child_result'
+                    AND result_spawning_request_id = $1",
+            )
+            .bind(fixture.spawning_request.into_uuid())
+            .execute(&pool)
+            .await?;
+            sqlx::query("ALTER TABLE delegation_update_outbox_event ENABLE TRIGGER ALL")
+                .execute(&pool)
+                .await?;
+        }
+        DelegatedCapabilityResultDamage::Wake => {
+            sqlx::query("ALTER TABLE delegation_wake_outbox_event DISABLE TRIGGER ALL")
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "DELETE FROM delegation_wake_outbox_event
+                  WHERE subject_kind = 'result'
+                    AND result_spawning_request_id = $1",
+            )
+            .bind(fixture.spawning_request.into_uuid())
+            .execute(&pool)
+            .await?;
+            sqlx::query("ALTER TABLE delegation_wake_outbox_event ENABLE TRIGGER ALL")
+                .execute(&pool)
+                .await?;
+        }
+    }
+    let error = fixture
+        .repository
+        .reread_capability_failure(fixture.child, fixture.call)
+        .await
+        .expect_err("damaged delegated delivery cannot authenticate a capability failure");
+    assert!(matches!(
+        error,
+        ModelCallRepositoryError::InvalidTransition(
+            "retained capability failure durable closure is incomplete"
+        )
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: ambiguous capability-failure reread
+/// authenticates the delegated child result itself.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_capability_reread_requires_delegated_result()
+-> Result<(), Box<dyn Error>> {
+    assert_delegated_capability_reread_rejects_damage(
+        0xe100,
+        DelegatedCapabilityResultDamage::Result,
+    )
+    .await
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: ambiguous capability-failure reread
+/// authenticates the exact delegated parent update satellite.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_capability_reread_requires_delegated_update()
+-> Result<(), Box<dyn Error>> {
+    assert_delegated_capability_reread_rejects_damage(
+        0xe200,
+        DelegatedCapabilityResultDamage::Update,
+    )
+    .await
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: ambiguous capability-failure reread
+/// authenticates the exact delegated parent wake satellite.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_capability_reread_requires_delegated_wake()
+-> Result<(), Box<dyn Error>> {
+    assert_delegated_capability_reread_rejects_damage(0xe300, DelegatedCapabilityResultDamage::Wake)
+        .await
 }
 
 fn delegated_tool_crash_scan_ids(seed: u128) -> FixedStartupScanIds {
@@ -20191,9 +20371,9 @@ async fn s17_inv010_inv032_delegated_tool_crash_publishes_failed_result()
         .await?;
     let evidence: (String, String, i64, i64) = sqlx::query_as(
         "SELECT result.outcome_kind, event.reason_kind,
-                (SELECT count(*) FROM delegation_update_outbox_event AS update
-                  WHERE update.result_spawning_request_id = $1
-                    AND update.session_id = $2),
+                (SELECT count(*) FROM delegation_update_outbox_event AS parent_update
+                  WHERE parent_update.result_spawning_request_id = $1
+                    AND parent_update.session_id = $2),
                 (SELECT count(*) FROM delegation_wake_outbox_event AS wake
                   WHERE wake.result_spawning_request_id = $1
                     AND wake.session_id = $2)
@@ -20215,6 +20395,50 @@ async fn s17_inv010_inv032_delegated_tool_crash_publishes_failed_result()
     assert_eq!(
         evidence,
         ("child_failed".into(), "child_execution_failed".into(), 1, 1)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-009 / INV-010: startup classifies an undecodable delegated active
+/// phase as durable corruption rather than retryable database failure.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv009_inv010_delegated_null_active_phase_fails_closed() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xe400;
+    let fixture = prepare_delegated_tool_crash_fixture(&pool, seed).await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = NULL
+          WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.child.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let mut ids = delegated_tool_crash_scan_ids(seed);
+    let error = PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.child,
+            delegated_tool_crash_failure_ids(seed),
+            &mut ids,
+        )
+        .await
+        .expect_err("a null delegated active phase is durable corruption");
+
+    assert_eq!(
+        error.operator_failure_class(),
+        OperatorFailureClass::FailClosedCorruption
     );
 
     pool.close().await;
@@ -20307,10 +20531,10 @@ async fn s17_inv032_delegated_completion_materializes_result_update_and_wake()
         "SELECT result.outcome_kind, result.content_text,
                 event.reason_kind, event.provenance_kind,
                 lifecycle.terminal_disposition_kind,
-                (SELECT count(*) FROM delegation_update_outbox_event AS update
-                  WHERE update.result_spawning_request_id = $1
-                    AND update.session_id = $2
-                    AND update.content_text = result.content_text),
+                (SELECT count(*) FROM delegation_update_outbox_event AS parent_update
+                  WHERE parent_update.result_spawning_request_id = $1
+                    AND parent_update.session_id = $2
+                    AND parent_update.content_text = result.content_text),
                 (SELECT count(*) FROM delegation_wake_outbox_event AS wake
                   WHERE wake.result_spawning_request_id = $1
                     AND wake.session_id = $2)
