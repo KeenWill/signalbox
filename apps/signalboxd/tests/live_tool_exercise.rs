@@ -627,11 +627,22 @@ fn completion_script(text: &str) -> Script {
     }))
 }
 
+/// Names every composed declaration whose permission default parks for a user.
+///
+/// Both confirming defaults belong here. `AlwaysConfirm` is the stricter of the
+/// two — human-only even under the dangerous session blanket — so an exact
+/// `Confirm` comparison omits precisely the declarations that most need the
+/// gate, and the denied-gate fixture would then be expected to skip them.
 fn confirm_tool_names(catalog: &impl ToolCatalog) -> Vec<String> {
     catalog
         .definitions()
         .iter()
-        .filter(|definition| definition.permission_default() == ToolPermissionDefault::Confirm)
+        .filter(|definition| {
+            matches!(
+                definition.permission_default(),
+                ToolPermissionDefault::Confirm | ToolPermissionDefault::AlwaysConfirm
+            )
+        })
         .map(|definition| definition.name().as_str().to_owned())
         .collect()
 }
