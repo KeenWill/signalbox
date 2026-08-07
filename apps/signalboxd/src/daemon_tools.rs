@@ -1716,12 +1716,23 @@ mod tests {
             return PathBuf::from("rustc");
         };
         let configured = Path::new(configured);
-        if configured.is_absolute() {
+        if configured.is_absolute() || is_bare_program_name(configured) {
             return configured.to_path_buf();
         }
         invocation_directory
             .map(|directory| directory.join(configured))
             .unwrap_or_else(|| PathBuf::from("rustc"))
+    }
+
+    /// Whether one configured command is a single program name.
+    ///
+    /// Cargo resolves a single-component override such as `rustc` or `sccache`
+    /// through `PATH`; it is not a relative filesystem path, so joining it to
+    /// the invocation directory names an executable that does not exist.
+    fn is_bare_program_name(configured: &Path) -> bool {
+        let mut components = configured.components();
+        matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none()
     }
 
     fn configure_compiler_wrapper(command: &mut Command, variable: &'static str) {
@@ -1744,7 +1755,7 @@ mod tests {
         invocation_directory: Option<&Path>,
     ) -> Option<PathBuf> {
         let configured = Path::new(configured);
-        if configured.is_absolute() {
+        if configured.is_absolute() || is_bare_program_name(configured) {
             return Some(configured.to_path_buf());
         }
         invocation_directory.map(|directory| directory.join(configured))
@@ -2394,6 +2405,39 @@ mod tests {
         assert_eq!(
             compiler_wrapper_command_for(OsStr::new("tooling/compiler-wrapper"), None),
             None
+        );
+    }
+
+    #[test]
+    fn bridge_rustc_command_preserves_a_bare_program_name_for_path_lookup() {
+        assert_eq!(
+            rustc_command_for(
+                Some(OsStr::new("rustc")),
+                Some(Path::new("synthetic-workspace"))
+            ),
+            PathBuf::from("rustc")
+        );
+    }
+
+    #[test]
+    fn bridge_compiler_wrapper_preserves_a_bare_program_name_for_path_lookup() {
+        assert_eq!(
+            compiler_wrapper_command_for(
+                OsStr::new("sccache"),
+                Some(Path::new("synthetic-workspace")),
+            ),
+            Some(PathBuf::from("sccache"))
+        );
+    }
+
+    #[test]
+    fn bridge_compiler_wrapper_keeps_resolving_an_explicit_current_directory_path() {
+        assert_eq!(
+            compiler_wrapper_command_for(
+                OsStr::new("./sccache"),
+                Some(Path::new("synthetic-workspace")),
+            ),
+            Some(PathBuf::from("synthetic-workspace/./sccache"))
         );
     }
 
