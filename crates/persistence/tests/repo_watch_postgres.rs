@@ -164,7 +164,7 @@ struct CommittedFixture {
     repository: RepositorySlug,
     store: PostgresRepoWatchStore,
     second_candidate: RepoWatchCursorCandidate,
-    events: Vec<signalbox_domain::RepoWatchEvent>,
+    events: Vec<RepoWatchEvent>,
     first_generation: RepoWatchCursorGeneration,
     second_generation: RepoWatchCursorGeneration,
 }
