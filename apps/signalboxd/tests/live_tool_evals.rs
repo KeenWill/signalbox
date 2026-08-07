@@ -1348,13 +1348,15 @@ struct CaseSnapshot {
     model_calls: i64,
 }
 
-#[derive(sqlx::FromRow)]
 struct RequestSnapshot {
+    #[expect(
+        dead_code,
+        reason = "the typed request identity records the proposal/result join in snapshots"
+    )]
     request_id: Uuid,
     producing_model_call_id: Uuid,
     name: String,
     arguments_text: String,
-    #[sqlx(skip)]
     attempt_succeeded: bool,
 }
 
@@ -1378,33 +1380,35 @@ impl CaseSnapshot {
             .state();
         let turn_disposition = SnapshotTurnDisposition::from_process_state(turn_state)?;
         let successful_requests = successful_tool_requests(transcript.entries());
-        let requests = sqlx::query_as::<_, RequestSnapshot>(
-            "SELECT request.request_id,
-                    request.producing_model_call_id,
-                    request.tool_name AS name,
-                    request.arguments_text
-               FROM tool_request AS request
-              WHERE request.session_id = $1 AND request.turn_id = $2
-              ORDER BY request.producing_model_call_id, request.request_ordinal",
-        )
-        .bind(session.into_uuid())
-        .bind(turn.into_uuid())
-        .fetch_all(pool)
-        .await?;
-        let requests = requests
-            .into_iter()
-            .map(|mut request| {
-                request.attempt_succeeded = successful_requests.contains(&request.request_id);
-                request
+        let requests = transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ProcessTranscriptEntry::AssistantToolUse {
+                    turn: request_turn,
+                    model_call,
+                    request,
+                    name,
+                    arguments,
+                    ..
+                } if *request_turn == turn => Some(RequestSnapshot {
+                    request_id: request.into_uuid(),
+                    producing_model_call_id: model_call.into_uuid(),
+                    name: name.clone(),
+                    arguments_text: arguments.clone(),
+                    attempt_succeeded: successful_requests.contains(&request.into_uuid()),
+                }),
+                _ => None,
             })
             .collect();
-        let model_calls = sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM model_call WHERE session_id = $1 AND turn_id = $2",
+        let model_calls = i64::try_from(
+            transcript
+                .model_call_usage()
+                .iter()
+                .filter(|usage| usage.turn() == turn)
+                .count(),
         )
-        .bind(session.into_uuid())
-        .bind(turn.into_uuid())
-        .fetch_one(pool)
-        .await?;
+        .map_err(|_| io::Error::other("the eval model-call count fits in i64"))?;
         Ok(Self {
             turn_disposition,
             requests,
