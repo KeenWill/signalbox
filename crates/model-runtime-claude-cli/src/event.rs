@@ -53,6 +53,7 @@ pub(crate) struct EventDecoder<C> {
     /// tool — is still recorded as opened. `proposal_indexes` cannot answer
     /// for those: the rejection returns before the insert.
     opened_tool_calls: bool,
+    current_event_examined: bool,
     proposal_indexes: HashMap<String, usize>,
     result_ids: HashSet<String>,
     emitted_tool_ids: HashSet<String>,
@@ -101,6 +102,7 @@ impl<C: Clone> EventDecoder<C> {
             native_message_id: None,
             content: Vec::new(),
             opened_tool_calls: false,
+            current_event_examined: false,
             proposal_indexes: HashMap::new(),
             result_ids: HashSet::new(),
             emitted_tool_ids: HashSet::new(),
@@ -140,6 +142,9 @@ impl<C: Clone> EventDecoder<C> {
         line: &[u8],
         sink: &mut RedactingSink<'_, C>,
     ) -> Result<(), DecodeFailure> {
+        // Each line is examined on its own merits; nothing carries over except
+        // `opened_tool_calls`, which is sticky by design.
+        self.current_event_examined = false;
         if self.terminal.is_some() {
             return Err(DecodeFailure::stream_protocol(
                 "Claude emitted an event after its terminal result",
@@ -157,6 +162,12 @@ impl<C: Clone> EventDecoder<C> {
         let event_type = value.get("type").and_then(Value::as_str).ok_or_else(|| {
             DecodeFailure::stream_protocol("event has no string `type` discriminator")
         })?;
+        if event_type != "assistant" {
+            // Only an `assistant` event carries content blocks, so for every
+            // other type the discriminator alone settles the tool question: no
+            // tool call can have opened in material of this shape.
+            self.current_event_examined = true;
+        }
         match event_type {
             "system" => self.system(value, sink),
             "assistant" => self.assistant(text, sink),
@@ -246,6 +257,19 @@ impl<C: Clone> EventDecoder<C> {
         self.require_initialized()?;
         let event: AssistantEvent = decode_text(text)?;
         let raw_event: AssistantRawEvent = decode_text(text)?;
+        // Read the tool fact off the decoded content before any check below can
+        // reject the event. The identity, nesting, message-id, and model checks
+        // all return before `assistant_block` runs, so a flag set during the
+        // block walk would miss a call this event plainly announced.
+        self.current_event_examined = true;
+        if event
+            .message
+            .content
+            .iter()
+            .any(|block| matches!(block, AssistantContent::ToolUse { .. }))
+        {
+            self.opened_tool_calls = true;
+        }
         if event.parent_tool_use_id.is_some()
             || event.message.role != "assistant"
             || event.message.id.is_empty()
@@ -767,14 +791,21 @@ impl<C: Clone> EventDecoder<C> {
 
     /// The tool fact for a loss raised by an event that never decoded.
     ///
-    /// Unlike [`Self::tool_calls_at_loss`], the negative case here is withheld:
-    /// the line that failed UTF-8, nesting, duplicate-member, JSON, or typed-event
-    /// decoding was never classified, so it could itself have been the `tool_use`
-    /// event, and "none opened" would claim a negative about material the adapter
-    /// never read. A tool call an earlier event already established still stands.
+    /// The dividing line is whether *this* event's content was examined, not
+    /// whether it was accepted. A line that failed UTF-8, nesting,
+    /// duplicate-member, JSON, or `type`-discriminator decoding was never
+    /// classified and could itself have been the `tool_use` event, so the
+    /// negative is withheld. An event whose content did decode — every
+    /// non-`assistant` type, whose discriminator alone precludes content
+    /// blocks, and an `assistant` event whose blocks were scanned before the
+    /// semantic checks ran — states the negative, because the adapter read the
+    /// material and no tool call was in it. A tool call an earlier event
+    /// already established outranks both.
     fn tool_calls_at_decode_failure(&self) -> ToolCallsAtLoss {
         if self.opened_tool_calls {
             ToolCallsAtLoss::Opened
+        } else if self.current_event_examined {
+            ToolCallsAtLoss::NoneOpened
         } else {
             ToolCallsAtLoss::Unobserved
         }

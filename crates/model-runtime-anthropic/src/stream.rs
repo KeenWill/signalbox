@@ -70,6 +70,7 @@ pub(crate) struct StreamDecoder {
     finish: Option<FinishReason>,
     declared_stop_sequences: Vec<String>,
     tool_call_ids: BTreeSet<String>,
+    discarded_unexamined_bytes: bool,
     open_blocks: BTreeMap<u32, BlockBuilder>,
     closed: BTreeMap<u32, AssistantPart>,
 }
@@ -90,6 +91,7 @@ impl StreamDecoder {
             finish: None,
             declared_stop_sequences,
             tool_call_ids: BTreeSet::new(),
+            discarded_unexamined_bytes: false,
             open_blocks: BTreeMap::new(),
             closed: BTreeMap::new(),
         }
@@ -132,21 +134,38 @@ impl StreamDecoder {
     /// fact rather than an absence; material that never decoded is answered by
     /// [`Self::tool_calls_at_decode_failure`] instead.
     fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
-        if self.tool_call_ids.is_empty() {
-            ToolCallsAtLoss::NoneOpened
-        } else {
+        if !self.tool_call_ids.is_empty() {
             ToolCallsAtLoss::Opened
+        } else if self.discarded_unexamined_bytes {
+            ToolCallsAtLoss::Unobserved
+        } else {
+            ToolCallsAtLoss::NoneOpened
         }
+    }
+
+    /// Records that the transport accepted bytes no record ever carried into
+    /// this decoder — a partial record held by the framer when the stream was
+    /// cancelled or failed. Those bytes are discarded unexamined, so from this
+    /// point the decoder can no longer state that no tool call opened.
+    pub(crate) fn note_discarded_unexamined_bytes(&mut self) {
+        self.discarded_unexamined_bytes = true;
     }
 
     /// The tool fact for a violation raised by material that never decoded.
     ///
     /// An SSE record with no event name, a payload rejected by the JSON bound
-    /// or by typed-event parsing, a `content_block_start` whose own payload is
-    /// malformed, and a stream whose framing ended inside an incomplete record
-    /// all leave their content unexamined. A `tool_use` block opens inside
-    /// exactly that material, so "none opened" would claim a negative about
+    /// or by typed-event parsing, a stream whose framing ended inside an
+    /// incomplete record, and every `content_block_start` exit taken before its
+    /// inner `content_block` parses all leave unexamined the one place a
+    /// `tool_use` block can open, so "none opened" would claim a negative about
     /// bytes the decoder never read. A block already recorded still stands.
+    ///
+    /// The scope is deliberately that narrow. The SSE event name is examined —
+    /// it is what dispatched the handler — and no other event type opens a tool
+    /// call: a `content_block_delta` carries arguments for a block already
+    /// opened, and `message_start` is rejected outright if it carries content
+    /// blocks. Their unparsed payloads therefore cannot hide a tool call
+    /// opening, and those handlers state the negative rather than withhold it.
     fn tool_calls_at_decode_failure(&self) -> ToolCallsAtLoss {
         if self.tool_call_ids.is_empty() {
             ToolCallsAtLoss::Unobserved
@@ -365,20 +384,22 @@ impl StreamDecoder {
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> StreamStep {
         if !self.started {
-            return self.violation("content_block_start before message_start");
+            return self.undecoded_violation("content_block_start before message_start");
         }
         if self.finish.is_some() {
-            return self.violation("content_block_start after the stop_reason");
+            return self.undecoded_violation("content_block_start after the stop_reason");
         }
         let event: ContentBlockStartEvent = match self.parse(record, "content_block_start") {
             Ok(event) => event,
             Err(step) => return *step,
         };
         if event.event_type != "content_block_start" {
-            return self.violation("content_block_start payload has the wrong discriminator");
+            return self
+                .undecoded_violation("content_block_start payload has the wrong discriminator");
         }
         if self.open_blocks.contains_key(&event.index) || self.closed.contains_key(&event.index) {
-            return self.violation(format!("content_block_start reopens index {}", event.index));
+            return self
+                .undecoded_violation(format!("content_block_start reopens index {}", event.index));
         }
         let content_block = match parse_response_block(&event.content_block) {
             Ok(block) => block,
@@ -1237,6 +1258,56 @@ mod tests {
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
             panic!("a duplicate message_start is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// Every `content_block_start` exit taken before its inner `content_block`
+    /// parses leaves unexamined the one place a `tool_use` block can open, so
+    /// the fact is withheld even though the outer event itself decoded.
+    #[test]
+    fn content_block_start_exits_before_the_payload_parses_withhold() {
+        let reopen = b"event: content_block_start\n\
+                       data: {\"type\":\"content_block_start\",\"index\":0,\
+                       \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            .as_slice();
+        let cases: Vec<Vec<&[u8]>> = vec![
+            // before message_start
+            vec![reopen],
+            // wrong inner discriminator
+            vec![
+                message_start(),
+                b"event: content_block_start\n\
+                  data: {\"type\":\"quasar\",\"index\":0,\
+                  \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            ],
+            // reopened index
+            vec![message_start(), reopen, reopen],
+        ];
+
+        for chunks in cases {
+            let (evidence, _) = drive(&chunks);
+            let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+                panic!("a rejected content_block_start is a protocol violation");
+            };
+            assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+        }
+    }
+
+    /// A `content_block_delta` cannot open a tool call — it carries arguments
+    /// for a block already opened — so its rejection states the negative. This
+    /// is what keeps the withholding above scoped to `content_block_start`.
+    #[test]
+    fn a_rejected_content_block_delta_still_reports_none_opened() {
+        let (evidence, _) = drive(&[
+            message_start(),
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":9,\
+              \"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("a delta for an unopened index is a protocol violation");
         };
         assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
     }

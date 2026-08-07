@@ -100,6 +100,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
             success("end_turn", Some(fixtures::ANSWER))?;
         }
+        // An assistant event that both announces a tool call and contradicts
+        // the established message id. The identity check rejects it, so the
+        // tool fact must come from the pre-scan of its decoded content.
+        "tool_use_with_conflicting_message_id" => {
+            assistant_text(fixtures::ANSWER)?;
+            assistant_tool_with_message_id(
+                fixtures::OTHER_MESSAGE_ID,
+                fixtures::TOOL_ID,
+                fixtures::TOOL_NAME,
+            )?;
+            success("tool_use", None)?;
+        }
         "success_without_stop_reason" => {
             assistant_text(fixtures::ANSWER)?;
             success_without_stop_reason()?;
@@ -263,6 +275,20 @@ fn assistant_text_with_identity(id: &str, model: &str, text: &str) -> std::io::R
         "message": {"model": model, "id": id, "role": "assistant",
             "content": [{"type": "text", "text": text}],
             "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}}
+    }))
+}
+
+fn assistant_tool_with_message_id(
+    message_id: &str,
+    tool_id: &str,
+    name: &str,
+) -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "assistant", "parent_tool_use_id": null,
+        "message": {"model": fixtures::MODEL, "id": message_id, "role": "assistant",
+            "content": [{"type": "tool_use", "id": tool_id,
+                "name": format!("mcp__signalbox_tools__{name}"),
+                "input": {"subject": "synthetic"}, "caller": {"type": "direct"}}]}
     }))
 }
 

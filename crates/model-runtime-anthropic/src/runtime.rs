@@ -503,7 +503,12 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         let mut streamed_bytes = 0usize;
         loop {
             let chunk = match cancellation.run_until_cancelled(body.next()).await {
-                None => return decoder.cancelled(),
+                None => {
+                    if framing.holds_unframed_bytes() {
+                        decoder.note_discarded_unexamined_bytes();
+                    }
+                    return decoder.cancelled();
+                }
                 Some(chunk) => chunk,
             };
             match chunk {
@@ -526,6 +531,9 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                     } else {
                         StreamInterruption::TransportFailure(transport_facts(&error))
                     };
+                    if framing.holds_unframed_bytes() {
+                        decoder.note_discarded_unexamined_bytes();
+                    }
                     return decoder.lost(interruption);
                 }
                 Some(Ok(bytes)) => {
@@ -587,11 +595,13 @@ fn process_streamed_chunk<C: Clone>(
         }
     }
     if let Some(error) = outcome.error {
-        return Some(decoder.violation_evidence(error.to_string()));
+        return Some(decoder.undecoded_violation_evidence(error.to_string()));
     }
     match budget {
         PrefixBudget::Accepted { .. } => None,
-        PrefixBudget::Overflowed { .. } => Some(decoder.violation_evidence(format!(
+        // The suffix past the limit is dropped without ever being framed, so
+        // the tool fact is withheld rather than stated negative.
+        PrefixBudget::Overflowed { .. } => Some(decoder.undecoded_violation_evidence(format!(
             "streamed response exceeded the {MAX_STREAMED_RESPONSE_BYTES}-byte adapter limit"
         ))),
     }

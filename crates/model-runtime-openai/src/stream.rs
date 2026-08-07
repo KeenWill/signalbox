@@ -63,6 +63,7 @@ pub(crate) struct StreamDecoder {
     /// `tool_builders` (emptied by `finalize_tools`) nor `completed_tools`
     /// (populated only there) survives every loss path.
     opened_tool_calls: bool,
+    discarded_unexamined_bytes: bool,
     final_usage_reported: bool,
 }
 
@@ -81,6 +82,7 @@ impl StreamDecoder {
             tool_builders: BTreeMap::new(),
             completed_tools: Vec::new(),
             opened_tool_calls: false,
+            discarded_unexamined_bytes: false,
             final_usage_reported: false,
         }
     }
@@ -394,9 +396,19 @@ impl StreamDecoder {
     fn tool_calls_at_loss(&self) -> ToolCallsAtLoss {
         if self.opened_tool_calls {
             ToolCallsAtLoss::Opened
+        } else if self.discarded_unexamined_bytes {
+            ToolCallsAtLoss::Unobserved
         } else {
             ToolCallsAtLoss::NoneOpened
         }
+    }
+
+    /// Records that the transport accepted bytes no record ever carried into
+    /// this decoder — a partial record held by the framer when the stream was
+    /// cancelled or failed. Those bytes are discarded unexamined, so from this
+    /// point the decoder can no longer state that no tool call opened.
+    pub(crate) fn note_discarded_unexamined_bytes(&mut self) {
+        self.discarded_unexamined_bytes = true;
     }
 
     /// The tool fact for a violation raised by a record that never decoded.
@@ -880,6 +892,36 @@ mod tests {
         let (terminal, _) = drive(&[first_chunk(), deep.as_bytes()]);
 
         assert_eq!(loss_of(terminal).tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// A loss raised while the framer still holds bytes discards material the
+    /// decoder never saw, so the fact is withheld even though every record that
+    /// did reach the decoder was scanned.
+    #[test]
+    fn a_loss_with_unframed_bytes_held_withholds_the_tool_fact() {
+        let mut framing = SseFraming::new(1024 * 1024);
+        let mut decoder = StreamDecoder::new(exchange(), StopSequences::NotDeclared);
+        let mut observations: Vec<Observation<String>> = Vec::new();
+        let correlation = "call-1".to_string();
+        for record in push_ok(&mut framing, first_chunk()) {
+            assert!(matches!(
+                decoder.apply(&record, &correlation, &mut observations),
+                StreamStep::Continue
+            ));
+        }
+        // A partial record: accepted by the transport, never framed, never seen.
+        assert_eq!(
+            push_ok(&mut framing, b"data: {\"choices\":[{\"index\""),
+            vec![]
+        );
+        assert!(framing.holds_unframed_bytes());
+        decoder.note_discarded_unexamined_bytes();
+
+        let TerminalEvidence::BoundaryLoss(loss) = decoder.lost(StreamInterruption::EndOfStream)
+        else {
+            panic!("an interrupted stream is boundary loss");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
     }
 
     /// An undecodable record does not erase a tool call an earlier record

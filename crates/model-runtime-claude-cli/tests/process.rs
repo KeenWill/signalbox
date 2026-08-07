@@ -488,6 +488,37 @@ async fn a_loss_from_a_decoded_prefix_without_tool_calls_reports_none_opened() {
     );
 }
 
+/// An event whose content decoded and was then rejected on semantics states the
+/// negative: the adapter read the blocks and no tool call was among them.
+///
+/// The rejection is a decode failure like the one below, so this is what makes
+/// the withholding a statement about unexamined material rather than about the
+/// failure class.
+#[tokio::test]
+async fn a_decoded_event_rejected_on_semantics_reports_none_opened() {
+    let result = execute_scenario("conflicting_message_id", OperationShape::Text).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
+}
+
+/// The same semantic rejection on an event that *did* announce a tool call
+/// reports it, which pins that the scan runs before the identity checks.
+#[tokio::test]
+async fn a_decoded_event_rejected_after_announcing_a_tool_reports_opened() {
+    let result =
+        execute_scenario("tool_use_with_conflicting_message_id", OperationShape::Text).await;
+
+    assert_eq!(
+        boundary_loss(&result.evidence).tool_calls,
+        ToolCallsAtLoss::Opened
+    );
+}
+
 /// A line that never decoded withholds the fact instead of stating a negative.
 ///
 /// The failing line was never classified, so it could itself have carried the

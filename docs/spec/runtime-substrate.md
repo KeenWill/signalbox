@@ -260,11 +260,18 @@ by a layer that reads no response material, and every Codex CLI loss raised
 before the agent-message envelope parses, since that adapter's item lifecycle
 carries no tool item.
 
-The dividing line is whether the material parsed, not whether it was accepted: a
-record the decoder read and then rejected on semantics has been examined, so it
-states none opened, while a record that never decoded could itself have carried
-the tool call and withholds. A tool call an earlier record already established
-outranks the withholding in every adapter.
+The dividing line is whether the adapter examined the material that could open a
+tool call, not whether it accepted that material. A record read and then
+rejected on semantics has been examined, so it states none opened; material
+discarded before examination withholds. Examination does not require a full
+parse: where a type discriminator alone precludes a tool call — an SSE event
+name that is not `content_block_start`, a Claude CLI event type that is not
+`assistant` — the question is settled without parsing the payload, and the
+negative is stated. Nor does a rejection make the whole response unexamined:
+rejecting the final content block of a buffered body leaves nothing unread and
+states the negative, while the same rejection with blocks still behind it
+withholds. A tool call an earlier record already established outranks the
+withholding in every adapter.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss
