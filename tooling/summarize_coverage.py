@@ -258,7 +258,10 @@ def baseline_note(baseline: Baseline) -> list[str]:
             "Compared against the most recent `main` push this workflow measured:",
             measured,
             "That is **not** the base this pull request is open against, so the",
-            "deltas below also carry whatever else landed on `main` in between.",
+            "deltas below carry every difference between that commit and the",
+            "actual base — what landed on `main` in between, and, when this",
+            "pull request is stacked on another, that parent's unmerged",
+            "changes as well. A stacked parent can dominate the numbers.",
         ]
     return provenance + [
         "",
@@ -334,10 +337,18 @@ def least_covered_files(files: list[tuple[str, Summary]], repo_root: Path, limit
 
 
 def measure_row(name: str, current: Counter, baseline: "Counter | None") -> str:
-    """Render one totals row, with its delta column only when there is one."""
+    """Render one totals row, with its delta column only when there is one.
+
+    A baseline counter of zero gets no delta. `read_counter` defaults a counter
+    the baseline's toolchain never emitted to an empty one, and `percent`
+    reports an empty counter as 100% — so subtracting it would render a current
+    50% as a fabricated `-50.00 pp` regression against a measure the baseline
+    never made. A baseline that genuinely counted nothing is the same case:
+    there is no share to compare against either way.
+    """
     cells = [name, str(current.covered), str(current.count), percent(current)]
     if baseline is not None:
-        cells.append(delta(current, baseline))
+        cells.append(delta(current, baseline) if baseline.count else "not in baseline")
     return "| " + " | ".join(cells) + " |"
 
 

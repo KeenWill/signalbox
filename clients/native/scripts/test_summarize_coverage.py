@@ -330,7 +330,14 @@ class BaselineDeltaTests(unittest.TestCase):
         )
 
         self.assertIn("**not** the base this pull request is open against", rendered)
-        self.assertIn("carries whatever else landed on `main` in between", rendered)
+        # Whitespace-normalized: this prose is hard-wrapped, so a contiguous
+        # phrase would break on a rewrap rather than on a change of meaning.
+        flowed = " ".join(rendered.split())
+        self.assertIn("what landed on `main` in between", flowed)
+        # The fallback also spans a stacked parent's unmerged changes, which
+        # can be larger than anything `main` contributed.
+        self.assertIn("stacked on another", flowed)
+        self.assertIn("dominate the number", flowed)
 
     def test_the_baseline_commit_and_date_are_named(self) -> None:
         """Native coverage is measured on a main push only when that push

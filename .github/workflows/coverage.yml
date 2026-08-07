@@ -328,6 +328,12 @@ jobs:
             # counts-only predicate and still fails to load, ending the scan
             # while an older usable artifact goes unexamined.
             #
+            # `summary` absent defaults to `{}` the way `entry.get("summary",
+            # {})` does, but `summary: null` does not: the loader gets `None`
+            # back and raises `AttributeError`. `// {}` would have conflated
+            # the two and accepted a document the loader rejects, so the
+            # default is keyed on the key's presence rather than its value.
+            #
             # A counter that is absent, or not an object, stays acceptable:
             # `read_counter` defaults those to empty on purpose so the report
             # survives a toolchain that grows a counter. Only values that are
@@ -355,7 +361,7 @@ jobs:
                   .type == "llvm.coverage.json.export"
                   and all(.data[]?.files[]?; has("filename"))
                   and all(.data[]?.files[]?;
-                        (.summary // {})
+                        (if has("summary") then .summary else {} end)
                         | (type == "object")
                           and (.lines | okcounter)
                           and (.functions | okcounter)

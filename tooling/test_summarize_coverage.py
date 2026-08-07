@@ -319,8 +319,42 @@ class BaselineDeltaTests(unittest.TestCase):
             baseline=baseline_of(lines=100, covered=50, label=LATEST_MAIN),
         )
 
-        self.assertIn("**not** the base this pull request is open against", report)
-        self.assertIn("carry whatever else landed on `main` in between", report)
+        # Whitespace-normalized: this prose is hard-wrapped, so a contiguous
+        # phrase would break on a rewrap rather than on a change of meaning.
+        flowed = " ".join(report.split())
+        self.assertIn("**not** the base this pull request is open against", flowed)
+        self.assertIn("what landed on `main` in between", flowed)
+        # The fallback also spans a stacked parent's unmerged changes, which
+        # can be larger than anything `main` contributed.
+        self.assertIn("stacked on another", flowed)
+        self.assertIn("dominate the numbers", flowed)
+
+    def test_a_counter_the_baseline_never_measured_gets_no_delta(self) -> None:
+        """`read_counter` defaults a counter the baseline's toolchain omitted
+        to an empty one, and `Counter.percent` calls an empty counter 100%
+        covered. Subtracting that renders a current 50% as a fabricated
+        `-50.00 pp` regression against a measure that was never taken."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+        baseline = Baseline(
+            total=Summary(
+                lines=Counter(count=100, covered=50),
+                functions=Counter(),
+                regions=Counter(),
+            ),
+            label=BASE,
+            sha="abc1234",
+            date="2026-08-01T09:00:00Z",
+        )
+
+        report = render(
+            document, REPO_ROOT, 0, "Rust coverage (report only)", baseline=baseline
+        )
+
+        # The measured counter still gets its delta.
+        self.assertIn("+10.00 pp", report)
+        # The two the baseline never measured say so instead of inventing one.
+        self.assertEqual(report.count("not in baseline"), 2)
+        self.assertNotIn("-40.00 pp", report)
 
     def test_the_baseline_commit_and_date_are_named(self) -> None:
         """A baseline is only judgeable with its provenance: which commit it

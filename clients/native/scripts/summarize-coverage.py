@@ -170,7 +170,10 @@ def baseline_note(baseline: Baseline, measurement_incomplete: bool = False) -> l
             "Compared against the most recent `main` push this workflow measured:",
             measured,
             "That is **not** the base this pull request is open against, so the",
-            "delta above also carries whatever else landed on `main` in between.",
+            "delta above carries every difference between that commit and the",
+            "actual base — what landed on `main` in between, and, when this",
+            "pull request is stacked on another, that parent's unmerged",
+            "changes as well. A stacked parent can dominate the number.",
         ]
     return provenance + [
         "",
