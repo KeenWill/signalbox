@@ -42,6 +42,15 @@ pub(crate) struct ChildResultPresentation<'a> {
     pub(crate) provenance: DelegationProvenance,
 }
 
+pub(crate) struct SessionMessageSentPresentation {
+    pub(crate) tool_request_id: CanonicalUuid,
+    pub(crate) peer_session_id: CanonicalUuid,
+    pub(crate) message_id: CanonicalUuid,
+    pub(crate) direction: DelegationMessageDirection,
+    pub(crate) ordinal: u64,
+    pub(crate) delivery_sequence: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct PresentTokenTotal {
     tokens: u128,
@@ -718,13 +727,16 @@ impl<'a> Output<'a> {
 
     pub(crate) fn session_message_sent(
         &mut self,
-        tool_request_id: CanonicalUuid,
-        peer_session_id: CanonicalUuid,
-        message_id: CanonicalUuid,
-        direction: DelegationMessageDirection,
-        ordinal: u64,
-        delivery_sequence: u64,
+        receipt: SessionMessageSentPresentation,
     ) -> io::Result<()> {
+        let SessionMessageSentPresentation {
+            tool_request_id,
+            peer_session_id,
+            message_id,
+            direction,
+            ordinal,
+            delivery_sequence,
+        } = receipt;
         writeln!(
             self.stdout,
             "message_request={tool_request_id} peer_session={peer_session_id} \

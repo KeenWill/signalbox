@@ -17,8 +17,8 @@ use arguments::{
 use connection::ProcessClient;
 use error::ClientError;
 use presentation::{
-    ChildResultPresentation, ConversationRow, ImportedEntryRow, Output, SessionMetadataRow,
-    SnapshotSelection,
+    ChildResultPresentation, ConversationRow, ImportedEntryRow, Output,
+    SessionMessageSentPresentation, SessionMetadataRow, SnapshotSelection,
 };
 use rustix::{
     fd::OwnedFd,
@@ -1463,14 +1463,14 @@ async fn session_delegation(
                     delivery_sequence,
                 } => {
                     if recorded_request == tool_request_id && session_id != peer_session_id {
-                        output.session_message_sent(
+                        output.session_message_sent(SessionMessageSentPresentation {
                             tool_request_id,
                             peer_session_id,
                             message_id,
                             direction,
-                            ordinal.value(),
-                            delivery_sequence.value(),
-                        )?;
+                            ordinal: ordinal.value(),
+                            delivery_sequence: delivery_sequence.value(),
+                        })?;
                         Ok(())
                     } else {
                         Err(
