@@ -246,6 +246,19 @@ impl GoalRepository {
             return Ok(outcome);
         }
 
+        if matches!(
+            command.action(),
+            GoalUserAction::Stop {
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            }
+        ) {
+            sqlx::query(crate::lock_inventory::DELEGATION_TERMINATION_SESSION_FRONTIER)
+                .bind(session_id_to_uuid(command.session()))
+                .bind("stopped")
+                .execute(&mut *transaction)
+                .await?;
+        }
+
         let session_exists = lock_session(&mut transaction, command.session()).await?;
         let mut result = if !session_exists {
             GoalCommandResult::Rejected(GoalCommandRejection::SessionNotFound)
