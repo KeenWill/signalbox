@@ -24,8 +24,8 @@ use crate::{
     },
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
-        fail_tool_crash_in_transaction, insert_snapshot, persist_terminal_outcome,
-        require_live_execution_for_restart,
+        fail_tool_crash_in_transaction, insert_snapshot, lock_delegated_turn_terminal_frontier,
+        persist_terminal_outcome, require_live_execution_for_restart,
     },
     outbox,
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -309,9 +309,26 @@ async fn recover_in_transaction<Generator>(
 where
     Generator: StartupScanIdGenerator + Send,
 {
-    // This is the same scheduler-row lock ordering used by every lifecycle
-    // writer. Reconstitution and all guarded writes happen while it is held.
     let session_uuid = session_id_to_uuid(requested_session);
+    let observed_active_turn: Option<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND state_kind = 'active'
+            AND NOT delegation_runtime_terminal",
+    )
+    .bind(session_uuid)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if let Some(turn) = observed_active_turn {
+        lock_delegated_turn_terminal_frontier(
+            connection,
+            requested_session,
+            turn_id_from_uuid(turn),
+        )
+        .await
+        .map_err(map_model_call_error)?;
+    }
     let (session_exists, scheduler_session, active_turn) =
         sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
             crate::lock_inventory::STARTUP_RECOVERY,
@@ -319,6 +336,12 @@ where
         .bind(session_uuid)
         .fetch_one(&mut *connection)
         .await?;
+
+    if active_turn != observed_active_turn {
+        return Ok(TransactionDecision::Rollback(
+            StartupScanSessionOutcome::NoActiveTurn,
+        ));
+    }
 
     recover_locked_session(
         connection,
@@ -373,14 +396,62 @@ where
     let scheduling = load_scheduling_projection(connection, session)
         .await
         .map_err(map_scheduling_error)?;
-
-    let Some(active_turn) = scheduling.active_turn_execution() else {
+    let delegated_phase = match (scheduling.active_turn_execution(), active_turn) {
+        (None, Some(turn)) => {
+            sqlx::query_scalar::<_, String>(
+                "SELECT active_phase_kind
+                   FROM turn_lifecycle
+                  WHERE session_id = $1
+                    AND turn_id = $2
+                    AND origin_kind = 'delegation'
+                    AND state_kind = 'active'
+                    AND NOT delegation_runtime_terminal",
+            )
+            .bind(session_id_to_uuid(requested_session))
+            .bind(turn)
+            .fetch_optional(&mut *connection)
+            .await?
+        }
+        (Some(_), _) | (None, None) => None,
+    };
+    if let Some(phase) = delegated_phase.as_deref()
+        && phase != "running"
+    {
+        let delegated_turn =
+            active_turn
+                .map(turn_id_from_uuid)
+                .ok_or(StartupScanCorruption::Inconsistent(
+                    "delegated active turn identity",
+                ))?;
+        let outcome = match phase {
+            "awaiting_model_call_recovery" | "awaiting_tool_recovery" => {
+                StartupScanSessionOutcome::AwaitingRecoveryDecision {
+                    turn: delegated_turn,
+                }
+            }
+            "awaiting_tool_approval" | "awaiting_child" => StartupScanSessionOutcome::NoActiveTurn,
+            _ => {
+                return Err(StartupScanCorruption::Inconsistent("delegated active phase").into());
+            }
+        };
+        return Ok(TransactionDecision::Rollback(outcome));
+    }
+    let accepted_active_turn = scheduling.active_turn_execution();
+    let delegated_active_turn = (delegated_phase.as_deref() == Some("running"))
+        .then(|| active_turn.map(turn_id_from_uuid))
+        .flatten();
+    let active_turn_id = accepted_active_turn
+        .as_ref()
+        .map(signalbox_domain::ActivatedAcceptedInputTurn::turn)
+        .or(delegated_active_turn);
+    let Some(active_turn_id) = active_turn_id else {
         return Ok(TransactionDecision::Rollback(
             StartupScanSessionOutcome::NoActiveTurn,
         ));
     };
-    match active_turn.phase() {
-        signalbox_domain::ActiveTurnPhase::Running { .. } => {}
+    match accepted_active_turn.as_ref().map(|turn| turn.phase()) {
+        None => {}
+        Some(signalbox_domain::ActiveTurnPhase::Running { .. }) => {}
         // A prior process already ended this turn's physical tenure and
         // recorded the exact ambiguity set, so there is no lost live end for
         // the scan to classify. Reporting it separately keeps the wait visible
@@ -389,10 +460,10 @@ where
         // The domain phase also carries a tool-attempt ambiguity wait, which
         // has no operator surface to point at; that wait stays classified as
         // it was, so the report never promises a decision nothing can make.
-        signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision {
+        Some(signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision {
             ambiguous_operations,
             ..
-        } if ambiguous_operations.iter().all(|operation| {
+        }) if ambiguous_operations.iter().all(|operation| {
             matches!(
                 operation,
                 signalbox_domain::IssuedOperationRef::ModelCall(_)
@@ -401,25 +472,25 @@ where
         {
             return Ok(TransactionDecision::Rollback(
                 StartupScanSessionOutcome::AwaitingRecoveryDecision {
-                    turn: active_turn.turn(),
+                    turn: active_turn_id,
                 },
             ));
         }
-        signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. }
-        | signalbox_domain::ActiveTurnPhase::AwaitingChild { .. } => {
+        Some(signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. })
+        | Some(signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. })
+        | Some(signalbox_domain::ActiveTurnPhase::AwaitingChild { .. }) => {
             return Ok(TransactionDecision::Rollback(
                 StartupScanSessionOutcome::NoActiveTurn,
             ));
         }
     }
-    let pending_steering = active_turn
-        .pending_steering()
-        .first()
+    let pending_steering = accepted_active_turn
+        .as_ref()
+        .and_then(|turn| turn.pending_steering().first())
         .map(signalbox_domain::PendingSteeringInput::accepted_input);
 
     if let Some(batch) =
-        load_active_batch_from_connection(connection, requested_session, active_turn.turn())
+        load_active_batch_from_connection(connection, requested_session, active_turn_id)
             .await
             .map_err(map_tool_loop_error)?
     {
@@ -434,7 +505,7 @@ where
         else {
             return Ok(TransactionDecision::Rollback(
                 StartupScanSessionOutcome::ResumableToolBatch {
-                    turn: active_turn.turn(),
+                    turn: active_turn_id,
                 },
             ));
         };
@@ -469,7 +540,7 @@ where
                 let closed_batch = load_active_batch_from_connection(
                     connection,
                     requested_session,
-                    active_turn.turn(),
+                    active_turn_id,
                 )
                 .await
                 .map_err(map_tool_loop_error)?
@@ -491,7 +562,7 @@ where
                 fail_tool_crash_in_transaction(
                     connection,
                     requested_session,
-                    active_turn.turn(),
+                    active_turn_id,
                     &projection,
                     closure.failure().clone(),
                     |accepted_input| ids.next_reclassified_turn_id(accepted_input),
@@ -505,6 +576,7 @@ where
         }
     }
 
+    let delegated_recovery = delegated_active_turn.is_some();
     let model_execution = require_live_execution_for_restart(connection, requested_session)
         .await
         .map_err(map_model_call_error)?;
@@ -556,7 +628,7 @@ where
         ));
     }
 
-    if pending_steering.is_some() {
+    if pending_steering.is_some() || delegated_recovery {
         let mut proposed_turns = BTreeSet::new();
         let mut reclassifications = Vec::new();
         for pending in model_execution.active_turn().pending_steering() {
