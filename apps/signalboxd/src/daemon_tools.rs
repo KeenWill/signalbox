@@ -1408,6 +1408,10 @@ mod tests {
                 cargo_diagnostics: Some(cargo_diagnostics),
                 conversations: Some(conversations),
                 plan,
+                delegation: SessionDelegationTools::try_new(
+                    DaemonSessionDelegationPort::unavailable(),
+                )
+                .expect("offline session-delegation tools compile"),
                 goal: Some(goal),
             },
         )
