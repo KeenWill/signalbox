@@ -634,9 +634,14 @@ Locks per transaction, in acquisition order:
   priority's members, preparation next locks that immutable-policy-and-priority
   cursor row `FOR UPDATE` before reading the cursor, choosing a member, or
   advancing it with `Prepared`. It rereads the protected selection facts after
-  acquiring the lock. No other path may take a scheduler lock while holding a
-  capacity-row lock, or take a capacity-row lock while holding a cursor-row
-  lock.
+  acquiring the lock. A transaction that mints, activates, or clears a
+  credential exclusion — a terminal observation applying a pool trigger, a
+  delivery-layer quarantine, or an operator clear — instead locks each affected
+  profile's action head `FOR UPDATE`, in profile-reference byte order,
+  immediately after the scheduler lock and before any capacity or cursor row. No
+  other path may take a scheduler lock while holding an action-head, capacity-,
+  or cursor-row lock; take an action-head lock while holding a capacity-row or
+  cursor-row lock; or take a capacity-row lock while holding a cursor-row lock.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -1438,8 +1443,13 @@ commit ambiguity the repository rereads the generation: the committed
 replacement wins, while an uncleared marker is durable quarantine evidence.
 Startup treats that marker the same way and never submits the possibly
 superseded stored token again. Provisioning replaces the quarantined generation
-with a fresh authorization in one transaction. This paragraph constrains the
-future schema; no present storage surface provides it.
+with a fresh authorization in one transaction. Each generation stores the exact
+provisioning tuple it was minted under — `client_id`, `token_url`,
+`device_authorization_url`, and ordered `scopes` — and every refresh and
+dispatch compares it byte for byte with the current registration under the same
+profile lock; a difference quarantines instead of exchanging, so an edited
+endpoint cannot receive a token minted for another. This paragraph constrains
+the future schema; no present storage surface provides it.
 
 **Committed unimplemented functionality — credential-pool state.** No present
 migration stores a pool-policy revision, pool action, or pre-call exhaustion
@@ -1454,16 +1464,19 @@ inherit one. Selection locks the exact cursor row `FOR UPDATE` before reading it
 and commits the chosen call and successor cursor together.
 
 Legacy family-to-reference entries are rewritten only by a post-schema backfill
-running with the validated profile registry. For each locked entry it requires
-the referenced profile registration, copies that registration's adapter and
-delivery kind, and never consults the current family mapping or pool table. It
-interns the deterministic `legacy/<session-uuid>/<event-ordinal>/<model-family>`
-singleton policy defined by the configuration contract: one priority-1 member,
-no headroom reserve, `first_listed`, `fail`, and `stay` for every trigger. The
-policy insert and entry rewrite are atomic and idempotent; a missing
-registration aborts before any rewrite. Thus the migration has an authoritative
-source for its two profile-owned fields and canonical values for every
-policy-owned field.
+running with the validated profile registry, after the configuration-independent
+recovery scan completes and before scheduling is enabled. For each locked entry
+it requires the referenced profile registration, copies that registration's
+adapter and delivery kind, and never consults the current family mapping or pool
+table. It interns the deterministic
+`legacy/<session-uuid>/<event-ordinal>/sha256:<model-family-digest>` singleton
+policy defined by the configuration contract, using that contract's exact
+spelling: one priority-1 member, no headroom reserve, `first_listed`, `fail`,
+and `stay` for every trigger. The policy insert and entry rewrite are atomic and
+idempotent; a missing registration aborts before any rewrite and blocks
+scheduling without blocking recovery of acknowledged work (INV-034). Thus the
+migration has an authoritative source for its two profile-owned fields and
+canonical values for every policy-owned field.
 
 Every pool-selected model call stores the immutable policy identity beside its
 credential reference as an insert-only authorization fact. Observation commit
@@ -1472,6 +1485,13 @@ trigger action; a session credential-history update racing with the call cannot
 substitute its newer policy. The call's target adapter and the current profile
 registration must agree with the membership row's expected adapter and delivery
 kind before credential resolution, or preparation fails before send.
+
+Each profile owns one durable action head naming its current exclusion
+generation. Every transaction that mints, activates, or clears an exclusion
+locks that head `FOR UPDATE` before reading it, so concurrent observations in
+different sessions cannot mint two active generations for one profile and a
+uniqueness conflict cannot prevent a terminal observation from committing with
+its required action record.
 
 Profile-quarantine, membership-exclusion, and session-displacement rows each
 carry a positive generation, active/cleared state, and their exact scope. A
@@ -1524,11 +1544,14 @@ serializes reservation admission across sessions and pools. Preparation locks
 all candidate capacity rows in profile-reference byte order, counts their live
 reservation rows under those locks, and inserts the selected reservation with
 the `Prepared` call. A deferred constraint rejects a committed live count above
-the policy member's bound. Invocation completion releases its reservation and
-writes the wake signal atomically. Entering either wait ends the call-free
-current attempt as `WithoutStop(YieldedToDurableWait)` in the same transaction.
-Release atomically consumes the wait and creates its fresh `Prepared` successor
-attempt; `stop_turn` instead atomically consumes it, creates the fresh
+the bound the profile's current registration declares; the bound is a live
+profile property rather than a frozen policy field, so it governs the next
+admission and never retroactively invalidates a committed reservation.
+Invocation completion releases its reservation and writes the wake signal
+atomically. Entering either wait ends the call-free current attempt as
+`WithoutStop(YieldedToDurableWait)` in the same transaction. Release atomically
+consumes the wait and creates its fresh `Prepared` successor attempt;
+`stop_turn` instead atomically consumes it, creates the fresh
 immediate-successor attempt, applies the interrupt proof, ends that attempt
 `AfterCancellation(Cancelled)`, and terminalizes the turn. Each reservation has
 a closed `pending_spawn` state with no process identity and a

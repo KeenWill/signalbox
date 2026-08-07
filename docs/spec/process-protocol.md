@@ -2567,6 +2567,19 @@ closed `exclusion` object:
 - `session_displacement { record_generation }`; or
 - `chain_exclusion { predecessor_model_call_id }`.
 
+One member can satisfy several of these at once. The producer selects exactly
+one by the fixed precedence in which they are listed above — widest scope first,
+so a profile-wide quarantine outranks a session displacement, which outranks a
+membership exclusion, which outranks a chain exclusion — and two producers
+therefore cannot describe one exhaustion differently. `reset_at_unix_ms` is
+present only when every exclusion active for that member at the failure commit
+reported a reset, and is then the latest of them; any exclusion with no reset
+makes it null. A wake can consequently never be scheduled while an indefinite
+condition still bars the member. The narrower correlations the selected item
+omits are not lost: each remains an active durable record that
+[credential-exclusion administration](#credential-exclusion-administration)
+lists and clears by its own exact target.
+
 Generations and reset instants are positive canonical decimal strings;
 `pool_policy_id` uses the `PoolPolicyId` UUID spelling above, and every other
 identity uses its already-owned bounded wire spelling. The snapshot and event
