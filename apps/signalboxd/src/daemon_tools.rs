@@ -1342,6 +1342,10 @@ mod tests {
 
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
+        claude_mcp_bridge_artifact_selection_for(&current)
+    }
+
+    fn claude_mcp_bridge_artifact_selection_for(current: &Path) -> BridgeArtifactSelection {
         let profile_dir = current
             .parent()
             .and_then(Path::parent)
@@ -1361,6 +1365,43 @@ mod tests {
                 .expect("Cargo profile has a target directory")
                 .to_path_buf(),
         }
+    }
+
+    fn assert_bridge_artifact_selection(executable: &Path, expected_profile: &str) {
+        let profile_dir = executable
+            .parent()
+            .and_then(Path::parent)
+            .expect("synthetic executable has a profile directory");
+        let selection = claude_mcp_bridge_artifact_selection_for(executable);
+
+        assert_eq!(selection.profile, OsString::from(expected_profile));
+        assert_eq!(
+            selection.target_dir,
+            profile_dir
+                .parent()
+                .expect("profile has a target directory")
+        );
+    }
+
+    #[test]
+    fn bridge_artifact_selection_maps_debug_to_the_dev_profile() {
+        let executable = Path::new("synthetic-target/debug/deps/daemon-tools-test");
+
+        assert_bridge_artifact_selection(executable, "dev");
+    }
+
+    #[test]
+    fn bridge_artifact_selection_preserves_the_release_profile() {
+        let executable = Path::new("synthetic-target/release/deps/daemon-tools-test");
+
+        assert_bridge_artifact_selection(executable, "release");
+    }
+
+    #[test]
+    fn bridge_artifact_selection_preserves_a_custom_profile() {
+        let executable = Path::new("synthetic-target/ci-fast/deps/daemon-tools-test");
+
+        assert_bridge_artifact_selection(executable, "ci-fast");
     }
 
     const BRIDGE_BUILD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
