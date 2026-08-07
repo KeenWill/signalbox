@@ -638,10 +638,13 @@ fn confirm_tool_names(catalog: &impl ToolCatalog) -> Vec<String> {
         .definitions()
         .iter()
         .filter(|definition| {
-            matches!(
-                definition.permission_default(),
-                ToolPermissionDefault::Confirm | ToolPermissionDefault::AlwaysConfirm
-            )
+            // Exhaustive rather than `matches!`: a new permission default must
+            // fail to compile here instead of being silently classified as
+            // ungated, which is the coverage hole this smoke exists to close.
+            match definition.permission_default() {
+                ToolPermissionDefault::Confirm | ToolPermissionDefault::AlwaysConfirm => true,
+                ToolPermissionDefault::Auto => false,
+            }
         })
         .map(|definition| definition.name().as_str().to_owned())
         .collect()
