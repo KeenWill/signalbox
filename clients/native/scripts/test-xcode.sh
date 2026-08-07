@@ -58,6 +58,16 @@ if [[ -n "${SIGNALBOX_NATIVE_SKIP_TESTING:-}" ]]; then
 	done
 fi
 
+# The counterpart selector, in the same space-separated identifier vocabulary.
+# CI runs the snapshot suite through a second invocation of this script rather
+# than a second job: the build is already in the derived data, so selecting one
+# suite costs a test pass and not a build.
+if [[ -n "${SIGNALBOX_NATIVE_ONLY_TESTING:-}" ]]; then
+	for only_identifier in $SIGNALBOX_NATIVE_ONLY_TESTING; do
+		CMD+=("-only-testing:$only_identifier")
+	done
+fi
+
 # Opt-in so an ordinary local run pays nothing for a measurement it did not
 # ask for: instrumentation makes the build and the test pass slower, and the
 # only consumer is report-coverage.sh, which reads the result bundle this run

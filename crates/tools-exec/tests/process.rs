@@ -818,10 +818,20 @@ fn procfs_children_available() -> bool {
         let Ok(task) = task else {
             return false;
         };
-        if std::fs::read_to_string(task.path().join("children")).is_err() {
-            return false;
+        match std::fs::read_to_string(task.path().join("children")) {
+            Ok(_) => observed_task = true,
+            // /proc/<pid>/task enumerates live threads at read_dir time, but
+            // a thread can exit before its children file is read: the tid
+            // directory (and the file inside it) then vanishes mid-scan and
+            // the read fails with ENOENT. That race means "this thread has
+            // no children anymore", not "procfs task-children support is
+            // missing" -- skip it and keep scanning rather than flipping the
+            // whole verdict to unavailable. See tests/bwrap.rs's
+            // `classify_task_children_read` for the same policy with unit
+            // coverage of this exact decision.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return false,
         }
-        observed_task = true;
     }
     observed_task
 }
