@@ -54,7 +54,7 @@ use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiPreparedRequest, OpenAi
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
-    process_read::{ProcessReadRepository, ProcessTranscriptEntry, ProcessTurnState},
+    process_read::{ProcessFailedModelCallDisposition, ProcessReadRepository, ProcessTurnState},
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
@@ -118,6 +118,7 @@ const WORKSPACE_ANSWER: &str = "model loop observed\n";
 const EXEC_SUPERVISOR_VARIABLE: &str = "SIGNALBOX_EXEC_SUPERVISOR";
 const EXEC_RESULT_PATH: &str = "exec-result.txt";
 const EXEC_RESULT: &str = "model loop observed\n";
+const EXEC_FORCED_SANDBOXED_ARGUMENTS: &str = r#"{"program":"printf","arguments":["forced sandboxed eval\n"],"working_directory":".","timeout_seconds":30}"#;
 const EXEC_FORCED_SANDBOXED_OUTPUT: &str = "forced sandboxed eval\n";
 const EXEC_FORCED_READ_ONLY_PROGRAM: &str = "/usr/bin/printf";
 const EXEC_FORCED_READ_ONLY_OUTPUT: &str = "forced unsandboxed eval\n";
@@ -129,7 +130,6 @@ const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
 const ARBITRARY_EVAL_SELECTION_ID: u128 = 0x9101;
 const ARBITRARY_EVAL_PROVIDER_ID: u128 = 0x9102;
 const ARBITRARY_EVAL_APPROVAL_COMMAND_ID: u128 = 0x9103;
-const ARBITRARY_EVAL_REQUEST_ID: u128 = 0x9104;
 const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
 
 type EvalResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -145,9 +145,7 @@ async fn run_selected_family_if_enabled() -> EvalResult {
         return Ok(());
     };
     let database = EvalDatabase::start(family.model()).await?;
-    let forced_suite = family.build_suite()?;
-    let forced = run_forced_tier(&database, &forced_suite).await?;
-    drop(forced_suite);
+    let forced = run_forced_tier(&database, family).await?;
     let natural_suite = family.build_suite()?;
     let natural = run_case(
         &database,
@@ -169,13 +167,17 @@ async fn run_selected_family_if_enabled() -> EvalResult {
 
 async fn run_forced_tier(
     database: &EvalDatabase,
-    suite: &FamilySuite,
+    family: EvalFamily,
 ) -> EvalResult<Vec<CaseOutcome>> {
-    suite.validate_forced_inventory()?;
+    let inventory_suite = family.build_suite()?;
+    inventory_suite.validate_forced_inventory()?;
+    let cases = inventory_suite.forced_cases();
+    drop(inventory_suite);
     let mut outcomes = Vec::new();
-    for case in suite.forced_cases() {
+    for case in cases {
+        let suite = family.build_suite()?;
         suite.prepare_for(case.name).await?;
-        outcomes.push(run_case(database, suite, Some(case), case.prompt).await?);
+        outcomes.push(run_case(database, &suite, Some(case), case.prompt).await?);
     }
     Ok(outcomes)
 }
@@ -375,7 +377,7 @@ const WEB_CASES: &[ForcedCase] = &[
 const EXEC_CASES: &[ForcedCase] = &[
     ForcedCase {
         name: SANDBOXED_EXEC_NAME,
-        expected_arguments: r#"{"program":"printf","arguments":["forced sandboxed eval\n"],"working_directory":".","timeout_seconds":30}"#,
+        expected_arguments: EXEC_FORCED_SANDBOXED_ARGUMENTS,
         prompt: "Call sandboxed_exec with exactly {\"program\":\"printf\",\"arguments\":[\"forced sandboxed eval\\n\"],\"working_directory\":\".\",\"timeout_seconds\":30}. After its result, answer done without another tool call.",
     },
     ForcedCase {
@@ -619,7 +621,9 @@ fn git_natural_state_passed(root: &Path) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let head = repository.head()?.peel_to_commit()?;
     let message_matches = head.message()? == GIT_NATURAL_MESSAGE;
-    let parent = head.parent(0)?;
+    let Ok(parent) = head.parent(0) else {
+        return Ok(false);
+    };
     let parent_tree = parent.tree()?;
     let head_tree = head.tree()?;
     let diff = repository.diff_tree_to_tree(Some(&parent_tree), Some(&head_tree), None)?;
@@ -999,10 +1003,11 @@ struct OperationTracker {
 
 #[derive(Default)]
 struct OperationTrackerState {
+    seen_tool_call_ids: BTreeSet<String>,
     tool_results: Vec<TrackedToolResult>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct TrackedToolResult {
     content: String,
     is_error: bool,
@@ -1012,18 +1017,32 @@ impl OperationTracker {
     fn observe(&self, operation: &ModelOperation<ModelCallId>) {
         let tool_results = operation.messages.iter().flat_map(|message| {
             message.parts.iter().filter_map(|part| match part {
-                MessagePart::ToolResult(result) => Some(TrackedToolResult {
-                    content: result.content.clone(),
-                    is_error: result.is_error,
-                }),
+                MessagePart::ToolResult(result) => Some((
+                    String::from(result.tool_call_id.as_str()),
+                    TrackedToolResult {
+                        content: result.content.clone(),
+                        is_error: result.is_error,
+                    },
+                )),
                 _ => None,
             })
         });
-        self.state
+        self.record_new_results(tool_results);
+    }
+
+    fn record_new_results(
+        &self,
+        tool_results: impl IntoIterator<Item = (String, TrackedToolResult)>,
+    ) {
+        let mut state = self
+            .state
             .lock()
-            .expect("operation-tracker lock is available")
-            .tool_results
-            .extend(tool_results);
+            .expect("operation-tracker lock is available");
+        for (tool_call_id, result) in tool_results {
+            if state.seen_tool_call_ids.insert(tool_call_id) {
+                state.tool_results.push(result);
+            }
+        }
     }
 
     fn tool_results(&self) -> Vec<TrackedToolResult> {
@@ -1235,11 +1254,9 @@ struct CaseSnapshot {
 
 #[derive(sqlx::FromRow)]
 struct RequestSnapshot {
-    request_id: Uuid,
     name: String,
     arguments_text: String,
-    #[sqlx(skip)]
-    attempt_completed: bool,
+    attempt_succeeded: bool,
 }
 
 impl RequestSnapshot {
@@ -1261,20 +1278,17 @@ impl CaseSnapshot {
             .ok_or_else(|| io::Error::other("the eval transcript turn is missing"))?
             .state();
         let turn_disposition = SnapshotTurnDisposition::from_process_state(turn_state)?;
-        let completed_requests = transcript
-            .entries()
-            .iter()
-            .filter_map(|entry| match entry {
-                ProcessTranscriptEntry::ToolExecutionResult { request, .. } => {
-                    Some(request.into_uuid())
-                }
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let mut requests = sqlx::query_as::<_, RequestSnapshot>(
-            "SELECT request.request_id,
-                    request.tool_name AS name,
-                    request.arguments_text
+        let requests = sqlx::query_as::<_, RequestSnapshot>(
+            "SELECT request.tool_name AS name,
+                    request.arguments_text,
+                    EXISTS (
+                        SELECT 1
+                          FROM tool_attempt AS attempt
+                         WHERE attempt.request_id = request.request_id
+                           AND attempt.session_id = request.session_id
+                           AND attempt.turn_id = request.turn_id
+                           AND attempt.terminal_disposition_kind = 'completed'
+                    ) AS attempt_succeeded
                FROM tool_request AS request
               WHERE request.session_id = $1 AND request.turn_id = $2
               ORDER BY request.producing_model_call_id, request.request_ordinal",
@@ -1283,9 +1297,6 @@ impl CaseSnapshot {
         .bind(turn.into_uuid())
         .fetch_all(pool)
         .await?;
-        for request in &mut requests {
-            request.attempt_completed = completed_requests.contains(&request.request_id);
-        }
         let model_calls = sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM model_call WHERE session_id = $1 AND turn_id = $2",
         )
@@ -1370,7 +1381,7 @@ impl SnapshotTurnDisposition {
             ProcessTurnState::Failed {
                 terminal_model_call: Some(call),
                 ..
-            } if call.provider_failure_cause().is_some() => {
+            } if call.disposition() == ProcessFailedModelCallDisposition::KnownFailed => {
                 Err(io::Error::other("the eval model provider committed a known failure").into())
             }
             _ => Ok(Self::Other),
@@ -1413,7 +1424,7 @@ impl CaseOutcome {
                 && self.snapshot.requests.len() == 1
                 && self.snapshot.requests[0].name == target
                 && self.snapshot.requests[0].arguments_text == expected_arguments
-                && self.snapshot.requests[0].attempt_completed,
+                && self.snapshot.requests[0].attempt_succeeded,
         )
     }
 
@@ -1438,7 +1449,7 @@ impl CaseOutcome {
                     .snapshot
                     .requests
                     .iter()
-                    .all(|request| request.attempt_completed)
+                    .all(|request| request.attempt_succeeded)
                 && (family != EvalFamily::Exec
                     || (self.snapshot.requests.len() == 1
                         && self.snapshot.requests[0].name == SANDBOXED_EXEC_NAME)),
@@ -1488,10 +1499,9 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
-                attempt_completed: true,
+                attempt_succeeded: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -1511,10 +1521,34 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
-                attempt_completed: true,
+                attempt_succeeded: true,
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_tier_reports_a_miss_for_a_known_failed_attempt() {
+    let target = GIT_STATUS_NAME;
+    let outcome = CaseOutcome {
+        target: Some(String::from(target)),
+        expected_arguments: Some(String::from("{}")),
+        execution_completed: true,
+        tool_results: vec![TrackedToolResult {
+            content: String::from("fixture result"),
+            is_error: false,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![RequestSnapshot {
+                name: String::from(target),
+                arguments_text: String::from("{}"),
+                attempt_succeeded: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -1536,10 +1570,9 @@ fn unforced_git_tier_requires_both_task_tools() {
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(GIT_STAGE_NAME),
                 arguments_text: String::from(r#"{"paths":["eval.txt"]}"#),
-                attempt_completed: true,
+                attempt_succeeded: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -1577,6 +1610,15 @@ fn git_natural_state_rejects_a_commit_with_an_unrelated_fixture() -> EvalResult 
 }
 
 #[test]
+fn git_natural_state_rejects_a_parentless_seed_commit() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    seed_git_repository(workspace.path())?;
+
+    assert!(!git_natural_state_passed(workspace.path())?);
+    Ok(())
+}
+
+#[test]
 fn forced_case_inventory_matches_each_catalog_available_offline() -> EvalResult {
     let git = FamilySuite::git()?;
     let workspace = FamilySuite::workspace()?;
@@ -1602,10 +1644,9 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(target),
                 arguments_text: String::from(r#"{"unexpected":true}"#),
-                attempt_completed: true,
+                attempt_succeeded: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -1631,13 +1672,25 @@ fn exec_eval_rejects_model_argument_drift_before_dispatch() {
 }
 
 #[test]
+fn operation_tracker_records_each_cumulative_tool_result_once() {
+    let tracker = OperationTracker::default();
+    let tool_call_id = String::from("synthetic-tool-call");
+    let result = TrackedToolResult {
+        content: String::from("synthetic result"),
+        is_error: false,
+    };
+    tracker.record_new_results([(tool_call_id.clone(), result.clone())]);
+    tracker.record_new_results([(tool_call_id, result.clone())]);
+
+    assert_eq!(tracker.tool_results(), vec![result]);
+}
+
+#[test]
 fn forced_exec_tier_rejects_a_nonzero_process_result() {
     let target = SANDBOXED_EXEC_NAME;
     let outcome = CaseOutcome {
         target: Some(String::from(target)),
-        expected_arguments: Some(String::from(
-            r#"{"program":"printf","arguments":["forced sandboxed eval\n"],"working_directory":".","timeout_seconds":30}"#,
-        )),
+        expected_arguments: Some(String::from(EXEC_FORCED_SANDBOXED_ARGUMENTS)),
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
             content: serde_json::json!({
@@ -1649,12 +1702,9 @@ fn forced_exec_tier_rejects_a_nonzero_process_result() {
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(target),
-                arguments_text: String::from(
-                    r#"{"program":"printf","arguments":["forced sandboxed eval\n"],"working_directory":".","timeout_seconds":30}"#,
-                ),
-                attempt_completed: true,
+                arguments_text: String::from(EXEC_FORCED_SANDBOXED_ARGUMENTS),
+                attempt_succeeded: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -1677,16 +1727,14 @@ fn unforced_exec_tier_rejects_an_additional_tool_call() {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![
                 RequestSnapshot {
-                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                     name: String::from(SANDBOXED_EXEC_NAME),
                     arguments_text: String::from("{}"),
-                    attempt_completed: true,
+                    attempt_succeeded: true,
                 },
                 RequestSnapshot {
-                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                     name: String::from(CARGO_DIAGNOSTICS_NAME),
                     arguments_text: String::from("{}"),
-                    attempt_completed: true,
+                    attempt_succeeded: true,
                 },
             ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -1705,18 +1753,16 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
         turn_disposition: SnapshotTurnDisposition::Completed,
         requests: vec![
             RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(WRITE_FILE_NAME),
                 arguments_text: String::from(
                     r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
                 ),
-                attempt_completed: true,
+                attempt_succeeded: true,
             },
             RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(READ_FILE_NAME),
                 arguments_text: String::from(r#"{"path":"brief.txt"}"#),
-                attempt_completed: true,
+                attempt_succeeded: true,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -1731,16 +1777,14 @@ fn web_natural_state_requires_the_exact_query() -> EvalResult {
         turn_disposition: SnapshotTurnDisposition::Completed,
         requests: vec![
             RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(WEB_SEARCH_NAME),
                 arguments_text: String::from(r#"{"query":"different query"}"#),
-                attempt_completed: true,
+                attempt_succeeded: true,
             },
             RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 name: String::from(WEB_FETCH_NAME),
                 arguments_text: String::from(r#"{"url":"https://example.com/eval"}"#),
-                attempt_completed: true,
+                attempt_succeeded: true,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
