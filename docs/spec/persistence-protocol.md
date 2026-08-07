@@ -40,8 +40,8 @@ cascade locks, typed delegation wake origins, and exact delegation update and
 wake obligations were verified through this PR
 (`agent/delegation-persistence-schema`); the delegated child-input, await,
 peer-message, and terminal-observation locks plus wait/message replay satellites
-were verified through PR #461 (`agent/delegation-runtime-persistence-v2`), and
-the broader child-terminal endpoint locks were verified through PR #462
+were verified through this PR (`agent/delegation-runtime-persistence-v2`), and
+the broader child-terminal endpoint locks were verified through this PR
 (`agent/delegation-runtime-daemon-v2`); the model-settings command fields,
 immutable evidence, snapshot projection, and typed outbox records were verified
 through this PR (`agent/model-settings-persistence`); the defaults-replacement
