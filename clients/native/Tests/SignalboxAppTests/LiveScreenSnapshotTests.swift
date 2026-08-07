@@ -28,7 +28,13 @@ final class LiveScreenSnapshotTests: XCTestCase {
         await assertLiveScreenSnapshot(of: rootView(for: .sessions), canvas: .regular)
     }
 
-    func testSessionTranscriptForAnActiveTurn() async {
+    /// Named for the state it renders, not the fixture it uses. `.activeChat`
+    /// names the screen, but the transcript it serves carries a turn whose
+    /// `state.type` is `completed`, and the golden says "Completed" across the
+    /// header. A turn still in flight renders a different header and a
+    /// different usage card, and nothing here covers it — a test named for an
+    /// active turn would have claimed otherwise while pinning this.
+    func testSessionTranscriptForACompletedTurn() async {
         await assertLiveScreenSnapshot(of: rootView(for: .activeChat), canvas: .compact)
     }
 
