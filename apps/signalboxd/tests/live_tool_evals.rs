@@ -97,8 +97,17 @@ const API_KEY_VARIABLE: &str = "OPENAI_API_KEY";
 const FAMILY_VARIABLE: &str = "SIGNALBOX_TOOL_EVAL_FAMILY";
 const SUMMARY_VARIABLE: &str = "SIGNALBOX_TOOL_EVAL_SUMMARY";
 const DEFAULT_MODEL: &str = "gpt-5-nano";
-const GIT_MODEL: &str = "gpt-5-mini";
-const MAX_OUTPUT_TOKENS: u32 = 1_024;
+/// Output ceiling for one eval exchange.
+///
+/// The selected models are reasoning models, and the provider charges reasoning
+/// tokens against this same ceiling before the visible tool call is emitted. A
+/// ceiling small enough to be reached while reasoning terminates the response
+/// with the provider's `length` token, which this adapter deliberately refuses
+/// to interpret, so the turn terminalizes as a provider failure and the family
+/// reports no capability evidence at all. The ceiling therefore sits far above
+/// any plausible reasoning burn for these single-call fixtures; it bounds a
+/// runaway response rather than shaping the expected one.
+const MAX_OUTPUT_TOKENS: u32 = 16_384;
 const CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const TURN_TIMEOUT: Duration = Duration::from_secs(3 * 2 * 60 + 60);
@@ -297,8 +306,7 @@ impl EvalFamily {
 
     const fn model(self) -> &'static str {
         match self {
-            Self::Git => GIT_MODEL,
-            Self::Workspace | Self::Web => DEFAULT_MODEL,
+            Self::Git | Self::Workspace | Self::Web => DEFAULT_MODEL,
         }
     }
 
