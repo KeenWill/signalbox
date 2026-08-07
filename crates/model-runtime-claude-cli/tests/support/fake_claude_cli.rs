@@ -100,6 +100,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         success("end_turn", Some(fixtures::ANSWER))?;
         return Ok(());
     }
+    if scenario == "system_lifecycle_event_redaction" {
+        system_init(&arguments)?;
+        system_status(Some(fixtures::FRAGMENTED_SECRET_PREFIX))?;
+        assistant_text(fixtures::FRAGMENTED_SECRET_CONTINUATION)?;
+        success("end_turn", Some(fixtures::FRAGMENTED_SECRET_CONTINUATION))?;
+        return Ok(());
+    }
     system_init(&arguments)?;
     match scenario.as_str() {
         "normal_completion" => {

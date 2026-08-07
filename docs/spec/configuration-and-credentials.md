@@ -1048,9 +1048,9 @@ protocol's 8 MiB frame limit even under worst-case JSON escaping. Each
 
 - `name` — the exact pool key, unique in the document.
 - `members` — a nonempty array of tables. Each names one declared `profile`, its
-  `priority` within this pool as a positive integer where a lower value is
-  preferred, and an optional `headroom_reserve_percent` overriding the pool
-  value for that member alone.
+  `priority` within this pool as an integer from 1 through 4,294,967,295 where a
+  lower value is preferred, and an optional `headroom_reserve_percent`
+  overriding the pool value for that member alone.
 - `tie_break` — one closed value resolving equal priorities: `first_listed`,
   `round_robin`, or `least_used`.
 - `on_pool_exhausted` — one closed value, `park` or `fail`.
@@ -1209,19 +1209,19 @@ model family through this adapter.
 
 Admission is fail-closed. Startup rejects a pool with no members, a duplicate
 member profile, a member naming an undeclared profile, a mapping naming an
-undeclared pool, members disagreeing on adapter, a priority that is not a
-positive integer, an unknown tie-break or exhaustion value, an unknown action,
-an action on a trigger that does not admit it, and any unknown field. It also
-rejects `headroom_reserve_percent`, `tie_break = "least_used"`, and any
-`on_headroom_low` action other than `stay` in this build, because no composed
-runtime observes remaining capacity. Reporting capacity alone does not admit
-`least_used`: a later accepted adapter contract must first define the normalized
-quantity, observation lifetime, and deterministic secondary tie-break it uses.
-Why: a configured reserve or selection rule that silently never fires — or whose
-metric varies by implementation — would read as protection the deployment does
-not have. The keys are admitted by the grammar so that supplying that later
-contract needs no configuration grammar change; the observation itself is routed
-through
+undeclared pool, members disagreeing on adapter, a priority outside the integer
+range 1 through 4,294,967,295, an unknown tie-break or exhaustion value, an
+unknown action, an action on a trigger that does not admit it, and any unknown
+field. It also rejects `headroom_reserve_percent`, `tie_break = "least_used"`,
+and any `on_headroom_low` action other than `stay` in this build, because no
+composed runtime observes remaining capacity. Reporting capacity alone does not
+admit `least_used`: a later accepted adapter contract must first define the
+normalized quantity, observation lifetime, and deterministic secondary tie-break
+it uses. Why: a configured reserve or selection rule that silently never fires —
+or whose metric varies by implementation — would read as protection the
+deployment does not have. The keys are admitted by the grammar so that supplying
+that later contract needs no configuration grammar change; the observation
+itself is routed through
 [model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 
 A one-member pool is the ordinary single-account deployment and requires no

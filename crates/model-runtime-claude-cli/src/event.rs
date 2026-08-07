@@ -181,6 +181,44 @@ impl<C: Clone> EventDecoder<C> {
                     | "thinking_tokens"
             )
         ) {
+            let mut event = value;
+            if let Value::Object(members) = &mut event {
+                // Closed protocol metadata describes the envelope, not
+                // discarded provider content. In particular,
+                // `thinking_tokens` must not create a credential-shaped
+                // lookbehind merely because its name contains `token`, and
+                // repeated copies of the already-retained session identity
+                // must not accumulate as dropped content.
+                members.remove("type");
+                members.remove("subtype");
+                members.remove("session_id");
+                members.retain(|_, value| !value.is_null());
+                if members.is_empty() {
+                    return Ok(());
+                }
+            }
+            let mut context = String::new();
+            let members = event.as_object().ok_or_else(|| {
+                DecodeFailure::stream_protocol("Claude system event is not an object")
+            })?;
+            for (name, value) in members {
+                if !context.is_empty() {
+                    context.push('\n');
+                }
+                context.push_str(name);
+                context.push(':');
+                if let Some(value) = value.as_str() {
+                    context.push_str(value);
+                } else {
+                    let value = serde_json::to_string(value).map_err(|error| {
+                        DecodeFailure::stream_protocol(format!(
+                            "Claude lifecycle event could not be retained for redaction: {error}"
+                        ))
+                    })?;
+                    context.push_str(&value);
+                }
+            }
+            sink.extend_dropped_context(&context);
             return Ok(());
         }
         if subtype != Some("init") || self.initialized {

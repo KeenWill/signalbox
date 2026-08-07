@@ -5329,6 +5329,24 @@ members = [{ profile = "anthropic-primary", priority = 0 }]"#,
     }
 
     #[test]
+    fn configuration_rejects_a_member_priority_above_u32() {
+        let overflowing_priority = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 4294967296 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&overflowing_priority).err(),
+            Some(HubModelConfigurationError::InvalidMemberPriority {
+                credential_pool: Arc::from("anthropic-main"),
+            })
+        );
+    }
+
+    #[test]
     fn configuration_rejects_pool_members_disagreeing_on_adapter() {
         let mixed_adapters = configuration_with_anthropic_pool(
             r#"[[credential_pools]]

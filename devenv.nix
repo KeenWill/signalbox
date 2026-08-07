@@ -429,7 +429,7 @@ in
           import tomlkit
 
           config_path = Path(sys.argv[1])
-          credential_path = sys.argv[2]
+          credential_path = str(Path(sys.argv[2]).absolute())
           document = tomlkit.parse(config_path.read_text())
           profiles = document.get("credential_profiles", [])
           profile = next(
