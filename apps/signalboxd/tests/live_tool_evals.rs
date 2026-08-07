@@ -54,8 +54,9 @@ use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
     process_read::{
-        ProcessFailedModelCallDisposition, ProcessReadRepository,
-        ProcessToolExecutionResultDisposition, ProcessTranscriptEntry, ProcessTurnState,
+        ProcessFailedModelCallDisposition, ProcessProviderModelCallFailureCause,
+        ProcessReadRepository, ProcessToolExecutionResultDisposition, ProcessTranscriptEntry,
+        ProcessTurnState,
     },
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
@@ -142,14 +143,48 @@ fn live_model_in_the_loop_evaluates_one_daemon_tool_family() -> EvalResult {
                 .enable_all()
                 .thread_stack_size(LIVE_EVAL_THREAD_STACK_BYTES)
                 .build()
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| rendered_error_chain(&error))?;
             runtime
                 .block_on(run_selected_family_if_enabled())
-                .map_err(|error| error.to_string())
+                .map_err(|error| rendered_error_chain(error.as_ref()))
         })?
         .join()
         .map_err(|_| io::Error::other("the live tool eval thread panicked"))?;
     outcome.map_err(|error| io::Error::other(error).into())
+}
+
+/// Renders one error and every nested cause it forwards.
+///
+/// A thread boundary can only carry an owned string, and the family executor
+/// wrapper deliberately displays a fixed sentence while retaining the concrete
+/// cause as its source. Rendering the complete chain before the crossing keeps
+/// the paid run diagnosable from the failure text alone.
+fn rendered_error_chain(error: &(dyn Error + 'static)) -> String {
+    let mut rendered = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        rendered.push_str(": ");
+        rendered.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    rendered
+}
+
+#[test]
+fn the_rendered_error_chain_names_every_nested_cause() {
+    let error = FamilyExecutorError::new(io::Error::other(SYNTHETIC_EXECUTOR_FAILURE));
+
+    assert_eq!(
+        rendered_error_chain(&error),
+        format!("the selected eval tool executor failed: {SYNTHETIC_EXECUTOR_FAILURE}")
+    );
+}
+
+#[test]
+fn the_rendered_error_chain_of_a_sourceless_error_is_its_own_text() {
+    let error = io::Error::other(SYNTHETIC_EXECUTOR_FAILURE);
+
+    assert_eq!(rendered_error_chain(&error), SYNTHETIC_EXECUTOR_FAILURE);
 }
 
 async fn run_selected_family_if_enabled() -> EvalResult {
@@ -1327,7 +1362,9 @@ fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SnapshotTurnDisposition {
     Completed,
-    ProviderFailure,
+    /// The turn terminalized on a definitive provider failure, carrying the
+    /// closed cause the daemon retained for it when one was recorded.
+    ProviderFailure(Option<ProcessProviderModelCallFailureCause>),
     Other,
 }
 
@@ -1339,7 +1376,9 @@ impl SnapshotTurnDisposition {
                 terminal_model_call,
                 ..
             } => Self::from_failed_model_call(
-                terminal_model_call.as_ref().map(|call| call.disposition()),
+                terminal_model_call
+                    .as_ref()
+                    .map(|call| (call.disposition(), call.provider_failure_cause())),
             ),
             ProcessTurnState::Queued { .. }
             | ProcessTurnState::QueuedDelegated { .. }
@@ -1357,27 +1396,60 @@ impl SnapshotTurnDisposition {
     }
 
     const fn from_failed_model_call(
-        disposition: Option<ProcessFailedModelCallDisposition>,
+        terminal_call: Option<(
+            ProcessFailedModelCallDisposition,
+            Option<ProcessProviderModelCallFailureCause>,
+        )>,
     ) -> Self {
-        match disposition {
-            Some(ProcessFailedModelCallDisposition::KnownFailed) => Self::ProviderFailure,
-            Some(ProcessFailedModelCallDisposition::Cancelled) | None => Self::Other,
+        match terminal_call {
+            Some((ProcessFailedModelCallDisposition::KnownFailed, cause)) => {
+                Self::ProviderFailure(cause)
+            }
+            Some((ProcessFailedModelCallDisposition::Cancelled, _)) | None => Self::Other,
         }
     }
 
     const fn is_completed(self) -> bool {
         match self {
             Self::Completed => true,
-            Self::ProviderFailure | Self::Other => false,
+            Self::ProviderFailure(_) | Self::Other => false,
         }
     }
 
-    const fn label(self) -> &'static str {
+    const fn is_provider_failure(self) -> bool {
         match self {
-            Self::Completed => "completed",
-            Self::ProviderFailure => "provider failure",
-            Self::Other => "not completed",
+            Self::ProviderFailure(_) => true,
+            Self::Completed | Self::Other => false,
         }
+    }
+
+    /// Renders the turn cell, naming the closed provider cause when the daemon
+    /// retained one so a paid run reports why the exchange never happened.
+    fn label(self) -> String {
+        match self {
+            Self::Completed => String::from("completed"),
+            Self::ProviderFailure(None) => String::from("provider failure"),
+            Self::ProviderFailure(Some(cause)) => {
+                format!("provider failure: {}", provider_failure_cause_label(cause))
+            }
+            Self::Other => String::from("not completed"),
+        }
+    }
+}
+
+/// Names one closed provider-failure classification for the eval report.
+const fn provider_failure_cause_label(cause: ProcessProviderModelCallFailureCause) -> &'static str {
+    match cause {
+        ProcessProviderModelCallFailureCause::CredentialRejected => "credential rejected",
+        ProcessProviderModelCallFailureCause::PermissionDenied => "permission denied",
+        ProcessProviderModelCallFailureCause::InvalidRequest => "invalid request",
+        ProcessProviderModelCallFailureCause::TargetNotFound => "target not found",
+        ProcessProviderModelCallFailureCause::RequestTooLarge => "request too large",
+        ProcessProviderModelCallFailureCause::RateLimited => "rate limited",
+        ProcessProviderModelCallFailureCause::QuotaExhausted => "quota exhausted",
+        ProcessProviderModelCallFailureCause::Overloaded => "overloaded",
+        ProcessProviderModelCallFailureCause::ProviderInternal => "provider internal",
+        ProcessProviderModelCallFailureCause::Unrecognized => "unrecognized",
     }
 }
 
@@ -1391,7 +1463,7 @@ struct CaseOutcome {
 
 impl CaseOutcome {
     fn forced_disposition(&self) -> EvalDisposition {
-        if self.snapshot.turn_disposition == SnapshotTurnDisposition::ProviderFailure {
+        if self.snapshot.turn_disposition.is_provider_failure() {
             return EvalDisposition::Infrastructure;
         }
         let Some(target) = self.target.as_deref() else {
@@ -1413,7 +1485,7 @@ impl CaseOutcome {
     }
 
     fn natural_loop_disposition(&self, family: EvalFamily) -> EvalDisposition {
-        if self.snapshot.turn_disposition == SnapshotTurnDisposition::ProviderFailure {
+        if self.snapshot.turn_disposition.is_provider_failure() {
             return EvalDisposition::Infrastructure;
         }
         let required_names: &[&str] = match family {
@@ -1491,11 +1563,52 @@ fn turn_snapshot_reports_ambiguous_model_recovery_as_a_miss() {
 #[test]
 fn turn_snapshot_reports_a_terminal_provider_failure_distinctly() {
     assert_eq!(
-        SnapshotTurnDisposition::from_failed_model_call(Some(
-            ProcessFailedModelCallDisposition::KnownFailed
-        )),
-        SnapshotTurnDisposition::ProviderFailure
+        SnapshotTurnDisposition::from_failed_model_call(Some((
+            ProcessFailedModelCallDisposition::KnownFailed,
+            None
+        ))),
+        SnapshotTurnDisposition::ProviderFailure(None)
     );
+}
+
+#[test]
+fn turn_snapshot_retains_the_closed_provider_failure_cause() {
+    assert_eq!(
+        SnapshotTurnDisposition::from_failed_model_call(Some((
+            ProcessFailedModelCallDisposition::KnownFailed,
+            Some(ProcessProviderModelCallFailureCause::TargetNotFound)
+        ))),
+        SnapshotTurnDisposition::ProviderFailure(Some(
+            ProcessProviderModelCallFailureCause::TargetNotFound
+        ))
+    );
+}
+
+#[test]
+fn a_cancelled_terminal_model_call_is_not_a_provider_failure() {
+    assert_eq!(
+        SnapshotTurnDisposition::from_failed_model_call(Some((
+            ProcessFailedModelCallDisposition::Cancelled,
+            None
+        ))),
+        SnapshotTurnDisposition::Other
+    );
+}
+
+#[test]
+fn the_turn_cell_names_the_closed_provider_failure_cause() {
+    let disposition = SnapshotTurnDisposition::ProviderFailure(Some(
+        ProcessProviderModelCallFailureCause::TargetNotFound,
+    ));
+
+    assert_eq!(disposition.label(), "provider failure: target not found");
+}
+
+#[test]
+fn the_turn_cell_of_an_unclassified_provider_failure_stays_bare() {
+    let disposition = SnapshotTurnDisposition::ProviderFailure(None);
+
+    assert_eq!(disposition.label(), "provider failure");
 }
 
 #[test]
@@ -1506,7 +1619,9 @@ fn provider_failure_is_reported_as_infrastructure_not_a_model_miss() {
         execution_completed: true,
         result_round_trips: 0,
         snapshot: CaseSnapshot {
-            turn_disposition: SnapshotTurnDisposition::ProviderFailure,
+            turn_disposition: SnapshotTurnDisposition::ProviderFailure(Some(
+                ProcessProviderModelCallFailureCause::TargetNotFound,
+            )),
             requests: Vec::new(),
             model_calls: 1,
         },
@@ -2052,11 +2167,12 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         .natural_loop_disposition(report.family)
         .and(report.natural_state);
     markdown.push_str(&format!(
-        "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state |\n| --- | --- | ---: | --- |\n| {} | {} | {} | {} |\n\nAll outcomes are report-only; a model miss does not fail this workflow.\n",
+        "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | `{}` |\n\nAll outcomes are report-only; a model miss does not fail this workflow.\n",
         natural.label(),
         report.natural.snapshot.called_names(),
         report.natural.result_round_trips,
         report.natural_state.label(),
+        report.natural.snapshot.turn_disposition.label(),
     ));
     fs::write(summary_path, &markdown)?;
     print!("{markdown}");
