@@ -704,6 +704,15 @@ pub enum ProcessImportedContentKind {
     MessageContentAbsent,
 }
 
+/// Typed outcome of an executed tool-result transcript entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessToolExecutionResultDisposition {
+    /// The executor returned admitted result content.
+    Completed,
+    /// The executor returned definitive typed failure evidence.
+    KnownFailed,
+}
+
 /// One ordered member of the latest authoritative semantic frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTranscriptEntry {
@@ -869,6 +878,8 @@ pub enum ProcessTranscriptEntry {
         request: ToolRequestId,
         /// Exact physical tool attempt.
         attempt: ToolAttemptId,
+        /// Typed terminal outcome of the exact physical attempt.
+        disposition: ProcessToolExecutionResultDisposition,
         /// Exact provider-visible result content.
         content: String,
     },
@@ -4340,20 +4351,25 @@ fn decode_transcript_entry(
                 ProcessReadCorruption::Inconsistent("tool execution-result entry shape").into(),
             );
         };
-        let content = match (
+        let (disposition, content) = match (
             disposition,
             result_text,
             result_error_kind,
             result_error_detail,
         ) {
-            ("completed", Some(text), None, None) => text,
-            ("known_failed", None, Some(kind), detail) => serde_json::json!({
-                "error": {
-                    "kind": kind,
-                    "detail": detail,
-                }
-            })
-            .to_string(),
+            ("completed", Some(text), None, None) => {
+                (ProcessToolExecutionResultDisposition::Completed, text)
+            }
+            ("known_failed", None, Some(kind), detail) => (
+                ProcessToolExecutionResultDisposition::KnownFailed,
+                serde_json::json!({
+                    "error": {
+                        "kind": kind,
+                        "detail": detail,
+                    }
+                })
+                .to_string(),
+            ),
             _ => {
                 return Err(
                     ProcessReadCorruption::Inconsistent("tool execution-result evidence").into(),
@@ -4383,6 +4399,7 @@ fn decode_transcript_entry(
             entry,
             request: ToolRequestId::from_uuid(request),
             attempt: ToolAttemptId::from_uuid(attempt),
+            disposition,
             content,
         });
     }
