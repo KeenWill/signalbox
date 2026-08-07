@@ -452,6 +452,126 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("docs/agents/backlog.md", result.stdout)
 
+    def test_stale_count_split_by_inline_markup_fails(self) -> None:
+        """Rendered emphasis and links state the same sentence.
+
+        `**51**` and `[invariants](...)` render exactly as the plain words do,
+        so formatting must not decide whether a stale total is caught.
+        """
+        for markup in (
+            f"There are **{STALE_INVARIANT_COUNT}** invariants.",
+            f"There are {STALE_INVARIANT_COUNT} **invariants**.",
+            f"There are _{STALE_INVARIANT_COUNT}_ invariants.",
+            f"There are {STALE_INVARIANT_COUNT} [invariants](../invariants.md).",
+        ):
+            with self.subTest(markup=markup):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = fixture_root(tmp, {"docs/spec/example.md": markup + "\n"})
+
+                    result = run_checker(root)
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(f"{STALE_INVARIANT_COUNT} invariants", result.stdout)
+
+    def test_count_inside_inline_code_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {
+                    "docs/spec/example.md": (
+                        f"The literal `{STALE_INVARIANT_COUNT} invariants` is an example.\n"
+                    )
+                },
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_count_inside_an_html_comment_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {
+                    "docs/spec/example.md": (
+                        f"Text.\n\n<!-- draft: {STALE_INVARIANT_COUNT} invariants -->\n"
+                    )
+                },
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_count_inside_indented_code_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {
+                    "docs/spec/example.md": (
+                        f"Example:\n\n    {STALE_INVARIANT_COUNT} invariants (sample)\n"
+                    )
+                },
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_stale_count_of_noun_phrase_fails(self) -> None:
+        """`count of scenarios: N` states a total the other way round."""
+        for phrase in (
+            f"count of scenarios: {STALE_SCENARIO_COUNT}",
+            f"The count of scenarios is {STALE_SCENARIO_COUNT}.",
+        ):
+            with self.subTest(phrase=phrase):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = fixture_root(tmp, {"docs/spec/example.md": phrase + "\n"})
+
+                    result = run_checker(root)
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(
+                    f"current scenario catalog has {SCENARIO_COUNT}", result.stdout
+                )
+
+    def test_a_partial_numeric_token_is_not_read_as_the_count(self) -> None:
+        """`37.5` and `1,000` must not be read as 37 and 1.
+
+        Both are rejected rather than parsed: misreporting a different number
+        as the stated total is worse than not recognising the phrase, because
+        it can silently agree with the catalog — which is exactly what
+        `scenario count: <N>.5` would do against an N-scenario catalog.
+        """
+        for phrase in (
+            f"scenario count: {SCENARIO_COUNT}.5",
+            "scenario count: 1,000",
+        ):
+            with self.subTest(phrase=phrase):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = fixture_root(tmp, {"docs/spec/example.md": phrase + "\n"})
+
+                    result = run_checker(root)
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
+        """A tracked path can vanish between `git ls-files` and the read.
+
+        The documented contract is a stable failure report; a traceback would
+        replace it, taking every other file's findings with it.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(tmp, {"docs/spec/gone.md": "Placeholder.\n"})
+            (root / "docs/spec/gone.md").unlink()
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("docs/spec/gone.md", result.stdout)
+        self.assertIn("could not be read", result.stdout)
+
     def test_missing_invariants_catalog_fails_loudly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = fixture_root(tmp, omit_invariants=True)

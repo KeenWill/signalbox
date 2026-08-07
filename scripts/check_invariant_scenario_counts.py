@@ -14,21 +14,26 @@ rather than estimated: the invariant count is the number of distinct
 number of distinct `## S<N>` headings in `docs/scenarios.md`.
 
 Prose elsewhere occasionally restates one of those totals ("the catalog
-defines 50 invariants", "scenario count: 37") instead of pointing at the
-catalog. That restatement goes stale the moment a scenario or invariant is
-added or removed without also touching the sentence that quoted the old
-total — the same staleness class `check_domain_spine.py` guards against for
-the domain crates' exported-type counts. This script scans every tracked
-Markdown file for a stated count next to the word "invariant" or "scenario"
-and fails when it disagrees with the catalog — every file except the
+defines 50 invariants", "scenario count: 37", "count of scenarios: 38")
+instead of pointing at the catalog. That restatement goes stale the moment a
+scenario or invariant is added or removed without also touching the sentence
+that quoted the old total — the same staleness class `check_domain_spine.py`
+guards against for the domain crates' exported-type counts. This script scans
+every tracked Markdown file for a stated count next to the word "invariant" or
+"scenario" and fails when it disagrees with the catalog — every file except the
 non-authoritative planning scratchpads, which AGENTS.md exempts from
-consistency review and whose quantities decide nothing. The scan reads each
-document whole, not line by line, so a statement the required mdformat pass
-wrapped between its number and its noun still reads as one statement; fenced
-code is excluded through `check_docs_consistency.mask_fenced_code`, which
-already knows this repository's `~~~`, long, and container-nested fences, and
-is applied to the two catalogs themselves so a fenced example of a row or a
-heading cannot inflate ground truth.
+consistency review and whose quantities decide nothing.
+
+The scan reads each document whole, not line by line, so a statement the
+required mdformat pass wrapped between its number and its noun still reads as
+one statement, and it reads what the document *renders*: inline emphasis and
+link delimiters between the number and the noun are stepped over, because
+"There are **51** invariants" states the same total as the unformatted
+sentence. Literal content is excluded first, through the masking helpers in
+`check_docs_consistency` — fences (including `~~~`, long, and container-nested
+ones), indented code, HTML comments, raw HTML blocks, and inline code spans.
+The fence masking is applied to the two catalogs themselves as well, so a
+fenced example of a row or a heading cannot inflate ground truth.
 
 This mechanizes check class (2), "stale-count checks", of the
 invariant-citation review work commissioned for this checker. The other two
@@ -57,9 +62,9 @@ invariants changed in the last 2 scenarios" reads as a claim of 5 total
 invariants). None exists in the tree today; broaden `NUMBER_BEFORE_NOUN` /
 `NOUN_COUNT_PHRASE`, or add a reviewed exclusion, if one legitimately arises.
 
-Standalone invocation — this script is not yet wired into
-`.github/workflows/rust.yml` or the AGENTS.md documentation bar (see the
-commissioning PR body for why); run it directly:
+Standalone invocation — this script is not part of
+`.github/workflows/rust.yml` or the AGENTS.md documentation bar, so nothing
+runs it automatically. Run it directly:
 
     python3 scripts/check_invariant_scenario_counts.py
 
@@ -74,7 +79,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from check_docs_consistency import mask_fenced_code
+from check_docs_consistency import mask_block_content, mask_fenced_code, mask_inline_code
 from generate_invariants import has_non_authoritative_planning_banner
 
 INVARIANTS = Path("docs/invariants.md")
@@ -93,7 +98,20 @@ SCENARIO_HEADING = re.compile(r"^##\s+(S[0-9]+)\b", re.MULTILINE)
 # Repeated markers are accepted, not just one: a statement nested two levels
 # deep wraps as "> > There are 51\n> > invariants", and stopping at a single
 # `>` would let exactly the stale counts inside quoted material through.
-WRAPPED_GAP = r"(?:[ \t]+|[ \t]*\r?\n[ \t]*(?:>[ \t]*)*)"
+#
+# Inline markup may sit on either side of that whitespace. "There are **51**
+# invariants", "51 **invariants**" and "51 [invariants](invariants.md)" all
+# render as the same sentence, so the emphasis and link delimiters must not be
+# what decides whether a stale total is caught. Only the delimiters are
+# skipped, never the words between them, so "51 and 3 invariants" still reads
+# as two separate tokens rather than one span.
+MARKUP = r"[*_~`\[\]]*"
+WRAPPED_GAP = rf"(?:{MARKUP}(?:[ \t]+|[ \t]*\r?\n[ \t]*(?:>[ \t]*)*){MARKUP})"
+
+# A digit run that is only part of a larger number: "37.5" and "1,000" must not
+# read as 37 and 1. Rejecting is the safe direction — a total this cannot parse
+# is skipped rather than misreported as a different number.
+NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 
 # A number sitting directly before the noun: "50 invariants", "1 scenario".
 # The lookbehind refuses a digit run glued to a preceding word, decimal point,
@@ -106,8 +124,15 @@ WRAPPED_GAP = r"(?:[ \t]+|[ \t]*\r?\n[ \t]*(?:>[ \t]*)*)"
 # checker fails on the very references it exists to protect. The cost is that a
 # range written "5-10 scenarios" no longer matches, which is correct — a range
 # states no total.
+#
+# `_` is deliberately absent from both classes, unlike `\w`: it is Markdown's
+# other emphasis delimiter, and refusing it would let "There are _51_
+# invariants" hide a stale total exactly as `**51**` did. The exposure is a
+# snake_case identifier written as bare prose, which this repository formats as
+# inline code — masked above before any of these patterns run.
 NUMBER_BEFORE_NOUN = re.compile(
-    rf"(?<![\w.-])([0-9]{{1,4}}){WRAPPED_GAP}(invariants?|scenarios?)(?![\w-])",
+    rf"(?<![0-9A-Za-z.-])([0-9]{{1,4}}){NOT_PARTIAL_NUMBER}{WRAPPED_GAP}"
+    rf"(invariants?|scenarios?)(?![0-9A-Za-z-])",
     re.IGNORECASE,
 )
 # The noun stated as an explicit count: "invariant count: 50", "scenario
@@ -115,7 +140,16 @@ NUMBER_BEFORE_NOUN = re.compile(
 # "invariant count 50" still matches.
 NOUN_COUNT_PHRASE = re.compile(
     rf"\b(invariant|scenario)s?{WRAPPED_GAP}count{WRAPPED_GAP}?"
-    rf"(?:is|of|:|=)?{WRAPPED_GAP}?([0-9]{{1,4}})\b",
+    rf"(?:is|of|:|=)?{WRAPPED_GAP}?([0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
+    re.IGNORECASE,
+)
+# The same claim with the words the other way round: "count of scenarios: 38",
+# "the count of invariants is 51". Neither existing pattern reaches this — the
+# noun follows `count` rather than leading it, and the number is too far from
+# the noun for `NUMBER_BEFORE_NOUN` to bridge.
+COUNT_OF_NOUN_PHRASE = re.compile(
+    rf"\bcount{WRAPPED_GAP}of{WRAPPED_GAP}(invariant|scenario)s?"
+    rf"{WRAPPED_GAP}?(?:is|of|:|=)?{WRAPPED_GAP}?([0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
     re.IGNORECASE,
 )
 
@@ -186,12 +220,18 @@ def line_number_at(text: str, offset: int) -> int:
 def as_one_phrase(matched: str) -> str:
     """Collapse a match that spans a wrapped line into one reportable phrase.
 
-    Block-quote markers the wrap carried are dropped, so a claim nested in a
-    quote reports as "5 invariants" rather than "5 > > invariants". Only the
-    gap between the number and the noun can contain one, so discarding
-    all-`>` tokens cannot touch the words being quoted back.
+    Quote markers the wrap carried, and the inline markup the patterns now step
+    over, are dropped: a claim written "There are **51**\ninvariants" inside a
+    nested quote reports as "51 invariants" rather than "51** > > invariants".
+    Only delimiters are stripped, so every word the document actually states is
+    still quoted back verbatim.
     """
-    return " ".join(word for word in matched.split() if set(word) != {">"})
+    words = []
+    for word in matched.split():
+        stripped = word.strip("*_~`[]>")
+        if stripped:
+            words.append(stripped)
+    return " ".join(words)
 
 
 def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
@@ -199,12 +239,15 @@ def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
 
     The whole document is scanned at once rather than line by line, because a
     statement wrapped between its number and its noun is still that statement.
-    `mask_fenced_code` blanks fenced content in place — same length, same line
-    breaks — so offsets still name the right line, and it is reused rather than
-    re-approximated: it already handles `~~~` fences, fences longer than three
-    characters, and fences nested in block quotes and list items, none of which
-    an opening-delimiter toggle gets right. A code example that happens to say
-    "50 invariants" is not a claim about the catalog.
+    Every form of literal content is masked first, not just fenced blocks:
+    `mask_block_content` covers fences, HTML comments, raw HTML blocks and
+    indented code, and `mask_inline_code` covers backtick spans. All of them
+    blank in place — same length, same line breaks — so offsets still name the
+    right line, and they are reused rather than re-approximated: they already
+    handle `~~~` fences, fences longer than three characters, and fences nested
+    in block quotes and list items, none of which an opening-delimiter toggle
+    gets right. A code example, a commented-out draft, or an inline
+    `50 invariants` is not a claim about the catalog.
 
     A file opening with the non-authoritative-planning banner states nothing at
     all and yields no counts. AGENTS.md exempts those scratchpads from
@@ -217,28 +260,29 @@ def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
     raw = path.read_text(encoding="utf-8", errors="replace")
     if has_non_authoritative_planning_banner(raw):
         return []
-    text = mask_fenced_code(raw)
+    text = mask_inline_code(mask_block_content(raw))
     found: list[tuple[int, str, int, str]] = []
-    for match in NUMBER_BEFORE_NOUN.finditer(text):
-        noun = "invariant" if match.group(2).lower().startswith("invariant") else "scenario"
-        found.append(
-            (
-                line_number_at(text, match.start()),
-                noun,
-                int(match.group(1)),
-                as_one_phrase(match.group(0)),
+    # (pattern, group holding the noun, group holding the number)
+    patterns = (
+        (NUMBER_BEFORE_NOUN, 2, 1),
+        (NOUN_COUNT_PHRASE, 1, 2),
+        (COUNT_OF_NOUN_PHRASE, 1, 2),
+    )
+    for pattern, noun_group, number_group in patterns:
+        for match in pattern.finditer(text):
+            noun = (
+                "invariant"
+                if match.group(noun_group).lower().startswith("invariant")
+                else "scenario"
             )
-        )
-    for match in NOUN_COUNT_PHRASE.finditer(text):
-        noun = "invariant" if match.group(1).lower() == "invariant" else "scenario"
-        found.append(
-            (
-                line_number_at(text, match.start()),
-                noun,
-                int(match.group(2)),
-                as_one_phrase(match.group(0)),
+            found.append(
+                (
+                    line_number_at(text, match.start()),
+                    noun,
+                    int(match.group(number_group)),
+                    as_one_phrase(match.group(0)),
+                )
             )
-        )
     return found
 
 
@@ -255,7 +299,20 @@ def main() -> int:
 
     failures: list[str] = []
     for path in files:
-        for line_number, noun, stated, matched in find_stated_counts(path):
+        # A tracked path can be unreadable while the index still lists it —
+        # an unstaged deletion during local validation is the ordinary way.
+        # That is reported as a failure like any other rather than raised: a
+        # traceback would replace the whole report, including the findings
+        # from every file that read fine.
+        try:
+            stated_counts = find_stated_counts(path)
+        except OSError as error:
+            failures.append(
+                f"{path.as_posix()}: tracked but could not be read "
+                f"({error.__class__.__name__})"
+            )
+            continue
+        for line_number, noun, stated, matched in stated_counts:
             if stated != actual[noun]:
                 failures.append(
                     f'{path.as_posix()}:{line_number}: states "{matched}", but '
