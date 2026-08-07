@@ -61,13 +61,19 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = OsString>) -> ExitCode {
             serve(PathBuf::from(catalog), PathBuf::from(ready))
         }
         (Some(mode), Some(ready), None, None) if mode == "--wait-ready" => {
-            wait_ready(PathBuf::from(ready))
+            wait_ready(PathBuf::from(ready), None)
+        }
+        (Some(mode), Some(ready), Some(started), None) if mode == "--wait-ready" => {
+            wait_ready(PathBuf::from(ready), Some(PathBuf::from(started)))
         }
         _ => ExitCode::FAILURE,
     }
 }
 
-fn wait_ready(path: PathBuf) -> ExitCode {
+fn wait_ready(path: PathBuf, started: Option<PathBuf>) -> ExitCode {
+    if started.is_some_and(|started| create_marker(&started, b"waiting\n").is_err()) {
+        return ExitCode::FAILURE;
+    }
     let deadline = Instant::now() + READY_WAIT_LIMIT;
     while Instant::now() < deadline {
         if path.is_file() {
@@ -258,11 +264,15 @@ fn publish_ready_once(path: &Path, published: &mut bool) -> std::io::Result<()> 
 }
 
 fn create_ready_marker(path: &Path) -> std::io::Result<()> {
+    create_marker(path, b"ready\n")
+}
+
+fn create_marker(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let mut marker = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(path)?;
-    marker.write_all(b"ready\n")?;
+    marker.write_all(content)?;
     marker.sync_all()
 }
 
@@ -320,7 +330,14 @@ mod tests {
     fn initialize_accepts_the_observed_protocol_version() {
         let response = initialize_response(
             Some(serde_json::json!(1)),
-            &serde_json::json!({"protocolVersion": MCP_PROTOCOL_VERSION}),
+            &serde_json::json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "signalbox-bridge-unit-test",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            }),
         );
 
         assert_eq!(response["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);

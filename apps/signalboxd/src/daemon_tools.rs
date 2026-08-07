@@ -1383,9 +1383,9 @@ mod tests {
     const CLAUDE_MCP_BRIDGE_BINARY: &str = "signalbox-claude-mcp-bridge";
     const CARGO_TEST_PROFILE: &str = "test";
 
-    fn claude_mcp_bridge_artifact_selection(workspace: &Path) -> BridgeArtifactSelection {
+    fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
-        let configured_target_dir = configured_cargo_target_dir(workspace);
+        let configured_target_dir = absolute_cargo_target_dir();
         let known_targets = rustc_target_names();
         claude_mcp_bridge_artifact_selection_for(
             &current,
@@ -1395,14 +1395,10 @@ mod tests {
         )
     }
 
-    fn configured_cargo_target_dir(workspace: &Path) -> Option<PathBuf> {
+    fn absolute_cargo_target_dir() -> Option<PathBuf> {
         let configured = std::env::var_os("CARGO_TARGET_DIR")?;
         let configured = PathBuf::from(configured);
-        if configured.is_absolute() {
-            Some(configured)
-        } else {
-            Some(workspace.join(configured))
-        }
+        configured.is_absolute().then_some(configured)
     }
 
     fn rustc_target_names() -> BTreeSet<OsString> {
@@ -1574,16 +1570,15 @@ mod tests {
         });
     }
 
-    const SYNTHETIC_CARGO_TARGET_DIR: &str = "/tmp/signalbox-cli-target-dir";
-
     #[test]
-    fn bridge_artifact_selection_preserves_a_cli_selected_target_directory() {
-        let target_dir = Path::new(SYNTHETIC_CARGO_TARGET_DIR);
+    fn bridge_artifact_selection_derives_a_relative_target_directory_from_the_executable() {
+        let invocation = Path::new("synthetic-invocation");
+        let target_dir = invocation.join("relative-target");
         let executable = target_dir.join("debug/deps/daemon-tools-test");
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
-            target_dir,
+            target_dir: &target_dir,
             configured_target_dir: None,
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: CARGO_TEST_PROFILE,
@@ -1599,7 +1594,7 @@ mod tests {
     const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
     static BRIDGE_BUILD_LOCK: Mutex<()> = Mutex::new(());
 
-    fn wait_for_child(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
+    fn wait_for_child(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = child.try_wait()? {
@@ -1674,7 +1669,7 @@ mod tests {
             .and_then(Path::parent)
             .expect("signalboxd manifest has a workspace root")
             .to_path_buf();
-        let selection = claude_mcp_bridge_artifact_selection(&workspace);
+        let selection = claude_mcp_bridge_artifact_selection();
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
         let mut build_command = Command::new(cargo);
         build_command
@@ -1899,7 +1894,7 @@ mod tests {
     struct McpBridgeProcess {
         child: Child,
         input: Option<ChildStdin>,
-        responses: Receiver<Result<String, std::io::Error>>,
+        responses: Receiver<Result<String, io::Error>>,
         reader: Option<JoinHandle<()>>,
     }
 
@@ -1955,7 +1950,10 @@ mod tests {
             };
             let response = serde_json::from_str(&response).expect("MCP response is JSON");
             assert!(
-                valid_mcp_response_envelope(&response, &request_id),
+                valid_mcp_response_envelope(McpResponseEnvelope {
+                    response: &response,
+                    request_id: &request_id,
+                }),
                 "MCP response has the exact JSON-RPC version and request identity"
             );
             response
@@ -1987,14 +1985,20 @@ mod tests {
         }
     }
 
-    fn valid_mcp_response_envelope(
-        response: &serde_json::Value,
-        request_id: &serde_json::Value,
-    ) -> bool {
-        let has_result = response.get("result").is_some();
-        let has_error = response.get("error").is_some();
-        response.get("jsonrpc").and_then(serde_json::Value::as_str) == Some("2.0")
-            && response.get("id") == Some(request_id)
+    struct McpResponseEnvelope<'a> {
+        response: &'a serde_json::Value,
+        request_id: &'a serde_json::Value,
+    }
+
+    fn valid_mcp_response_envelope(envelope: McpResponseEnvelope<'_>) -> bool {
+        let has_result = envelope.response.get("result").is_some();
+        let has_error = envelope.response.get("error").is_some();
+        envelope
+            .response
+            .get("jsonrpc")
+            .and_then(serde_json::Value::as_str)
+            == Some("2.0")
+            && envelope.response.get("id") == Some(envelope.request_id)
             && has_result != has_error
     }
 
@@ -2004,7 +2008,10 @@ mod tests {
         let response =
             serde_json::json!({"jsonrpc": "1.0", "id": request_id.clone(), "result": {}});
 
-        assert!(!valid_mcp_response_envelope(&response, &request_id));
+        assert!(!valid_mcp_response_envelope(McpResponseEnvelope {
+            response: &response,
+            request_id: &request_id,
+        }));
     }
 
     #[test]
@@ -2013,7 +2020,10 @@ mod tests {
         let response =
             serde_json::json!({"jsonrpc": "2.0", "id": MCP_OTHER_REQUEST_ID, "result": {}});
 
-        assert!(!valid_mcp_response_envelope(&response, &request_id));
+        assert!(!valid_mcp_response_envelope(McpResponseEnvelope {
+            response: &response,
+            request_id: &request_id,
+        }));
     }
 
     #[test]
@@ -2026,7 +2036,10 @@ mod tests {
             "error": {"code": -32603, "message": "synthetic error"},
         });
 
-        assert!(!valid_mcp_response_envelope(&response, &request_id));
+        assert!(!valid_mcp_response_envelope(McpResponseEnvelope {
+            response: &response,
+            request_id: &request_id,
+        }));
     }
 
     impl Drop for McpBridgeProcess {
@@ -2045,6 +2058,7 @@ mod tests {
     struct McpBridgeReadyWaiterSpawn<'a> {
         executable: &'a Path,
         ready: &'a Path,
+        started: &'a Path,
         workspace: &'a Path,
     }
 
@@ -2053,13 +2067,35 @@ mod tests {
             let child = Command::new(config.executable)
                 .arg("--wait-ready")
                 .arg(config.ready)
+                .arg(config.started)
                 .current_dir(config.workspace)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
                 .expect("bridge readiness waiter starts");
-            Self { child }
+            let mut waiter = Self { child };
+            waiter.await_started(config.started);
+            waiter
+        }
+
+        #[track_caller]
+        fn await_started(&mut self, started: &Path) {
+            let deadline = Instant::now() + BRIDGE_RESPONSE_TIMEOUT;
+            while !started.is_file() {
+                assert!(
+                    self.child
+                        .try_wait()
+                        .expect("bridge readiness waiter status is readable")
+                        .is_none(),
+                    "bridge readiness waiter remains active while starting"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "bridge readiness waiter reports entering its wait loop"
+                );
+                thread::sleep(CHILD_POLL_INTERVAL);
+            }
         }
 
         #[track_caller]
@@ -2498,7 +2534,14 @@ mod tests {
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "initialize",
-                    "params": {"protocolVersion": MCP_PROTOCOL_VERSION},
+                    "params": {
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {
+                            "name": "signalboxd-mcp-conformance",
+                            "version": env!("CARGO_PKG_VERSION"),
+                        },
+                    },
                 }));
             self.bridge
                 .as_mut()
@@ -2567,6 +2610,10 @@ mod tests {
             initialized["result"]["protocolVersion"],
             MCP_PROTOCOL_VERSION
         );
+        assert_eq!(
+            initialized["result"]["capabilities"]["tools"],
+            serde_json::json!({"listChanged": false})
+        );
     }
 
     #[test]
@@ -2587,9 +2634,11 @@ mod tests {
         fixture.initialize();
         fixture.synchronize_without_listing();
         assert!(!fixture.ready_path.exists());
+        let waiter_started = fixture.workspace.path().join("waiter-started");
         let mut waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
             executable: &fixture.executable,
             ready: &fixture.ready_path,
+            started: &waiter_started,
             workspace: fixture.workspace.path(),
         });
         waiter.assert_waiting();
