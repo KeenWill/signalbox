@@ -26,15 +26,3 @@ pub use runtime::{
     ClaudeCliConstructionError, ClaudeCliPreparedRequest, ClaudeCliRuntime,
     DISABLED_CLAUDE_CLI_BUILTIN_TOOLS, SUPPORTED_CLAUDE_CLI_VERSION, validate_model_settings,
 };
-
-/// Serializes the MCP catalog shape used by Claude CLI preparation.
-///
-/// This narrow surface lets cross-crate conformance tests compare a composed
-/// application catalog with the exact adapter translation and serializer.
-pub fn serialize_mcp_tool_catalog_for_conformance(
-    tools: &[signalbox_model_runtime::ToolDefinition],
-) -> Result<Vec<u8>, String> {
-    let catalog = translate::translate_tool_catalog(tools)
-        .map_err(|error| format!("could not translate MCP catalog: {error:?}"))?;
-    runtime::serialize_mcp_catalog(&catalog)
-}
