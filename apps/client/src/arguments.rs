@@ -486,10 +486,10 @@ struct SpawnSessionArguments {
     /// Apply the two explicit parent-terminal policies.
     #[arg(long)]
     bound: bool,
-    /// Bound-child action when the parent stops.
+    /// Bound-child action when the parent stops; required with `--bound`.
     #[arg(long, value_enum, requires = "bound")]
     on_parent_stopped: Option<BoundChildActionArgument>,
-    /// Bound-child action when the parent is cancelled.
+    /// Bound-child action when the parent is cancelled; required with `--bound`.
     #[arg(long, value_enum, requires = "bound")]
     on_parent_cancelled: Option<BoundChildActionArgument>,
 }
@@ -3521,15 +3521,15 @@ mod tests {
         ));
     }
 
-    fn parsed_delegation_spawn(
-        parsed: Result<ParseOutcome, UsageError>,
-    ) -> (
-        CanonicalUuid,
-        CanonicalUuid,
-        CanonicalUuid,
-        String,
-        DelegationPolicy,
-    ) {
+    struct ParsedDelegationSpawn {
+        session_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+        task: String,
+        relationship: DelegationPolicy,
+    }
+
+    fn parsed_delegation_spawn(parsed: Result<ParseOutcome, UsageError>) -> ParsedDelegationSpawn {
         let Ok(ParseOutcome::Run(arguments)) = parsed else {
             panic!("the background spawn fixture must parse");
         };
@@ -3543,7 +3543,13 @@ mod tests {
         else {
             panic!("the fixture must select session spawn");
         };
-        (session_id, turn_id, tool_request_id, task, relationship)
+        ParsedDelegationSpawn {
+            session_id,
+            turn_id,
+            tool_request_id,
+            task,
+            relationship,
+        }
     }
 
     fn parsed_delegation_await(
@@ -3586,26 +3592,25 @@ mod tests {
         const TURN: &str = "00000000-0000-0000-0000-000000000002";
         const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
         const TASK: &str = "inspect logs";
-        let (session_id, turn_id, tool_request_id, task, relationship) =
-            parsed_delegation_spawn(parse(
-                [
-                    "session",
-                    "spawn",
-                    SESSION,
-                    TURN,
-                    REQUEST,
-                    "--task",
-                    TASK,
-                    "--background",
-                ]
-                .map(Into::into),
-            ));
+        let parsed = parsed_delegation_spawn(parse(
+            [
+                "session",
+                "spawn",
+                SESSION,
+                TURN,
+                REQUEST,
+                "--task",
+                TASK,
+                "--background",
+            ]
+            .map(Into::into),
+        ));
 
-        assert_eq!(session_id.to_string(), SESSION);
-        assert_eq!(turn_id.to_string(), TURN);
-        assert_eq!(tool_request_id.to_string(), REQUEST);
-        assert_eq!(task, TASK);
-        assert_eq!(relationship, DelegationPolicy::Background {});
+        assert_eq!(parsed.session_id.to_string(), SESSION);
+        assert_eq!(parsed.turn_id.to_string(), TURN);
+        assert_eq!(parsed.tool_request_id.to_string(), REQUEST);
+        assert_eq!(parsed.task, TASK);
+        assert_eq!(parsed.relationship, DelegationPolicy::Background {});
     }
 
     #[test]
