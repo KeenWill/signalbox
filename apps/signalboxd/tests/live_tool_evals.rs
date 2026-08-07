@@ -55,6 +55,7 @@ use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
     process_read::{
+        ProcessFailedModelCallDisposition, ProcessProviderModelCallFailureCause,
         ProcessReadRepository, ProcessToolExecutionResultDisposition, ProcessTranscriptEntry,
         ProcessTurnState,
     },
@@ -103,8 +104,17 @@ const API_KEY_VARIABLE: &str = "OPENAI_API_KEY";
 const FAMILY_VARIABLE: &str = "SIGNALBOX_TOOL_EVAL_FAMILY";
 const SUMMARY_VARIABLE: &str = "SIGNALBOX_TOOL_EVAL_SUMMARY";
 const DEFAULT_MODEL: &str = "gpt-5-nano";
-const GIT_MODEL: &str = "gpt-5-mini";
-const MAX_OUTPUT_TOKENS: u32 = 1_024;
+/// Output ceiling for one eval exchange.
+///
+/// The selected models are reasoning models, and the provider charges reasoning
+/// tokens against this same ceiling before the visible tool call is emitted. A
+/// ceiling small enough to be reached while reasoning terminates the response
+/// with the provider's `length` token, which this adapter deliberately refuses
+/// to interpret, so the turn terminalizes as a provider failure and the family
+/// reports no capability evidence at all. The ceiling therefore sits far above
+/// any plausible reasoning burn for these single-call fixtures; it bounds a
+/// runaway response rather than shaping the expected one.
+const MAX_OUTPUT_TOKENS: u32 = 16_384;
 const CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const TURN_TIMEOUT: Duration = Duration::from_secs(3 * 2 * 60 + 60);
@@ -145,6 +155,7 @@ const ARBITRARY_SECOND_EVAL_REQUEST_ID: u128 = 0x910a;
 const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x910b;
 const ARBITRARY_EVAL_FRONTIER_ID: u128 = 0x910c;
 const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
+const SYNTHETIC_EXECUTOR_FAILURE: &str = "synthetic executor failure";
 
 type EvalResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -159,14 +170,48 @@ fn live_model_in_the_loop_evaluates_one_daemon_tool_family() -> EvalResult {
                 .enable_all()
                 .thread_stack_size(LIVE_EVAL_THREAD_STACK_BYTES)
                 .build()
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| rendered_error_chain(&error))?;
             runtime
                 .block_on(run_selected_family_if_enabled())
-                .map_err(|error| error.to_string())
+                .map_err(|error| rendered_error_chain(error.as_ref()))
         })?
         .join()
         .map_err(|_| io::Error::other("the live tool eval thread panicked"))?;
     outcome.map_err(|error| io::Error::other(error).into())
+}
+
+/// Renders one error and every nested cause it forwards.
+///
+/// A thread boundary can only carry an owned string, and the family executor
+/// wrapper deliberately displays a fixed sentence while retaining the concrete
+/// cause as its source. Rendering the complete chain before the crossing keeps
+/// the paid run diagnosable from the failure text alone.
+fn rendered_error_chain(error: &(dyn Error + 'static)) -> String {
+    let mut rendered = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        rendered.push_str(": ");
+        rendered.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    rendered
+}
+
+#[test]
+fn the_rendered_error_chain_names_every_nested_cause() {
+    let error = FamilyExecutorError::new(io::Error::other(SYNTHETIC_EXECUTOR_FAILURE));
+
+    assert_eq!(
+        rendered_error_chain(&error),
+        format!("the selected eval tool executor failed: {SYNTHETIC_EXECUTOR_FAILURE}")
+    );
+}
+
+#[test]
+fn the_rendered_error_chain_of_a_sourceless_error_is_its_own_text() {
+    let error = io::Error::other(SYNTHETIC_EXECUTOR_FAILURE);
+
+    assert_eq!(rendered_error_chain(&error), SYNTHETIC_EXECUTOR_FAILURE);
 }
 
 async fn run_selected_family_if_enabled() -> EvalResult {
@@ -291,8 +336,7 @@ impl EvalFamily {
 
     const fn model(self) -> &'static str {
         match self {
-            Self::Git => GIT_MODEL,
-            Self::Workspace | Self::Web | Self::Exec => DEFAULT_MODEL,
+            Self::Git | Self::Workspace | Self::Web | Self::Exec => DEFAULT_MODEL,
         }
     }
 
@@ -888,8 +932,18 @@ impl SharedFamilyExecutor {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct FamilyExecutorError;
+#[derive(Debug)]
+struct FamilyExecutorError {
+    source: Box<dyn Error + Send + Sync>,
+}
+
+impl FamilyExecutorError {
+    fn new(source: impl Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
 
 impl fmt::Display for FamilyExecutorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -897,12 +951,26 @@ impl fmt::Display for FamilyExecutorError {
     }
 }
 
-impl Error for FamilyExecutorError {}
+impl Error for FamilyExecutorError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
 
 impl ClassifyOperatorFailure for FamilyExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         OperatorFailureClass::CallerOrHubBug
     }
+}
+
+#[test]
+fn family_executor_error_preserves_its_concrete_source() {
+    let error = FamilyExecutorError::new(io::Error::other(SYNTHETIC_EXECUTOR_FAILURE));
+
+    assert_eq!(
+        error.source().map(ToString::to_string),
+        Some(String::from(SYNTHETIC_EXECUTOR_FAILURE))
+    );
 }
 
 impl ToolExecutor for SharedFamilyExecutor {
@@ -918,7 +986,7 @@ impl ToolExecutor for SharedFamilyExecutor {
             FamilyExecutor::Git(executor) => executor
                 .execute(invocation)
                 .await
-                .map_err(|_| FamilyExecutorError),
+                .map_err(FamilyExecutorError::new),
             FamilyExecutor::Workspace { read, .. }
                 if matches!(
                     name.as_str(),
@@ -927,20 +995,20 @@ impl ToolExecutor for SharedFamilyExecutor {
             {
                 read.execute(invocation)
                     .await
-                    .map_err(|_| FamilyExecutorError)
+                    .map_err(FamilyExecutorError::new)
             }
             FamilyExecutor::Workspace { mutation, .. } => mutation
                 .execute(invocation)
                 .await
-                .map_err(|_| FamilyExecutorError),
+                .map_err(FamilyExecutorError::new),
             FamilyExecutor::Web { fetch, .. } if name == WEB_FETCH_NAME => fetch
                 .execute(invocation)
                 .await
-                .map_err(|_| FamilyExecutorError),
+                .map_err(FamilyExecutorError::new),
             FamilyExecutor::Web { search, .. } => search
                 .execute(invocation)
                 .await
-                .map_err(|_| FamilyExecutorError),
+                .map_err(FamilyExecutorError::new),
             FamilyExecutor::Exec {
                 sandboxed,
                 unsandboxed,
@@ -954,15 +1022,15 @@ impl ToolExecutor for SharedFamilyExecutor {
                     SANDBOXED_EXEC_NAME => sandboxed
                         .execute(invocation)
                         .await
-                        .map_err(|_| FamilyExecutorError),
+                        .map_err(FamilyExecutorError::new),
                     UNSANDBOXED_EXEC_NAME => unsandboxed
                         .execute(invocation)
                         .await
-                        .map_err(|_| FamilyExecutorError),
+                        .map_err(FamilyExecutorError::new),
                     _ => diagnostics
                         .execute(invocation)
                         .await
-                        .map_err(|_| FamilyExecutorError),
+                        .map_err(FamilyExecutorError::new),
                 }
             }
         }
@@ -1574,6 +1642,9 @@ fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SnapshotTurnDisposition {
     Completed,
+    /// The turn terminalized on a definitive provider failure, carrying the
+    /// closed cause the daemon retained for it when one was recorded.
+    ProviderFailure(Option<ProcessProviderModelCallFailureCause>),
     Other,
 }
 
@@ -1581,13 +1652,20 @@ impl SnapshotTurnDisposition {
     fn from_process_state(state: &ProcessTurnState) -> Self {
         match state {
             ProcessTurnState::Completed { .. } => Self::Completed,
+            ProcessTurnState::Failed {
+                terminal_model_call,
+                ..
+            } => Self::from_failed_model_call(
+                terminal_model_call
+                    .as_ref()
+                    .map(|call| (call.disposition(), call.provider_failure_cause())),
+            ),
             ProcessTurnState::Queued { .. }
             | ProcessTurnState::QueuedDelegated { .. }
             | ProcessTurnState::QueuedDelegationWake { .. }
             | ProcessTurnState::DelegationTerminated { .. }
             | ProcessTurnState::ActiveRunning { .. }
             | ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
-            | ProcessTurnState::Failed { .. }
             | ProcessTurnState::Cancelled { .. }
             | ProcessTurnState::Refused { .. }
             | ProcessTurnState::ActiveAwaitingToolApproval { .. }
@@ -1597,18 +1675,61 @@ impl SnapshotTurnDisposition {
         }
     }
 
-    const fn is_completed(self) -> bool {
-        match self {
-            Self::Completed => true,
-            Self::Other => false,
+    const fn from_failed_model_call(
+        terminal_call: Option<(
+            ProcessFailedModelCallDisposition,
+            Option<ProcessProviderModelCallFailureCause>,
+        )>,
+    ) -> Self {
+        match terminal_call {
+            Some((ProcessFailedModelCallDisposition::KnownFailed, cause)) => {
+                Self::ProviderFailure(cause)
+            }
+            Some((ProcessFailedModelCallDisposition::Cancelled, _)) | None => Self::Other,
         }
     }
 
-    const fn label(self) -> &'static str {
+    const fn is_completed(self) -> bool {
         match self {
-            Self::Completed => "completed",
-            Self::Other => "not completed",
+            Self::Completed => true,
+            Self::ProviderFailure(_) | Self::Other => false,
         }
+    }
+
+    const fn is_provider_failure(self) -> bool {
+        match self {
+            Self::ProviderFailure(_) => true,
+            Self::Completed | Self::Other => false,
+        }
+    }
+
+    /// Renders the turn cell, naming the closed provider cause when the daemon
+    /// retained one so a paid run reports why the exchange never happened.
+    fn label(self) -> String {
+        match self {
+            Self::Completed => String::from("completed"),
+            Self::ProviderFailure(None) => String::from("provider failure"),
+            Self::ProviderFailure(Some(cause)) => {
+                format!("provider failure: {}", provider_failure_cause_label(cause))
+            }
+            Self::Other => String::from("not completed"),
+        }
+    }
+}
+
+/// Names one closed provider-failure classification for the eval report.
+const fn provider_failure_cause_label(cause: ProcessProviderModelCallFailureCause) -> &'static str {
+    match cause {
+        ProcessProviderModelCallFailureCause::CredentialRejected => "credential rejected",
+        ProcessProviderModelCallFailureCause::PermissionDenied => "permission denied",
+        ProcessProviderModelCallFailureCause::InvalidRequest => "invalid request",
+        ProcessProviderModelCallFailureCause::TargetNotFound => "target not found",
+        ProcessProviderModelCallFailureCause::RequestTooLarge => "request too large",
+        ProcessProviderModelCallFailureCause::RateLimited => "rate limited",
+        ProcessProviderModelCallFailureCause::QuotaExhausted => "quota exhausted",
+        ProcessProviderModelCallFailureCause::Overloaded => "overloaded",
+        ProcessProviderModelCallFailureCause::ProviderInternal => "provider internal",
+        ProcessProviderModelCallFailureCause::Unrecognized => "unrecognized",
     }
 }
 
@@ -1622,6 +1743,9 @@ struct CaseOutcome {
 
 impl CaseOutcome {
     fn forced_disposition(&self) -> EvalDisposition {
+        if self.snapshot.turn_disposition.is_provider_failure() {
+            return EvalDisposition::Infrastructure;
+        }
         let Some(target) = self.target.as_deref() else {
             return EvalDisposition::Miss;
         };
@@ -1641,6 +1765,9 @@ impl CaseOutcome {
     }
 
     fn natural_loop_disposition(&self, family: EvalFamily) -> EvalDisposition {
+        if self.snapshot.turn_disposition.is_provider_failure() {
+            return EvalDisposition::Infrastructure;
+        }
         let required_names: &[&str] = match family {
             EvalFamily::Git => &[GIT_STAGE_NAME, GIT_CREATE_COMMIT_NAME],
             EvalFamily::Workspace => &[READ_FILE_NAME, WRITE_FILE_NAME],
@@ -1758,6 +1885,83 @@ fn turn_snapshot_reports_a_terminal_model_failure_as_a_miss() {
     assert_eq!(
         SnapshotTurnDisposition::from_process_state(&state),
         SnapshotTurnDisposition::Other
+    );
+}
+
+#[test]
+fn turn_snapshot_reports_a_terminal_provider_failure_distinctly() {
+    assert_eq!(
+        SnapshotTurnDisposition::from_failed_model_call(Some((
+            ProcessFailedModelCallDisposition::KnownFailed,
+            None
+        ))),
+        SnapshotTurnDisposition::ProviderFailure(None)
+    );
+}
+
+#[test]
+fn turn_snapshot_retains_the_closed_provider_failure_cause() {
+    assert_eq!(
+        SnapshotTurnDisposition::from_failed_model_call(Some((
+            ProcessFailedModelCallDisposition::KnownFailed,
+            Some(ProcessProviderModelCallFailureCause::TargetNotFound)
+        ))),
+        SnapshotTurnDisposition::ProviderFailure(Some(
+            ProcessProviderModelCallFailureCause::TargetNotFound
+        ))
+    );
+}
+
+#[test]
+fn a_cancelled_terminal_model_call_is_not_a_provider_failure() {
+    assert_eq!(
+        SnapshotTurnDisposition::from_failed_model_call(Some((
+            ProcessFailedModelCallDisposition::Cancelled,
+            None
+        ))),
+        SnapshotTurnDisposition::Other
+    );
+}
+
+#[test]
+fn the_turn_cell_names_the_closed_provider_failure_cause() {
+    let disposition = SnapshotTurnDisposition::ProviderFailure(Some(
+        ProcessProviderModelCallFailureCause::TargetNotFound,
+    ));
+
+    assert_eq!(disposition.label(), "provider failure: target not found");
+}
+
+#[test]
+fn the_turn_cell_of_an_unclassified_provider_failure_stays_bare() {
+    let disposition = SnapshotTurnDisposition::ProviderFailure(None);
+
+    assert_eq!(disposition.label(), "provider failure");
+}
+
+#[test]
+fn provider_failure_is_reported_as_infrastructure_not_a_model_miss() {
+    let outcome = CaseOutcome {
+        target: Some(String::from(GIT_STATUS_NAME)),
+        expected_arguments: Some(String::from("{}")),
+        execution_completed: true,
+        tool_results: Vec::new(),
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::ProviderFailure(Some(
+                ProcessProviderModelCallFailureCause::TargetNotFound,
+            )),
+            requests: Vec::new(),
+            model_calls: 1,
+        },
+    };
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Git),
+        EvalDisposition::Infrastructure
     );
 }
 
@@ -2353,6 +2557,7 @@ fn web_natural_state_requires_the_exact_query() -> EvalResult {
 enum EvalDisposition {
     Pass,
     Miss,
+    Infrastructure,
 }
 
 impl EvalDisposition {
@@ -2364,6 +2569,8 @@ impl EvalDisposition {
         match (self, other) {
             (Self::Pass, Self::Pass) => Self::Pass,
             (Self::Pass, Self::Miss) | (Self::Miss, Self::Pass | Self::Miss) => Self::Miss,
+            (Self::Infrastructure, Self::Pass | Self::Miss | Self::Infrastructure)
+            | (Self::Pass | Self::Miss, Self::Infrastructure) => Self::Infrastructure,
         }
     }
 
@@ -2371,6 +2578,7 @@ impl EvalDisposition {
         match self {
             Self::Pass => "PASS",
             Self::Miss => "MISS",
+            Self::Infrastructure => "INFRA",
         }
     }
 }
@@ -2406,11 +2614,12 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         .natural_loop_disposition(report.family)
         .and(report.natural_state);
     markdown.push_str(&format!(
-        "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state |\n| --- | --- | ---: | --- |\n| {} | {} | {} | {} |\n\nAll outcomes are report-only; a model miss does not fail this workflow.\n",
+        "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | `{}` |\n\nAll outcomes are report-only; a model miss does not fail this workflow.\n",
         natural.label(),
         report.natural.snapshot.called_names(),
         report.natural.tool_results.len(),
         report.natural_state.label(),
+        report.natural.snapshot.turn_disposition.label(),
     ));
     fs::write(summary_path, &markdown)?;
     print!("{markdown}");
