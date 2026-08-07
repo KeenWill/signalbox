@@ -254,7 +254,8 @@ pub struct AwaitSessionReceipt {
 impl AwaitSessionReceipt {
     /// Projects a receipt only from the exact sealed request and wait.
     pub fn from_wait(request: &DelegationAwaitRequest, wait: DelegationWait) -> Option<Self> {
-        (request.request().id() == wait.awaiting_request()
+        (wait.mode() == DelegationWaitMode::Background
+            && request.request().id() == wait.awaiting_request()
             && request.request().session() == wait.parent()
             && request.child() == wait.child()
             && request.mode() == wait.mode())

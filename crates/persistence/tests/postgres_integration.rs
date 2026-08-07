@@ -1907,6 +1907,104 @@ async fn s18_inv010_inv012_message_replay_requires_complete_tool_provenance()
     Ok(())
 }
 
+/// S18 / INV-010 / INV-012: equal message replay requires the durable update
+/// satellite emitted by the original transaction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_message_replay_requires_update_outbox_satellite()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationMessageRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository
+        .record_message(
+            request.clone(),
+            DelegationMessageId::from_uuid(fixture.message_id),
+            &dispatch,
+        )
+        .await?;
+    sqlx::query("ALTER TABLE delegation_update_outbox_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM delegation_update_outbox_event WHERE message_id = $1")
+        .bind(fixture.message_id)
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .record_message(
+            request,
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x401)),
+            &dispatch,
+        )
+        .await
+        .expect_err("message replay requires its update outbox satellite");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Missing("update_event_kind")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-010 / INV-012: equal message replay requires the durable wake
+/// satellite emitted by the original transaction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_message_replay_requires_wake_outbox_satellite()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationMessageRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository
+        .record_message(
+            request.clone(),
+            DelegationMessageId::from_uuid(fixture.message_id),
+            &dispatch,
+        )
+        .await?;
+    sqlx::query("ALTER TABLE delegation_wake_outbox_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM delegation_wake_outbox_event WHERE message_id = $1")
+        .bind(fixture.message_id)
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .record_message(
+            request,
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x401)),
+            &dispatch,
+        )
+        .await
+        .expect_err("message replay requires its wake outbox satellite");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Missing("wake_event_kind")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S18 / INV-010 / INV-012: concurrent relationships cannot claim one global
 /// message identity; exactly one records and the loser is a typed rejection.
 #[tokio::test(flavor = "multi_thread")]
@@ -19920,6 +20018,85 @@ async fn s17_inv032_delegated_terminal_result_locks_parent_before_relationship()
 
     assert!(matches!(committed, ModelCallTerminalOutcome::Completed(_)));
     assert_eq!(result_count, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-010: input submitted to a delegated child takes the canonical
+/// parent endpoint before the child session, scheduler, and relationship.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_delegated_input_locks_parent_before_child_scheduler()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xd780;
+    let fixture = authorize_delegated_model_call_fixture(&pool, seed).await?;
+    let mut parent_lock = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(fixture.parent.into_uuid())
+        .execute(&mut *parent_lock)
+        .await?;
+    let child = fixture.child;
+    let spawning_request = fixture.spawning_request;
+    let submit_pool = pool.clone();
+    let submitted = tokio::spawn(async move {
+        SubmitInputRepository::new(submit_pool)
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(seed + 40)),
+                    child,
+                    UserContent::try_text(String::from("must retain the delegated active turn"))
+                        .expect("fixture input content is admitted"),
+                    DeliveryRequest::StartWhenNoActiveTurn {
+                        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                    },
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + 41)),
+                Some(TurnId::from_uuid(Uuid::from_u128(seed + 42))),
+            )
+            .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "delegated child input must wait on the parent endpoint lock"
+    );
+    sqlx::query("SET LOCAL lock_timeout = '250ms'")
+        .execute(&mut *parent_lock)
+        .await?;
+    let locked_child_session: Uuid = sqlx::query_scalar(
+        "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE",
+    )
+    .bind(child.into_uuid())
+    .fetch_one(&mut *parent_lock)
+    .await?;
+    let locked_child_scheduler: Uuid = sqlx::query_scalar(
+        "SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE",
+    )
+    .bind(child.into_uuid())
+    .fetch_one(&mut *parent_lock)
+    .await?;
+    let locked_request: Uuid = sqlx::query_scalar(
+        "SELECT spawning_tool_request_id
+           FROM session_delegation
+          WHERE spawning_tool_request_id = $1
+          FOR UPDATE",
+    )
+    .bind(spawning_request.into_uuid())
+    .fetch_one(&mut *parent_lock)
+    .await?;
+    assert_eq!(locked_child_session, child.into_uuid());
+    assert_eq!(locked_child_scheduler, child.into_uuid());
+    assert_eq!(locked_request, spawning_request.into_uuid());
+    parent_lock.commit().await?;
+    let outcome = submitted.await??;
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::ActiveTurnPresent { .. },
+    )) = outcome
+    else {
+        panic!("delegated input must preserve the child's active turn");
+    };
 
     pool.close().await;
     drop(container);

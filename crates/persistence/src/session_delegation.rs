@@ -1533,6 +1533,7 @@ async fn load_message_replay(
 ) -> Result<Option<RecordedDelegationMessage>, SessionDelegationRepositoryError> {
     let row = sqlx::query(
         "SELECT relation.parent_session_id, relation.child_session_id,
+                event.spawning_tool_request_id AS message_spawning_request_id,
                 event.provenance_kind, event.provenance_session_id,
                 event.provenance_turn_id, event.provenance_goal_generation,
                 event.provenance_tool_request_id, event.provenance_command_id,
@@ -1543,7 +1544,23 @@ async fn load_message_replay(
                 delivery.delivery_kind AS delivery_kind,
                 pending.recipient_session_id AS pending_recipient_session_id,
                 pending.delivery_sequence AS pending_delivery_sequence,
-                pending.delivery_kind AS pending_delivery_kind
+                pending.delivery_kind AS pending_delivery_kind,
+                update_event.event_kind AS update_event_kind,
+                update_event.storage_version AS update_storage_version,
+                update_event.session_id AS update_session_id,
+                update_event.update_kind AS update_kind,
+                update_event.spawning_tool_request_id AS update_spawning_request_id,
+                update_event.message_id AS update_message_id,
+                update_event.sender_session_id AS update_sender_session_id,
+                update_event.recipient_session_id AS update_recipient_session_id,
+                update_event.message_ordinal AS update_message_ordinal,
+                update_event.content_text AS update_content_text,
+                wake_event.event_kind AS wake_event_kind,
+                wake_event.storage_version AS wake_storage_version,
+                wake_event.session_id AS wake_session_id,
+                wake_event.spawning_tool_request_id AS wake_spawning_request_id,
+                wake_event.subject_kind AS wake_subject_kind,
+                wake_event.message_id AS wake_message_id
            FROM session_delegation_event AS event
            LEFT JOIN session_delegation AS relation
              ON relation.spawning_tool_request_id = event.spawning_tool_request_id
@@ -1557,6 +1574,12 @@ async fn load_message_replay(
              ON pending.recipient_session_id = delivery.recipient_session_id
             AND pending.delivery_sequence = delivery.delivery_sequence
             AND pending.delivery_kind = delivery.delivery_kind
+           LEFT JOIN delegation_update_outbox_event AS update_event
+             ON update_event.update_kind = 'session_message'
+            AND update_event.message_id = message.message_id
+           LEFT JOIN delegation_wake_outbox_event AS wake_event
+             ON wake_event.subject_kind = 'message'
+            AND wake_event.message_id = message.message_id
           WHERE event.event_kind = 'message_delivered'
             AND event.provenance_tool_request_id = $1",
     )
@@ -1581,16 +1604,37 @@ async fn load_message_replay(
     )?;
     let delivery_kind: String = required(&row, "delivery_kind")?;
     let pending_kind: String = required(&row, "pending_delivery_kind")?;
+    let message_id = required::<Uuid>(&row, "message_id")?;
+    let message_ordinal = decode_ordinal(required(&row, "event_ordinal")?)?;
+    let spawning_request = required::<Uuid>(&row, "message_spawning_request_id")?;
     let endpoints = RelationEndpoints { parent, child };
+    let recipient = message_recipient(direction, endpoints);
     if content != request.content().as_str()
-        || delivery_recipient != message_recipient(direction, endpoints)
+        || delivery_recipient != recipient
         || pending_recipient != delivery_recipient
         || pending_sequence != delivery_sequence
         || delivery_kind != "message"
         || pending_kind != delivery_kind
+        || required::<String>(&row, "update_event_kind")? != "delegation_update"
+        || required::<i16>(&row, "update_storage_version")? != STORAGE_VERSION
+        || session_id_from_uuid(required(&row, "update_session_id")?) != recipient
+        || required::<String>(&row, "update_kind")? != "session_message"
+        || required::<Uuid>(&row, "update_spawning_request_id")? != spawning_request
+        || required::<Uuid>(&row, "update_message_id")? != message_id
+        || session_id_from_uuid(required(&row, "update_sender_session_id")?)
+            != request.request().session()
+        || session_id_from_uuid(required(&row, "update_recipient_session_id")?) != recipient
+        || decode_ordinal(required(&row, "update_message_ordinal")?)? != message_ordinal
+        || required::<String>(&row, "update_content_text")? != content
+        || required::<String>(&row, "wake_event_kind")? != "delegation_wake"
+        || required::<i16>(&row, "wake_storage_version")? != STORAGE_VERSION
+        || session_id_from_uuid(required(&row, "wake_session_id")?) != recipient
+        || required::<Uuid>(&row, "wake_spawning_request_id")? != spawning_request
+        || required::<String>(&row, "wake_subject_kind")? != "message"
+        || required::<Uuid>(&row, "wake_message_id")? != message_id
         || DelegationMessage::reconstitute(
             request,
-            DelegationMessageId::from_uuid(required(&row, "message_id")?),
+            DelegationMessageId::from_uuid(message_id),
             direction,
             DelegationMessageEndpoints { parent, child },
         )
@@ -1600,9 +1644,9 @@ async fn load_message_replay(
     }
     Ok(Some(RecordedDelegationMessage {
         tool_request: request.request().id(),
-        message: DelegationMessageId::from_uuid(required(&row, "message_id")?),
+        message: DelegationMessageId::from_uuid(message_id),
         direction,
-        ordinal: decode_ordinal(required(&row, "event_ordinal")?)?,
+        ordinal: message_ordinal,
         delivery_sequence,
     }))
 }
