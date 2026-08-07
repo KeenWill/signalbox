@@ -944,21 +944,21 @@ relaxed invocation.
 
 The pinned stream establishes correlation and reported-model evidence through
 `system/init`. Nonterminal `system/status`, `system/hook_started`,
-`system/hook_progress`, and `system/hook_response` lifecycle events are
-discarded, so they neither masquerade as initialization nor mask the later typed
-process-exit classification. Assistant `text`, `thinking`, `redacted_thinking`,
-and `tool_use` blocks become typed observations and assistant parts. A tool
-proposal must name the private MCP namespace, match a declared schema name,
-carry a unique nonempty id and object arguments, and receive exactly one
-matching user `tool_result` whose sole text block is the fixed acknowledgement.
-Only a terminal `result` event can establish success or refusal; an error
-`result` and a nonzero process exit produce typed provider-error evidence. Exit
-zero without it is `BoundaryLoss(StreamEndedWithoutTerminalMarker)`; malformed
-or contradictory JSONL is `BoundaryLoss(StreamProtocolViolation)`; and prose
-alone never becomes terminal evidence. A success must satisfy the operation's
-any/named tool choice, with a structured-output contract represented as the
-required named MCP tool. Provider usage is retained only where the CLI reports
-it.
+`system/hook_progress`, `system/hook_response`, and `system/api_retry` lifecycle
+events are discarded, so they neither masquerade as initialization nor mask the
+later typed terminal or process-exit classification. Assistant `text`,
+`thinking`, `redacted_thinking`, and `tool_use` blocks become typed observations
+and assistant parts. A tool proposal must name the private MCP namespace, match
+a declared schema name, carry a unique nonempty id and object arguments, and
+receive exactly one matching user `tool_result` whose sole text block is the
+fixed acknowledgement. Only a terminal `result` event can establish success or
+refusal; an error `result` and a nonzero process exit produce typed
+provider-error evidence. Exit zero without it is
+`BoundaryLoss(StreamEndedWithoutTerminalMarker)`; malformed or contradictory
+JSONL is `BoundaryLoss(StreamProtocolViolation)`; and prose alone never becomes
+terminal evidence. A success must satisfy the operation's any/named tool choice,
+with a structured-output contract represented as the required named MCP tool.
+Provider usage is retained only where the CLI reports it.
 
 The adapter accepts only its configured non-secret `CredentialReference`.
 Ambient delivery leaves subscription-login resolution inside Claude Code. File

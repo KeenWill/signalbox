@@ -88,12 +88,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if scenario == "nonterminal_system_events" {
-        system_hook("hook_started")?;
+        system_event("hook_started")?;
         system_status(None)?;
         system_init(&arguments)?;
-        system_hook("hook_progress")?;
-        system_hook("hook_response")?;
+        system_event("hook_progress")?;
+        system_event("hook_response")?;
         system_status(Some("requesting"))?;
+        system_event("api_retry")?;
         assistant_text(fixtures::ANSWER)?;
         success("end_turn", Some(fixtures::ANSWER))?;
         return Ok(());
@@ -228,7 +229,7 @@ fn system_status(status: Option<&str>) -> std::io::Result<()> {
     }))
 }
 
-fn system_hook(subtype: &str) -> std::io::Result<()> {
+fn system_event(subtype: &str) -> std::io::Result<()> {
     emit_json(&serde_json::json!({
         "type": "system", "subtype": subtype, "session_id": fixtures::SESSION_ID
     }))

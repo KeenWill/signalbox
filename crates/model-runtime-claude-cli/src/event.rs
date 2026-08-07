@@ -172,14 +172,15 @@ impl<C: Clone> EventDecoder<C> {
         let subtype = value.get("subtype").and_then(Value::as_str);
         if matches!(
             subtype,
-            Some("status" | "hook_started" | "hook_progress" | "hook_response")
+            Some("status" | "hook_started" | "hook_progress" | "hook_response" | "api_retry")
         ) {
             return Ok(());
         }
         if subtype != Some("init") || self.initialized {
-            return Err(DecodeFailure::stream_protocol(
-                "unexpected or duplicate Claude system event",
-            ));
+            let subtype = subtype.unwrap_or("<missing>");
+            return Err(DecodeFailure::stream_protocol(format!(
+                "unexpected or duplicate Claude system event subtype `{subtype}`"
+            )));
         }
         let event: SystemInit = decode(value)?;
         if event.session_id.is_empty() || event.model.is_empty() {
