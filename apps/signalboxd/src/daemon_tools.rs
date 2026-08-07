@@ -1406,7 +1406,7 @@ mod tests {
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
         let known_targets = rustc_target_names();
-        let configured_target_dir = configured_cargo_target_dir(&current);
+        let configured_target_dir = configured_cargo_target_dir(&current, &known_targets);
         let default_target_dir = cargo_metadata_target_dir();
         reject_unrecognized_default_target(
             &current,
@@ -1424,18 +1424,42 @@ mod tests {
     }
 
     #[track_caller]
-    fn configured_cargo_target_dir(current: &Path) -> Option<PathBuf> {
+    fn configured_cargo_target_dir(
+        current: &Path,
+        known_targets: &BTreeSet<OsString>,
+    ) -> Option<PathBuf> {
         let configured = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR")?);
-        let configured = configured_cargo_target_dir_for(current, &configured);
+        let configured = configured_cargo_target_dir_for(current, &configured, known_targets);
         Some(canonicalized_target_dir(&configured))
     }
 
     #[track_caller]
-    fn configured_cargo_target_dir_for(current: &Path, configured: &Path) -> PathBuf {
+    fn configured_cargo_target_dir_for(
+        current: &Path,
+        configured: &Path,
+        known_targets: &BTreeSet<OsString>,
+    ) -> PathBuf {
         if configured.is_absolute() {
             return configured.to_path_buf();
         }
         let configured = lexically_normalized(configured);
+        let artifact_parent = current
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("test executable has a Cargo artifact parent");
+        if configured.as_os_str().is_empty() {
+            if artifact_parent
+                .file_name()
+                .is_some_and(|name| known_targets.contains(name))
+            {
+                return artifact_parent
+                    .parent()
+                    .expect("target-specific artifacts have a target directory")
+                    .to_path_buf();
+            }
+            return artifact_parent.to_path_buf();
+        }
         let closest = current
             .ancestors()
             .find(|ancestor| ancestor.ends_with(&configured))
@@ -1446,11 +1470,6 @@ mod tests {
                     .find(|ancestor| ancestor.file_name() == Some(configured_name))
             })
             .expect("relative Cargo target directory is an ancestor of the test executable");
-        let artifact_parent = current
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .expect("test executable has a Cargo artifact parent");
         if closest == artifact_parent
             && closest.parent().and_then(Path::file_name) == configured.file_name()
         {
@@ -1697,6 +1716,12 @@ mod tests {
 
     const SYNTHETIC_CARGO_TARGET: &str = "x86_64-unknown-linux-musl";
 
+    fn synthetic_known_targets() -> BTreeSet<OsString> {
+        [OsString::from(SYNTHETIC_CARGO_TARGET)]
+            .into_iter()
+            .collect()
+    }
+
     #[test]
     fn bridge_artifact_selection_preserves_a_cli_selected_target() {
         let executable = Path::new("synthetic-target")
@@ -1822,8 +1847,11 @@ mod tests {
         let executable = target_dir
             .join(SYNTHETIC_CARGO_TARGET)
             .join("debug/deps/daemon-tools-test");
-        let configured_target_dir =
-            configured_cargo_target_dir_for(&executable, Path::new("relative-target"));
+        let configured_target_dir = configured_cargo_target_dir_for(
+            &executable,
+            Path::new("relative-target"),
+            &synthetic_known_targets(),
+        );
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
@@ -1843,8 +1871,11 @@ mod tests {
         let executable = target_dir
             .join(SYNTHETIC_CARGO_TARGET)
             .join("debug/deps/daemon-tools-test");
-        let configured_target_dir =
-            configured_cargo_target_dir_for(&executable, Path::new("../artifact"));
+        let configured_target_dir = configured_cargo_target_dir_for(
+            &executable,
+            Path::new("../artifact"),
+            &synthetic_known_targets(),
+        );
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
@@ -1867,6 +1898,7 @@ mod tests {
         let configured_target_dir = configured_cargo_target_dir_for(
             &executable,
             &Path::new("..").join(SYNTHETIC_CARGO_TARGET),
+            &synthetic_known_targets(),
         );
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
@@ -1881,11 +1913,56 @@ mod tests {
         });
     }
 
+    #[test]
+    fn bridge_artifact_selection_resolves_a_dot_relative_configured_directory() {
+        let target_dir = Path::new("synthetic-workspace");
+        let executable = target_dir.join("debug/deps/daemon-tools-test");
+        let configured_target_dir =
+            configured_cargo_target_dir_for(&executable, Path::new("."), &BTreeSet::new());
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: None,
+        });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_preserves_a_target_with_a_dot_relative_directory() {
+        let target_dir = Path::new("synthetic-workspace");
+        let executable = target_dir
+            .join(SYNTHETIC_CARGO_TARGET)
+            .join("debug/deps/daemon-tools-test");
+        let configured_target_dir = configured_cargo_target_dir_for(
+            &executable,
+            Path::new("."),
+            &synthetic_known_targets(),
+        );
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: Some(SYNTHETIC_CARGO_TARGET),
+            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
+        });
+    }
+
     const BRIDGE_BUILD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
     const BRIDGE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
     const BRIDGE_EXIT_TIMEOUT: Duration = Duration::from_secs(12);
     const BRIDGE_CHILD_TEST_TIMEOUT: Duration = Duration::from_millis(25);
     const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+    const BRIDGE_WAIT_CHILD_FIXTURE_LIFETIME: Duration = Duration::from_secs(2);
+    const BRIDGE_WAIT_DESCENDANT_FIXTURE_LIFETIME: Duration = Duration::from_secs(30);
     #[cfg(target_os = "linux")]
     const LINUX_NANOSLEEP_WAIT_CHANNEL: &str = "nanosleep";
     static BRIDGE_BUILD_LOCK: Mutex<()> = Mutex::new(());
@@ -1926,14 +2003,14 @@ mod tests {
     #[test]
     #[ignore = "subprocess fixture for the bounded child-wait regression test"]
     fn bridge_wait_child_fixture() {
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(BRIDGE_WAIT_CHILD_FIXTURE_LIFETIME);
     }
 
     #[cfg(unix)]
     #[test]
     #[ignore = "subprocess fixture that holds its parent's stderr open"]
     fn bridge_wait_descendant_fixture() {
-        thread::sleep(Duration::from_secs(30));
+        thread::sleep(BRIDGE_WAIT_DESCENDANT_FIXTURE_LIFETIME);
     }
 
     #[cfg(unix)]
@@ -2135,6 +2212,7 @@ mod tests {
         );
     }
 
+    #[track_caller]
     fn response_reader<Output>(
         mut output: Output,
     ) -> (Receiver<Result<String, io::Error>>, JoinHandle<()>)
@@ -2162,6 +2240,7 @@ mod tests {
         (receiver, reader)
     }
 
+    #[track_caller]
     fn bridge_response_reader(
         output: ChildStdout,
     ) -> (Receiver<Result<String, io::Error>>, JoinHandle<()>) {
