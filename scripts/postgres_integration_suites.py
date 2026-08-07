@@ -24,6 +24,44 @@ agreement so the manifest itself cannot drift from either side.
 Run directly with `--matrix`, `--archive-plan`, or `--check` (validate the
 manifest alone and print a summary). Exits nonzero with a stable message on a
 malformed manifest.
+
+## Scope of the workflow agreement checks
+
+`workflow_disagreements` reads `.github/workflows/rust.yml` to confirm the
+workflow still derives its jobs from the manifest. **Its coverage of workflow,
+shell, and Cargo spellings is best-effort by design, and completeness is not a
+goal.** This is a deliberate limit, settled by owner ruling, not an oversight
+or a backlog.
+
+The reason is that the space of spellings is unbounded. A command can be
+wrapped by any launcher, a value can arrive through any expression, and YAML
+offers several ways to write everything; each spelling this reader does not
+know is one more it could be taught, without end. Chasing that to completion
+would make this module a shell and YAML interpreter — which is precisely the
+coupling the manifest was introduced to remove, since the checker it replaced
+failed exactly by trying to infer CI's behaviour from CI's text.
+
+What that buys, and what it costs:
+
+- **This detects drift, not sabotage.** It is built to catch a workflow that
+  stops honouring the manifest through ordinary editing — a step restructured,
+  an invocation replaced, an assertion dropped. It is not a barrier against an
+  author working around it, who has unbounded options anyway: writing a literal
+  matrix to `$GITHUB_OUTPUT`, invoking the reader and discarding its output, or
+  spelling a command in a form written after this was.
+- **Where a spelling is ambiguous, it fails closed.** A `continue-on-error`
+  whose value is an expression is read as non-blocking; a documented command
+  naming features by reference rather than by listing them is reported rather
+  than guessed at. A false positive is a conversation; a false negative is a
+  green check over tests that never ran.
+- **A new spelling appearing in this repository is a fix worth making.** A new
+  spelling that merely *could* exist is not. The distinction is whether the
+  workflow or the documentation actually acquired it.
+
+`check_docs_consistency.py` is what makes the residual risk tolerable: the
+manifest's own agreement with the workspace and with the documented commands is
+checked independently of any of this, and `docs/invariants.md` is regenerated
+from the manifest rather than from the workflow.
 """
 
 from __future__ import annotations
@@ -87,7 +125,7 @@ BUILD_JOB = "postgres-integration-build"
 # run carrying this would let every shard fail while the matrix job reports
 # success and the aggregate's assertion passes.
 CONTINUE_ON_ERROR = re.compile(
-    r"^[ ]*(?:-[ ]+)?continue-on-error:[ ]*(?P<value>\S+)"
+    r"^[ ]*(?:-[ ]+)?continue-on-error:[ ]*(?P<value>.*?)[ ]*$"
 )
 # Bash's `command [-pVv] name [args]` runs `name`; only `-v`/`-V` print instead.
 COMMAND_BUILTIN_OPTIONS = ("-p",)
@@ -385,13 +423,20 @@ def step_span(lines: list[str], run_index: int, indent: int) -> tuple[int, int]:
 def step_is_blocking(lines: list[str], start: int, end: int) -> bool:
     """Return whether a step's failure still fails its job.
 
-    `continue-on-error: true` on the archived run would let every shard fail
-    while the matrix job reported success and the aggregate's assertion passed
-    — the required check green with nothing enforced.
+    `continue-on-error` on the archived run would let every shard fail while
+    the matrix job reported success and the aggregate's assertion passed — the
+    required check green with nothing enforced. The archived run has to be
+    unconditionally blocking, so only a literal `false` counts as blocking.
     """
     for line in lines[start:end]:
         match = CONTINUE_ON_ERROR.match(line)
-        if match is not None and match.group("value").strip("\"'") == "true":
+        if match is None:
+            continue
+        # Only a literal `false` keeps the step blocking. `true`, an expression
+        # (`${{ … }}`), and anything else are all read as non-blocking, because
+        # what an expression evaluates to is not decidable here and a step that
+        # might be allowed to fail cannot be credited with enforcing anything.
+        if match.group("value").strip("\"'") != "false":
             return False
     return True
 

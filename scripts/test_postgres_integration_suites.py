@@ -796,6 +796,29 @@ class WorkflowAgreementTests(unittest.TestCase):
 
         self.assertTrue(any("runs no archive-backed" in failure for failure in failures))
 
+    def test_an_expression_enabled_continue_on_error_is_reported(self) -> None:
+        # What `${{ … }}` evaluates to is not decidable here, so a step that
+        # might be allowed to fail cannot be credited with enforcing anything.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                "      - env:\n          SUITE:",
+                "      - continue-on-error: ${{ true }}\n        env:\n          SUITE:",
+            )
+        )
+
+        self.assertTrue(any("runs no archive-backed" in failure for failure in failures))
+
+    def test_an_explicitly_false_continue_on_error_stays_blocking(self) -> None:
+        self.assertEqual(
+            self.disagreements(
+                AGREEING_WORKFLOW.replace(
+                    "      - env:\n          SUITE:",
+                    "      - continue-on-error: false\n        env:\n          SUITE:",
+                )
+            ),
+            [],
+        )
+
     def test_an_unrelated_non_ubuntu_job_is_allowed(self) -> None:
         # Cross-platform CI elsewhere in this workflow is nobody's business
         # here; only the jobs whose environment reaches the archives matter.
