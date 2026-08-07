@@ -615,9 +615,13 @@ Locks per transaction, in acquisition order:
 - **StartEligibleTurn**, **startup recovery**, and the **model-call execution
   transactions** (prepare, authorize, observation commit, restart recovery — all
   in `model_execution.rs`, reusing the same inventory statement): the
-  `session_scheduler` row `FOR UPDATE` is the only explicit lock (session
-  existence is checked with a bare `EXISTS`). The session row is locked only
-  `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
+  `session_scheduler` row `FOR UPDATE` is ordinarily the only explicit lock
+  (session existence is checked with a bare `EXISTS`). Credential-pool call
+  preparation additionally locks every potentially selected bounded profile's
+  shared capacity row `FOR UPDATE`, in profile-reference byte order, after the
+  scheduler lock and before reading reservation counts. No other path may take a
+  scheduler lock while holding a capacity-row lock. The session row is locked
+  only `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
   `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
@@ -1329,11 +1333,21 @@ future schema; no present storage surface provides it.
 **Committed unimplemented functionality — credential-pool state.** No present
 migration stores a pool-policy revision, pool action, or pre-call exhaustion
 failure. The implementing schema must intern each policy as one immutable header
-plus ordered membership and action rows, with a deferred uniqueness constraint
-over the complete canonical structural value. The surrogate identity is reused
-only after full relational equality succeeds; a digest is not identity. Cursor
-rows key that identity and priority, so an unchanged policy retains its cursor
-across restart and an edited policy cannot inherit one.
+plus ordered membership and action rows. Each membership row stores the expected
+adapter and delivery kind beside its profile reference and settings. A deferred
+uniqueness constraint covers the complete canonical structural value. The
+surrogate identity is reused only after full relational equality succeeds; a
+digest is not identity. Cursor rows key that identity and priority, so an
+unchanged policy retains its cursor across restart and an edited policy cannot
+inherit one.
+
+Every pool-selected model call stores the immutable policy identity beside its
+credential reference as an insert-only authorization fact. Observation commit
+joins through that call identity to the exact stored policy before applying a
+trigger action; a session credential-history update racing with the call cannot
+substitute its newer policy. The call's target adapter and the current profile
+registration must agree with the membership row's expected adapter and delivery
+kind before credential resolution, or preparation fails before send.
 
 Profile-quarantine, membership-exclusion, and session-displacement rows each
 carry a positive generation, active/cleared state, and their exact scope. A
@@ -1378,7 +1392,12 @@ The exhausted form stores every policy member's exclusion evidence and optional
 reset plus the optional earliest-reset deadline. The contended form stores every
 durable exclusion in the selection snapshot and the complete nonempty set of
 otherwise-admissible bounded members with their exact invocation-reservation
-identities and generations. Invocation completion releases its reservation and
+identities and generations. One shared capacity row per bounded profile
+serializes reservation admission across sessions and pools. Preparation locks
+all candidate capacity rows in profile-reference byte order, counts their live
+reservation rows under those locks, and inserts the selected reservation with
+the `Prepared` call. A deferred constraint rejects a committed live count above
+the policy member's bound. Invocation completion releases its reservation and
 writes the wake signal atomically; startup closes prior-process reservations as
 lost before waking their waiters and retains reservations owned by the live
 fenced process. These are the shapes required by

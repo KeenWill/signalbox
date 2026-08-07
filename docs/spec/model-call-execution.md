@@ -494,8 +494,10 @@ command. This proposal is accepted with the implementing stack's merge.
    commits the call disposition, attempt and turn transitions, semantic entries,
    terminal frontier, and outbox rows. If the frozen credential-pool policy
    derives a quarantine, pending displacement, or membership exclusion from that
-   observation, the same transaction commits the action record with the
-   observation's exact correlation; neither side may commit alone.
+   observation, the transaction reloads the immutable policy identity pinned by
+   that `Prepared` call rather than the session's current credential-history
+   head. It commits the derived action record with the observation's exact
+   correlation; neither side may commit alone.
 
 Failure keeps its stage: `ModelCallExecutionError` names which of prepare,
 render, capability, capability-failure commit, capability-failure reread,
@@ -650,6 +652,14 @@ frontier, and atomically emits the typed preparation-failure event owned by
 Partial evidence, a member outside the frozen policy, duplicate or reordered
 members, or any correlated record that is no longer exclusion evidence fails
 closed. Persistence owns the corresponding all-or-nothing representation below.
+
+The same child adds the selecting immutable pool-policy identity to every
+pool-selected `Prepared` call as an insert-only authorization fact beside its
+credential reference. Reconstitution requires that policy to contain the pinned
+profile with the expected target adapter and delivery kind. Every observation-
+derived trigger action reloads this call-pinned revision, so an explicit session
+credential update that commits while the provider interaction is in flight
+cannot change the action applied to its result.
 
 Each successor durably records the predecessor call it follows and the cause
 that authorized it, so a chain reads as evidence rather than as two calls that

@@ -302,8 +302,10 @@ defaults member are malformed.
 **Committed unimplemented functionality.** No present process request, server
 message, application command, or repository operation supplies this
 administrative surface; the implemented request inventory above remains closed
-and rejects it. The implementing stack must add one `clear_credential_exclusion`
-mutation carrying a user-global `command_id` and one closed `target` object:
+and rejects it. The implementing stack must add an authorized
+`list_credential_exclusions { page_size, after }` read and one
+`clear_credential_exclusion` mutation carrying a user-global `command_id` and
+one closed `target` object:
 
 - `profile_quarantine { profile, record_generation }` names one non-OAuth
   profile-wide quarantine;
@@ -314,6 +316,22 @@ mutation carrying a user-global `command_id` and one closed `target` object:
 - `chain_exclusion { session_id, turn_id, pool_policy_id, profile, predecessor_model_call_id }`
   names the exact qualifying predecessor observation that excluded one member
   from an availability-successor chain.
+
+The read lists every active non-OAuth exclusion the caller is authorized to
+administer as its exact closed target object, so the generation or predecessor
+correlation required by the clear mutation is observable even while another pool
+member remains usable. `page_size` is a canonical decimal string from 1 through
+100\. `after` is either null or one complete target object and is an exclusive
+keyset cursor. Results sort first by the closed target tags in the order above,
+then by each tagged target field's owned canonical order — UTF-8 bytes for
+configured names, UUID bytes for durable identities, and unsigned numeric order
+for generations. `credential_exclusion_page { exclusions, next_after }` returns
+no more than the requested count and uses null `next_after` only at the end.
+Clearing or creating an exclusion between page requests may change a traversal,
+so an operator needing one fresh inventory restarts from null. The read exposes
+only non-secret references and correlations. Ordinary credential-administration
+authorization governs both operations and fails as
+`credential_administration_forbidden` before existence is disclosed.
 
 Every identity is a nonempty bounded configuration or durable identity already
 owned by the credential contract. `pool_policy_id` is the canonical lowercase,
@@ -2508,12 +2526,19 @@ admits this shape. The implementing wire slice must add
 `failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
 as a distinct `transcript_turn.state` variant and
 `turn_credential_pool_exhausted { turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id, pool_policy_id, policy_members, members }`
-as its live event. The two `members` arrays have identical nonempty content in
-frozen policy order. Both shapes additionally carry `policy_members`, the
-immutable policy's complete nonempty ordered array of profile references. It has
-the same length as `members`, and each evidence item's `profile` must equal the
-same-ordinal `policy_members` value. Each evidence item carries `profile`,
-required-nullable `reset_at_unix_ms`, and one closed `exclusion` object:
+as its live event. It must also add
+`read_credential_pool_policy { session_id, turn_id, pool_policy_id }`. That read
+is admitted only when the caller may read the named session and its named turn
+references that exact immutable policy; mismatch is `unknown_pool_policy`. Its
+`credential_pool_policy { pool_policy_id, policy_members }` response loads and
+reconstitutes the policy header and ordered membership rows directly, rather
+than copying either failure projection. The two failure `members` arrays have
+identical nonempty content in frozen policy order. Both shapes additionally
+carry `policy_members`, the immutable policy's complete nonempty ordered array
+of profile references. It has the same length as `members`, and each evidence
+item's `profile` must equal the same-ordinal `policy_members` value. Each
+evidence item carries `profile`, required-nullable `reset_at_unix_ms`, and one
+closed `exclusion` object:
 
 - `profile_quarantine { record_generation }`;
 - `membership_exclusion { record_generation }`;
@@ -2525,11 +2550,14 @@ Generations and reset instants are positive canonical decimal strings;
 identity uses its already-owned bounded wire spelling. The snapshot and event
 carry no credential bytes, path, provider prose, or current-configuration
 lookup. The client validates the nonempty `policy_members` inventory and its
-one-to-one order and identity equality with `members` before exposing the
-terminal state, so reconnect and live follow project the same typed cause rather
-than a generic failed turn. Until the coordinated daemon-and-client slice lands,
-version one rejects both new variants and no present producer may terminalize a
-turn for this pre-call cause.
+one-to-one order and identity equality with `members`, then requires the
+session-correlated policy read to return that same complete ordered inventory,
+before exposing the terminal state. A producer that omits or reorders evidence
+therefore cannot make its second event-local copy authoritative. Reconnect and
+live follow project the same typed cause rather than a generic failed turn.
+Until the coordinated daemon-and-client slice lands, version one rejects both
+new variants and the policy read, and no present producer may terminalize a turn
+for this pre-call cause.
 
 **Committed unimplemented functionality — credential-availability projection.**
 No present request, event, transcript message, or closed turn-state object
