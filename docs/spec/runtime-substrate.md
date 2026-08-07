@@ -528,8 +528,9 @@ framed and decoded — so failing the smoke on it would assert something about
 answer quality, which this smoke does not do. The acceptance is keyed to that
 exact token from a 200 exchange; any other unrecognized finish, and every other
 loss cause, still fails, as does a `length` finish from a stream that never
-reported a model identity: that branch returns before the decoder's own
-end-of-stream validations, so the reported identity is checked here instead.
+reported a model identity: that check runs at the finish chunk rather than at
+`[DONE]`, so the reported identity is established before the verdict is
+deferred.
 
 That shape carries usage like the other two, and is held to the same
 requirements above. The trailing usage-only chunk is valid only after a finish,

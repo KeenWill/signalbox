@@ -1105,6 +1105,20 @@ mod tests {
             })
     }
 
+    /// The finish token the provider sends when generation reached an output
+    /// bound. Bound once so a fixture and the expectation asserted against it
+    /// cannot drift apart.
+    const CEILING_FINISH_TOKEN: &str = "length";
+
+    /// A finish-only chunk reporting `token`, built from the same binding the
+    /// asserting case compares against.
+    fn finish_chunk(token: &str) -> String {
+        format!(
+            "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+             \"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"{token}\"}}]}}\n\n"
+        )
+    }
+
     /// The `StreamProtocolViolation` cause carrying `detail`, spelled once so
     /// each case names only the detail it is about.
     fn protocol_violation(detail: &str) -> LossCause {
@@ -1147,8 +1161,7 @@ mod tests {
             b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
               \"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
               \"id\":\"call_1\",\"function\":{\"name\":\"probe\",\"arguments\":\"{}\"}}]}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            finish_chunk(CEILING_FINISH_TOKEN).as_bytes(),
             final_usage_chunk(),
             b"data: [DONE]\n\n",
         ]);
@@ -1162,12 +1175,13 @@ mod tests {
         assert_eq!(
             loss.finish_reported,
             Some(FinishReason::Unrecognized {
-                provider_token: "length".to_string()
+                provider_token: CEILING_FINISH_TOKEN.to_string()
             })
         );
-        // The token survives, but the cause records that tools were involved —
-        // the only channel that fact has, since neither observation fires on
-        // this path.
+        // The token survives, and the cause additionally records that tools
+        // were involved. Here the delta observation records it too, as the
+        // assertion above shows; the cause is the channel that still carries
+        // it when no fragment is emitted — see the sibling case below.
         assert_eq!(
             loss.cause,
             protocol_violation(&format!(
@@ -1209,8 +1223,7 @@ mod tests {
     fn a_well_formed_unrecognized_finish_still_reports_its_token() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            finish_chunk(CEILING_FINISH_TOKEN).as_bytes(),
             final_usage_chunk(),
             b"data: [DONE]\n\n",
         ]);
@@ -1220,7 +1233,7 @@ mod tests {
         assert_eq!(
             loss.finish_reported,
             Some(FinishReason::Unrecognized {
-                provider_token: "length".to_string()
+                provider_token: CEILING_FINISH_TOKEN.to_string()
             })
         );
     }

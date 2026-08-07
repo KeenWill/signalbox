@@ -469,15 +469,10 @@ fn is_the_output_ceiling_violation(cause: &LossCause) -> bool {
 /// `output_tokens: Some(0)` as `Completed`), and a downgraded-refusal
 /// `ProviderError` can be blocked before any completion token is produced.
 ///
-/// The usage checks apply only when the outcome actually carries final usage.
-/// The output-ceiling shape does not: OpenAI sends usage in a trailing
-/// usage-only chunk that is valid only after a finish, and the decoder ends
-/// the stream the moment the `length` finish arrives, so that chunk is never
-/// consumed. Asserting usage there would fail every real ceiling response —
-/// exactly the outcome this smoke set out to stop treating as a break. What
-/// that shape still proves, and what stays asserted for it, is the definitive
-/// success status plus the classifier's own match on the provider's finish
-/// token.
+/// One usage bar covers all three accepted shapes, including the
+/// output-ceiling loss: the decoder defers that verdict to `[DONE]` so the
+/// trailing usage-only chunk is consumed first, and refuses the verdict
+/// outright if it never arrived. No shape is exempt.
 ///
 /// Straight-line and credential-free: no test body branches on which accepted
 /// shape arrived; the one branch lives here and has its own coverage below.
@@ -842,9 +837,9 @@ mod require_decoded_response_tests {
 
     #[test]
     fn an_accepted_output_ceiling_truncation_is_well_formed() {
-        // The end-to-end guarantee the live test depends on: this shape must
-        // survive `assert_well_formed_response` even though it carries no
-        // usage, which is the whole point of accepting it.
+        // The end-to-end guarantee the live test depends on: the classifier
+        // and the assertion helper must agree, so this shape survives both
+        // rather than only being accepted by the first.
         let decoded =
             require_decoded_response(TerminalEvidence::BoundaryLoss(stopped_at_ceiling()), &[]);
 
