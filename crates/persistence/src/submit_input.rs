@@ -76,9 +76,9 @@ use crate::{
     model_execution::{
         ModelCallRepositoryError, attach_interrupt_reclassification_candidates,
         attach_interrupt_reclassification_candidates_for_active,
-        attach_recovery_interrupt_reclassification_candidates, persist_stop_requested,
-        persist_terminal_outcome, persist_tool_reconciliation_required,
-        require_live_execution_for_restart,
+        attach_recovery_interrupt_reclassification_candidates,
+        lock_delegated_child_endpoint_sessions, persist_stop_requested, persist_terminal_outcome,
+        persist_tool_reconciliation_required, require_live_execution_for_restart,
     },
     model_settings_resolution,
     outbox::{self, OutboxEvent},
@@ -836,6 +836,7 @@ where
             .await?;
     }
 
+    lock_delegated_child_endpoint_sessions(connection, command.session()).await?;
     let PreparedAgainstLockedState {
         prepared,
         scheduling,

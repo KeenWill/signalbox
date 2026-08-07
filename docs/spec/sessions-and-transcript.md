@@ -1029,7 +1029,10 @@ items at the next model-call safe point in that recipient-wide order. An idle
 recipient gets one delegation-origin queued turn, and further items coalesce
 into its starting frontier in the same order until activation. Per-relationship
 message ordinals remain provenance and do not serve as a cross-relationship
-tie-break.
+tie-break. Message admission preserves the final positive relationship ordinal
+for a future terminal child outcome. Exhaustion therefore rejects the
+nonterminal message with typed transition evidence instead of allowing later
+child terminalization to fail without a result event.
 
 A child result is delivered content, never transcript access. Its immutable
 record targets the exact spawning request and carries either the returned

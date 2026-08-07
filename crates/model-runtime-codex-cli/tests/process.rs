@@ -21,6 +21,7 @@ use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
     DISABLED_CODEX_CLI_CAPABILITY_FEATURES,
 };
+use signalbox_test_bin::test_bin_path;
 
 #[path = "support/fixtures.rs"]
 mod fixtures;
@@ -3549,7 +3550,7 @@ async fn prepare(
 }
 
 fn fake_cli() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-fake-codex-cli"))
+    test_bin_path!("signalbox-fake-codex-cli")
 }
 
 /// Scripts the reproduced launder-by-cancellation sequence: refuse the
