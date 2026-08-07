@@ -21,6 +21,20 @@ comparison, or a judgment about which enum a scrutinee belongs to are left to
 review and to Clippy, which sees the compiler's own answers; `docs/style.md`
 records which of those are deferred and why.
 
+Coverage is best-effort by design, and this is a property of the tool rather
+than a gap in it. Each rule detects the common shapes of its convention in the
+spellings this repository actually writes; completeness is explicitly not a
+goal, and it is not reachable — a text scan is not a compiler, so for any rule
+here a determined author can write a conforming-looking spelling it does not
+parse. Enumerating those spellings indefinitely buys nothing, because the tool
+is not the enforcement bar. The bar is the later per-rule promotion described
+above: a rule goes blocking only after its count is burned down to zero and a
+human has read what it found, which is where an unparsed shape gets caught. A
+finding that reports only "the scanner would not see X" is therefore describing
+the design, not a defect, and is declined on that basis; a finding that shows a
+rule reporting something it should not, or missing a shape this tree currently
+writes, is a defect and is fixed.
+
 Rules, each identified by the `SR-` tag its report line carries:
 
 - SR-1  every Rust module and Swift source file opens with a file-level doc
@@ -626,11 +640,13 @@ CREATE_TABLE = re.compile(
 )
 # Every SQL form that names a table, not only the ones a query uses: the rule
 # forbids naming a table at all, so a DDL statement admitted under `apps/` after
-# the count reached zero would otherwise never be reported. The two-word forms
-# precede the bare `truncate` so the alternation cannot stop at the verb.
+# the count reached zero would otherwise never be reported. `LOCK TABLE` is
+# among them because this tree already writes it — `review_orchestration.rs`
+# and `runner_protocol.rs` both do. The two-word forms precede the bare
+# `truncate` so the alternation cannot stop at the verb.
 SQL_TABLE_REFERENCE = re.compile(
     r"\b(?:from|join|into|update"
-    r"|(?:alter|drop|create|truncate)\s+table"
+    r"|(?:alter|drop|create|truncate|lock)\s+table"
     r"|truncate)\s+"
     r"(?:if\s+not\s+exists\s+|if\s+exists\s+|only\s+)?"
     r"\"?([a-z_][a-z0-9_]*)\"?",
@@ -700,10 +716,13 @@ def _attributing_comments(lines: list[str], index: int) -> list[str]:
         if not previous or previous.endswith(";"):
             break
         start -= 1
+    # Both comment forms, because SR-2 reads both: a checker that forbade a
+    # citation inside `/* … */` while refusing to accept an attribution written
+    # the same way would be rejecting a migration for how it delimits a comment.
     return [
         candidate.strip()
         for candidate in lines[start:index]
-        if candidate.strip().startswith("--")
+        if candidate.strip().startswith(("--", "/*", "*"))
     ]
 
 

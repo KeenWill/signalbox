@@ -540,6 +540,20 @@ class AppSqlTableAccessTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_app_locking_a_table_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            'pub const HOLD: &str = "LOCK TABLE turn_lifecycle IN SHARE MODE";\n'
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("turn_lifecycle", result.stdout)
+
     def test_app_ddl_naming_a_table_reports(self) -> None:
         source = (
             "//! Owned.\n"
@@ -638,6 +652,18 @@ class MigrationSupersessionTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn(MIGRATION, result.stdout)
+
+    def test_a_block_comment_attributes_the_supersession(self) -> None:
+        source = (
+            "/* Supersedes the definition in 202601010001_first.sql. */\n"
+            "ALTER TABLE durable_command\n"
+            "    DROP CONSTRAINT durable_command_storage_version_supported,\n"
+            "    ADD CONSTRAINT durable_command_storage_version_supported CHECK (v > 0);\n"
+        )
+
+        result = check("SR-9", {MIGRATION: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_a_permanently_removed_constraint_needs_no_attribution(self) -> None:
         source = (
