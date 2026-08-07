@@ -8,6 +8,9 @@ verified against PR #433 (`agent/web-search-wiring`). The durable-command
 version cross-link was re-verified through this PR
 (`agent/model-settings-persistence`).
 
+The session-delegation scheduling executor and daemon catalog composition are
+verified against PR #462 (`agent/delegation-runtime-daemon-v2`).
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -608,16 +611,19 @@ The daemon catalog adds three automatic, daemon-local tools. Their invoking
 session, turn, and request always come from trusted dispatch correlation and
 never from model arguments.
 
-- `spawn_session` takes `task` plus a `relationship` object. The relationship is
-  either `background`, or `bound` with separately labeled `on_parent_stopped`
-  and `on_parent_cancelled` actions (`keep_running`, `stop`, or `cancel`). It
-  atomically creates one delegated, no-ancestry child and its initial task work,
-  closes the spawning physical attempt with its matching receipt in that same
-  transaction, then returns the child session identity as a durable completion.
-  Equal physical replay of the same logical request returns that child; a second
-  child cannot attach to the request. Version one imposes no fixed
-  active-child-count limit; admission checks the complete locked relationship
-  inventory for request and child uniqueness.
+- `spawn_session` declares `task` plus a `relationship` object. The relationship
+  is either `background`, or `bound` with separately labeled `on_parent_stopped`
+  and `on_parent_cancelled` actions (`keep_running`, `stop`, or `cancel`).
+  **Committed unimplemented functionality.** No present tool or process
+  execution surface creates the child; the daemon rejects execution until the
+  placement-owned creation transaction implements the decided parent-directory
+  default. That transaction must atomically create one delegated, no-ancestry
+  child and its initial task work, close the spawning physical attempt with its
+  matching receipt in that same transaction, then return the child session
+  identity as a durable completion. Equal physical replay must return that
+  child; a second child cannot attach to the request. Version one imposes no
+  fixed active-child-count limit; admission must check the complete locked
+  relationship inventory for request and child uniqueness.
 
 - `await_session` takes the related child identity and `foreground` or
   `background`. Foreground converts the exact logical request into a durable
@@ -647,17 +653,36 @@ executor kept in flight. It ends any current physical attempt before committing
 `AwaitingChild`; restart therefore resumes from durable wait/result rows and
 cannot duplicate an external effect. The delivered tool result is copied from
 the child's terminal result record. The executor never reads or returns the
-child transcript.
+child transcript. The scheduling-aware executor returns a distinct
+`DurableChildWait` disposition instead of terminal result evidence. Before the
+application accepts that disposition, persistence rereads the complete parked
+batch and exact ended dispatch fence; absent or cross-wired wait evidence fails
+closed, and the generic observation path never attempts a second terminal
+commit. This remains true when the result predates registration: the await
+transaction parks the attempt and records its result delivery and wake
+atomically, while the scheduling executor reports the same durable-wait
+disposition so the scheduler resumes from stored result evidence.
+
+If an await or message transaction's commit acknowledgement is ambiguous, the
+executor replays that exact immutable request before reporting failure. A
+committed first transaction returns its durable wait or completion, while an
+uncommitted first transaction applies the replay-idempotent effect once.
 
 Background await registration and peer-message append likewise end the physical
-attempt in the same transaction as their delegation effect.
-
-Committed unimplemented: no present scheduling surface consumes the resulting
-`DurableCompletion` disposition. A future daemon scheduling integration must
-authenticate its exact dispatch correlation against the ended attempt before
-accepting the effect as already committed; absent or cross-wired evidence must
-fail closed, and a failed reread must retain the handoff for same-incarnation
+attempt in the same transaction as their delegation effect. Their scheduling
+executor result is a distinct `DurableCompletion` disposition carrying the exact
+ended dispatch correlation, not an encoded result awaiting a second commit. The
+application authenticates that correlation against the ended attempt before
+accepting it as already committed; an absent or cross-wired attempt fails
+closed, and a failed reread retains the handoff for same-incarnation
 reconciliation without repeating the effect.
+
+Process-protocol execution of an in-flight peer-message attempt also closes the
+attempt as `KnownFailed` in the message transaction when persistence proves a
+definitive operation rejection and no message effect committed. Pre-execution
+identity, correlation, and non-executable-state rejections do not terminalize an
+attempt. A daemon-minted message identity collision is returned with that exact
+identity rather than retried under a replacement identity.
 
 The child's normal terminal completion transaction concatenates the definitive
 ordered `AssistantText` entries from its proof-bearing completed call without a
