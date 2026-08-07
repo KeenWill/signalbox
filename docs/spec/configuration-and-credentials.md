@@ -1444,18 +1444,20 @@ deployment-side rules that code cannot enforce are stated in
   that reference, never the document's current family mapping or pool table. A
   missing registration fails startup before any entry is rewritten. It interns
   and stores one canonical singleton policy whose pool name is
-  `legacy/<session-uuid>/<event-ordinal>/<model-family>`, using the canonical
-  lowercase hyphenated session UUID, positive decimal ordinal, and closed model
-  family spelling. The one member is the exact legacy reference with priority 1,
-  no headroom reserve, and the registered adapter and delivery kind; `tie_break`
-  is `first_listed`, `on_pool_exhausted` is `fail`, and every trigger action is
-  `stay`. Those values preserve the former one-account, no-automatic-failover
-  behavior instead of inventing parking or substitution. The transaction locks
-  the legacy entry, interns that complete value, and rewrites the entry to its
-  policy identity atomically; replay observes the already stored policy. The
-  migrated policy is independent of the document's current mapping, so even a
-  mapping that now names a multi-member pool cannot broaden the session's
-  credentials.
+  `legacy/<session-uuid>/<event-ordinal>/sha256:<model-family-digest>`, using
+  the canonical lowercase hyphenated session UUID, positive decimal ordinal, and
+  the 64 lowercase hexadecimal characters of SHA-256 over the exact UTF-8 model
+  family spelling. The resulting name is at most 136 bytes, within the pool-name
+  bound regardless of the legacy family length. The one member is the exact
+  legacy reference with priority 1, no headroom reserve, and the registered
+  adapter and delivery kind; `tie_break` is `first_listed`, `on_pool_exhausted`
+  is `fail`, and every trigger action is `stay`. Those values preserve the
+  former one-account, no-automatic-failover behavior instead of inventing
+  parking or substitution. The transaction locks the legacy entry, interns that
+  complete value, and rewrites the entry to its policy identity atomically;
+  replay observes the already stored policy. The migrated policy is independent
+  of the document's current mapping, so even a mapping that now names a
+  multi-member pool cannot broaden the session's credentials.
 - **Resolution timing.** Each direct HTTP adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
   before send authorization — and scopes the resulting value to that request
