@@ -1584,6 +1584,12 @@ mod tests {
             .and_then(Path::parent)
             .expect("test executable has a Cargo artifact parent");
         if configured.as_os_str().is_empty() {
+            assert!(
+                artifact_parent
+                    .file_name()
+                    .is_none_or(|name| !known_targets.contains(name)),
+                "dot-relative Cargo target directory is ambiguous without invocation provenance"
+            );
             return artifact_parent.to_path_buf();
         }
         if configured.file_name().is_none() {
@@ -1677,9 +1683,7 @@ mod tests {
 
     #[track_caller]
     fn rustc_target_names() -> BTreeSet<OsString> {
-        let configured_rustc = std::env::var_os("RUSTC");
-        let invocation_directory = std::env::var_os("PWD").map(PathBuf::from);
-        let rustc = rustc_command_for(configured_rustc.as_deref(), invocation_directory.as_deref());
+        let rustc = normalized_rustc_override().unwrap_or_else(|| PathBuf::from("rustc"));
         let output = Command::new(rustc)
             .args(["--print", "target-list"])
             .output()
@@ -1690,6 +1694,15 @@ mod tests {
             .lines()
             .map(OsString::from)
             .collect()
+    }
+
+    fn normalized_rustc_override() -> Option<PathBuf> {
+        let configured = std::env::var_os("RUSTC")?;
+        let invocation_directory = std::env::var_os("PWD").map(PathBuf::from);
+        Some(rustc_command_for(
+            Some(&configured),
+            invocation_directory.as_deref(),
+        ))
     }
 
     fn rustc_command_for(
@@ -2275,26 +2288,17 @@ mod tests {
     }
 
     #[test]
-    fn bridge_artifact_selection_treats_an_ambiguous_dot_target_layout_as_a_host_root() {
+    #[should_panic(
+        expected = "dot-relative Cargo target directory is ambiguous without invocation provenance"
+    )]
+    fn bridge_artifact_selection_rejects_an_ambiguous_dot_target_layout() {
         let target_dir = Path::new("synthetic-workspace");
         let artifact_root = target_dir.join(SYNTHETIC_CARGO_TARGET);
         let executable = artifact_root.join("debug/deps/daemon-tools-test");
-        let configured_target_dir =
-            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
-                current_executable: &executable,
-                configured: Path::new("."),
-                known_targets: &synthetic_known_targets(),
-            });
-
-        assert_bridge_artifact_selection(BridgeArtifactExpectation {
-            executable: &executable,
-            target_dir: &artifact_root,
-            configured_target_dir: Some(&configured_target_dir),
-            default_target_dir: Path::new("synthetic-default-target"),
-            debug_profile: CARGO_TEST_PROFILE,
-            expected_profile: CARGO_TEST_PROFILE,
-            expected_target: None,
-            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
+        configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+            current_executable: &executable,
+            configured: Path::new("."),
+            known_targets: &synthetic_known_targets(),
         });
     }
 
@@ -2558,6 +2562,9 @@ mod tests {
             .arg(&selection.target_dir)
             .current_dir(workspace)
             .stdout(Stdio::piped());
+        if let Some(rustc) = normalized_rustc_override() {
+            build_command.env("RUSTC", rustc);
+        }
         if let Some(target) = &selection.target {
             build_command.arg("--target").arg(target);
         }
@@ -3133,17 +3140,46 @@ mod tests {
 
         #[track_caller]
         fn await_list_response_started(&mut self) {
-            let output = self
+            let mut output = self
                 .output
-                .as_mut()
+                .take()
                 .expect("blocking bridge output is present");
-            assert!(
-                !output
-                    .fill_buf()
-                    .expect("blocking bridge response prefix is readable")
-                    .is_empty(),
-                "bridge starts writing the oversized list response"
-            );
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let reader = thread::spawn(move || {
+                let result = (|| -> io::Result<(BufReader<ChildStdout>, String)> {
+                    let mut initialized = String::new();
+                    output.read_line(&mut initialized)?;
+                    if output.fill_buf()?.is_empty() {
+                        return Err(io::Error::new(
+                            ErrorKind::UnexpectedEof,
+                            "bridge list response has no prefix",
+                        ));
+                    }
+                    Ok((output, initialized))
+                })();
+                let _ = sender.send(result);
+            });
+            let (output, initialized) = match receiver.recv_timeout(BRIDGE_RESPONSE_TIMEOUT) {
+                Ok(Ok(observed)) => observed,
+                Ok(Err(error)) => {
+                    terminate_owned_process_group(&mut self.child);
+                    reader.join().expect("bounded prefix reader exits");
+                    panic!("blocking bridge response prefix failed: {error}");
+                }
+                Err(error) => {
+                    terminate_owned_process_group(&mut self.child);
+                    reader.join().expect("bounded prefix reader exits");
+                    panic!("blocking bridge response prefix exceeded its bound: {error}");
+                }
+            };
+            reader.join().expect("bounded prefix reader exits");
+            self.output = Some(output);
+            let initialized: serde_json::Value =
+                serde_json::from_str(&initialized).expect("blocking initialize response is JSON");
+            assert!(valid_mcp_response_envelope(McpResponseEnvelope {
+                response: &initialized,
+                request_id: &serde_json::json!(MCP_INITIALIZE_REQUEST_ID),
+            }));
         }
 
         #[track_caller]
@@ -3154,17 +3190,15 @@ mod tests {
                 .expect("blocking bridge output is present");
             let (sender, receiver) = mpsc::sync_channel(1);
             let reader = thread::spawn(move || {
-                let result = (|| -> io::Result<(String, String)> {
-                    let mut initialized = String::new();
-                    output.read_line(&mut initialized)?;
+                let result = (|| -> io::Result<String> {
                     let mut listed = String::new();
                     output.read_line(&mut listed)?;
-                    Ok((initialized, listed))
+                    Ok(listed)
                 })();
                 let _ = sender.send(result);
             });
-            let (initialized, response) = match receiver.recv_timeout(BRIDGE_RESPONSE_TIMEOUT) {
-                Ok(Ok(responses)) => responses,
+            let response = match receiver.recv_timeout(BRIDGE_RESPONSE_TIMEOUT) {
+                Ok(Ok(response)) => response,
                 Ok(Err(error)) => {
                     terminate_owned_process_group(&mut self.child);
                     reader.join().expect("bounded response reader exits");
@@ -3177,12 +3211,6 @@ mod tests {
                 }
             };
             reader.join().expect("bounded response reader exits");
-            let initialized: serde_json::Value =
-                serde_json::from_str(&initialized).expect("blocking initialize response is JSON");
-            assert!(valid_mcp_response_envelope(McpResponseEnvelope {
-                response: &initialized,
-                request_id: &serde_json::json!(MCP_INITIALIZE_REQUEST_ID),
-            }));
             let response: serde_json::Value =
                 serde_json::from_str(&response).expect("blocking list response is JSON");
             assert!(valid_mcp_response_envelope(McpResponseEnvelope {
