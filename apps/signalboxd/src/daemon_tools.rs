@@ -1487,9 +1487,12 @@ mod tests {
                     .find(|ancestor| ancestor.file_name() == Some(configured_name))
             })
         else {
-            return target_root_from_artifact_parent(artifact_parent, known_targets);
+            return artifact_parent.to_path_buf();
         };
         if closest == artifact_parent
+            && artifact_parent
+                .file_name()
+                .is_some_and(|name| known_targets.contains(name))
             && closest.parent().and_then(Path::file_name) == configured.file_name()
         {
             return closest
@@ -1884,6 +1887,29 @@ mod tests {
     }
 
     #[test]
+    fn bridge_artifact_selection_keeps_a_recognized_name_as_a_symlinked_host_root() {
+        let target_dir = Path::new("synthetic-parent").join(SYNTHETIC_CARGO_TARGET);
+        let executable = target_dir.join("debug/deps/daemon-tools-test");
+        let configured_target_dir =
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: Path::new("target-link"),
+                known_targets: &synthetic_known_targets(),
+            });
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: &target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
+        });
+    }
+
+    #[test]
     fn bridge_artifact_selection_derives_a_relative_target_directory_from_the_executable() {
         let invocation = Path::new("synthetic-invocation");
         let target_dir = invocation.join("relative-target");
@@ -2002,6 +2028,29 @@ mod tests {
     }
 
     #[test]
+    fn bridge_artifact_selection_keeps_a_repeated_unrecognized_name_as_the_host_root() {
+        let target_dir = Path::new("synthetic-parent/artifact/artifact");
+        let executable = target_dir.join("debug/deps/daemon-tools-test");
+        let configured_target_dir =
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable: &executable,
+                configured: Path::new("../artifact"),
+                known_targets: &synthetic_known_targets(),
+            });
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
+        });
+    }
+
+    #[test]
     fn bridge_artifact_selection_resolves_a_dot_relative_configured_directory() {
         let target_dir = Path::new("synthetic-workspace");
         let executable = target_dir.join("debug/deps/daemon-tools-test");
@@ -2106,6 +2155,12 @@ mod tests {
     const BRIDGE_WAIT_DESCENDANT_FIXTURE_LIFETIME: Duration = Duration::from_secs(30);
     #[cfg(target_os = "linux")]
     const LINUX_NANOSLEEP_WAIT_CHANNEL: &str = "nanosleep";
+    #[cfg(target_os = "linux")]
+    const LINUX_PIPE_WAIT_CHANNEL_FRAGMENT: &str = "pipe";
+    #[cfg(target_os = "linux")]
+    const SYNTHETIC_BLOCKING_DESCRIPTION_FRAGMENT: &str = "synthetic-padding";
+    #[cfg(target_os = "linux")]
+    const SYNTHETIC_BLOCKING_DESCRIPTION_REPETITIONS: usize = 300_000;
     static BRIDGE_BUILD_LOCK: Mutex<()> = Mutex::new(());
 
     fn wait_for_child(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
@@ -2246,7 +2301,7 @@ mod tests {
     fn ensure_claude_mcp_bridge_executable() -> PathBuf {
         let _build_guard = BRIDGE_BUILD_LOCK
             .lock()
-            .expect("bridge build lock is available");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -2752,6 +2807,149 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    struct BlockingListResponseFixture {
+        _support: tempfile::TempDir,
+        executable: PathBuf,
+        ready_path: PathBuf,
+        expected_tools: serde_json::Value,
+        child: Child,
+        input: Option<ChildStdin>,
+        output: BufReader<ChildStdout>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl BlockingListResponseFixture {
+        #[track_caller]
+        fn start() -> Self {
+            let support = tempfile::tempdir().expect("blocking response support root exists");
+            let description = SYNTHETIC_BLOCKING_DESCRIPTION_FRAGMENT
+                .repeat(SYNTHETIC_BLOCKING_DESCRIPTION_REPETITIONS);
+            let definition = ToolDefinition::new(
+                ToolName::try_new(String::from(SYNTHETIC_BRIDGE_TOOL_NAME))
+                    .expect("synthetic bridge tool name is valid"),
+                description,
+                ToolInputSchema::try_new(String::from(SYNTHETIC_BRIDGE_TOOL_SCHEMA))
+                    .expect("synthetic bridge schema is valid"),
+                ToolPermissionDefault::Confirm,
+                ToolEffectClass::EffectFree,
+            );
+            let catalog = bridge_catalog(&[definition]);
+            let catalog_path = support.path().join("blocking-tools.json");
+            let ready_path = support.path().join("blocking-ready");
+            fs::write(
+                &catalog_path,
+                serde_json::to_vec(&catalog).expect("blocking bridge catalog serializes"),
+            )
+            .expect("blocking bridge catalog is written");
+            let executable = ensure_claude_mcp_bridge_executable();
+            let mut command = Command::new(&executable);
+            command
+                .arg("--serve")
+                .arg(&catalog_path)
+                .arg(&ready_path)
+                .current_dir(support.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            configure_owned_process_group(&mut command);
+            let mut child = command.spawn().expect("blocking bridge starts");
+            let mut input = child.stdin.take().expect("blocking bridge stdin is piped");
+            serde_json::to_writer(
+                &mut input,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": MCP_BLOCKING_LIST_REQUEST_ID,
+                    "method": "tools/list",
+                    "params": {},
+                }),
+            )
+            .expect("blocking list request serializes");
+            input
+                .write_all(b"\n")
+                .expect("blocking list request is written");
+            input.flush().expect("blocking list request is flushed");
+            let output = BufReader::new(
+                child
+                    .stdout
+                    .take()
+                    .expect("blocking bridge stdout is piped"),
+            );
+            Self {
+                _support: support,
+                executable,
+                ready_path,
+                expected_tools: catalog["tools"].clone(),
+                child,
+                input: Some(input),
+                output,
+            }
+        }
+
+        #[track_caller]
+        fn await_blocked_response_write(&mut self) {
+            let wait_channel = Path::new("/proc")
+                .join(self.child.id().to_string())
+                .join("wchan");
+            let deadline = Instant::now() + BRIDGE_RESPONSE_TIMEOUT;
+            loop {
+                assert!(
+                    self.child
+                        .try_wait()
+                        .expect("blocking bridge status is readable")
+                        .is_none(),
+                    "bridge remains active while its list response is blocked"
+                );
+                let observed = fs::read_to_string(&wait_channel)
+                    .expect("blocking bridge exposes its Linux wait channel");
+                if observed.contains(LINUX_PIPE_WAIT_CHANNEL_FRAGMENT) {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "bridge blocks while writing the oversized list response"
+                );
+                thread::sleep(CHILD_POLL_INTERVAL);
+            }
+        }
+
+        #[track_caller]
+        fn read_list_response(&mut self) -> serde_json::Value {
+            let mut response = String::new();
+            self.output
+                .read_line(&mut response)
+                .expect("blocking list response is readable");
+            let response: serde_json::Value =
+                serde_json::from_str(&response).expect("blocking list response is JSON");
+            assert!(valid_mcp_response_envelope(McpResponseEnvelope {
+                response: &response,
+                request_id: &serde_json::json!(MCP_BLOCKING_LIST_REQUEST_ID),
+            }));
+            response
+        }
+
+        #[track_caller]
+        fn finish(&mut self) {
+            drop(self.input.take());
+            let Some(status) = wait_for_child(&mut self.child, BRIDGE_EXIT_TIMEOUT)
+                .expect("blocking bridge exit is observed")
+            else {
+                terminate_owned_process_group(&mut self.child);
+                panic!("blocking bridge exit exceeded its timeout");
+            };
+            assert!(status.success(), "blocking bridge exits successfully");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for BlockingListResponseFixture {
+        fn drop(&mut self) {
+            if self.child.try_wait().ok().flatten().is_none() {
+                terminate_owned_process_group(&mut self.child);
+            }
+        }
+    }
+
     #[test]
     fn composed_catalog_applies_an_enforceable_posture() {
         let (echo_catalog, _executor) = EchoTool::try_new()
@@ -3111,6 +3309,7 @@ mod tests {
     const MCP_NON_OBJECT_ARGUMENTS_REQUEST_ID: u64 = 6;
     const MCP_ENVELOPE_REQUEST_ID: u64 = 7;
     const MCP_OTHER_REQUEST_ID: u64 = 8;
+    const MCP_BLOCKING_LIST_REQUEST_ID: u64 = 9;
     const MCP_UNDECLARED_TOOL_NAME: &str = "synthetic_undeclared_tool";
     const MCP_PROPOSAL_PATH: &str = "bridge-must-not-write.txt";
     const MCP_PROPOSAL_CONTENT: &str = "proposal only\n";
@@ -3349,6 +3548,27 @@ mod tests {
         waiter.finish_success();
         assert!(fixture.ready_path.is_file());
         fixture.finish();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn claude_mcp_bridge_writes_the_list_response_before_publishing_readiness() {
+        let mut fixture = BlockingListResponseFixture::start();
+        let expected_tools = fixture.expected_tools.clone();
+        fixture.await_blocked_response_write();
+        assert!(!fixture.ready_path.exists());
+        let mut waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
+            executable: &fixture.executable,
+            ready: &fixture.ready_path,
+            workspace: fixture._support.path(),
+        });
+        waiter.await_polling();
+        let listed = fixture.read_list_response();
+        waiter.finish_success();
+        assert!(fixture.ready_path.is_file());
+        fixture.finish();
+
+        assert_eq!(listed["result"]["tools"], expected_tools);
     }
 
     #[test]
