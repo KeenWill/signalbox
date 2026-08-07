@@ -39,7 +39,7 @@ the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). The
 Anthropic compatibility smoke was verified through PR #465
 (`agent/anthropic-api-smoke`), and the OpenAI compatibility smoke through PR
 #466 (`agent/openai-api-smoke`). The cross-adapter `ToolCallsAtLoss` fact
-carried in boundary-loss evidence was verified through PR #490
+carried in boundary-loss evidence is verified against this PR
 (`agent/typed-loss-cause`), against every streamed and buffered loss path in the
 four adapters. This page covers the provider-neutral operation, observation, and
 evidence vocabulary; SSE framing; structured-output and tool decode;
