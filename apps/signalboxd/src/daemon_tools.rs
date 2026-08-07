@@ -1064,6 +1064,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     use std::{
+        collections::BTreeSet,
         ffi::OsString,
         fmt, fs,
         io::{self, BufRead, BufReader, Cursor, ErrorKind, Read, Write},
@@ -1384,26 +1385,47 @@ mod tests {
 
     fn claude_mcp_bridge_artifact_selection(workspace: &Path) -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
-        let target_dir = configured_cargo_target_dir(workspace);
-        claude_mcp_bridge_artifact_selection_for(&current, CARGO_TEST_PROFILE, &target_dir)
+        let configured_target_dir = configured_cargo_target_dir(workspace);
+        let known_targets = rustc_target_names();
+        claude_mcp_bridge_artifact_selection_for(
+            &current,
+            CARGO_TEST_PROFILE,
+            configured_target_dir.as_deref(),
+            &known_targets,
+        )
     }
 
-    fn configured_cargo_target_dir(workspace: &Path) -> PathBuf {
+    fn configured_cargo_target_dir(workspace: &Path) -> Option<PathBuf> {
         let Some(configured) = std::env::var_os("CARGO_TARGET_DIR") else {
-            return workspace.join("target");
+            return None;
         };
         let configured = PathBuf::from(configured);
         if configured.is_absolute() {
-            configured
+            Some(configured)
         } else {
-            workspace.join(configured)
+            Some(workspace.join(configured))
         }
+    }
+
+    fn rustc_target_names() -> BTreeSet<OsString> {
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+        let output = Command::new(rustc)
+            .args(["--print", "target-list"])
+            .output()
+            .expect("rustc target inventory is available");
+        assert!(output.status.success(), "rustc target inventory succeeds");
+        String::from_utf8(output.stdout)
+            .expect("rustc target inventory is UTF-8")
+            .lines()
+            .map(OsString::from)
+            .collect()
     }
 
     fn claude_mcp_bridge_artifact_selection_for(
         current: &Path,
         debug_profile: &str,
-        target_dir: &Path,
+        configured_target_dir: Option<&Path>,
+        known_targets: &BTreeSet<OsString>,
     ) -> BridgeArtifactSelection {
         let profile_dir = current
             .parent()
@@ -1420,42 +1442,63 @@ mod tests {
         let artifact_parent = profile_dir
             .parent()
             .expect("Cargo profile has an artifact parent");
-        let target = if artifact_parent == target_dir {
-            None
-        } else {
-            assert_eq!(
-                artifact_parent.parent(),
-                Some(target_dir),
-                "Cargo target-specific profile is directly below the target directory"
-            );
-            Some(
+        let artifact_parent_name = artifact_parent
+            .file_name()
+            .expect("Cargo artifact parent has a name");
+        let (target_dir, target) = if let Some(target_dir) = configured_target_dir {
+            if artifact_parent == target_dir {
+                (target_dir.to_path_buf(), None)
+            } else {
+                assert_eq!(
+                    artifact_parent.parent(),
+                    Some(target_dir),
+                    "Cargo target-specific profile is directly below the configured target directory"
+                );
+                (
+                    target_dir.to_path_buf(),
+                    Some(artifact_parent_name.to_os_string()),
+                )
+            }
+        } else if known_targets.contains(artifact_parent_name) {
+            (
                 artifact_parent
-                    .file_name()
-                    .expect("Cargo target-specific profile names its target")
-                    .to_os_string(),
+                    .parent()
+                    .expect("Cargo target-specific artifacts have a target directory")
+                    .to_path_buf(),
+                Some(artifact_parent_name.to_os_string()),
             )
+        } else {
+            (artifact_parent.to_path_buf(), None)
         };
         BridgeArtifactSelection {
             profile,
             target,
-            target_dir: target_dir.to_path_buf(),
+            target_dir,
         }
     }
 
     struct BridgeArtifactExpectation<'a> {
         executable: &'a Path,
         target_dir: &'a Path,
+        configured_target_dir: Option<&'a Path>,
         debug_profile: &'a str,
         expected_profile: &'a str,
         expected_target: Option<&'a str>,
+        recognized_target: Option<&'a str>,
     }
 
     #[track_caller]
     fn assert_bridge_artifact_selection(expectation: BridgeArtifactExpectation<'_>) {
+        let known_targets = expectation
+            .recognized_target
+            .map(OsString::from)
+            .into_iter()
+            .collect();
         let selection = claude_mcp_bridge_artifact_selection_for(
             expectation.executable,
             expectation.debug_profile,
-            expectation.target_dir,
+            expectation.configured_target_dir,
+            &known_targets,
         );
 
         assert_eq!(
@@ -1476,9 +1519,11 @@ mod tests {
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable,
             target_dir: Path::new("synthetic-target"),
+            configured_target_dir: None,
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: CARGO_TEST_PROFILE,
             expected_target: None,
+            recognized_target: None,
         });
     }
 
@@ -1489,9 +1534,11 @@ mod tests {
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable,
             target_dir: Path::new("synthetic-target"),
+            configured_target_dir: None,
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: "release",
             expected_target: None,
+            recognized_target: None,
         });
     }
 
@@ -1502,9 +1549,11 @@ mod tests {
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable,
             target_dir: Path::new("synthetic-target"),
+            configured_target_dir: None,
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: "ci-fast",
             expected_target: None,
+            recognized_target: None,
         });
     }
 
@@ -1519,9 +1568,29 @@ mod tests {
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
             target_dir: Path::new("synthetic-target"),
+            configured_target_dir: None,
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: CARGO_TEST_PROFILE,
             expected_target: Some(SYNTHETIC_CARGO_TARGET),
+            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
+        });
+    }
+
+    const SYNTHETIC_CARGO_TARGET_DIR: &str = "/tmp/signalbox-cli-target-dir";
+
+    #[test]
+    fn bridge_artifact_selection_preserves_a_cli_selected_target_directory() {
+        let target_dir = Path::new(SYNTHETIC_CARGO_TARGET_DIR);
+        let executable = target_dir.join("debug/deps/daemon-tools-test");
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir,
+            configured_target_dir: None,
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: None,
         });
     }
 
