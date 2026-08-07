@@ -1396,25 +1396,34 @@ impl HubModelConfiguration {
                     CredentialReference::new(credential_profile),
                 );
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
-                let profile = self.credential_profiles.get(credential_profile);
-                match profile.map(CredentialProfile::delivery) {
-                    Some(CredentialDelivery::File { env_key, .. }) => {
-                        let credentials = FileCredentialAccess::from_files(
-                            self.file_credential_profiles(ModelAdapter::ClaudeCli).map(
-                                |(reference, path)| {
-                                    (CredentialReference::new(reference), path.to_path_buf())
-                                },
-                            ),
-                        );
-                        ClaudeCliRuntime::new_with_file_delivery(
-                            runtime_configuration,
-                            credentials,
-                            env_key.as_deref().unwrap_or_default(),
-                        )
-                    }
-                    Some(CredentialDelivery::Ambient) | None => {
-                        ClaudeCliRuntime::new(runtime_configuration)
-                    }
+                let credentials = FileCredentialAccess::from_files(
+                    self.file_credential_profiles(ModelAdapter::ClaudeCli).map(
+                        |(reference, path)| {
+                            (CredentialReference::new(reference), path.to_path_buf())
+                        },
+                    ),
+                );
+                let ambient_reference = self
+                    .credential_profiles
+                    .values()
+                    .find(|profile| {
+                        profile.adapter() == ModelAdapter::ClaudeCli
+                            && matches!(profile.delivery(), CredentialDelivery::Ambient)
+                    })
+                    .map(|profile| CredentialReference::new(profile.name()));
+                let file_env_key = self
+                    .credential_profiles
+                    .values()
+                    .filter(|profile| profile.adapter() == ModelAdapter::ClaudeCli)
+                    .find_map(|profile| profile.delivery().env_key());
+                match file_env_key {
+                    Some(file_env_key) => ClaudeCliRuntime::new_with_credential_catalog(
+                        runtime_configuration,
+                        credentials,
+                        ambient_reference,
+                        file_env_key,
+                    ),
+                    None => ClaudeCliRuntime::new(runtime_configuration),
                 }
             })
             .transpose()

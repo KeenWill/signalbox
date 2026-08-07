@@ -5,8 +5,9 @@ use std::time::Duration;
 
 /// Configuration for [`crate::ClaudeCliRuntime`].
 ///
-/// It carries executable paths, bounds, and a non-secret credential reference.
-/// The runtime constructor separately selects ambient or file delivery.
+/// It carries executable paths, bounds, and a non-secret default credential
+/// reference. The runtime constructor separately selects ambient delivery or
+/// supplies an operation-scoped delivery catalog.
 #[derive(Debug, Clone)]
 pub struct ClaudeCliConfig {
     /// Exact per-model reasoning, fast-mode, and service-tier capabilities.

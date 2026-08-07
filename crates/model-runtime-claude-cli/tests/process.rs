@@ -24,6 +24,8 @@ use signalbox_test_bin::test_bin_path;
 mod fixtures;
 
 const CREDENTIAL_REFERENCE: &str = "claude-subscription-synthetic";
+const CURRENT_CREDENTIAL_REFERENCE: &str = "claude-current-synthetic";
+const HISTORICAL_CREDENTIAL_REFERENCE: &str = "claude-historical-synthetic";
 const OFFLINE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
@@ -181,6 +183,45 @@ async fn file_delivery_materializes_private_claude_settings_without_direct_child
     assert!(
         !format!("{:?}{:?}", report.evidence, observations)
             .contains(fixtures::FILE_DELIVERED_CREDENTIAL)
+    );
+}
+
+#[tokio::test]
+async fn file_delivery_resolves_a_historical_operation_pin_from_the_complete_catalog() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let historical_reference = CredentialReference::new(HISTORICAL_CREDENTIAL_REFERENCE);
+    let mut config = ClaudeCliConfig::new(
+        fake_cli(),
+        bridge_cli(),
+        temporary.path(),
+        CredentialReference::new(CURRENT_CREDENTIAL_REFERENCE),
+    );
+    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.interrupt_grace = Duration::from_millis(100);
+    let runtime = ClaudeCliRuntime::new_with_credential_catalog(
+        config,
+        SyntheticCredentialAccess {
+            reference: historical_reference.clone(),
+            value: CredentialValue::new(fixtures::FILE_DELIVERED_CREDENTIAL.as_bytes().to_vec()),
+        },
+        None,
+        CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY,
+    )
+    .expect("the complete file catalog is valid");
+    let mut historical_operation = operation("file_credential_redaction", OperationShape::Text);
+    historical_operation.credential_reference = historical_reference;
+    let prepared = prepare(&runtime, historical_operation).await;
+    let mut observations = Vec::new();
+
+    let _report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    assert_eq!(spawn_count(temporary.path()), 1);
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("fake-claude-helper-credential"))
+            .expect("the fake CLI invoked the historical credential helper"),
+        fixtures::FILE_DELIVERED_CREDENTIAL
     );
 }
 

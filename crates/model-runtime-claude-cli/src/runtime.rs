@@ -121,6 +121,10 @@ enum ClaudeCredentialDelivery {
     File {
         credentials: Arc<dyn ClaudeCredentialAccess>,
     },
+    Catalog {
+        ambient_reference: Option<CredentialReference>,
+        file_credentials: Arc<dyn ClaudeCredentialAccess>,
+    },
 }
 
 impl std::fmt::Debug for ClaudeCredentialDelivery {
@@ -128,6 +132,7 @@ impl std::fmt::Debug for ClaudeCredentialDelivery {
         formatter.write_str(match self {
             Self::Ambient => "Ambient",
             Self::File { .. } => "File([credential access])",
+            Self::Catalog { .. } => "Catalog([credential access])",
         })
     }
 }
@@ -268,6 +273,31 @@ impl ClaudeCliRuntime {
         )
     }
 
+    /// Validates the complete operation-scoped Claude delivery catalog.
+    ///
+    /// The catalog remains complete across preferred-profile changes so a
+    /// historical operation pin resolves its own ambient or file delivery.
+    pub fn new_with_credential_catalog<Credentials>(
+        config: ClaudeCliConfig,
+        file_credentials: Credentials,
+        ambient_reference: Option<CredentialReference>,
+        file_env_key: &str,
+    ) -> Result<Self, ClaudeCliConstructionError>
+    where
+        Credentials: CredentialAccess + 'static,
+    {
+        if file_env_key != CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY {
+            return Err(ClaudeCliConstructionError::InvalidCredentialEnvironmentKey);
+        }
+        Self::new_with_delivery(
+            config,
+            ClaudeCredentialDelivery::Catalog {
+                ambient_reference,
+                file_credentials: Arc::new(file_credentials),
+            },
+        )
+    }
+
     fn new_with_delivery(
         config: ClaudeCliConfig,
         credential_delivery: ClaudeCredentialDelivery,
@@ -380,17 +410,6 @@ impl ClaudeCliRuntime {
                 };
             }
         };
-        if operation.credential_reference != self.credential_reference {
-            return PreparationOutcome::Failed {
-                correlation,
-                failure: PreparationFailure::CredentialUnavailable {
-                    error: signalbox_model_runtime::CredentialAccessError::new(
-                        operation.credential_reference,
-                        signalbox_model_runtime::CredentialAccessFailure::Unmapped,
-                    ),
-                },
-            };
-        }
         let mut translated = match translate(&operation) {
             Ok(translated) => translated,
             Err(TranslationError::Failure(failure)) => {
@@ -406,9 +425,36 @@ impl ClaudeCliRuntime {
                 };
             }
         };
-        let credential = match &self.credential_delivery {
-            ClaudeCredentialDelivery::Ambient => None,
-            ClaudeCredentialDelivery::File { credentials } => {
+        let file_credentials = match &self.credential_delivery {
+            ClaudeCredentialDelivery::Ambient => {
+                if operation.credential_reference != self.credential_reference {
+                    return PreparationOutcome::Failed {
+                        correlation,
+                        failure: PreparationFailure::CredentialUnavailable {
+                            error: signalbox_model_runtime::CredentialAccessError::new(
+                                operation.credential_reference,
+                                signalbox_model_runtime::CredentialAccessFailure::Unmapped,
+                            ),
+                        },
+                    };
+                }
+                None
+            }
+            ClaudeCredentialDelivery::File { credentials } => Some(credentials),
+            ClaudeCredentialDelivery::Catalog {
+                ambient_reference,
+                file_credentials,
+            } => {
+                if ambient_reference.as_ref() == Some(&operation.credential_reference) {
+                    None
+                } else {
+                    Some(file_credentials)
+                }
+            }
+        };
+        let credential = match file_credentials {
+            None => None,
+            Some(credentials) => {
                 let resolve = credentials.resolve(&operation.credential_reference);
                 match cancellation.run_until_cancelled(resolve).await {
                     None => return PreparationOutcome::Cancelled { correlation },
