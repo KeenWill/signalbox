@@ -32,7 +32,7 @@
 //!
 //! [`cargo nextest archive`]: https://nexte.st/docs/ci-features/archiving/
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Resolve one binary path from the runtime environment, or the compiled path.
 ///
@@ -40,11 +40,16 @@ use std::path::PathBuf;
 /// from its own expansion of `env!`. It is public only because a macro's
 /// expansion is compiled in the caller's crate.
 ///
+/// The two arguments are a target name and a path, and they carry different
+/// types so that neither can be passed for the other: as two `&str` they would
+/// transpose silently, and a transposed call resolves the wrong variable and
+/// then falls back to a path that is really a binary name.
+///
 /// An environment variable that is present but empty is treated as absent: an
 /// empty path can only spawn as a failure whose message names nothing, and the
 /// compiled path is a strictly better answer than that.
 #[doc(hidden)]
-pub fn resolve(name: &str, compiled: &str) -> PathBuf {
+pub fn resolve(name: &str, compiled: &Path) -> PathBuf {
     let candidates = [
         format!("NEXTEST_BIN_EXE_{}", name.replace('-', "_")),
         format!("NEXTEST_BIN_EXE_{name}"),
@@ -55,7 +60,7 @@ pub fn resolve(name: &str, compiled: &str) -> PathBuf {
             _ => {}
         }
     }
-    PathBuf::from(compiled)
+    compiled.to_path_buf()
 }
 
 /// Return the path of one binary built by the calling test's own package.
@@ -80,7 +85,7 @@ macro_rules! test_bin_path {
     ($name:literal) => {
         $crate::resolve(
             $name,
-            ::core::env!(::core::concat!("CARGO_BIN_EXE_", $name)),
+            ::std::path::Path::new(::core::env!(::core::concat!("CARGO_BIN_EXE_", $name))),
         )
     };
 }
