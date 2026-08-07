@@ -134,21 +134,29 @@ NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 # range written "5-10 scenarios" no longer matches, which is correct — a range
 # states no total.
 #
+# `,` joins them for the mirror-image reason `NOT_PARTIAL_NUMBER` exists: without
+# it the engine simply restarts after the comma, so "There are 12,037 scenarios"
+# matches at `037` and reads as 37 — which *agrees* with a 37-scenario catalog
+# and passes silently. Guarding only the characters after the capture left the
+# same defect on the other side of it.
+#
 # `_` is deliberately absent from both classes, unlike `\w`: it is Markdown's
 # other emphasis delimiter, and refusing it would let "There are _51_
 # invariants" hide a stale total exactly as `**51**` did. The exposure is a
 # snake_case identifier written as bare prose, which this repository formats as
 # inline code — masked above before any of these patterns run.
 NUMBER_BEFORE_NOUN = re.compile(
-    rf"(?<![0-9A-Za-z.-])(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}{WRAPPED_GAP}"
+    rf"(?<![0-9A-Za-z.,-])(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}{WRAPPED_GAP}"
     rf"(?P<noun>invariants?|scenarios?)(?![0-9A-Za-z-])",
     re.IGNORECASE,
 )
 # The noun stated as an explicit count: "invariant count: 50", "scenario
 # count is 37". The connector before the digits is optional so bare
-# "invariant count 50" still matches.
+# "invariant count 50" still matches. `count` itself may carry markup —
+# "scenario **count**: 9" puts the closing `**` between the keyword and the
+# colon, where no whitespace follows to let the gap absorb it.
 NOUN_COUNT_PHRASE = re.compile(
-    rf"\b(?P<noun>invariant|scenario)s?{WRAPPED_GAP}count{WRAPPED_GAP}?"
+    rf"\b(?P<noun>invariant|scenario)s?{WRAPPED_GAP}count{MARKUP}{WRAPPED_GAP}?"
     rf"(?:is|of|:|=)?{WRAPPED_GAP}?(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
     re.IGNORECASE,
 )
@@ -157,7 +165,7 @@ NOUN_COUNT_PHRASE = re.compile(
 # noun follows `count` rather than leading it, and the number is too far from
 # the noun for `NUMBER_BEFORE_NOUN` to bridge.
 COUNT_OF_NOUN_PHRASE = re.compile(
-    rf"\bcount{WRAPPED_GAP}of{WRAPPED_GAP}(?P<noun>invariant|scenario)s?"
+    rf"\bcount{MARKUP}{WRAPPED_GAP}of{WRAPPED_GAP}(?P<noun>invariant|scenario)s?"
     rf"{WRAPPED_GAP}?(?:is|of|:|=)?{WRAPPED_GAP}?(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
     re.IGNORECASE,
 )

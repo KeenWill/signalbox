@@ -582,6 +582,27 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
     def test_a_grouped_number_is_not_read_as_its_first_digit(self) -> None:
         self.assert_no_count_read_from("scenario count: 1,000")
 
+    def test_a_grouped_number_is_not_matched_from_its_suffix(self) -> None:
+        """"12,037 scenarios" must not restart after the comma and read as 37.
+
+        This is the same silent-agreement failure as the decimal case, from the
+        other side of the capture: 37 *matches* a 37-scenario catalog, so the
+        stale total passes and nothing ever surfaces it.
+        """
+        self.assert_no_count_read_from(f"There are 12,0{SCENARIO_COUNT} scenarios")
+
+    def test_a_stale_count_with_a_formatted_count_keyword_fails(self) -> None:
+        """`scenario **count**: N` puts the closing `**` between the keyword
+        and the colon, where no whitespace follows to absorb it."""
+        self.assert_stale_scenario_count_caught(
+            f"scenario **count**: {STALE_SCENARIO_COUNT}"
+        )
+
+    def test_a_stale_count_of_noun_with_a_formatted_keyword_fails(self) -> None:
+        self.assert_stale_scenario_count_caught(
+            f"**count** of scenarios: {STALE_SCENARIO_COUNT}"
+        )
+
     def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
         """A tracked path can vanish between `git ls-files` and the read.
 
