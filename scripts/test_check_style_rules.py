@@ -56,6 +56,18 @@ TEST_TARGET = "crates/example/tests/end_to_end.rs"
 SWIFT = "clients/native/Sources/Example/Example.swift"
 MIGRATION = "crates/example/migrations/202601010001_first.sql"
 
+# SR-3 derives the crate names it recognizes from the workspace manifests, so a
+# fixture that exercises it ships the manifests it would be reading.
+MANIFESTS = {
+    "crates/domain/Cargo.toml": '[package]\nname = "signalbox-domain"\n',
+    "crates/persistence/Cargo.toml": '[package]\nname = "signalbox-persistence"\n',
+    "apps/signalboxd/Cargo.toml": '[package]\nname = "signalboxd"\n',
+}
+
+
+def with_manifests(files: dict[str, str]) -> dict[str, str]:
+    return {**MANIFESTS, **files}
+
 
 class FileDocCommentTests(unittest.TestCase):
     def test_module_without_a_file_doc_comment_reports(self) -> None:
@@ -138,6 +150,14 @@ class CommentProvenanceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn(MIGRATION, result.stdout)
 
+    def test_migration_block_comment_citing_a_process_document_reports(self) -> None:
+        source = "/* Derived per docs/agents/testing-style.md */\nALTER TABLE t ADD COLUMN c uuid;\n"
+
+        result = check("SR-2", {MIGRATION: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("docs/agents/", result.stdout)
+
     def test_a_date_inside_a_migration_string_literal_is_data(self) -> None:
         source = "-- The pinned spelling below is the wire form.\nINSERT INTO t VALUES ('2026-07-24');\n"
 
@@ -168,7 +188,7 @@ class SingleTypeSpellingTests(unittest.TestCase):
             "pub fn run(id: signalbox_domain::SessionId) -> SessionId { id }\n"
         )
 
-        result = check("SR-3", {MODULE: source})
+        result = check("SR-3", with_manifests({MODULE: source}))
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("signalbox_domain::SessionId", result.stdout)
@@ -180,7 +200,7 @@ class SingleTypeSpellingTests(unittest.TestCase):
             "pub fn run(id: SessionId) -> SessionId { id }\n"
         )
 
-        result = check("SR-3", {MODULE: source})
+        result = check("SR-3", with_manifests({MODULE: source}))
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
@@ -193,10 +213,22 @@ class SingleTypeSpellingTests(unittest.TestCase):
             "}\n"
         )
 
-        result = check("SR-3", {MODULE: source})
+        result = check("SR-3", with_manifests({MODULE: source}))
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("outbox::DispatchedDelegationUpdate", result.stdout)
+
+    def test_a_crate_whose_name_carries_no_prefix_is_matched(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use signalboxd::ProcessRuntime;\n"
+            "pub fn run(r: signalboxd::ProcessRuntime) -> ProcessRuntime { r }\n"
+        )
+
+        result = check("SR-3", with_manifests({MODULE: source}))
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("signalboxd::ProcessRuntime", result.stdout)
 
     def test_same_name_from_another_crate_is_a_disambiguation(self) -> None:
         source = (
@@ -205,7 +237,7 @@ class SingleTypeSpellingTests(unittest.TestCase):
             "pub fn run(other: signalbox_persistence::SessionId) -> SessionId { }\n"
         )
 
-        result = check("SR-3", {MODULE: source})
+        result = check("SR-3", with_manifests({MODULE: source}))
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
@@ -219,7 +251,7 @@ class SingleTypeSpellingTests(unittest.TestCase):
             "}\n"
         )
 
-        result = check("SR-3", {MODULE: "//! Owned.\n", TEST_TARGET: source})
+        result = check("SR-3", with_manifests({MODULE: "//! Owned.\n", TEST_TARGET: source}))
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn(TEST_TARGET, result.stdout)
@@ -412,6 +444,20 @@ class AnonymousRowDecodingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn(MODULE, result.stdout)
 
+    def test_an_imported_query_as_call_is_still_a_decode(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use sqlx::query_as;\n"
+            "pub async fn load() {\n"
+            '    let row: (Uuid, Uuid) = query_as("SELECT a, b FROM t");\n'
+            "}\n"
+        )
+
+        result = check("SR-6", {MODULE: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(MODULE, result.stdout)
+
     def test_projection_through_a_record_alias_passes(self) -> None:
         source = (
             "//! Owned.\n"
@@ -540,7 +586,8 @@ class MigrationSupersessionTests(unittest.TestCase):
     def test_unattributed_constraint_replacement_reports(self) -> None:
         source = (
             "ALTER TABLE durable_command\n"
-            "    DROP CONSTRAINT durable_command_storage_version_supported;\n"
+            "    DROP CONSTRAINT durable_command_storage_version_supported,\n"
+            "    ADD CONSTRAINT durable_command_storage_version_supported CHECK (v > 0);\n"
         )
 
         result = check("SR-9", {MIGRATION: source})
@@ -552,7 +599,8 @@ class MigrationSupersessionTests(unittest.TestCase):
         source = (
             "-- Supersedes the definition in 202601010001_first.sql.\n"
             "ALTER TABLE durable_command\n"
-            "    DROP CONSTRAINT durable_command_storage_version_supported;\n"
+            "    DROP CONSTRAINT durable_command_storage_version_supported,\n"
+            "    ADD CONSTRAINT durable_command_storage_version_supported CHECK (v > 0);\n"
         )
 
         result = check("SR-9", {MIGRATION: source})
@@ -568,7 +616,9 @@ class MigrationSupersessionTests(unittest.TestCase):
             "    ALTER COLUMN requested_kind DROP NOT NULL,\n"
             "    ALTER COLUMN frozen_kind DROP NOT NULL,\n"
             "    DROP CONSTRAINT durable_command_defaults_version_positive,\n"
-            "    DROP CONSTRAINT durable_command_requested_kind_shape;\n"
+            "    DROP CONSTRAINT durable_command_requested_kind_shape,\n"
+            "    ADD CONSTRAINT durable_command_defaults_version_positive CHECK (v > 0),\n"
+            "    ADD CONSTRAINT durable_command_requested_kind_shape CHECK (k <> '');\n"
         )
 
         result = check("SR-9", {MIGRATION: source})
@@ -580,7 +630,33 @@ class MigrationSupersessionTests(unittest.TestCase):
             "-- Supersedes the definition in 202601010001_first.sql.\n"
             "CREATE INDEX durable_command_kind ON durable_command (command_kind);\n"
             "ALTER TABLE durable_command\n"
-            "    DROP CONSTRAINT durable_command_kind_closed;\n"
+            "    DROP CONSTRAINT durable_command_kind_closed,\n"
+            "    ADD CONSTRAINT durable_command_kind_closed CHECK (command_kind <> '');\n"
+        )
+
+        result = check("SR-9", {MIGRATION: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(MIGRATION, result.stdout)
+
+    def test_a_permanently_removed_constraint_needs_no_attribution(self) -> None:
+        source = (
+            "ALTER TABLE tool_attempt\n"
+            "    DROP CONSTRAINT tool_attempt_request_id_key;\n"
+            "CREATE INDEX tool_attempt_request_id_idx ON tool_attempt (request_id);\n"
+        )
+
+        result = check("SR-9", {MIGRATION: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_wrapped_clause_is_still_read(self) -> None:
+        source = (
+            "ALTER TABLE durable_command\n"
+            "    DROP CONSTRAINT\n"
+            "        durable_command_storage_version_supported,\n"
+            "    ADD CONSTRAINT\n"
+            "        durable_command_storage_version_supported CHECK (v > 0);\n"
         )
 
         result = check("SR-9", {MIGRATION: source})
@@ -638,6 +714,17 @@ class AdjacentParameterTypeTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("read_directory", result.stdout)
+
+    def test_a_nested_generic_bound_does_not_hide_the_signature(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub fn execute<C, D: CliSession<C>>(first: usize, second: usize) {}\n"
+        )
+
+        result = check("SR-10", {MODULE: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("execute", result.stdout)
 
     def test_a_private_trait_method_is_not_public_api(self) -> None:
         source = (
@@ -755,6 +842,22 @@ class ProcMacroSpanTests(unittest.TestCase):
     def test_call_site_span_in_a_proc_macro_crate_reports(self) -> None:
         files = {
             "crates/derive/Cargo.toml": "[lib]\nproc-macro = true\n",
+            "crates/derive/src/lib.rs": (
+                "//! Owned.\n"
+                "pub fn expand() {\n"
+                "    return Err(syn::Error::new(Span::call_site(), \"duplicate\"));\n"
+                "}\n"
+            ),
+        }
+
+        result = check("SR-13", files)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("crates/derive/src/lib.rs", result.stdout)
+
+    def test_the_unspaced_manifest_spelling_still_selects_the_crate(self) -> None:
+        files = {
+            "crates/derive/Cargo.toml": "[lib]\nproc-macro=true\n",
             "crates/derive/src/lib.rs": (
                 "//! Owned.\n"
                 "pub fn expand() {\n"

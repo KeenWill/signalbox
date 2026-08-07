@@ -326,16 +326,17 @@ PROCESS_CITATIONS = (
 )
 
 
-SQL_COMMENT = re.compile(r"--[^\n]*")
+SQL_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
 SQL_STRING = re.compile(r"'(?:[^']|'')*'")
 
 
 def _sql_comments(text: str) -> Iterator[tuple[int, str]]:
-    """Yield each SQL line comment with the line it starts on.
+    """Yield each SQL comment with the line it starts on.
 
-    String bodies are blanked first, preserving their newlines so every offset
-    still maps to its original line: a `--` inside a literal is data a migration
-    writes, not a comment a reader is being addressed by.
+    Line and block comments both, because a citation is a citation whichever
+    way it is delimited. String bodies are blanked first, preserving their
+    newlines so every offset still maps to its original line: a `--` inside a
+    literal is data a migration writes, not a comment addressing a reader.
     """
     scrubbed = SQL_STRING.sub(
         lambda match: re.sub(r"[^\n]", " ", match.group()), text
@@ -378,9 +379,27 @@ USE_STATEMENT = re.compile(r"^\s*(?:pub\s+)?use\s+([^;]+);", re.MULTILINE)
 # `signalbox_persistence::outbox::DispatchedDelegationUpdate` is the same second
 # spelling as one reached directly off the crate, and a pattern that stopped at
 # the crate name reported only the shorter of the two forms.
-WORKSPACE_PATH = re.compile(
-    r"\bsignalbox_[a-z0-9_]+(?:::[a-z_][a-z0-9_]*)*::([A-Z][A-Za-z0-9_]*)"
-)
+CARGO_PACKAGE_NAME = re.compile(r"^\s*name\s*=\s*\"([^\"]+)\"", re.MULTILINE)
+
+
+def workspace_path_pattern(repository: Repository) -> re.Pattern[str]:
+    """A path pattern over the crate names the workspace actually publishes.
+
+    Derived rather than spelled, because the prefix is not a rule: `signalboxd`
+    is a workspace crate whose name carries no underscore, and a pattern that
+    assumed one would silently exempt every path through it.
+    """
+    identifiers = set()
+    for path in repository.files(("crates/*/Cargo.toml", "apps/*/Cargo.toml")):
+        match = CARGO_PACKAGE_NAME.search(path.read_text(encoding="utf-8"))
+        if match is not None:
+            identifiers.add(match.group(1).replace("-", "_"))
+    if not identifiers:
+        raise InventoryError("no workspace crate names found in Cargo.toml files")
+    alternation = "|".join(sorted(map(re.escape, identifiers), key=len, reverse=True))
+    return re.compile(
+        rf"\b(?:{alternation})(?:::[a-z_][a-z0-9_]*)*::([A-Z][A-Za-z0-9_]*)"
+    )
 TYPE_NAME = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\b")
 
 
@@ -392,6 +411,7 @@ def check_single_type_spelling(repository: Repository) -> Iterator[Finding]:
     crates — the one case where both spellings are load-bearing — does not
     report.
     """
+    workspace_path = workspace_path_pattern(repository)
     for source in repository.sources((*RUST_SOURCE_GLOBS, *RUST_TEST_TARGET_GLOBS)):
         imported: dict[str, set[str]] = {}
         import_spans: list[tuple[int, int]] = []
@@ -405,7 +425,7 @@ def check_single_type_spelling(repository: Repository) -> Iterator[Finding]:
                     imported.setdefault(trailing, set()).add(origin)
         if not imported:
             continue
-        for match in WORKSPACE_PATH.finditer(source.code):
+        for match in workspace_path.finditer(source.code):
             crate = match.group().split("::", 1)[0]
             if crate not in imported.get(match.group(1), frozenset()):
                 continue
@@ -527,12 +547,15 @@ TUPLE_ALIAS = re.compile(
 # Bounded to the line: the row type in a turbofish is written on one, and an
 # unbounded scan would run to the next `>` in the file and read an unrelated
 # name as this projection's.
-QUERY_AS_TURBOFISH = re.compile(r"query_as::<\s*_\s*,\s*([^>;\n]+)")
+QUERY_AS_TURBOFISH = re.compile(r"\bquery_as::<\s*_\s*,\s*([^>;\n]+)")
 # The binding may destructure. `let (exists, scheduler): (bool, Option<Uuid>)`
 # is the anonymous row this rule is about, and naming the positions at the
 # binding is not the same as the row carrying labels.
+# `sqlx::` optional: the call is the same decode whether the crate is qualified
+# at the site or the function imported at the top of the file.
 QUERY_AS_BINDING = re.compile(
-    r"\blet\s+(?:mut\s+)?(?:\([^)]*\)|[A-Za-z0-9_]+)\s*:\s*([^=;]+?)\s*=\s*sqlx::query_as"
+    r"\blet\s+(?:mut\s+)?(?:\([^)]*\)|[A-Za-z0-9_]+)\s*:\s*([^=;]+?)"
+    r"\s*=\s*(?:sqlx::)?query_as\b"
 )
 IDENTIFIER = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 
@@ -649,7 +672,13 @@ def _string_literals(text: str) -> Iterator[tuple[int, str]]:
 # --- SR-9: migrations name what they supersede and sort one way -------------
 
 MIGRATION_NAME = re.compile(r"^(\d+)_")
-DROP_CONSTRAINT = re.compile(r"\bDROP\s+CONSTRAINT\b", re.IGNORECASE)
+DROP_CONSTRAINT = re.compile(
+    r"\bDROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?\"?([a-z_][a-z0-9_]*)\"?",
+    re.IGNORECASE,
+)
+ADD_CONSTRAINT = re.compile(
+    r"\bADD\s+CONSTRAINT\s+\"?([a-z_][a-z0-9_]*)\"?", re.IGNORECASE
+)
 SUPERSEDED_MIGRATION = re.compile(r"\b\d{8,}_[a-z0-9_]+")
 
 
@@ -683,10 +712,21 @@ def check_migration_supersession(repository: Repository) -> Iterator[Finding]:
     paths = repository.files((MIGRATION_GLOB,))
     for path in paths:
         label = path.relative_to(repository.root).as_posix()
-        lines = path.read_text(encoding="utf-8").splitlines()
-        for index, line in enumerate(lines):
-            if DROP_CONSTRAINT.search(line) is None:
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        # Only a definition that comes back needs to name the one it replaces.
+        # A migration that removes a constraint for good supersedes nothing —
+        # `202607280401_runner_protocol.sql` drops a unique constraint and puts
+        # a differently named index in its place — and demanding attribution
+        # there would put a violation nobody can clear in the burndown.
+        readded = {match.group(1).lower() for match in ADD_CONSTRAINT.finditer(text)}
+        # Scanned over the file rather than line by line: a clause wraps, and
+        # `DROP CONSTRAINT` sitting on one line with its name on the next is
+        # both common here and exactly the shape a per-line search cannot name.
+        for dropped in DROP_CONSTRAINT.finditer(text):
+            if dropped.group(1).lower() not in readded:
                 continue
+            index = text.count("\n", 0, dropped.start())
             if any(
                 SUPERSEDED_MIGRATION.search(comment)
                 for comment in _attributing_comments(lines, index)
@@ -738,7 +778,7 @@ class Signature:
 
 PUBLIC_FUNCTION = re.compile(
     r"\bpub\s+(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+\"[^\"]*\"\s+)?"
-    r"fn\s+([A-Za-z0-9_]+)\s*(?:<[^>({]*>)?\s*\("
+    r"fn\s+([A-Za-z0-9_]+)"
 )
 
 
@@ -748,8 +788,7 @@ PUBLIC_FUNCTION = re.compile(
 # them and the pattern above cannot.
 PUBLIC_TRAIT = re.compile(r"\bpub\s+(?:unsafe\s+)?trait\s+[A-Za-z0-9_]+")
 TRAIT_METHOD = re.compile(
-    r"\b(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?"
-    r"fn\s+([A-Za-z0-9_]+)\s*(?:<[^>({]*>)?\s*\("
+    r"\b(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z0-9_]+)"
 )
 
 
@@ -775,7 +814,9 @@ def _signatures(
     for match in pattern.finditer(
         source.code, start, len(source.code) if end is None else end
     ):
-        opening = source.code.index("(", match.end() - 1)
+        opening = _parameter_list_start(source.code, match.end())
+        if opening is None:
+            continue
         closing = _matching_paren(source.code, opening)
         if closing is None:
             continue
@@ -792,6 +833,37 @@ def _signatures(
         yield Signature(
             match.group(1), source.line_of(match.start()), tuple(parameters)
         )
+
+
+def _parameter_list_start(text: str, after: int) -> int | None:
+    """The `(` opening a parameter list, past any generic list before it.
+
+    Balanced rather than matched with a character class: a bound may itself be
+    generic — `D: CliSession<C>` — and stopping at the first `>` does not merely
+    lose the generics, it drops the whole function from every rule that reads a
+    signature. A `>` closing an arrow is not a nesting close.
+    """
+    index = after
+    length = len(text)
+    while index < length and text[index].isspace():
+        index += 1
+    if index < length and text[index] == "<":
+        depth = 0
+        while index < length:
+            char = text[index]
+            if char == "<":
+                depth += 1
+            elif char == ">" and not (index and text[index - 1] in "-="):
+                depth -= 1
+                if depth == 0:
+                    index += 1
+                    break
+            index += 1
+        while index < length and text[index].isspace():
+            index += 1
+    if index < length and text[index] == "(":
+        return index
+    return None
 
 
 def _matching_paren(text: str, opening: int) -> int | None:
@@ -989,14 +1061,18 @@ def _enum_variants(lines: list[str], declaration: int) -> Iterator[tuple[int, st
 # --- SR-13: proc-macro diagnostics point at the user's tokens ---------------
 
 CALL_SITE = re.compile(r"\bSpan::call_site\(\)")
+PROC_MACRO_FLAG = re.compile(r"^\s*proc-macro\s*=\s*true\s*$", re.MULTILINE)
 
 
 def check_proc_macro_spans(repository: Repository) -> Iterator[Finding]:
     """A diagnostic at the call site cannot show the offending token."""
+    # Matched as a key and a value rather than as one spelling: `proc-macro=true`
+    # is the same manifest, and an exact-substring test would drop the whole
+    # crate from the inventory rather than report a rule it could not decide.
     crates = [
         path.parent
         for path in repository.files(("crates/*/Cargo.toml",))
-        if "proc-macro = true" in path.read_text(encoding="utf-8")
+        if PROC_MACRO_FLAG.search(path.read_text(encoding="utf-8"))
     ]
     for crate in crates:
         label = crate.relative_to(repository.root).as_posix()
