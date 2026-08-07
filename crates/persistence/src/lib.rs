@@ -32,6 +32,7 @@ pub mod runner_protocol;
 pub mod scheduler;
 pub mod session;
 pub mod session_credentials;
+pub mod session_delegation;
 pub mod session_metadata;
 pub mod session_placement;
 pub mod start_eligible_turn;
@@ -240,12 +241,13 @@ pub fn local_test_connection_options(database_url: &str) -> Result<PgConnectOpti
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::process::Command;
 
     use expect_test::expect;
     use sqlx::postgres::PgSslMode;
 
     use super::{
-        commit_failure_is_ambiguous, local_test_connection_options,
+        commit_failure_is_ambiguous, local_test_connection_options, production_connection_options,
         production_connection_options_with_environment,
     };
 
@@ -283,6 +285,79 @@ mod tests {
         .expect_err("an ambient credential channel must fail closed");
 
         expect!["error with configuration: ambient PostgreSQL variables would shape the production connection: PGPASSWORD; unset them and carry every connection parameter in the database URL"].assert_eq(&error.to_string());
+    }
+
+    /// The one spelling of the ambient channel the proof below plants, used
+    /// both to build the child's environment and to check what the refusal
+    /// names, so exercising a different variable cannot leave a stale
+    /// expectation behind.
+    const AMBIENT_CREDENTIAL_VARIABLE: &str = "PGPASSWORD";
+
+    /// Synthetic only: the refusal happens before any database contact, so
+    /// this value must never reach a real connection attempt.
+    const AMBIENT_CREDENTIAL_VALUE: &str = "sb-fix9-synthetic-not-a-real-credential";
+
+    /// The libtest path `--exact` needs for the fixture below. A stale path
+    /// selects zero tests, which libtest still reports as success — the
+    /// evidence assertion in the parent is what turns that into a failure.
+    const REAL_ENVIRONMENT_FIXTURE: &str = "tests::real_ambient_environment_refusal_fixture";
+
+    /// Prefix the fixture prints its outcome behind, so the parent can tell a
+    /// fixture that ran from a filter that matched nothing.
+    const FIXTURE_EVIDENCE: &str = "signalbox-fix9-child-observed:";
+
+    /// Reports how `production_connection_options` treats the environment of
+    /// the process it is running in. Deliberately assertion-free: the parent
+    /// owns the expectation, and this crate's PostgreSQL suite is swept with a
+    /// bare `--ignored` in CI, where no parent has planted anything.
+    #[test]
+    #[ignore = "subprocess fixture for the real-environment refusal proof"]
+    fn real_ambient_environment_refusal_fixture() {
+        println!(
+            "{FIXTURE_EVIDENCE}{:?}",
+            production_connection_options(DATABASE_URL).map(|_| ())
+        );
+    }
+
+    #[test]
+    fn production_options_refuse_a_real_ambient_pgpassword_variable() {
+        // `Command::env` sets only the child's environment, so proving the
+        // public, env-reading entry point needs no `std::env::set_var` — which
+        // the crate's forbidden `unsafe_code` would reject anyway. Every other
+        // refusal test drives the injected lookup instead of the process
+        // environment `production_connection_options` actually reads.
+        let executable =
+            std::env::current_exe().expect("test binary path is available under `cargo test`");
+        let output = Command::new(executable)
+            .env(AMBIENT_CREDENTIAL_VARIABLE, AMBIENT_CREDENTIAL_VALUE)
+            .args([
+                "--ignored",
+                "--exact",
+                REAL_ENVIRONMENT_FIXTURE,
+                "--nocapture",
+            ])
+            .output()
+            .expect("spawn this test binary as the child process");
+        let observed = String::from_utf8(output.stdout).expect("child stdout is UTF-8");
+
+        assert!(
+            output.status.success(),
+            "the child fixture must run and pass: {observed}"
+        );
+        assert!(
+            observed.contains(FIXTURE_EVIDENCE),
+            "the child must actually execute {REAL_ENVIRONMENT_FIXTURE}: an `--exact` filter that \
+             matches nothing runs zero tests and still exits zero: {observed}"
+        );
+        assert!(
+            observed.contains(&format!("{FIXTURE_EVIDENCE}Err(")),
+            "a real ambient {AMBIENT_CREDENTIAL_VARIABLE} must be refused, not silently \
+             consulted: {observed}"
+        );
+        assert!(
+            observed.contains(AMBIENT_CREDENTIAL_VARIABLE),
+            "the refusal must name the ambient channel the parent planted: {observed}"
+        );
     }
 
     #[test]
