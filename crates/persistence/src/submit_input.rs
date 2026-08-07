@@ -3311,36 +3311,38 @@ pub(crate) async fn load_scheduling_projection(
     }
 
     let preceding_non_accepted_terminal = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
-        "SELECT terminal.turn_id,
+        "WITH earliest_accepted AS (
+            SELECT queued.turn_id
+              FROM queued_input_origin AS queued
+             WHERE queued.session_id = $1
+               AND goal_turn_is_runtime_relevant(
+                    queued.session_id, queued.turn_id
+               )
+             ORDER BY queued.acceptance_position
+             LIMIT 1
+        )
+        SELECT terminal.turn_id,
                 turn_lifecycle_effective_terminal_frontier(
                     terminal.session_id, terminal.turn_id
                 ),
                 effective.direct_selection_id
-           FROM turn_lifecycle AS terminal
+           FROM earliest_accepted AS earliest
+           JOIN turn_lifecycle AS terminal
+             ON terminal.session_id = $1
+            AND terminal.turn_id = accepted_input_turn_queue_predecessor(
+                    $1, earliest.turn_id
+                )
            JOIN LATERAL turn_origin_effective_model_configuration(
                 terminal.turn_id, terminal.session_id
            ) AS effective ON true
-          WHERE terminal.session_id = $1
-            AND terminal.origin_kind = 'delegation'
+          WHERE terminal.origin_kind = 'delegation'
             AND (
                 terminal.state_kind = 'terminal'
                 OR terminal.delegation_runtime_terminal
             )
             AND turn_lifecycle_effective_terminal_frontier(
                     terminal.session_id, terminal.turn_id
-                ) IS NOT NULL
-            AND EXISTS (
-                SELECT 1
-                  FROM turn_lifecycle AS successor
-                 WHERE successor.session_id = terminal.session_id
-                   AND successor.turn_id <> terminal.turn_id
-                   AND goal_turn_is_runtime_relevant(
-                        successor.session_id, successor.turn_id
-                   )
-                   AND accepted_input_turn_queue_predecessor(
-                        successor.session_id, successor.turn_id
-                   ) = terminal.turn_id
-            )",
+                ) IS NOT NULL",
     )
     .bind(session_id_to_uuid(session_id))
     .fetch_optional(&mut *connection)
