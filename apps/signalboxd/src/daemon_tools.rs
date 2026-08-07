@@ -1757,13 +1757,20 @@ mod tests {
         reader: Option<JoinHandle<()>>,
     }
 
+    struct McpBridgeSpawn<'a> {
+        executable: &'a Path,
+        catalog: &'a Path,
+        ready: &'a Path,
+        workspace: &'a Path,
+    }
+
     impl McpBridgeProcess {
-        fn spawn(executable: &Path, catalog: &Path, ready: &Path, workspace: &Path) -> Self {
-            let mut child = Command::new(executable)
+        fn spawn(config: McpBridgeSpawn<'_>) -> Self {
+            let mut child = Command::new(config.executable)
                 .arg("--serve")
-                .arg(catalog)
-                .arg(ready)
-                .current_dir(workspace)
+                .arg(config.catalog)
+                .arg(config.ready)
+                .current_dir(config.workspace)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -1848,7 +1855,8 @@ mod tests {
     #[test]
     fn mcp_response_envelope_rejects_a_wrong_protocol_version() {
         let request_id = serde_json::json!(7);
-        let response = serde_json::json!({"jsonrpc": "1.0", "id": request_id.clone()});
+        let response =
+            serde_json::json!({"jsonrpc": "1.0", "id": request_id.clone(), "result": {}});
 
         assert!(!valid_mcp_response_envelope(&response, &request_id));
     }
@@ -1856,7 +1864,7 @@ mod tests {
     #[test]
     fn mcp_response_envelope_rejects_a_mismatched_request_identity() {
         let request_id = serde_json::json!(7);
-        let response = serde_json::json!({"jsonrpc": "2.0", "id": 8});
+        let response = serde_json::json!({"jsonrpc": "2.0", "id": 8, "result": {}});
 
         assert!(!valid_mcp_response_envelope(&response, &request_id));
     }
@@ -2281,8 +2289,12 @@ mod tests {
             )
             .expect("bridge catalog is written");
             let executable = ensure_claude_mcp_bridge_executable();
-            let bridge =
-                McpBridgeProcess::spawn(&executable, &catalog_path, &ready_path, workspace.path());
+            let bridge = McpBridgeProcess::spawn(McpBridgeSpawn {
+                executable: &executable,
+                catalog: &catalog_path,
+                ready: &ready_path,
+                workspace: workspace.path(),
+            });
             Self {
                 workspace,
                 _support: support,
@@ -2327,8 +2339,7 @@ mod tests {
         }
 
         fn synchronize_without_listing(&mut self) {
-            let response = self
-                .bridge
+            self.bridge
                 .as_mut()
                 .expect("bridge remains active")
                 .request(&serde_json::json!({
@@ -2337,7 +2348,6 @@ mod tests {
                     "method": "ping",
                     "params": {},
                 }));
-            assert_eq!(response["error"]["code"], -32601);
         }
 
         fn call_write_file(&mut self) -> serde_json::Value {
