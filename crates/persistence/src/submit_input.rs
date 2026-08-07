@@ -17,17 +17,17 @@ use signalbox_domain::{
     ConsumedSteeringReconstitutionInput, ContextCompactionId,
     ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
     ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
-    ContextFrontierId, ContinuationRoundReconstitutionInput, DelegationContent,
-    DelegationMessageId, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
-    DelegationProvenanceReconstitutionInput, DelegationWaitMode, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
-    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
-    GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput, GoalTurnSource,
-    IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
-    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
-    ModelCapabilityCatalog, ModelSelectionOverride, ModelSelectionRequest,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
-    OriginModelSettingsError, PerInputConfigurationChoices,
+    ContextFrontierId, ContinuationRoundReconstitutionInput, DelegatedTurnSchedulingFact,
+    DelegatedTurnSchedulingState, DelegationContent, DelegationMessageId, DelegationOutcome,
+    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenanceReconstitutionInput,
+    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
+    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
+    FrozenModelSelection, GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput,
+    GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
+    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+    ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
+    ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
     ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
     SemanticTranscriptEntryId,
@@ -3326,6 +3326,56 @@ pub(crate) async fn load_scheduling_projection(
         required_frontiers.insert(terminal_frontier);
     }
 
+    let delegated_turn_ids = delegated_turns
+        .iter()
+        .map(|turn| turn.into_uuid())
+        .collect::<Vec<_>>();
+    let delegated_turn_rows = sqlx::query(
+        "SELECT lifecycle.turn_id,
+                effective.defaults_version,
+                effective.direct_selection_id,
+                lifecycle.state_kind,
+                lifecycle.terminal_disposition_kind,
+                lifecycle.delegation_runtime_terminal
+           FROM turn_lifecycle AS lifecycle
+           JOIN LATERAL turn_origin_effective_model_configuration(
+                lifecycle.turn_id, lifecycle.session_id
+           ) AS effective ON true
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.origin_kind = 'delegation'
+            AND lifecycle.turn_id = ANY($2)
+          ORDER BY lifecycle.turn_id",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .bind(&delegated_turn_ids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut delegated_turn_facts = Vec::with_capacity(delegated_turn_rows.len());
+    for row in delegated_turn_rows {
+        let turn = turn_id_from_uuid(required(&row, "turn_id")?);
+        let defaults_version =
+            defaults_version_from_numeric(required(&row, "defaults_version")?)
+                .map_err(|_| SubmitInputCorruption::Inconsistent("delegated defaults version"))?;
+        let selected = DirectModelSelection::from_uuid(required(&row, "direct_selection_id")?);
+        let state_kind: String = required(&row, "state_kind")?;
+        let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
+        let runtime_terminal: bool = required(&row, "delegation_runtime_terminal")?;
+        let state = decode_delegated_turn_scheduling_state(
+            &state_kind,
+            terminal_disposition.as_deref(),
+            runtime_terminal,
+        )?;
+        delegated_turn_facts.push(DelegatedTurnSchedulingFact::new(
+            turn,
+            defaults_version,
+            selected,
+            state,
+        ));
+    }
+    if delegated_turn_facts.len() != delegated_turn_ids.len() {
+        return Err(SubmitInputCorruption::Missing("delegated turn scheduling fact").into());
+    }
+
     let required_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
     let frontier_rows = sqlx::query(
         "WITH RECURSIVE frontier_ids (context_frontier_id) AS (
@@ -4261,7 +4311,7 @@ pub(crate) async fn load_scheduling_projection(
         .with_context_compaction_facts(compaction_calls, compactions)
         .with_consumed_steering_facts(consumed_steering)
         .with_delegated_consumed_steering_facts(delegated_consumed_steering)
-        .with_delegated_turn_facts(delegated_turns.into_iter().collect())
+        .with_delegated_turn_facts(delegated_turn_facts)
         .with_steering_continuation_rounds(steering_continuation_rounds)
         .with_continuation_rounds(continuation_rounds)
         .reconstitute()
@@ -4276,6 +4326,27 @@ fn delegation_content(
     field: &'static str,
 ) -> Result<DelegationContent, SubmitInputCorruption> {
     DelegationContent::try_new(value).map_err(|_| SubmitInputCorruption::Inconsistent(field))
+}
+
+fn decode_delegated_turn_scheduling_state(
+    state_kind: &str,
+    terminal_disposition: Option<&str>,
+    runtime_terminal: bool,
+) -> Result<DelegatedTurnSchedulingState, SubmitInputCorruption> {
+    match (state_kind, terminal_disposition, runtime_terminal) {
+        ("active", None, false) => Ok(DelegatedTurnSchedulingState::Active),
+        ("queued" | "active", None, true) => Ok(DelegatedTurnSchedulingState::RuntimeTerminal),
+        ("terminal", Some("completed"), _) => Ok(DelegatedTurnSchedulingState::TerminalCompleted),
+        ("terminal", Some("refused"), _) => Ok(DelegatedTurnSchedulingState::TerminalRefused),
+        ("terminal", Some("failed"), _) => Ok(DelegatedTurnSchedulingState::TerminalFailed),
+        ("terminal", Some("cancelled"), _) => Ok(DelegatedTurnSchedulingState::TerminalCancelled),
+        ("terminal", Some("reconciliation_required"), _) => {
+            Ok(DelegatedTurnSchedulingState::TerminalReconciliationRequired)
+        }
+        _ => Err(SubmitInputCorruption::Inconsistent(
+            "delegated turn scheduling state",
+        )),
+    }
 }
 
 fn decode_delegation_wait_mode(value: &str) -> Result<DelegationWaitMode, SubmitInputCorruption> {
