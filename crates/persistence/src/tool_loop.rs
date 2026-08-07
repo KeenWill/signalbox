@@ -50,7 +50,9 @@ use crate::{
         tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
-    model_execution::{insert_prepared_call, insert_snapshot},
+    model_execution::{
+        insert_prepared_call, insert_snapshot, lock_delegated_turn_terminal_frontier,
+    },
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
 };
 
@@ -784,7 +786,9 @@ impl PostgresToolLoopRepository {
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_tool_session(&mut transaction, session).await?;
+            lock_delegated_turn_terminal_frontier(&mut transaction, session, turn)
+                .await
+                .map_err(map_model_call_error)?;
             load_active_batch_from_connection(&mut transaction, session, turn)
                 .await?
                 .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
@@ -3192,7 +3196,7 @@ async fn inspect_registry(
         })
 }
 
-async fn lock_tool_session(
+pub(crate) async fn lock_tool_session(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<(), ToolLoopRepositoryError> {

@@ -6,6 +6,9 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The typed usage provenance, derived-cost row shape, and labeled client
 aggregation are verified against PR #389 (`agent/cost-accounting`).
 
+The delegation mutation request and receipt frame vocabulary is verified through
+this PR (`agent/delegation-process-wire-v2`).
+
 The goal-mode process and terminal surface was re-verified through PR #384
 (`agent/goal-mode-runtime`).
 
@@ -1181,13 +1184,17 @@ rejection: admission checks the complete locked parent relationship inventory
 only for request and child uniqueness. `await_session` additionally admits
 `delegation_relation_not_found { session_id, peer_session_id }` and
 `delegation_await_conflict { tool_request_id }`; `send_session_message` admits
-that same relation detail and `delegation_message_conflict { tool_request_id }`.
-An exhausted relation event ordinal admits
-`delegation_event_ordinal_exhausted { spawning_request_id, last }`. These
-delegation details are closed; request-purpose, carried-argument, and bounded
-content failures occur while constructing the application input and therefore
-map to `invalid_request`, not `rejected`. A
-`create_session_from_imported_frontier` rejection admits
+that same relation detail, `delegation_message_conflict { tool_request_id }`,
+and `delegation_message_identity_collision { message_id }` when a concurrent
+operation already claimed the daemon-minted message identity. An exhausted
+relation event ordinal admits
+`delegation_event_ordinal_exhausted { spawning_request_id, last }`. Exhausting
+the independent recipient-wide delivery counter admits
+`delegation_delivery_sequence_exhausted { recipient_session_id, last }`. Either
+`last` is the maximum unsigned 64-bit value. These delegation details are
+closed; request-purpose, carried-argument, and bounded content failures occur
+while constructing the application input and therefore map to `invalid_request`,
+not `rejected`. A `create_session_from_imported_frontier` rejection admits
 `imported_conversation_not_found { imported_conversation_id }` and
 `imported_frontier_position_out_of_range { imported_conversation_id, requested_position, last_position }`.
 The first names an imported conversation, never a session, as the absent target;
@@ -1597,14 +1604,15 @@ the process protocol explicitly maps them.
 
 ## Session-delegation process surface
 
-The session-follow event shapes and internal-wake exclusion in this section are
-implemented. The mutation request and receipt shapes are committed unimplemented
-functionality: no current `ClientRequest`, daemon handler, or client verb
-provides them. Their fixed compatibility constraint is that the future process
-surface admits only exact already-issued model work for terminal operation and
-recovery; it must not let a client fabricate model provenance. The model-facing
-tool names and arguments are owned by
-[tool-loop](tool-loop.md#session-delegation-tool-family). Future
+The session-follow event shapes, internal-wake exclusion, and closed mutation
+request and receipt frame vocabulary in this section are implemented. Daemon
+execution and terminal-client verbs remain committed unimplemented functionality
+in this slice: each admitted delegation request currently receives
+`invalid_request` without mutation, and no client verb emits one. Their fixed
+compatibility constraint is that the composed process surface admits only exact
+already-issued model work for terminal operation and recovery; it must not let a
+client fabricate model provenance. The model-facing tool names and arguments are
+owned by [tool-loop](tool-loop.md#session-delegation-tool-family). Future
 `spawn_session`, `await_session`, and `send_session_message` requests therefore
 each carry the invoking session, turn, and `tool_request_id`, which must
 reconstitute one matching logical request before any mutation occurs.

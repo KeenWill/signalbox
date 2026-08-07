@@ -1026,6 +1026,28 @@ advancing the head by exactly one; it must never rewrite history or
 automatically apply a configuration edit. The current append-only record shape
 is compatible with that operation.
 
+**Committed unimplemented functionality — several credential profiles for one
+family.** Present configuration admits exactly one profile per model family: the
+adapter-mapping rules above fix the Anthropic and OpenAI profile names and force
+one shared profile for each of Codex CLI and Claude CLI, while file-based supply
+binds each direct-HTTP reference to one deployment path. No present surface lets
+one family draw on several interchangeable profiles. A later surface that does
+remains constrained by this page's credential-history rules; the qualifying and
+selection policy constraints are recorded under
+[model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
+Each model call keeps its own durable `credential_reference` pinned at the
+`Prepared` insert, so the profile that authenticated a call remains that call's
+record whatever chose it. Billing kind stays a property of the profile, so a
+historical read still resolves its dollar meaning from the reference that call
+pinned. A selection scope, if a session records one, is appended alongside the
+family-to-reference snapshot rather than replacing it, leaving the present
+complete snapshot valid as the single-member case. Members of one
+interchangeable group share an adapter, because the four composed runtimes
+differ in authentication shape as described above. The
+[credential operations policy](#credential-operations-policy) applies per
+profile: several profiles are several sources of truth, never one secret under
+several names.
+
 ## Runner credential lifecycle
 
 Runner credential profiles are non-secret checked names granted by the daemon
@@ -1230,3 +1252,10 @@ are outside this cluster-delivery policy:
   phase.
 - [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
   owns the unresolved in-memory credential-hygiene question.
+- One profile per model family is the present arity, so a deployment holding
+  several accounts for one provider cannot configure them. What a later plural
+  surface must stay compatible with is stated under
+  [credential lifecycle](#credential-lifecycle); which failure classes would let
+  one profile succeed another, and whether any adapter can report remaining
+  capacity, are routed through
+  [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
