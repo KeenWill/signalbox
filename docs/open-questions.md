@@ -278,13 +278,13 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   the durable per-call provenance schema that would record the concrete served
   identity and a substitution as evidence rather than as operator diagnostics
   and a fail-closed error. Blocks the provider provenance schema. (S20–S23)
-- **Future same-target retry.** Repeating a known provider failure or ambiguous
+- **Future same-profile retry.** Repeating a known provider failure or ambiguous
   outcome against the target and credential profile that produced it remains
   outside every accepted policy; the successor-call decision above authorizes
-  another profile, never a repeat of the same one. Any later same-target retry
-  command or policy, including backoff and resource limits, is a separate
-  decision the accepted no-retry policy leaves open. Blocks retry features.
-  (S02, S04, S22)
+  same-target failover through another eligible profile, never a repeat of the
+  same profile. Any later same-profile retry command or policy, including
+  backoff and resource limits, is a separate decision the accepted no-retry
+  policy leaves open. Blocks retry features. (S02, S04, S22)
 
 ## Scheduling and runners
 

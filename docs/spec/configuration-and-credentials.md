@@ -1010,12 +1010,12 @@ is compatible with that operation.
 
 **Committed unimplemented functionality — several credential profiles for one
 family.** Present configuration admits exactly one profile per model family: the
-adapter-mapping rules above fix the Anthropic profile name and force one shared
-Codex profile, and the file-based supply below binds one reference to one
-deployment path. No present surface lets one family draw on several
-interchangeable profiles. A later surface that does remains constrained by this
-page's credential-history rules; the qualifying and selection policy constraints
-are recorded under
+adapter-mapping rules above fix the Anthropic and OpenAI profile names and force
+one shared profile for each of Codex CLI and Claude CLI, while file-based supply
+binds each direct-HTTP reference to one deployment path. No present surface lets
+one family draw on several interchangeable profiles. A later surface that does
+remains constrained by this page's credential-history rules; the qualifying and
+selection policy constraints are recorded under
 [model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 Each model call keeps its own durable `credential_reference` pinned at the
 `Prepared` insert, so the profile that authenticated a call remains that call's
@@ -1024,8 +1024,8 @@ historical read still resolves its dollar meaning from the reference that call
 pinned. A selection scope, if a session records one, is appended alongside the
 family-to-reference snapshot rather than replacing it, leaving the present
 complete snapshot valid as the single-member case. Members of one
-interchangeable group share an adapter, because the two composed runtimes differ
-in authentication shape as described above. The
+interchangeable group share an adapter, because the four composed runtimes
+differ in authentication shape as described above. The
 [credential operations policy](#credential-operations-policy) applies per
 profile: several profiles are several sources of truth, never one secret under
 several names.
