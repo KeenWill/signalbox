@@ -1263,6 +1263,7 @@ mod tests {
             .collect()
     }
 
+    #[track_caller]
     fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
         git2::Repository::init(workspace).expect("fixture repository initializes");
         let web_fetch = WebFetchTool::try_new(OfflineTransport, WebFetchEgressPolicy::deny_all())
@@ -1337,6 +1338,7 @@ mod tests {
         .0
     }
 
+    #[track_caller]
     fn bridge_catalog(definitions: &[ToolDefinition]) -> serde_json::Value {
         let tools = definitions
             .iter()
@@ -1359,6 +1361,7 @@ mod tests {
     const SYNTHETIC_BRIDGE_TOOL_SCHEMA: &str =
         r#"{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}"#;
 
+    #[track_caller]
     fn synthetic_bridge_tool_definition() -> ToolDefinition {
         ToolDefinition::new(
             ToolName::try_new(String::from(SYNTHETIC_BRIDGE_TOOL_NAME))
@@ -1399,6 +1402,7 @@ mod tests {
     const CLAUDE_MCP_BRIDGE_BINARY: &str = "signalbox-claude-mcp-bridge";
     const CARGO_TEST_PROFILE: &str = "test";
 
+    #[track_caller]
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
         let known_targets = rustc_target_names();
@@ -1419,18 +1423,20 @@ mod tests {
         )
     }
 
+    #[track_caller]
     fn configured_cargo_target_dir(current: &Path) -> Option<PathBuf> {
         let configured = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR")?);
         let configured = configured_cargo_target_dir_for(current, &configured);
         Some(canonicalized_target_dir(&configured))
     }
 
+    #[track_caller]
     fn configured_cargo_target_dir_for(current: &Path, configured: &Path) -> PathBuf {
         if configured.is_absolute() {
             return configured.to_path_buf();
         }
         let configured = lexically_normalized(configured);
-        current
+        let closest = current
             .ancestors()
             .find(|ancestor| ancestor.ends_with(&configured))
             .or_else(|| {
@@ -1439,14 +1445,29 @@ mod tests {
                     .ancestors()
                     .find(|ancestor| ancestor.file_name() == Some(configured_name))
             })
-            .expect("relative Cargo target directory is an ancestor of the test executable")
-            .to_path_buf()
+            .expect("relative Cargo target directory is an ancestor of the test executable");
+        let artifact_parent = current
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("test executable has a Cargo artifact parent");
+        if closest == artifact_parent
+            && closest.parent().and_then(Path::file_name) == configured.file_name()
+        {
+            return closest
+                .parent()
+                .expect("repeated relative target name has an outer target root")
+                .to_path_buf();
+        }
+        closest.to_path_buf()
     }
 
+    #[track_caller]
     fn canonicalized_target_dir(configured: &Path) -> PathBuf {
         fs::canonicalize(configured).expect("configured Cargo target directory canonicalizes")
     }
 
+    #[track_caller]
     fn cargo_metadata_target_dir() -> PathBuf {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
         let output = Command::new(cargo)
@@ -1462,6 +1483,7 @@ mod tests {
         lexically_normalized(Path::new(target_dir))
     }
 
+    #[track_caller]
     fn reject_unrecognized_default_target(
         current: &Path,
         configured_target_dir: Option<&Path>,
@@ -1488,6 +1510,7 @@ mod tests {
         );
     }
 
+    #[track_caller]
     fn rustc_target_names() -> BTreeSet<OsString> {
         let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
         let output = Command::new(rustc)
@@ -1520,6 +1543,7 @@ mod tests {
             })
     }
 
+    #[track_caller]
     fn claude_mcp_bridge_artifact_selection_for(
         current: &Path,
         debug_profile: &str,
@@ -1834,6 +1858,29 @@ mod tests {
         });
     }
 
+    #[test]
+    fn bridge_artifact_selection_preserves_an_identically_named_relative_root_and_target() {
+        let target_dir = Path::new("synthetic-parent").join(SYNTHETIC_CARGO_TARGET);
+        let executable = target_dir
+            .join(SYNTHETIC_CARGO_TARGET)
+            .join("debug/deps/daemon-tools-test");
+        let configured_target_dir = configured_cargo_target_dir_for(
+            &executable,
+            &Path::new("..").join(SYNTHETIC_CARGO_TARGET),
+        );
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: &target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: Some(SYNTHETIC_CARGO_TARGET),
+            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
+        });
+    }
+
     const BRIDGE_BUILD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
     const BRIDGE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
     const BRIDGE_EXIT_TIMEOUT: Duration = Duration::from_secs(12);
@@ -2052,6 +2099,7 @@ mod tests {
         });
     }
 
+    #[track_caller]
     fn cargo_bridge_executable(messages: Receiver<Result<String, io::Error>>) -> PathBuf {
         messages
             .into_iter()
@@ -2419,6 +2467,7 @@ mod tests {
     }
 
     impl McpBridgeReadyWaiter {
+        #[track_caller]
         fn start(config: McpBridgeReadyWaiterSpawn<'_>) -> Self {
             let child = Command::new(config.executable)
                 .arg("--wait-ready")
