@@ -80,7 +80,7 @@ use signalbox_model_runtime_openai::{
 const API_KEY_VARIABLE: &str = "OPENAI_API_KEY";
 
 /// The cheapest current OpenAI model, chosen so a compatibility run costs a
-/// small fraction of a cent. Owner-selected for this smoke.
+/// small fraction of a cent.
 ///
 /// This is a reasoning model, so hidden reasoning tokens bill against the same
 /// `max_completion_tokens` ceiling as visible output, and no wire control caps
