@@ -52,8 +52,11 @@ export SIGNALBOX_SOCKET_PATH='/absolute/path/to/signalbox.sock'
 ```
 
 There is no maintainer-approved network transport reachable by a remote or
-mobile client. iPhone and iPad builds run against the in-memory process-protocol
-harness; real remote/mobile connectivity remains a maintainer design gate
+mobile client. iPhone and iPad **Debug** builds run against the in-memory
+process-protocol harness. The harness is compiled out of Release builds, so a
+Release iPhone or iPad build has no backend at all — that configuration is not
+a supported way to run the app, and shipping one is gated on the same design
+decision. Real remote/mobile connectivity remains a maintainer design gate
 recorded in
 [Protocols and persistence](../../docs/open-questions.md#protocols-and-persistence);
 the non-authoritative backlog tracks Tailscale as near-local direction and
@@ -68,9 +71,11 @@ scripts/test-real-server-xcode.sh
 ```
 
 The scheme runs app, client, model, integration, and UI tests. The local mock is
-selected with `--mock-server`. The real-server script builds `signalboxd`,
-starts it with an isolated temporary PostgreSQL database and Unix socket, and
-runs the macOS client exchanges without making a model call.
+selected with `--mock-server`, which only has an effect in Debug builds — the
+scripts above all build Debug. In a Release build the flag is parsed and
+ignored. The real-server script builds `signalboxd`, starts it with an isolated
+temporary PostgreSQL database and Unix socket, and runs the macOS client
+exchanges without making a model call.
 
 `SIGNALBOX_NATIVE_SKIP_TESTING` and `SIGNALBOX_NATIVE_ONLY_TESTING` take
 space-separated `xcodebuild` test identifiers and select which suites

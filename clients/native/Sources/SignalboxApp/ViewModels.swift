@@ -23,8 +23,15 @@ final class AppCoordinator: ObservableObject {
 
     init(isMockMode: Bool, screenshotScenario: ScreenshotScenario? = nil, resetPersistedSettings: Bool = false) {
         self.screenshotScenario = screenshotScenario
+        #if DEBUG
         let shouldInstallMockService = isMockMode || screenshotScenario?.requiresMockService == true
         self.isMockMode = shouldInstallMockService
+        #else
+        // The mock harness only compiles in Debug, so Release never enters mock
+        // mode and --mock-server is ignored. Which service Release does install
+        // is left to the unchanged non-mock branches below.
+        self.isMockMode = false
+        #endif
         LegacyRemoteSettingsCleanup.perform()
         if resetPersistedSettings {
             UserDefaults.standard.removeObject(forKey: NativeProcessConstants.socketDefaultsKey)
@@ -37,6 +44,7 @@ final class AppCoordinator: ObservableObject {
                 selectedProcessSessionID = try? SignalboxCanonicalUUID(validating: rawSessionID)
             }
         }
+        #if DEBUG
         if shouldInstallMockService {
             self.service = MockSignalboxService()
             self.processService = SignalboxProcessService(
@@ -49,7 +57,10 @@ final class AppCoordinator: ObservableObject {
             )
             self.processSettings.socketPath = "In-memory single-version JSONL harness"
             self.processSettings.markConnectedForHarness()
-        } else if screenshotScenario == .setup {
+            return
+        }
+        #endif
+        if screenshotScenario == .setup {
             self.service = nil
             self.processService = nil
             self.processSettings.socketPath = ""
@@ -159,6 +170,9 @@ enum ScreenshotScenario: String, CaseIterable, Sendable {
     }
 
     var selectedSessionID: SignalboxSessionID? {
+        // The fixture session IDs only exist in Debug; Release has no
+        // scenario that resolves to one.
+        #if DEBUG
         switch self {
         case .activeChat, .completedTool, .artifactPreview:
             return SignalboxSessionID(rawValue: MockSignalboxFixtures.activeSessionID)
@@ -177,6 +191,9 @@ enum ScreenshotScenario: String, CaseIterable, Sendable {
         default:
             return nil
         }
+        #else
+        return nil
+        #endif
     }
 
     static func parse(arguments: [String]) -> ScreenshotScenario? {
