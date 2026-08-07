@@ -682,6 +682,14 @@ Locks per transaction, in acquisition order:
   session prefix. The endpoint prefix precedes the scheduler because processing
   the input can terminalize the delegated turn and publish its parent result.
 
+- **Descendant-scoped stop and interrupt transactions**: after registry
+  inspection and an unseen command claim, but before the ordinary root-session
+  or scheduler locks, the repository locks the complete reachable session
+  frontier in ascending session-identity order. It re-evaluates that frontier
+  after waits and then locks its relationships in spawning-request order. The
+  goal-stop and input-interrupt writers share this prefix; parent-alone commands
+  take no descendant locks.
+
 - **Delegated peer-message transactions**: after a nonlocking peer-existence
   read, message recording locks both endpoint session rows `FOR NO KEY UPDATE`
   in ascending session-identity order, then both endpoint `session_scheduler`
@@ -1158,21 +1166,23 @@ delivery as the lifecycle origin entry. The schema admits at most one queued
 delegation-origin turn per recipient.
 
 Parent-and-descendants termination locks the root and complete reachable session
-frontier before inserting the applied parent command and therefore before any
-outbox allocation. It re-evaluates after a lock wait, then locks relationship
-rows in stable spawning-request order before it writes any disposition. Spawn
-admission takes the same parent-session lock, so spawn and cascade transactions
-do not invert the session/outbox lock order or omit an edge that committed while
-the cascade waited. The command and every evaluated edge commit together; a
-crash can leave all prior durable state or the complete typed evaluation, never
-an unrecorded partial cascade. Parent-alone takes no descendant authority.
-Deferred reverse constraints also reject an applied descendant-scoped root
-command that lacks its exact cascade row, so an omitted cascade writer fails
-closed instead of silently degrading to parent-alone. Background and
-bound-keep-running edges still receive a continue-running event when evaluated.
-An already-terminal edge receives its typed already-terminal event and traversal
-continues through that child's outgoing relationships, so a terminal
-intermediate session cannot hide live descendants.
+frontier in ascending session-identity order before the command repository takes
+its ordinary root or scheduler locks, before inserting the applied parent
+command, and therefore before any outbox allocation. It re-evaluates after a
+lock wait, then locks relationship rows in stable spawning-request order before
+it writes any disposition. Spawn admission takes the same parent-session lock,
+so spawn, message, and cascade transactions do not invert the session/outbox
+lock order or omit an edge that committed while the cascade waited. The command
+and every evaluated edge commit together; a crash can leave all prior durable
+state or the complete typed evaluation, never an unrecorded partial cascade.
+Parent-alone takes no descendant authority. Deferred reverse constraints also
+reject an applied descendant-scoped root command that lacks its exact cascade
+row, so an omitted cascade writer fails closed instead of silently degrading to
+parent-alone. Background and bound-keep-running edges still receive a
+continue-running event when evaluated. An already-terminal edge receives its
+typed already-terminal event and traversal continues through that child's
+outgoing relationships, so a terminal intermediate session cannot hide live
+descendants.
 
 **SPEC PROPOSAL — cascade terminal authority.** For each newly stopped or
 cancelled edge, the cascade transaction appends one immutable logical-terminal

@@ -54,6 +54,7 @@ use crate::{
     mapping::{
         ToolApprovalDecisionSourceStorageKind, accepted_input_id_from_uuid,
         dangerous_tool_auto_approval_to_str, defaults_version_to_numeric,
+        delegation_outcome_kind_to_str, delegation_outcome_reason_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, input_position_from_numeric,
         positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
         tool_approval_decision_source_to_str, tool_approval_posture_to_str,
@@ -1257,15 +1258,35 @@ enum ExpectedDelegatedChildResult {
     ResultUnavailable,
 }
 
+struct StoredDelegatedChildResultFacts<'a> {
+    outcome: DelegationOutcomeKind,
+    reason: DelegationOutcomeReason,
+    content: Option<&'a str>,
+}
+
 impl ExpectedDelegatedChildResult {
-    fn stored_facts(&self) -> (&'static str, &'static str, Option<&str>) {
+    fn stored_facts(&self) -> StoredDelegatedChildResultFacts<'_> {
         match self {
-            Self::Returned(content) => {
-                ("result_returned", "child_completed", Some(content.as_str()))
-            }
-            Self::Failed => ("child_failed", "child_execution_failed", None),
-            Self::Cancelled => ("child_cancelled", "child_cancelled", None),
-            Self::ResultUnavailable => ("child_failed", "child_result_unavailable", None),
+            Self::Returned(content) => StoredDelegatedChildResultFacts {
+                outcome: DelegationOutcomeKind::ResultReturned,
+                reason: DelegationOutcomeReason::ChildCompleted,
+                content: Some(content.as_str()),
+            },
+            Self::Failed => StoredDelegatedChildResultFacts {
+                outcome: DelegationOutcomeKind::ChildFailed,
+                reason: DelegationOutcomeReason::ChildExecutionFailed,
+                content: None,
+            },
+            Self::Cancelled => StoredDelegatedChildResultFacts {
+                outcome: DelegationOutcomeKind::ChildCancelled,
+                reason: DelegationOutcomeReason::ChildCancelled,
+                content: None,
+            },
+            Self::ResultUnavailable => StoredDelegatedChildResultFacts {
+                outcome: DelegationOutcomeKind::ChildFailed,
+                reason: DelegationOutcomeReason::ChildResultUnavailable,
+                content: None,
+            },
         }
     }
 }
@@ -1293,7 +1314,14 @@ async fn delegated_observation_result_matches(
             }
         }
         ModelCallTerminalObservation::CompletedWithTools { .. }
-        | ModelCallTerminalObservation::Ambiguous => return Ok(true),
+        | ModelCallTerminalObservation::Ambiguous => {
+            return delegated_nonterminal_result_absent(
+                connection,
+                session,
+                observation.correlation().turn(),
+            )
+            .await;
+        }
     };
     delegated_terminal_result_matches(
         connection,
@@ -1310,7 +1338,11 @@ async fn delegated_terminal_result_matches(
     turn: TurnId,
     expected: &ExpectedDelegatedChildResult,
 ) -> Result<bool, ModelCallRepositoryError> {
-    let (outcome_kind, reason_kind, content_text) = expected.stored_facts();
+    let stored = expected.stored_facts();
+    let outcome_kind = delegation_outcome_kind_to_str(stored.outcome);
+    let reason_kind = delegation_outcome_reason_to_str(stored.reason).ok_or(
+        ModelCallCorruption::Inconsistent("delegated child result reason"),
+    )?;
     Ok(sqlx::query_scalar::<_, bool>(
         "WITH delegated AS (
             SELECT task.spawning_tool_request_id,
@@ -1390,13 +1422,122 @@ async fn delegated_terminal_result_matches(
                    AND wake_header.session_id = parent_wake.session_id
                    AND wake_header.event_kind = 'delegation_wake'
                    AND wake_header.storage_version = 1
+                 WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM session_delegation_wait AS wait
+                      LEFT JOIN session_child_result_delivery AS delivery
+                        ON delivery.awaiting_tool_request_id =
+                           wait.awaiting_tool_request_id
+                       AND delivery.spawning_tool_request_id =
+                           wait.spawning_tool_request_id
+                       AND delivery.parent_session_id = wait.parent_session_id
+                      LEFT JOIN session_pending_delivery AS pending
+                        ON pending.recipient_session_id =
+                           delivery.parent_session_id
+                       AND pending.delivery_sequence = delivery.delivery_sequence
+                       AND pending.delivery_kind = delivery.delivery_kind
+                     WHERE wait.spawning_tool_request_id =
+                           delegated.spawning_tool_request_id
+                       AND (
+                            delivery.awaiting_tool_request_id IS NULL
+                            OR wait.wait_mode IS NULL
+                            OR wait.wait_mode NOT IN ('foreground', 'background')
+                            OR (
+                                wait.wait_mode = 'foreground'
+                                AND (
+                                    delivery.delivery_sequence IS NOT NULL
+                                    OR delivery.delivery_kind IS NOT NULL
+                                )
+                            )
+                            OR (
+                                wait.wait_mode = 'background'
+                                AND (
+                                    delivery.delivery_sequence IS NULL
+                                    OR delivery.delivery_kind <>
+                                       'background_result'
+                                    OR pending.delivery_sequence IS NULL
+                                )
+                            )
+                       )
+                 )
+                   AND NOT EXISTS (
+                    SELECT 1
+                      FROM session_child_result_delivery AS delivery
+                      LEFT JOIN session_delegation_wait AS wait
+                        ON wait.awaiting_tool_request_id =
+                           delivery.awaiting_tool_request_id
+                       AND wait.spawning_tool_request_id =
+                           delivery.spawning_tool_request_id
+                       AND wait.parent_session_id = delivery.parent_session_id
+                     WHERE delivery.spawning_tool_request_id =
+                           delegated.spawning_tool_request_id
+                       AND wait.awaiting_tool_request_id IS NULL
+                 )
             )",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
     .bind(outcome_kind)
     .bind(reason_kind)
-    .bind(content_text)
+    .bind(stored.content)
+    .fetch_one(connection)
+    .await?)
+}
+
+async fn delegated_nonterminal_result_absent(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<bool, ModelCallRepositoryError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "WITH delegated AS (
+            SELECT relation.spawning_tool_request_id
+              FROM session_delegation AS relation
+              JOIN session_delegation_initial_task AS task
+                ON task.spawning_tool_request_id = relation.spawning_tool_request_id
+               AND task.child_session_id = relation.child_session_id
+               AND task.turn_id = $2
+             WHERE relation.child_session_id = $1
+        )
+        SELECT NOT EXISTS (
+                    SELECT 1
+                      FROM session_delegation
+                     WHERE child_session_id = $1
+               )
+            OR (
+                (SELECT count(*) = 1 FROM delegated)
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM delegated
+                      JOIN session_child_result AS result
+                        ON result.spawning_tool_request_id =
+                           delegated.spawning_tool_request_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM delegated
+                      JOIN delegation_update_outbox_event AS parent_update
+                        ON parent_update.result_spawning_request_id =
+                           delegated.spawning_tool_request_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM delegated
+                      JOIN delegation_wake_outbox_event AS parent_wake
+                        ON parent_wake.result_spawning_request_id =
+                           delegated.spawning_tool_request_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM delegated
+                      JOIN session_child_result_delivery AS delivery
+                        ON delivery.spawning_tool_request_id =
+                           delegated.spawning_tool_request_id
+                )
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
     .fetch_one(connection)
     .await?)
 }
