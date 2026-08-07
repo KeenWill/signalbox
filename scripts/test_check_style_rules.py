@@ -150,6 +150,35 @@ class CommentProvenanceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn(MIGRATION, result.stdout)
 
+    def test_a_comment_citing_a_retired_adr_reports(self) -> None:
+        source = "//! Owned.\n// ADR-0010's reconciliation reads queued sessions.\npub fn f() {}\n"
+
+        result = check("SR-2", {MODULE: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("ADR-0010", result.stdout)
+
+    def test_a_toml_comment_citing_a_date_reports(self) -> None:
+        files = {
+            MODULE: "//! Owned.\n",
+            "deny.toml": "# Adopted by the 2026-07-20 decision-log entry.\n[graph]\n",
+        }
+
+        result = check("SR-2", files)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("deny.toml", result.stdout)
+
+    def test_a_date_inside_a_toml_string_is_a_value(self) -> None:
+        files = {
+            MODULE: "//! Owned.\n",
+            "deny.toml": '[graph]\nrate_version = "example-2026-08-01"\n',
+        }
+
+        result = check("SR-2", files)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_migration_block_comment_citing_a_process_document_reports(self) -> None:
         source = "/* Derived per docs/agents/testing-style.md */\nALTER TABLE t ADD COLUMN c uuid;\n"
 
@@ -473,6 +502,37 @@ class AnonymousRowDecodingTests(unittest.TestCase):
 
 
 class StorageVersionThresholdTests(unittest.TestCase):
+    def test_a_qualified_writer_constant_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "const CURSOR_STORAGE_VERSION: u64 = 1;\n"
+            "pub fn read(record: Record) {\n"
+            "    if record.storage_version != CURSOR_STORAGE_VERSION {\n"
+            "        return;\n"
+            "    }\n"
+            "}\n"
+        )
+
+        result = check("SR-7", {"crates/persistence/src/store.rs": source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("store.rs", result.stdout)
+
+    def test_a_feature_threshold_constant_passes(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "const PLACEMENT_FROM_STORAGE_VERSION: i16 = 6;\n"
+            "pub fn read(storage_version: i16) {\n"
+            "    if storage_version < PLACEMENT_FROM_STORAGE_VERSION {\n"
+            "        return;\n"
+            "    }\n"
+            "}\n"
+        )
+
+        result = check("SR-7", {"crates/persistence/src/store.rs": source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_comparison_against_the_current_writer_version_reports(self) -> None:
         source = "//! Owned.\npub fn admits(stored: i16) -> bool {\n    stored < STORAGE_VERSION\n}\n"
 

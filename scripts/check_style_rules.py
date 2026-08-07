@@ -337,7 +337,26 @@ PROCESS_CITATIONS = (
         re.compile(r"\bowner\s+(?:ruling|decision|approval)\b", re.IGNORECASE),
     ),
     ("a bare date", re.compile(r"(?<!`)\b20\d{2}-\d{2}-\d{2}\b(?!`)")),
+    # The ADR corpus is retired, and a comment citing one points a reader at a
+    # document the repository no longer treats as authority.
+    ("a retired ADR", re.compile(r"\bADR-\d+", re.IGNORECASE)),
 )
+
+# Configuration carries prose too, and a policy file is where an adopted-on
+# citation is most tempting: `deny.toml` opens with one today. The comment
+# character is unambiguous once string bodies are blanked.
+TOML_GLOBS = ("*.toml",)
+TOML_STRING = re.compile(r'"""(?:.|\n)*?"""|\'\'\'(?:.|\n)*?\'\'\'|"[^"\n]*"|\'[^\'\n]*\'')
+TOML_COMMENT = re.compile(r"#[^\n]*")
+
+
+def _toml_comments(text: str) -> Iterator[tuple[int, str]]:
+    """Yield each TOML comment with the line it starts on."""
+    scrubbed = TOML_STRING.sub(
+        lambda match: re.sub(r"[^\n]", " ", match.group()), text
+    )
+    for match in TOML_COMMENT.finditer(scrubbed):
+        yield text.count("\n", 0, match.start()) + 1, text[match.start() : match.end()]
 
 
 SQL_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
@@ -371,6 +390,9 @@ def check_comment_provenance(repository: Repository) -> Iterator[Finding]:
     for path in repository.files((MIGRATION_GLOB,)):
         label = path.relative_to(repository.root).as_posix()
         commented.append((label, _sql_comments(path.read_text(encoding="utf-8"))))
+    for path in repository.files(TOML_GLOBS):
+        label = path.relative_to(repository.root).as_posix()
+        commented.append((label, _toml_comments(path.read_text(encoding="utf-8"))))
     for path, comments in commented:
         for line, comment in comments:
             for label, pattern in PROCESS_CITATIONS:
@@ -613,10 +635,20 @@ def _anonymous_row_shape(annotation: str, aliases: set[str]) -> str | None:
 # only against a named feature threshold, and `stored != STORAGE_VERSION` is the
 # comparison whose harm the rule states most exactly — advancing the writer
 # version turns every row written under the old one into corruption.
+# A module may qualify its writer constant — `CURSOR_STORAGE_VERSION` in
+# `repo_watch.rs` — and the harm is identical: advancing it turns every row
+# written under the old value into corruption. The prefix is part of the name,
+# not a different rule.
+#
+# `_FROM_STORAGE_VERSION` is excluded because that suffix names the other thing
+# entirely: `PLACEMENT_FROM_STORAGE_VERSION` is the version a feature became
+# available from, and comparing against one is what this rule asks code to do.
+# Matching it would report the correct pattern as the violation.
+WRITER_VERSION = r"(?:[A-Z][A-Z0-9]*_)*(?<!FROM_)STORAGE_VERSION"
 STORAGE_VERSION_COMPARISON = re.compile(
-    r"(?:(?:[<>!=]=|[<>])\s*STORAGE_VERSION"
-    r"|STORAGE_VERSION\s*(?:[<>!=]=|[<>][^=])"
-    r"|\.\.=?\s*STORAGE_VERSION)"
+    rf"(?:(?:[<>!=]=|[<>])\s*{WRITER_VERSION}"
+    rf"|{WRITER_VERSION}\s*(?:[<>!=]=|[<>][^=])"
+    rf"|\.\.=?\s*{WRITER_VERSION})"
 )
 STORAGE_VERSION_TREES = ("crates/persistence/src/*.rs",)
 
