@@ -20,11 +20,15 @@ added or removed without also touching the sentence that quoted the old
 total — the same staleness class `check_domain_spine.py` guards against for
 the domain crates' exported-type counts. This script scans every tracked
 Markdown file for a stated count next to the word "invariant" or "scenario"
-and fails when it disagrees with the catalog. The scan reads each document
-whole, not line by line, so a statement the required mdformat pass wrapped
-between its number and its noun still reads as one statement; fenced code is
-excluded through `check_docs_consistency.mask_fenced_code`, which already
-knows this repository's `~~~`, long, and container-nested fences.
+and fails when it disagrees with the catalog — every file except the
+non-authoritative planning scratchpads, which AGENTS.md exempts from
+consistency review and whose quantities decide nothing. The scan reads each
+document whole, not line by line, so a statement the required mdformat pass
+wrapped between its number and its noun still reads as one statement; fenced
+code is excluded through `check_docs_consistency.mask_fenced_code`, which
+already knows this repository's `~~~`, long, and container-nested fences, and
+is applied to the two catalogs themselves so a fenced example of a row or a
+heading cannot inflate ground truth.
 
 This mechanizes check class (2), "stale-count checks", of the
 invariant-citation review work commissioned for this checker. The other two
@@ -71,6 +75,7 @@ import sys
 from pathlib import Path
 
 from check_docs_consistency import mask_fenced_code
+from generate_invariants import has_non_authoritative_planning_banner
 
 INVARIANTS = Path("docs/invariants.md")
 SCENARIOS = Path("docs/scenarios.md")
@@ -85,15 +90,24 @@ SCENARIO_HEADING = re.compile(r"^##\s+(S[0-9]+)\b", re.MULTILINE)
 # number in one paragraph states nothing about a noun in the next — and a
 # block-quote marker may lead the continuation, the way `CARRIER_GAP` in
 # `check_docs_consistency.py` already allows for its own wrapped carriers.
-WRAPPED_GAP = r"(?:[ \t]+|[ \t]*\r?\n[ \t]*(?:>[ \t]*)?)"
+# Repeated markers are accepted, not just one: a statement nested two levels
+# deep wraps as "> > There are 51\n> > invariants", and stopping at a single
+# `>` would let exactly the stale counts inside quoted material through.
+WRAPPED_GAP = r"(?:[ \t]+|[ \t]*\r?\n[ \t]*(?:>[ \t]*)*)"
 
 # A number sitting directly before the noun: "50 invariants", "1 scenario".
-# The lookbehind refuses a digit run glued to a preceding word or decimal
-# point (so `v2.50 invariants` and an identifier suffix don't qualify); the
-# lookahead refuses one glued to a following word or hyphen (so `INV-050`
-# and `50-invariant` don't qualify either).
+# The lookbehind refuses a digit run glued to a preceding word, decimal point,
+# or hyphen; the lookahead refuses one glued to a following word or hyphen (so
+# `50-invariant` doesn't qualify).
+#
+# The hyphen in the lookbehind is what keeps a citation from reading as a
+# total: "the INV-002 invariant" would otherwise match at `002` and claim the
+# catalog states 2. Since AGENTS.md requires those citations, without this the
+# checker fails on the very references it exists to protect. The cost is that a
+# range written "5-10 scenarios" no longer matches, which is correct — a range
+# states no total.
 NUMBER_BEFORE_NOUN = re.compile(
-    rf"(?<![\w.])([0-9]{{1,4}}){WRAPPED_GAP}(invariants?|scenarios?)(?![\w-])",
+    rf"(?<![\w.-])([0-9]{{1,4}}){WRAPPED_GAP}(invariants?|scenarios?)(?![\w-])",
     re.IGNORECASE,
 )
 # The noun stated as an explicit count: "invariant count: 50", "scenario
@@ -136,8 +150,14 @@ def tracked_markdown_files() -> list[Path]:
 
 
 def actual_invariant_count() -> int:
-    """Return the number of distinct rows in the generated invariant index."""
-    text = INVARIANTS.read_text(encoding="utf-8")
+    """Return the number of distinct rows in the generated invariant index.
+
+    Fenced content is masked first, on the same grounds as `find_stated_counts`
+    below: a documented example of the row format is a sample, not a catalog
+    entry. Counting one would inflate ground truth itself and so fail every
+    accurate stated count in the tree — the loudest possible failure mode.
+    """
+    text = mask_fenced_code(INVARIANTS.read_text(encoding="utf-8"))
     tags = set(INVARIANT_ROW.findall(text))
     if not tags:
         raise CountCheckError(f"{INVARIANTS} has no parseable INV-NNN rows")
@@ -145,8 +165,13 @@ def actual_invariant_count() -> int:
 
 
 def actual_scenario_count() -> int:
-    """Return the number of distinct `## S<N>` scenario headings."""
-    text = SCENARIOS.read_text(encoding="utf-8")
+    """Return the number of distinct `## S<N>` scenario headings.
+
+    Fenced content is masked for the same reason as in `actual_invariant_count`:
+    a fenced `## S99 — Example` renders as code, names no scenario, and must not
+    enlarge the catalog it is only illustrating.
+    """
+    text = mask_fenced_code(SCENARIOS.read_text(encoding="utf-8"))
     tags = set(SCENARIO_HEADING.findall(text))
     if not tags:
         raise CountCheckError(f"{SCENARIOS} has no parseable scenario headings")
@@ -159,8 +184,14 @@ def line_number_at(text: str, offset: int) -> int:
 
 
 def as_one_phrase(matched: str) -> str:
-    """Collapse a match that spans a wrapped line into one reportable phrase."""
-    return " ".join(matched.split())
+    """Collapse a match that spans a wrapped line into one reportable phrase.
+
+    Block-quote markers the wrap carried are dropped, so a claim nested in a
+    quote reports as "5 invariants" rather than "5 > > invariants". Only the
+    gap between the number and the noun can contain one, so discarding
+    all-`>` tokens cannot touch the words being quoted back.
+    """
+    return " ".join(word for word in matched.split() if set(word) != {">"})
 
 
 def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
@@ -174,8 +205,19 @@ def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
     characters, and fences nested in block quotes and list items, none of which
     an opening-delimiter toggle gets right. A code example that happens to say
     "50 invariants" is not a claim about the catalog.
+
+    A file opening with the non-authoritative-planning banner states nothing at
+    all and yields no counts. AGENTS.md exempts those scratchpads from
+    consistency review and lets them be revised freely, so a backlog item
+    reading "5 scenarios" is a work quantity, not a claim about the catalog.
+    The banner test is imported from `generate_invariants.py`, which already
+    applies it when validating invariant references, so both checks exempt
+    exactly the same set of files.
     """
-    text = mask_fenced_code(path.read_text(encoding="utf-8", errors="replace"))
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    if has_non_authoritative_planning_banner(raw):
+        return []
+    text = mask_fenced_code(raw)
     found: list[tuple[int, str, int, str]] = []
     for match in NUMBER_BEFORE_NOUN.finditer(text):
         noun = "invariant" if match.group(2).lower().startswith("invariant") else "scenario"

@@ -74,7 +74,12 @@ def run_checker(root: Path) -> subprocess.CompletedProcess[str]:
 
 
 def fixture_root(
-    directory: str, extra: dict[str, str] | None = None, *, omit_invariants: bool = False
+    directory: str,
+    extra: dict[str, str] | None = None,
+    *,
+    omit_invariants: bool = False,
+    invariants_text: str | None = None,
+    scenarios_text: str | None = None,
 ) -> Path:
     """Build a synthetic repository with the two generated catalogs staged.
 
@@ -82,12 +87,20 @@ def fixture_root(
     to make a fixture file "tracked" for the checker's own discovery; a file
     written but never added stays invisible, which is how the sibling-worktree
     test below proves untracked content is ignored.
+
+    `invariants_text`/`scenarios_text` replace a catalog wholesale, for the
+    cases that put a fenced example inside the catalog itself.
     """
     root = Path(directory)
     (root / "docs").mkdir(parents=True)
     if not omit_invariants:
-        (root / "docs/invariants.md").write_text(INVARIANTS_TEXT, encoding="utf-8")
-    (root / "docs/scenarios.md").write_text(SCENARIOS_TEXT, encoding="utf-8")
+        (root / "docs/invariants.md").write_text(
+            INVARIANTS_TEXT if invariants_text is None else invariants_text,
+            encoding="utf-8",
+        )
+    (root / "docs/scenarios.md").write_text(
+        SCENARIOS_TEXT if scenarios_text is None else scenarios_text, encoding="utf-8"
+    )
     for relative, text in (extra or {}).items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -317,6 +330,127 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
             result = run_checker(root)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_invariant_citation_before_the_noun_is_not_a_count(self) -> None:
+        """`INV-002 invariant` must not read as a stated count of 2.
+
+        The identifier's digits sit directly before the noun, so only the
+        lookbehind's hyphen rejection separates a required citation from a
+        claim about the catalog. AGENTS.md mandates these citations, so the
+        failure mode is the checker firing on the references it protects.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {
+                    "docs/spec/example.md": (
+                        f"The {INVARIANT_TAGS[-1]} invariant covers the reconnect path.\n"
+                    )
+                },
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_stale_count_in_a_nested_block_quote_fails(self) -> None:
+        """A wrapped claim keeps its full quote prefix, not just one marker."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {
+                    "docs/spec/example.md": (
+                        f"> > The catalog defines {STALE_INVARIANT_COUNT}\n"
+                        "> > invariants across the workspace.\n"
+                    )
+                },
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(f"{STALE_INVARIANT_COUNT} invariants", result.stdout)
+
+    def test_fenced_scenario_heading_does_not_enlarge_the_catalog(self) -> None:
+        """A documented example of the heading format names no scenario."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {
+                    "docs/spec/example.md": (
+                        f"The catalog defines {SCENARIO_COUNT} scenarios.\n"
+                    )
+                },
+                scenarios_text=(
+                    SCENARIOS_TEXT
+                    + "Scenarios are written like this:\n\n"
+                    + "```markdown\n## S99 — Example heading\n```\n"
+                ),
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"{SCENARIO_COUNT} scenarios", result.stdout)
+
+    def test_fenced_invariant_row_does_not_enlarge_the_catalog(self) -> None:
+        """The same, for a fenced example of the invariant row format."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {
+                    "docs/spec/example.md": (
+                        f"The catalog defines {INVARIANT_COUNT} invariants.\n"
+                    )
+                },
+                invariants_text=(
+                    INVARIANTS_TEXT
+                    + "\nRows are written like this:\n\n"
+                    + "```markdown\n| INV-999 | tests in [`src/x.rs`](../src/x.rs) |\n```\n"
+                ),
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"{INVARIANT_COUNT} invariants", result.stdout)
+
+    def test_non_authoritative_planning_file_is_skipped(self) -> None:
+        """A backlog quantity is a work item, not a claim about the catalog."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {
+                    "docs/agents/backlog.md": (
+                        "# Work backlog\n\n"
+                        "> **Non-authoritative planning scratchpad — do not review "
+                        "for consistency.**\n\n"
+                        f"- Draft {STALE_SCENARIO_COUNT} scenarios for the new flow.\n"
+                    )
+                },
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_same_quantity_without_the_banner_still_fails(self) -> None:
+        """Negative control: the exemption is the banner, not the filename."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {
+                    "docs/agents/backlog.md": (
+                        "# Work backlog\n\n"
+                        f"- Draft {STALE_SCENARIO_COUNT} scenarios for the new flow.\n"
+                    )
+                },
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("docs/agents/backlog.md", result.stdout)
 
     def test_missing_invariants_catalog_fails_loudly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
