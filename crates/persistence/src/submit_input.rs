@@ -3311,25 +3311,35 @@ pub(crate) async fn load_scheduling_projection(
     }
 
     let preceding_non_accepted_terminal = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
-        "SELECT terminal.child_turn_id,
-                terminal.terminal_frontier_id,
+        "SELECT terminal.turn_id,
+                turn_lifecycle_effective_terminal_frontier(
+                    terminal.session_id, terminal.turn_id
+                ),
                 effective.direct_selection_id
-           FROM session_delegation_logical_terminal AS terminal
+           FROM turn_lifecycle AS terminal
            JOIN LATERAL turn_origin_effective_model_configuration(
-                terminal.child_turn_id, terminal.child_session_id
+                terminal.turn_id, terminal.session_id
            ) AS effective ON true
-          WHERE terminal.child_session_id = $1
+          WHERE terminal.session_id = $1
+            AND terminal.origin_kind = 'delegation'
+            AND (
+                terminal.state_kind = 'terminal'
+                OR terminal.delegation_runtime_terminal
+            )
+            AND turn_lifecycle_effective_terminal_frontier(
+                    terminal.session_id, terminal.turn_id
+                ) IS NOT NULL
             AND EXISTS (
                 SELECT 1
                   FROM turn_lifecycle AS successor
-                 WHERE successor.session_id = terminal.child_session_id
-                   AND successor.turn_id <> terminal.child_turn_id
+                 WHERE successor.session_id = terminal.session_id
+                   AND successor.turn_id <> terminal.turn_id
                    AND goal_turn_is_runtime_relevant(
                         successor.session_id, successor.turn_id
                    )
                    AND accepted_input_turn_queue_predecessor(
                         successor.session_id, successor.turn_id
-                   ) = terminal.child_turn_id
+                   ) = terminal.turn_id
             )",
     )
     .bind(session_id_to_uuid(session_id))
@@ -3339,6 +3349,40 @@ pub(crate) async fn load_scheduling_projection(
         delegated_turns.insert(turn_id_from_uuid(turn));
         required_frontiers.insert(terminal_frontier);
     }
+
+    let semantic_delegated_turns = sqlx::query_scalar::<_, Uuid>(
+        "SELECT DISTINCT subject.turn_id
+           FROM (
+                SELECT CASE entry.payload_kind
+                         WHEN 'model_identity_changed'
+                           THEN entry.model_identity_turn_id
+                         WHEN 'turn_completed' THEN entry.completed_turn_id
+                         WHEN 'turn_failed' THEN entry.failed_turn_id
+                         WHEN 'turn_cancelled' THEN entry.cancelled_turn_id
+                       END AS turn_id
+                  FROM semantic_transcript_entry AS entry
+                 WHERE entry.source_session_id = $1
+                   AND entry.payload_kind IN (
+                        'model_identity_changed',
+                        'turn_completed',
+                        'turn_failed',
+                        'turn_cancelled'
+                   )
+           ) AS subject
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.session_id = $1
+            AND lifecycle.turn_id = subject.turn_id
+            AND lifecycle.origin_kind = 'delegation'
+            AND (
+                lifecycle.state_kind = 'terminal'
+                OR lifecycle.delegation_runtime_terminal
+            )
+          ORDER BY subject.turn_id",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_all(&mut *connection)
+    .await?;
+    delegated_turns.extend(semantic_delegated_turns.into_iter().map(turn_id_from_uuid));
 
     let delegated_turn_ids = delegated_turns
         .iter()

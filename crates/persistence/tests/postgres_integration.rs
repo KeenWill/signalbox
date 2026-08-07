@@ -20090,6 +20090,200 @@ async fn authorize_delegated_model_call_fixture(
     })
 }
 
+struct AuthorizedDelegatedSuccessorFixture {
+    child: SessionId,
+    repository: PostgresModelCallRepository,
+    authorized: AuthorizedModelCall,
+}
+
+async fn authorize_delegated_successor_model_call_fixture(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<AuthorizedDelegatedSuccessorFixture, Box<dyn Error>> {
+    let (_parent, child, _delegated_turn, _spawning_request, selection) =
+        activate_delegated_result_fixture(pool, seed).await?;
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 20));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one delegated successor target forms a catalog");
+    complete_text_turn(
+        pool,
+        child,
+        targets.clone(),
+        model_credential_reference(),
+        seed + 0x100,
+        "complete the delegated initial turn",
+    )
+    .await?;
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x201));
+    let submitted = SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x202,
+                child.as_uuid().as_u128(),
+                "continue after delegated completion",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x203)),
+            Some(successor),
+        )
+        .await?;
+    assert!(matches!(
+        submitted,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    activate_earliest_queued_turn(
+        pool,
+        EarliestQueuedTurnActivation {
+            session: child.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 0x204),
+            starting_frontier: Uuid::from_u128(seed + 0x205),
+            initial_attempt: Uuid::from_u128(seed + 0x206),
+        },
+    )
+    .await?;
+
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x207));
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                child,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x208)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x209)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x20a)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x20b)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 0x20c)),
+                    )
+                },
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
+    ));
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(child, call).await?
+    else {
+        panic!("the accepted-input successor authorizes its exact call")
+    };
+    Ok(AuthorizedDelegatedSuccessorFixture {
+        child,
+        repository,
+        authorized: *authorized,
+    })
+}
+
+/// S18 / INV-006 / INV-010: a retained child relationship does not make a
+/// later accepted-input turn subject to delegated initial-result closure.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_successor_completion_rereads_without_delegated_result()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xeb00;
+    let fixture = authorize_delegated_successor_model_call_fixture(&pool, seed).await?;
+    let observation = fixture
+        .authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![
+                AssistantText::try_new(String::from("ordinary successor result"))
+                    .expect("fixture successor result is admitted"),
+            ],
+        });
+    fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            observation.clone(),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x210,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x211)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x212)),
+            )),
+            |_| panic!("the successor completion fixture has no steering"),
+        )
+        .await?;
+
+    assert_eq!(
+        fixture
+            .repository
+            .reread_terminal_observation(fixture.child, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-006 / INV-010: nonterminal observation reread likewise scopes
+/// delegated-result absence to the exact delegation-origin turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_successor_tool_round_rereads_without_delegated_result()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xec00;
+    let fixture = authorize_delegated_successor_model_call_fixture(&pool, seed).await?;
+    let request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x210));
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from("current_time")).expect("valid fixture tool name"),
+                NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                    .expect("bounded fixture arguments"),
+            ),
+        )])
+        .expect("the proposal forms a tool-using response");
+    let observation = fixture
+        .authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            observation.clone(),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x211)),
+                    request,
+                    InitialToolApproval::Confirm,
+                )],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x212)),
+                None,
+            )),
+            |_| panic!("the successor tool-round fixture has no steering"),
+        )
+        .await?;
+
+    assert_eq!(
+        fixture
+            .repository
+            .reread_terminal_observation(fixture.child, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn attach_delegation_relationship_fixture(
     pool: &PgPool,
     child: SessionId,
@@ -20313,6 +20507,43 @@ async fn delegated_capability_failure_fixture(
         call,
         spawning_request,
     })
+}
+
+/// S18 / INV-006 / INV-010: a failed delegated initial turn remains a complete
+/// semantic subject when the child accepts its next user turn, even though the
+/// failed call produced no assistant entry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_failed_delegated_subject_allows_successor_input()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xed00;
+    let fixture = delegated_capability_failure_fixture(&pool, seed).await?;
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x100));
+    let outcome = SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x101,
+                fixture.child.as_uuid().as_u128(),
+                "continue after delegated failure",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x102)),
+            Some(successor),
+        )
+        .await?;
+
+    assert!(matches!(
+        outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
