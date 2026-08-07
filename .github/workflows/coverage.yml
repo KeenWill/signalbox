@@ -389,8 +389,24 @@ jobs:
                     or (type == "string" and test("^[+-]?[0-9]+$"));
                   def trunc: if . < 0 then -((-.) | floor) else floor end;
                   def okfield($k): (has($k) | not) or (.[$k] | okint);
+                  def counted($k): (.[$k] // 0) | tonumber | trunc;
+                  # A counter cannot be negative, and cannot report more
+                  # covered than exist. A corrupt artifact saying
+                  # `{"count": 1, "covered": 2}` is a 200% baseline, which
+                  # renders a complete current measurement as a fabricated
+                  # -100.00 pp regression instead of falling through to an
+                  # older usable artifact.
+                  #
+                  # Deliberately stricter than the loader, which does not
+                  # validate counters at all — the second such divergence
+                  # here, alongside the non-positive line total. Both reject
+                  # a document `load_baseline` would read, because reading it
+                  # yields a number no reviewer can act on.
+                  def sane: (counted("count") >= 0)
+                    and (counted("covered") >= 0)
+                    and (counted("covered") <= counted("count"));
                   def okcounter: (type != "object")
-                    or (okfield("count") and okfield("covered"));
+                    or (okfield("count") and okfield("covered") and sane);
                   .type == "llvm.coverage.json.export"
                   and ((.data | type) == "array")
                   and all(.data[]; (.files | type) == "array")

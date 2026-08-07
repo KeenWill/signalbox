@@ -451,7 +451,15 @@ jobs:
                   ] as $products
                   | ($products | length) > 0
                   and all($products[];
-                        (.coveredLines | okint) and (.executableLines | okint))
+                        (.coveredLines | okint)
+                        and (.executableLines | okint)
+                        # Same impossibility guard as the Rust predicate: a
+                        # target reporting more covered than executable lines
+                        # is a corrupt measurement, not a 200% baseline.
+                        and ((.coveredLines | tonumber | trunc) >= 0)
+                        and ((.executableLines | tonumber | trunc) >= 0)
+                        and ((.coveredLines | tonumber | trunc)
+                             <= (.executableLines | tonumber | trunc)))
                   and (([$products[].executableLines | tonumber | trunc]
                         | add) // 0) > 0)
                 ' "$baseline_dir/$SUMMARY_FILE" > /dev/null 2>&1; then
