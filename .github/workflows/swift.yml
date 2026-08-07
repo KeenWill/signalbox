@@ -126,11 +126,60 @@ jobs:
         id: native-tests
         run: clients/native/scripts/test-xcode.sh
         env:
-          SIGNALBOX_NATIVE_SKIP_TESTING: SignalboxNativeUITests
+          # The snapshot suite is excluded here and runs in the report-only step
+          # below instead; this step is the blocking one, and a golden is not
+          # yet trusted enough to hold a merge.
+          SIGNALBOX_NATIVE_SKIP_TESTING: >-
+            SignalboxNativeUITests
+            SignalboxAppTests/LiveScreenSnapshotTests
           # Quoted deliberately: the script tests for the exact string, and an
           # unquoted YES is a YAML boolean that a parser may hand the step as
           # "true" instead, silently turning the measurement off.
           SIGNALBOX_NATIVE_ENABLE_CODE_COVERAGE: "YES"
+      # Report only, exactly as native coverage was rolled out: it never fails
+      # the job. Promoting the suite to a merge gate is deleting the
+      # `continue-on-error` line and the skip above.
+      #
+      # A second test pass, not a second job or a second build: the derived data
+      # already holds the build this step reuses, which is also why it sets
+      # code coverage the same way the step above does. Instrumentation changes
+      # the built products, so a step that disagreed about it would rebuild
+      # everything to run the goldens. Its result bundle is separate so it cannot
+      # overwrite the one the coverage report reads.
+      - name: Run native snapshot suite (report only)
+        id: snapshots
+        continue-on-error: true
+        # Not test-xcode.sh with a suite named here: test-snapshots.sh takes
+        # both the suite and the simulator from scripts/lib/snapshots.sh, which
+        # is the same owner the recording script reads, so a golden is never
+        # checked against a model it was not recorded against.
+        run: clients/native/scripts/test-snapshots.sh
+        env:
+          SIGNALBOX_NATIVE_ENABLE_CODE_COVERAGE: "YES"
+          SIGNALBOX_NATIVE_TEST_RESULT_BUNDLE_PATH: ${{ runner.temp }}/native-snapshots/SignalboxNative-Snapshots.xcresult
+      # The library attaches the reference, the failed rendering, and their
+      # difference to the failing test, so the result bundle is where a diff
+      # lives. Exported unfiltered rather than with `--only-failures`: the three
+      # images hang off an activity rather than off the failure itself, and that
+      # filter drops them, leaving an artifact of nothing but issue text. A run
+      # that took no failing snapshot has no attachments to export anyway.
+      # manifest.json maps each exported file to its name.
+      - name: Export the native snapshot diffs
+        if: ${{ always() && steps.snapshots.outcome == 'failure' }}
+        continue-on-error: true
+        run: |
+          xcrun xcresulttool export attachments \
+            --path "$RUNNER_TEMP/native-snapshots/SignalboxNative-Snapshots.xcresult" \
+            --output-path "$RUNNER_TEMP/native-snapshot-diffs"
+      - name: Upload the native snapshot diffs
+        if: ${{ always() && steps.snapshots.outcome == 'failure' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-snapshot-diffs
+          path: ${{ runner.temp }}/native-snapshot-diffs
+          if-no-files-found: warn
+          retention-days: 14
       # Fetches the number this pull request's number is reported against, from
       # a `native-coverage` artifact an earlier main run left behind. Deliberately
       # a copy of coverage.yml's step of the same name rather than a shared
