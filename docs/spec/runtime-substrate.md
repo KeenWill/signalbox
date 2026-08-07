@@ -37,8 +37,9 @@ mappings and advisory exceptions are verified against PR #437
 composition is verified against this PR (`agent/wire-claude-cli-adapter`), and
 the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). The
 Anthropic compatibility smoke was verified through PR #465
-(`agent/anthropic-api-smoke`). The cross-adapter `ToolCallsAtLoss` fact carried
-in boundary-loss evidence was verified through PR #490
+(`agent/anthropic-api-smoke`), and the OpenAI compatibility smoke through PR
+#466 (`agent/openai-api-smoke`). The cross-adapter `ToolCallsAtLoss` fact
+carried in boundary-loss evidence was verified through PR #490
 (`agent/typed-loss-cause`), against every streamed and buffered loss path in the
 four adapters. This page covers the provider-neutral operation, observation, and
 evidence vocabulary; SSE framing; structured-output and tool decode;
@@ -300,6 +301,34 @@ material — leaving a genuine failure indistinguishable from a decoded refusal.
 An error record that *does* classify still outranks the reported finish, because
 it carries information the finish does not.
 
+Unrecognized finish reasons (OpenAI adapter) record their verdict but defer it
+to `[DONE]`, so records arriving after that finish are still examined and a
+definitive error among them supersedes it. Why: returning at the finish chunk
+would leave such a record unread, and the post-finish rule below could never
+fire for this finish — a caller would accept the prefix as a clean stop at an
+output bound. The two envelope checks that are already decidable — assistant
+role established and model identity reported — still run at the finish rather
+than at `[DONE]`, and a stream failing either reports the envelope defect and
+carries no `finish_reported`, because a caller cannot otherwise distinguish a
+well-formed response that stopped at an output bound from an envelope that was
+never valid and also reported one. Accumulated tool content is deliberately not
+among those checks: a tool-bearing request can legitimately exhaust the output
+ceiling partway through a call, so the token is an observed fact rather than a
+contradiction, and the buffered decoder retains it in exactly that case — the
+two decoders must not disagree about the same response.
+
+Post-finish error records (OpenAI adapter): once its stream has reported why
+generation stopped, a later error record carrying no native material at all is a
+protocol violation rather than definitive provider evidence. Why: it supersedes
+the reported finish with nothing a caller could act on, and it would otherwise
+reach the caller wearing exactly the shape the refusal downgrade above produces
+— an HTTP 200 exchange, `Unrecognized`, and empty native facts — leaving a
+genuine failure indistinguishable from a decoded refusal. An error record
+carrying any native material still outranks the reported finish, even when its
+type or code is unfamiliar and it therefore classifies as `Unrecognized`: it
+carries diagnostics the finish does not, and cannot be mistaken for the
+downgrade.
+
 ## SSE framing
 
 `SseFraming` is a provider-agnostic incremental parser from transport byte
@@ -491,45 +520,81 @@ request in addition to that alternate target.
 
 ### Compatibility smoke
 
-The Anthropic adapter carries a gated live compatibility smoke
-(`.github/workflows/anthropic-smoke.yml`) that spends one real exchange against
-the cheapest model the provider currently advertises — `claude-haiku-4-5` — run
-through this crate's own `ModelRuntime` implementation with a small fixed prompt
-and no provider-side prompt caching: at one exchange per gated run a cache write
-is never amortized by a later read, so caching would raise the cost of the run
-it is meant to cheapen. Unlike the Codex CLI smoke, there is no locally
-installed executable and therefore no version to verify beforehand; the adapter
-targets the provider's stable public API directly, so spending the one exchange
-is the whole smoke rather than a second gate behind a credential-free version
-probe.
+Both direct HTTP adapters carry a gated live compatibility smoke — the Anthropic
+adapter's in `.github/workflows/anthropic-smoke.yml`, the OpenAI adapter's in
+`.github/workflows/openai-smoke.yml`. Each spends one real exchange against the
+cheapest model its provider currently advertises (`claude-haiku-4-5` and
+`gpt-5-nano` respectively), run through that crate's own `ModelRuntime`
+implementation with a small fixed prompt and no provider-side prompt caching: at
+one exchange per gated run a cache write is never amortized by a later read, so
+caching would raise the cost of the run it is meant to cheapen. Unlike the Codex
+CLI smoke, there is no locally installed executable and therefore no version to
+verify beforehand; each adapter targets its provider's stable public API
+directly, so spending the one exchange is the whole smoke rather than a second
+gate behind a credential-free version probe.
 
-The smoke asserts only the protocol surfaces a provider-side change would move:
+Everything below applies to both smokes except where a paragraph names one
+adapter, which marks a difference in what that provider's wire protocol makes
+observable.
+
+Each smoke asserts only the protocol surfaces a provider-side change would move:
 a definitive HTTP 200, and the response decoding as `Completed` evidence, or as
 the adapter's downgraded-refusal `ProviderError` shape (`kind: Unrecognized`
-from that same 200 exchange, carrying `without_unproven_refusal`'s stable
-`native.error_token: "refusal"` discriminator — see the refusal-downgrade rule
-above; a raw `Refused` never leaves the adapter). That downgraded shape is
-accepted only when it carries exactly the fabricated native facts and no
-provider material, and the execution also observed a reported refusal stop
-reason: a mid-stream native error event inside a 200 SSE body reaches the caller
-as `Unrecognized` from the same status, and those two further facts are what a
-genuine streamed failure cannot present. Either accepted shape must carry
-provider-reported input usage present *and positive* (a request that reached the
-model always billed at least one input token). The smoke asserts nothing about
-answer quality. Output usage is held to a looser bar: present, not positive. A
-valid `Completed` response can legitimately report zero output tokens, and a
-downgraded refusal can be blocked before any completion token is produced, so
-both accepted shapes share one output usage-presence check without demanding it
-be nonzero.
+from that same 200 exchange — see the refusal-downgrade rule above; a raw
+`Refused` never leaves either adapter). That downgraded shape is accepted only
+when it carries exactly the native material its adapter's downgrade fabricates
+and nothing else — for Anthropic the stable `native.error_token: "refusal"`
+discriminator with no code and no message, for OpenAI no native material at all
+— and the execution also observed a reported refusal finish. A mid-stream native
+error inside a 200 SSE body reaches the caller as `Unrecognized` from the same
+status, and those two further facts are what a genuine streamed failure cannot
+present. Either accepted shape must carry provider-reported input usage present
+*and positive* (a request that reached the model always billed at least one
+input token). Neither smoke asserts anything about answer quality. Output usage
+is held to a looser bar: present, not positive. A valid `Completed` response can
+legitimately report zero output tokens, and a downgraded refusal can be blocked
+before any completion token is produced, so both accepted shapes share one
+output usage-presence check without demanding it be nonzero.
 
-This smoke pins no explicit reasoning effort, and needs none. Extended reasoning
-is requested per operation — the adapter emits `output_config.effort` only when
-`ModelSettings.reasoning_level` is set explicitly, and this smoke never sets it
-— so the exchange spends no hidden reasoning tokens against the output ceiling.
-The ceiling is therefore a pure cost cap: every token billed against it is
-visible output that the fixed one-word prompt already bounds, and the exchange
-cannot truncate into the `BoundaryLoss` a required check could not distinguish
-from a real compatibility break.
+The OpenAI smoke also accepts one loss shape: the exchange that stopped at its
+own output ceiling. Chat Completions reports that as `finish_reason: "length"`,
+which this adapter deliberately leaves unmapped, so the decoder ends the stream
+as `BoundaryLoss` carrying the token verbatim. That is a truthful report about
+answer length, not a protocol break — the request was accepted and the body
+framed and decoded — so failing the smoke on it would assert something about
+answer quality, which this smoke does not do. The acceptance is keyed to that
+exact token from a 200 exchange; any other unrecognized finish, and every other
+loss cause, still fails, as does a `length` finish from a stream that never
+reported a model identity: that check runs at the finish chunk rather than at
+`[DONE]`, so the reported identity is established before the verdict is
+deferred.
+
+That shape carries usage like the other two, and is held to the same
+requirements above. The trailing usage-only chunk is valid only after a finish,
+and the decoder defers the unrecognized-finish verdict to `[DONE]` precisely so
+that chunk is consumed first; a stream that never sends it fails the
+`include_usage` contract and reports that missing chunk instead of an
+output-bound stop.
+
+Accepting that shape is what makes the OpenAI smoke's reasoning-capable target
+safe as a required check. Hidden reasoning tokens bill against the same ceiling
+as visible content, and Chat Completions offers no control that caps them below
+it — `reasoning_effort` is a qualitative hint, so even its lowest setting leaves
+the worst case unbounded. No effort is pinned there: this repository's own
+OpenAI catalog records that the `"minimal"` effort is listed by no current model
+page and appears on no row, so pinning it would assert a capability the
+repository does not claim. That operation therefore sets no explicit provider
+control, and the smoke's `ModelCapabilityCatalog` is correspondingly empty.
+
+The Anthropic smoke pins no explicit reasoning effort either, and needs no
+equivalent loss shape. Extended reasoning is requested per operation — the
+adapter emits `output_config.effort` only when `ModelSettings.reasoning_level`
+is set explicitly, and that smoke never sets it — so the exchange spends no
+hidden reasoning tokens against the output ceiling. Its ceiling is therefore a
+pure cost cap: every token billed against it is visible output that the fixed
+one-word prompt already bounds, and the exchange cannot truncate into a
+`BoundaryLoss` a required check could not distinguish from a real compatibility
+break.
 
 This smoke's required aggregate is merge-gating for a pull request that changes
 the adapter crate or the workflow itself — an explicit exception to
@@ -567,12 +632,13 @@ run id for a non-`pull_request` event, so each scheduled run keeps its own slot.
 GitHub only fires `schedule` events from a repository's default branch, so the
 schedule takes effect only once a change lands on `main`.
 
-The `anthropic-smoke` environment is configured for all branches, for the same
-reason the `codex-smoke` environment is: GitHub evaluates an environment used by
-`pull_request` against `GITHUB_REF`, the synthetic merge ref rather than the
-head branch. That setting admits fork and same-repository merge refs alike and
-supplies no security boundary. Forks are excluded, in order, by GitHub secret
-withholding and the three explicit repository-name comparisons above.
+The `anthropic-smoke` and `openai-smoke` environments are configured for all
+branches, for the same reason the `codex-smoke` environment is: GitHub evaluates
+an environment used by `pull_request` against `GITHUB_REF`, the synthetic merge
+ref rather than the head branch. That setting admits fork and same-repository
+merge refs alike and supplies no security boundary. Forks are excluded, in
+order, by GitHub secret withholding and the three explicit repository-name
+comparisons above.
 
 The workflow's own concurrency is a single group keyed to the pull request ref
 (or the run id for every other event), so a run superseded only by a newer push
@@ -587,13 +653,13 @@ pending one when a third arrives. That would fail a required check that never
 tested its own head. A concurrent real exchange costs a small fraction of a
 cent; required-check integrity is worth more than serializing that spend.
 
-The credential (`ANTHROPIC_API_KEY`) is referenced only in the step that spends
-the exchange, scoped to that step's environment alone, never echoed and never
-passed in argv. The crate is compiled before that step runs, and the compiled
-test binary's path is captured from that credential-free build and invoked
-directly rather than through a second `cargo test`, so no build-freshness check
-— and therefore no build script or procedural macro — ever runs while the key is
-readable.
+Each credential (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) is referenced only in
+the step that spends the exchange, scoped to that step's environment alone,
+never echoed and never passed in argv. The crate is compiled before that step
+runs, and the compiled test binary's path is captured from that credential-free
+build and invoked directly rather than through a second `cargo test`, so no
+build-freshness check — and therefore no build script or procedural macro — ever
+runs while the key is readable.
 
 ## Codex CLI provider adapter
 
