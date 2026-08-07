@@ -278,10 +278,18 @@ AGREEING_WORKFLOW = """
 jobs:
   postgres-integration-run:
     runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.postgres-integration-build.outputs.matrix) }}
     steps:
-      - run: >-
-          cargo nextest run --archive-file a.tar.zst
-          --run-ignored only --no-fail-fast
+      - env:
+          SUITE: ${{ matrix.suite }}
+          PARTITION: ${{ matrix.partition }}
+          PARTITIONS: ${{ matrix.partitions }}
+          FILTER: ${{ matrix.filter }}
+        run: >-
+          cargo nextest run --archive-file "$RUNNER_TEMP/$SUITE.tar.zst"
+          --partition "count:$PARTITION/$PARTITIONS"
+          --run-ignored only --no-fail-fast -E "$FILTER"
   postgres-integration-build:
     runs-on: ubuntu-latest
     steps:
@@ -291,9 +299,12 @@ jobs:
         with:
           name: postgres-integration-archive-alpha
 """
-ARCHIVE_RUN_STEP = """      - run: >-
-          cargo nextest run --archive-file a.tar.zst
-          --run-ignored only --no-fail-fast
+# Only the `run:` scalar, so a case can remove or vary the command while the
+# step's `matrix.*` bindings stay in place and are judged separately.
+ARCHIVE_RUN_STEP = """        run: >-
+          cargo nextest run --archive-file "$RUNNER_TEMP/$SUITE.tar.zst"
+          --partition "count:$PARTITION/$PARTITIONS"
+          --run-ignored only --no-fail-fast -E "$FILTER"
 """
 
 
@@ -418,12 +429,25 @@ class WorkflowAgreementTests(unittest.TestCase):
         failures = self.disagreements(
             AGREEING_WORKFLOW.replace(
                 ARCHIVE_RUN_STEP,
-                "      - run: cargo nextest run --archive-file a.tar.zst\n",
+                '        run: cargo nextest run --archive-file "$RUNNER_TEMP/$SUITE.z"'
+                ' --partition "count:$PARTITION/$PARTITIONS" -E "$FILTER"\n',
             )
         )
 
         self.assertEqual(len(failures), 1)
         self.assertIn("--run-ignored only", failures[0])
+
+    def test_an_archive_run_not_parameterised_by_the_matrix_is_reported(self) -> None:
+        # A run naming one fixed archive would have every shard execute the
+        # same suite while the aggregate check still passed.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                '--archive-file "$RUNNER_TEMP/$SUITE.tar.zst"',
+                "--archive-file /tmp/persistence.tar.zst",
+            )
+        )
+
+        self.assertTrue(any("--run-ignored only" in failure for failure in failures))
 
     def test_a_run_without_an_archive_is_reported(self) -> None:
         # Two distinct problems, reported separately: no archive-backed run
@@ -431,7 +455,8 @@ class WorkflowAgreementTests(unittest.TestCase):
         failures = self.disagreements(
             AGREEING_WORKFLOW.replace(
                 ARCHIVE_RUN_STEP,
-                "      - run: cargo nextest run --run-ignored only\n",
+                '        run: cargo nextest run --run-ignored only'
+                ' --partition "count:$PARTITION/$PARTITIONS" -E "$FILTER"\n',
             )
         )
 
@@ -813,6 +838,41 @@ class DocumentedCommandTests(unittest.TestCase):
 
         self.assertEqual(len(failures), 1)
         self.assertIn("--no-default-features", failures[0][1])
+
+    def test_workspace_selection_covers_every_manifested_package(self) -> None:
+        # `--workspace` runs the persistence package without its feature, so
+        # Cargo skips the required-feature targets while the command reads as
+        # agreeing with the manifest.
+        failures = documentation_disagreements(
+            "AGENTS.md",
+            "`cargo test --workspace --tests -- --ignored`\n",
+            (suite(package="pa", features=("one",)),),
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("(none)", failures[0][1])
+
+    def test_the_all_alias_selects_the_workspace(self) -> None:
+        self.assertEqual(
+            len(
+                documentation_disagreements(
+                    "AGENTS.md",
+                    "`cargo test --all --tests -- --ignored`\n",
+                    (suite(package="pa", features=("one",)),),
+                )
+            ),
+            1,
+        )
+
+    def test_an_excluded_package_is_not_selected_by_the_workspace(self) -> None:
+        self.assertEqual(
+            documentation_disagreements(
+                "AGENTS.md",
+                "`cargo test --workspace --exclude pa --tests -- --ignored`\n",
+                (suite(package="pa", features=("one",)),),
+            ),
+            [],
+        )
 
     def test_every_repeated_package_selection_is_checked(self) -> None:
         # Cargo runs every `-p` named. Keeping only the last let an

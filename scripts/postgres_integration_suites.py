@@ -65,6 +65,9 @@ ENV_VALUE_OPTIONS = ("-u", "--unset", "-C", "--chdir", "-S", "--split-string")
 # Cargo package specs may carry a version or a source URL; only the name is
 # comparable against the manifest.
 PACKAGE_SPEC = re.compile(r"(?:.*#)?(?P<name>[^@#/]+?)(?:@[^@]*)?$")
+MATRIX_BINDING = re.compile(r"\$\{\{[ ]*matrix\.(?P<field>[A-Za-z_][A-Za-z0-9_]*)[ ]*\}\}")
+MATRIX_FIELDS = ("suite", "partition", "partitions", "filter")
+WORKSPACE_SELECTORS = ("--workspace", "--all")
 SUBSTITUTION = re.compile(r"\$\((?P<body>[^()]*)\)")
 # Cargo feature names, one per manifest entry. Cargo would read a comma or a
 # space inside one entry as a separator and enable two features; the docs
@@ -464,6 +467,14 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
             "never executed"
         )
 
+    bound = {match.group("field") for match in MATRIX_BINDING.finditer(text)}
+    for field in MATRIX_FIELDS:
+        if field not in bound:
+            failures.append(
+                f"{WORKFLOW} binds no `matrix.{field}`, so its shards no longer "
+                f"take that value from the matrix {MANIFEST} generates"
+            )
+
     targets = {match.group("target") for match in RUNS_ON.finditer(text)}
     if targets and targets != {"ubuntu-latest"}:
         listing = ", ".join(sorted(targets))
@@ -600,7 +611,25 @@ def runs_archived_ignored_tests(tokens: list[str]) -> bool:
     if "--archive-file" not in arguments or "--run-ignored" not in arguments:
         return False
     selection = arguments.index("--run-ignored") + 1
-    return selection < len(arguments) and arguments[selection] == "only"
+    if selection >= len(arguments) or arguments[selection] != "only":
+        return False
+    # Parameterised by the matrix, not merely archived. A run naming one fixed
+    # archive, or dropping the partition or the filterset, would execute a
+    # different set of tests on every shard than the manifest describes while
+    # still being an archive-backed ignored run.
+    return all(
+        option_value(arguments, option) is not None
+        and "$" in (option_value(arguments, option) or "")
+        for option in ("--archive-file", "--partition", "-E")
+    )
+
+
+def option_value(arguments: list[str], option: str) -> str | None:
+    """Return the value following one option, or `None` if it is absent."""
+    if option not in arguments:
+        return None
+    index = arguments.index(option) + 1
+    return arguments[index] if index < len(arguments) else None
 
 
 def runs_ignored_tests(arguments: list[str]) -> bool:
@@ -689,6 +718,7 @@ def documentation_disagreements(
         selected: list[str] = []
         by_manifest_path: list[str] = []
         declared: set[str] = set()
+        excluded: set[str] = set()
         index = 0
         while index < len(cargo_arguments):
             argument = cargo_arguments[index]
@@ -706,6 +736,12 @@ def documentation_disagreements(
                     by_manifest_path.append(name)
                 index += 2
                 continue
+            if argument == "--exclude" and index + 1 < len(cargo_arguments):
+                name = package_spec_name(cargo_arguments[index + 1])
+                if name:
+                    excluded.add(name)
+                index += 2
+                continue
             if argument in ("--features", "-F") and index + 1 < len(cargo_arguments):
                 declared.update(
                     part
@@ -715,7 +751,16 @@ def documentation_disagreements(
                 index += 2
                 continue
             index += 1
-        for name in selected or by_manifest_path:
+        # `--workspace` (and its `--all` alias) selects every workspace member,
+        # so it selects every manifested suite's package too — and it carries
+        # none of their features, which is exactly the drift worth reporting.
+        workspace = [
+            suite.package
+            for suite in suites
+            if any(flag in cargo_arguments for flag in WORKSPACE_SELECTORS)
+            and suite.package not in excluded
+        ]
+        for name in selected or by_manifest_path or workspace:
             report_documented_selection(
                 failures, label, line, name, declared, cargo_arguments,
                 packages, known, suites,

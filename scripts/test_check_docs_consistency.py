@@ -56,8 +56,14 @@ def write_manifest_workflow(root: Path, *names: str) -> None:
         "  postgres-integration-run:\n"
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
-        "      - run: cargo nextest run --archive-file a.tar.zst"
-        " --run-ignored only\n"
+        "      - env:\n"
+        "          SUITE: ${{ matrix.suite }}\n"
+        "          PARTITION: ${{ matrix.partition }}\n"
+        "          PARTITIONS: ${{ matrix.partitions }}\n"
+        "          FILTER: ${{ matrix.filter }}\n"
+        '        run: cargo nextest run --archive-file "$RUNNER_TEMP/$SUITE.z"'
+        ' --partition "count:$PARTITION/$PARTITIONS"'
+        ' --run-ignored only -E "$FILTER"\n'
         "  postgres-integration-build:\n"
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
@@ -683,8 +689,14 @@ class DocsConsistencyTests(unittest.TestCase):
             "  postgres-integration-run:\n"
             "    runs-on: ubuntu-latest\n"
             "    steps:\n"
-            "      - run: cargo nextest run --archive-file a.tar.zst"
-            " --run-ignored only\n"
+            "      - env:\n"
+            "          SUITE: ${{ matrix.suite }}\n"
+            "          PARTITION: ${{ matrix.partition }}\n"
+            "          PARTITIONS: ${{ matrix.partitions }}\n"
+            "          FILTER: ${{ matrix.filter }}\n"
+            '        run: cargo nextest run --archive-file "$RUNNER_TEMP/$SUITE.z"'
+            ' --partition "count:$PARTITION/$PARTITIONS"'
+            ' --run-ignored only -E "$FILTER"\n'
             "  postgres-integration-build:\n"
             "    runs-on: ubuntu-latest\n"
             "    steps:\n"
