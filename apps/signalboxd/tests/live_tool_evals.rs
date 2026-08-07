@@ -135,10 +135,8 @@ const EXEC_RESULT_PATH: &str = "exec-result.txt";
 const EXEC_RESULT: &str = "model loop observed\n";
 const EXEC_FORCED_SANDBOXED_ARGUMENTS: &str = r#"{"program":"printf","arguments":["forced sandboxed eval\n"],"working_directory":".","timeout_seconds":30}"#;
 const EXEC_FORCED_SANDBOXED_OUTPUT: &str = "forced sandboxed eval\n";
-const EXEC_FORCED_READ_ONLY_PROGRAM: &str = "/usr/bin/printf";
 const EXEC_FORCED_READ_ONLY_OUTPUT: &str = "forced unsandboxed eval\n";
-const EXEC_NATURAL_PROGRAM: &str = "/bin/sh";
-const EXEC_NATURAL_SCRIPT: &str = "printf 'model loop observed\\n' > exec-result.txt";
+const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
 const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
@@ -866,48 +864,36 @@ impl ExecEvalCase {
         }
     }
 
+    /// The exact tool name and argument text this case admits.
+    ///
+    /// A forced case reads the one `EXEC_CASES` fixture the report also
+    /// compares the observed request against, so the dispatch allowlist cannot
+    /// drift from the reported expectation and record a harness-induced miss.
+    fn admitted_call(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Natural => (SANDBOXED_EXEC_NAME, EXEC_NATURAL_ARGUMENTS),
+            Self::ForcedSandboxed => forced_exec_fixture(SANDBOXED_EXEC_NAME),
+            Self::ForcedUnsandboxed => forced_exec_fixture(UNSANDBOXED_EXEC_NAME),
+            Self::ForcedDiagnostics => forced_exec_fixture(CARGO_DIAGNOSTICS_NAME),
+        }
+    }
+
     fn admits(self, name: &str, arguments: &NormalizedToolArguments) -> bool {
-        let (expected_name, expected_arguments) = match self {
-            Self::Natural => (
-                SANDBOXED_EXEC_NAME,
-                serde_json::json!({
-                    "program": EXEC_NATURAL_PROGRAM,
-                    "arguments": ["-c", EXEC_NATURAL_SCRIPT],
-                    "working_directory": ".",
-                    "timeout_seconds": 30,
-                }),
-            ),
-            Self::ForcedSandboxed => (
-                SANDBOXED_EXEC_NAME,
-                serde_json::json!({
-                    "program": "printf",
-                    "arguments": [EXEC_FORCED_SANDBOXED_OUTPUT],
-                    "working_directory": ".",
-                    "timeout_seconds": 30,
-                }),
-            ),
-            Self::ForcedUnsandboxed => (
-                UNSANDBOXED_EXEC_NAME,
-                serde_json::json!({
-                    "program": EXEC_FORCED_READ_ONLY_PROGRAM,
-                    "arguments": [EXEC_FORCED_READ_ONLY_OUTPUT],
-                    "working_directory": ".",
-                    "timeout_seconds": 30,
-                }),
-            ),
-            Self::ForcedDiagnostics => (
-                CARGO_DIAGNOSTICS_NAME,
-                serde_json::json!({
-                    "command": "check",
-                    "timeout_seconds": 120,
-                }),
-            ),
-        };
+        let (expected_name, expected_arguments) = self.admitted_call();
         let expected =
-            NormalizedToolArguments::try_from_provider_text(expected_arguments.to_string())
+            NormalizedToolArguments::try_from_provider_text(expected_arguments.to_owned())
                 .expect("the static exec eval arguments normalize");
         name == expected_name && arguments == &expected
     }
+}
+
+/// The one forced fixture an Exec case dispatches and reports against.
+fn forced_exec_fixture(name: &'static str) -> (&'static str, &'static str) {
+    let case = EXEC_CASES
+        .iter()
+        .find(|case| case.name == name)
+        .expect("every Exec eval case names a forced fixture");
+    (case.name, case.expected_arguments)
 }
 
 #[derive(Clone)]
@@ -1791,8 +1777,29 @@ impl CaseOutcome {
                     .all(|request| request.attempt_succeeded)
                 && (family != EvalFamily::Exec
                     || (self.snapshot.requests.len() == 1
-                        && self.snapshot.requests[0].name == SANDBOXED_EXEC_NAME)),
+                        && self.snapshot.requests[0].name == SANDBOXED_EXEC_NAME
+                        && self.natural_exec_result_passed())),
         )
+    }
+
+    /// Whether the unforced Exec tier's sole result proves a confined process
+    /// that actually ran to a zero exit.
+    ///
+    /// The executor returns completed evidence for a timeout, a nonzero exit,
+    /// and a supervision failure alike, and the workspace file the task writes
+    /// can predate any of them, so requiring only that some result exists would
+    /// report a pass for a failed process.
+    fn natural_exec_result_passed(&self) -> bool {
+        let [result] = self.tool_results.as_slice() else {
+            return false;
+        };
+        if result.is_error {
+            return false;
+        }
+        let Ok(execution) = serde_json::from_str::<serde_json::Value>(&result.content) else {
+            return false;
+        };
+        execution["confinement"]["kind"] == "filesystem_confined" && exited_cleanly(&execution)
     }
 
     fn forced_result_passed(&self, target: &str) -> bool {
@@ -1816,12 +1823,34 @@ impl CaseOutcome {
         } else {
             &result
         };
-        execution["outcome"]["kind"] == "exited"
-            && execution["outcome"]["code"] == 0
-            && (target != CARGO_DIAGNOSTICS_NAME
-                || (execution["preparation_failure"].is_null()
-                    && execution["cargo_failure"].is_null()))
+        if !exited_cleanly(execution) {
+            return false;
+        }
+        match target {
+            SANDBOXED_EXEC_NAME => captured_stdout_is(execution, EXEC_FORCED_SANDBOXED_OUTPUT),
+            UNSANDBOXED_EXEC_NAME => captured_stdout_is(execution, EXEC_FORCED_READ_ONLY_OUTPUT),
+            // Cargo owns the diagnostics stdout, so the fixture asserts the
+            // absence of a preparation or Cargo failure instead of exact bytes.
+            _ => execution["preparation_failure"].is_null() && execution["cargo_failure"].is_null(),
+        }
     }
+}
+
+/// Whether one serialized execution reports a zero-code process exit.
+fn exited_cleanly(execution: &serde_json::Value) -> bool {
+    execution["outcome"]["kind"] == "exited" && execution["outcome"]["code"] == 0
+}
+
+/// Whether one serialized execution captured exactly the expected standard
+/// output, complete and undamaged.
+///
+/// A zero exit code alone proves only that the process ended well; argument
+/// forwarding or output capture could still have regressed to empty or wrong
+/// bytes while the eval reported a pass.
+fn captured_stdout_is(execution: &serde_json::Value, expected: &str) -> bool {
+    execution["stdout"]["text"] == expected
+        && execution["stdout"]["completeness"] == "complete"
+        && execution["stdout"]["encoding"] == "utf8"
 }
 
 fn synthetic_tool_result(
@@ -2290,6 +2319,192 @@ fn unforced_exec_tier_rejects_an_additional_tool_call() {
         outcome.natural_loop_disposition(EvalFamily::Exec),
         EvalDisposition::Miss
     );
+}
+
+/// One forced Exec outcome whose sole result carries the supplied execution.
+fn forced_exec_outcome(target: &'static str, execution: serde_json::Value) -> CaseOutcome {
+    let (name, arguments) = forced_exec_fixture(target);
+    CaseOutcome {
+        target: Some(String::from(name)),
+        expected_arguments: Some(String::from(arguments)),
+        execution_completed: true,
+        tool_results: vec![TrackedToolResult {
+            content: execution.to_string(),
+            is_error: false,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(name),
+                arguments_text: String::from(arguments),
+                attempt_succeeded: true,
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    }
+}
+
+/// One serialized confined execution that exited zero with the given output.
+fn confined_exit(stdout: &str) -> serde_json::Value {
+    serde_json::json!({
+        "confinement": {"kind": "filesystem_confined"},
+        "outcome": {"kind": "exited", "code": 0},
+        "stdout": {"text": stdout, "completeness": "complete", "encoding": "utf8"},
+        "stderr": {"text": "", "completeness": "complete", "encoding": "utf8"},
+    })
+}
+
+#[test]
+fn forced_exec_tier_passes_the_exact_captured_output() {
+    let outcome = forced_exec_outcome(
+        SANDBOXED_EXEC_NAME,
+        confined_exit(EXEC_FORCED_SANDBOXED_OUTPUT),
+    );
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Pass);
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_zero_exit_that_captured_nothing() {
+    let outcome = forced_exec_outcome(SANDBOXED_EXEC_NAME, confined_exit(""));
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_exec_tier_rejects_the_other_case_s_output() {
+    let outcome = forced_exec_outcome(
+        SANDBOXED_EXEC_NAME,
+        confined_exit(EXEC_FORCED_READ_ONLY_OUTPUT),
+    );
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_truncated_output_capture() {
+    let outcome = forced_exec_outcome(
+        UNSANDBOXED_EXEC_NAME,
+        serde_json::json!({
+            "confinement": {"kind": "unsandboxed"},
+            "outcome": {"kind": "exited", "code": 0},
+            "stdout": {
+                "text": EXEC_FORCED_READ_ONLY_OUTPUT,
+                "completeness": "truncated",
+                "encoding": "utf8",
+            },
+        }),
+    );
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+/// One unforced Exec outcome whose sole request carries the supplied execution.
+fn natural_exec_outcome(execution: serde_json::Value) -> CaseOutcome {
+    CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        tool_results: vec![TrackedToolResult {
+            content: execution.to_string(),
+            is_error: false,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(SANDBOXED_EXEC_NAME),
+                arguments_text: String::from(EXEC_NATURAL_ARGUMENTS),
+                attempt_succeeded: true,
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    }
+}
+
+#[test]
+fn unforced_exec_tier_passes_a_confined_zero_exit() {
+    let outcome = natural_exec_outcome(confined_exit(""));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Pass
+    );
+}
+
+#[test]
+fn unforced_exec_tier_rejects_a_timed_out_process() {
+    let outcome = natural_exec_outcome(serde_json::json!({
+        "confinement": {"kind": "filesystem_confined"},
+        "outcome": {"kind": "timed_out"},
+        "stdout": {"text": "", "completeness": "complete", "encoding": "utf8"},
+    }));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
+fn unforced_exec_tier_rejects_a_nonzero_exit() {
+    let outcome = natural_exec_outcome(serde_json::json!({
+        "confinement": {"kind": "filesystem_confined"},
+        "outcome": {"kind": "exited", "code": 1},
+        "stdout": {"text": "", "completeness": "complete", "encoding": "utf8"},
+    }));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
+fn unforced_exec_tier_rejects_a_supervision_failure() {
+    let outcome = natural_exec_outcome(serde_json::json!({
+        "confinement": {"kind": "filesystem_confined"},
+        "outcome": {"kind": "supervision_failed", "reason": "wait"},
+        "stdout": {"text": "", "completeness": "complete", "encoding": "utf8"},
+    }));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
+fn unforced_exec_tier_rejects_an_unconfined_execution() {
+    let outcome = natural_exec_outcome(serde_json::json!({
+        "confinement": {"kind": "unsandboxed"},
+        "outcome": {"kind": "exited", "code": 0},
+        "stdout": {"text": "", "completeness": "complete", "encoding": "utf8"},
+    }));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
+fn every_forced_exec_fixture_is_admitted_by_its_own_dispatch_case() -> EvalResult {
+    for case in EXEC_CASES {
+        let arguments =
+            NormalizedToolArguments::try_from_provider_text(case.expected_arguments.to_owned())
+                .map_err(|_| io::Error::other("a forced exec fixture does not normalize"))?;
+
+        assert!(
+            ExecEvalCase::for_forced_tool(case.name)?.admits(case.name, &arguments),
+            "the dispatch allowlist rejects the reported fixture for {}",
+            case.name
+        );
+    }
+    Ok(())
 }
 
 #[test]
