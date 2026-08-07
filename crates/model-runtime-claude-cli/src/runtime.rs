@@ -649,12 +649,14 @@ fn create_support_files(
             .to_str()
             .ok_or_else(|| "Claude credential-helper path is not valid UTF-8".to_string())?;
         let helper = format!(
-            "#!/bin/sh\nseparator=\nwhile\n    IFS= read -r line\n    read_status=$?\n    case \"$read_status:$line\" in\n        0:*) : ;;\n        *:) break ;;\n        *) : ;;\n    esac\ndo\n    printf '%s%s' \"$separator\" \"$line\"\n    separator='\n'\ndone < {}\n",
+            "#!/bin/sh\nseparator=\nwhile\n    IFS= read -r line\n    read_status=$?\n    case \"$read_status\" in\n        0) : ;;\n        *)\n            case \"$line\" in\n                '') break ;;\n                *) : ;;\n            esac\n            ;;\n    esac\ndo\n    printf '%s%s' \"$separator\" \"$line\"\n    separator='\n'\ndone < {}\n",
             shell_quote(credential_text)
         );
-        write_private_executable(&credential_helper, helper.as_bytes())?;
-        isolated_settings["apiKeyHelper"] =
-            serde_json::json!(format!("exec {}", shell_quote(credential_helper_text)));
+        write_private_file(&credential_helper, helper.as_bytes())?;
+        isolated_settings["apiKeyHelper"] = serde_json::json!(format!(
+            "exec /bin/sh {}",
+            shell_quote(credential_helper_text)
+        ));
     }
     write_private_file(
         &settings,
@@ -669,10 +671,6 @@ fn create_support_files(
 
 fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     write_private_support_file(path, contents, 0o600)
-}
-
-fn write_private_executable(path: &Path, contents: &[u8]) -> Result<(), String> {
-    write_private_support_file(path, contents, 0o700)
 }
 
 fn write_private_support_file(path: &Path, contents: &[u8], mode: u32) -> Result<(), String> {

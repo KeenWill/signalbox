@@ -830,7 +830,8 @@ impl HubModelConfiguration {
         let mut routes = HashMap::with_capacity(models.len());
         let mut target_billing_rates = HashMap::with_capacity(models.len());
         let mut target_adapters = HashMap::with_capacity(models.len());
-        let mut target_credential_profiles = HashMap::with_capacity(models.len());
+        let mut target_model_families = HashMap::with_capacity(models.len());
+        let mut target_fast_targets = HashMap::new();
         let mut target_provider_models = HashMap::with_capacity(models.len());
         let mut selectable_targets = HashSet::with_capacity(models.len());
         let mut provider_model_adapters = HashMap::with_capacity(models.len());
@@ -943,11 +944,13 @@ impl HubModelConfiguration {
             {
                 return Err(HubModelConfigurationError::ConflictingTarget);
             }
-            if let Some(previous) =
-                target_credential_profiles.insert(target, Arc::clone(&mapping.credential_profile))
-                && previous != mapping.credential_profile
+            if let Some(previous) = target_model_families.insert(target, Arc::clone(&model_family))
+                && previous != model_family
             {
                 return Err(HubModelConfigurationError::ConflictingTarget);
+            }
+            if let Some(fast_target) = fast_target {
+                target_fast_targets.insert(target, fast_target);
             }
             if let Some(previous) = target_provider_models.insert(target, provider_model.clone())
                 && previous != provider_model
@@ -977,7 +980,6 @@ impl HubModelConfiguration {
             ));
             runtime_capability_projections.push(RuntimeCapabilityProjection {
                 adapter: mapping.adapter,
-                credential_profile: Arc::clone(&mapping.credential_profile),
                 provider_model: provider_model.clone(),
                 capabilities,
             });
@@ -1034,7 +1036,7 @@ impl HubModelConfiguration {
                     required_positive_u32(serving_target, "context_window_tokens")?;
                 target_provider_models.insert(target, provider_model.clone());
                 target_adapters.insert(target, mapping.adapter);
-                target_credential_profiles.insert(target, Arc::clone(&mapping.credential_profile));
+                target_model_families.insert(target, Arc::clone(&model_family));
                 if let Some(previous) =
                     provider_model_adapters.insert(provider_model.clone(), mapping.adapter)
                     && previous != mapping.adapter
@@ -1094,7 +1096,6 @@ impl HubModelConfiguration {
             runtime_capability_projections,
             &target_provider_models,
             &target_adapters,
-            &target_credential_profiles,
             &selectable_targets,
         )?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
@@ -1103,17 +1104,16 @@ impl HubModelConfiguration {
             .into_iter()
             .filter_map(|(target, rates)| rates.map(|rates| (target, rates)))
             .collect();
-        let credential_families =
-            ModelCredentialFamilyCatalog::try_new(routes.values().map(|route| {
-                (
-                    route.target,
-                    Arc::<str>::from(route.model_family.as_ref()),
-                    route
-                        .uses_anthropic_adapter()
-                        .then(|| Arc::<str>::from(MIGRATED_ANTHROPIC_MODEL_FAMILY)),
-                )
-            }))
-            .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
+        let credential_families = ModelCredentialFamilyCatalog::try_new(
+            target_model_families.into_iter().map(|(target, family)| {
+                let migration_fallback = (target_adapters.get(&target)
+                    == Some(&ModelAdapter::Anthropic))
+                .then(|| Arc::<str>::from(MIGRATED_ANTHROPIC_MODEL_FAMILY));
+                (target, family, migration_fallback)
+            }),
+        )
+        .and_then(|catalog| catalog.with_fast_targets(target_fast_targets))
+        .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         Ok(Self {
             targets,
             runtime_models,
@@ -2555,7 +2555,6 @@ fn parse_configured_service_tier(item: &Item) -> Result<ServiceTier, HubModelCon
 
 struct RuntimeCapabilityProjection {
     adapter: ModelAdapter,
-    credential_profile: Arc<str>,
     provider_model: String,
     capabilities: ModelCapabilities,
 }
@@ -2564,18 +2563,15 @@ fn project_runtime_model_capabilities(
     projections: Vec<RuntimeCapabilityProjection>,
     target_provider_models: &HashMap<ResolvedProviderTarget, String>,
     target_adapters: &HashMap<ResolvedProviderTarget, ModelAdapter>,
-    target_credential_profiles: &HashMap<ResolvedProviderTarget, Arc<str>>,
     selectable_targets: &HashSet<ResolvedProviderTarget>,
 ) -> Result<RuntimeModelCapabilityCatalog, HubModelConfigurationError> {
     let mut capabilities_by_provider_model = BTreeMap::new();
     for projection in projections {
         let capabilities = runtime_model_capabilities(
             projection.adapter,
-            &projection.credential_profile,
             &projection.capabilities,
             target_provider_models,
             target_adapters,
-            target_credential_profiles,
             selectable_targets,
         )?;
         if let Some(previous) =
@@ -2600,11 +2596,9 @@ fn project_runtime_model_capabilities(
 
 fn runtime_model_capabilities(
     adapter: ModelAdapter,
-    credential_profile: &str,
     capabilities: &ModelCapabilities,
     target_provider_models: &HashMap<ResolvedProviderTarget, String>,
     target_adapters: &HashMap<ResolvedProviderTarget, ModelAdapter>,
-    target_credential_profiles: &HashMap<ResolvedProviderTarget, Arc<str>>,
     selectable_targets: &HashSet<ResolvedProviderTarget>,
 ) -> Result<RuntimeModelCapabilities, HubModelConfigurationError> {
     let reasoning_levels = capabilities
@@ -2624,12 +2618,6 @@ fn runtime_model_capabilities(
                 .get(&target)
                 .ok_or(HubModelConfigurationError::InvalidModelCapabilities)?;
             if target_adapters.get(&target) != Some(&adapter) {
-                return Err(HubModelConfigurationError::InvalidModelCapabilities);
-            }
-            if target_credential_profiles
-                .get(&target)
-                .is_none_or(|profile| profile.as_ref() != credential_profile)
-            {
                 return Err(HubModelConfigurationError::InvalidModelCapabilities);
             }
             Some(RuntimeFastModeTarget::Mapped(RuntimeResolvedTarget::new(
@@ -6733,24 +6721,26 @@ context_window_tokens = 200000
     }
 
     #[test]
-    fn configuration_rejects_an_alternate_target_with_another_credential_profile() {
+    fn alternate_target_selects_its_serving_family_credential_profile() {
+        let fast_family = "anthropic-fast";
+        let fast_profile = ANTHROPIC_OVERFLOW_PROFILE;
         let configuration = format!(
             r#"{}
 
 [[credential_pools]]
-name = "anthropic-fast"
+name = "{fast_family}"
 tie_break = "first_listed"
 on_pool_exhausted = "fail"
-members = [{{ profile = "anthropic-overflow", priority = 1 }}]
+members = [{{ profile = "{fast_profile}", priority = 1 }}]
 
 [[adapter_mappings]]
-model_family = "anthropic-fast"
+model_family = "{fast_family}"
 adapter = "anthropic"
-credential_pool = "anthropic-fast"
+credential_pool = "{fast_family}"
 
 [[serving_targets]]
 target_id = "20000000-0000-4000-8000-000000000002"
-model_family = "anthropic-fast"
+model_family = "{fast_family}"
 provider_model = "synthetic-fast-target"
 max_output_tokens = 256
 context_window_tokens = 200000
@@ -6760,11 +6750,22 @@ context_window_tokens = 200000
                 "context_window_tokens = 200000\nfast_mode = \"alternate_target\"\nfast_target_id = \"20000000-0000-4000-8000-000000000002\"",
             )
         );
+        let configuration =
+            HubModelConfiguration::parse(&configuration).expect("serving family is valid");
+        let selected_target = configured_target(&configuration);
+        let credential_pin = configuration.session_credential_pin();
+        let serving_credential = credential_pin
+            .credentials()
+            .find(|credential| credential.model_family() == fast_family)
+            .expect("serving family has a pinned credential");
 
         assert_eq!(
-            HubModelConfiguration::parse(&configuration).err(),
-            Some(HubModelConfigurationError::InvalidModelCapabilities)
+            configuration
+                .credential_family_catalog()
+                .family_for_call(selected_target, FastMode::Enabled),
+            Some(fast_family)
         );
+        assert_eq!(serving_credential.credential_reference(), fast_profile);
     }
 
     /// INV-035: credential references stay scoped while paths and values stay

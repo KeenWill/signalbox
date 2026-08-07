@@ -789,13 +789,13 @@ forwarded and process-control names such as `HOME`, `CLAUDE_CONFIG_DIR`,
 Claude file delivery resolves the selected value during cancellable request
 preparation, writes it into a mode-0600 credential file in a private
 request-scoped Claude settings store, and configures that store's `apiKeyHelper`
-to read it through a mode-0700 request-scoped helper that uses only fixed shell
-builtins and resolves no executable through `PATH`. The adapter replaces only
-the already allowlisted `CLAUDE_CONFIG_DIR` child value with the store's
-directory; the key itself never enters the child environment assembled by the
-adapter. The prepared capability retains the exact value for observation and
-terminal-evidence redaction and deletes the store when the capability is
-dropped.
+to read it through a mode-0600 request-scoped script interpreted by the fixed
+`/bin/sh` path; the script uses only shell builtins and resolves no executable
+through `PATH`. The adapter replaces only the already allowlisted
+`CLAUDE_CONFIG_DIR` child value with the store's directory; the key itself never
+enters the child environment assembled by the adapter. The prepared capability
+retains the exact value for observation and terminal-evidence redaction and
+deletes the store when the capability is dropped.
 
 This is the delivery for every credential that has an external source of truth —
 provider API keys, and any long-lived bearer token a provider's own tooling
