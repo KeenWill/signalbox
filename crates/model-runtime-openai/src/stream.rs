@@ -23,18 +23,6 @@ use signalbox_model_runtime::{
     ToolCallsAtLoss, ToolName, validate_provider_json_nesting,
 };
 
-/// The violation detail reported when an otherwise well-formed stream ends on
-/// an unrecognized finish reason — in practice, `length`, the token this
-/// adapter declines to map because the provider reuses it for two different
-/// bounds.
-///
-/// Public because a caller cannot otherwise distinguish that outcome from any
-/// other protocol violation: the loss evidence carries only the cause and the
-/// finish, and the finish is deliberately retained for truncated tool calls
-/// too. Exporting the exact spelling makes this one shared constant rather
-/// than a string a caller has to guess and keep in sync.
-pub const OUTPUT_CEILING_VIOLATION_DETAIL: &str = "stream carries an unrecognized finish_reason";
-
 use crate::response::{StopSequences, convert_usage, map_finish};
 use crate::status::classify_error_envelope;
 use crate::translate::is_valid_function_name;
@@ -427,21 +415,17 @@ impl StreamDecoder {
                     // unrecognized-finish paragraph of the runtime-substrate
                     // specification, which owns this behavior.
                     //
-                    // It does change *which* violation this is, though. A tool
-                    // call opened here may have emitted no observation at all —
-                    // `ToolArgumentsDelta` needs a non-empty fragment and
-                    // `ToolCallProposed` needs `finalize_tools`, which this
-                    // return precedes — so the cause is the only place that
-                    // fact can survive for a caller who cares whether tools
-                    // were involved.
-                    let opened_tool_calls =
-                        !self.tool_builders.is_empty() || !self.completed_tools.is_empty();
+                    // Whether a tool call was involved rides
+                    // `BoundaryLossEvidence::tool_calls`, not this detail. That
+                    // fact needs a channel because a call opened here may emit
+                    // no observation at all — `ToolArgumentsDelta` needs a
+                    // non-empty fragment and `ToolCallProposed` needs
+                    // `finalize_tools`, which the deferred verdict returns ahead
+                    // of — but the channel is the typed field, so the detail
+                    // stays a rendered diagnostic no caller classifies on.
                     self.finish = Some(finish);
-                    self.pending_unrecognized_finish = Some(if opened_tool_calls {
-                        format!("{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened")
-                    } else {
-                        OUTPUT_CEILING_VIOLATION_DETAIL.to_string()
-                    });
+                    self.pending_unrecognized_finish =
+                        Some("stream carries an unrecognized finish_reason".to_string());
                     return StreamStep::Continue;
                 }
                 if !self.refusal_text.is_empty() {
@@ -759,7 +743,7 @@ mod tests {
 
     use signalbox_model_runtime::ProviderErrorEvidence;
 
-    use super::{OUTPUT_CEILING_VIOLATION_DETAIL, StreamDecoder, StreamStep};
+    use super::{StreamDecoder, StreamStep};
     use crate::response::StopSequences;
 
     /// Pushes one chunk that must frame without a failure and returns its
@@ -1506,16 +1490,11 @@ mod tests {
                 provider_token: CEILING_FINISH_TOKEN.to_string()
             })
         );
-        // The token survives, and the cause additionally records that tools
-        // were involved. Here the delta observation records it too, as the
-        // assertion above shows; the cause is the channel that still carries
-        // it when no fragment is emitted — see the sibling case below.
-        assert_eq!(
-            loss.cause,
-            protocol_violation(&format!(
-                "{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened"
-            ))
-        );
+        // The token survives, and the typed field records that tools were
+        // involved. Here the delta observation records it too, as the assertion
+        // above shows; the field is the channel that still carries it when no
+        // fragment is emitted — see the sibling case below.
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
     }
 
     #[test]
@@ -1539,12 +1518,7 @@ mod tests {
             "a tool call opened with no argument fragment emits no delta"
         );
         let loss = expect_boundary_loss(terminal);
-        assert_eq!(
-            loss.cause,
-            protocol_violation(&format!(
-                "{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened"
-            ))
-        );
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
     }
 
     #[test]
