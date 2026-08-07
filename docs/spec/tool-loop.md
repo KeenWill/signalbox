@@ -612,11 +612,12 @@ never from model arguments.
   either `background`, or `bound` with separately labeled `on_parent_stopped`
   and `on_parent_cancelled` actions (`keep_running`, `stop`, or `cancel`). It
   atomically creates one delegated, no-ancestry child and its initial task work,
-  then returns the child session identity. Equal physical replay of the same
-  logical request returns that child; a second child cannot attach to the
-  request. Version one imposes no fixed active-child-count limit; admission
-  checks the complete locked relationship inventory for request and child
-  uniqueness.
+  closes the spawning physical attempt with its matching receipt in that same
+  transaction, then returns the child session identity as a durable completion.
+  Equal physical replay of the same logical request returns that child; a second
+  child cannot attach to the request. Version one imposes no fixed
+  active-child-count limit; admission checks the complete locked relationship
+  inventory for request and child uniqueness.
 
 - `await_session` takes the related child identity and `foreground` or
   `background`. Foreground converts the exact logical request into a durable
@@ -647,6 +648,16 @@ executor kept in flight. It ends any current physical attempt before committing
 cannot duplicate an external effect. The delivered tool result is copied from
 the child's terminal result record. The executor never reads or returns the
 child transcript.
+
+Background await registration and peer-message append likewise end the physical
+attempt in the same transaction as their delegation effect.
+
+Committed unimplemented: no present scheduling surface consumes the resulting
+`DurableCompletion` disposition. A future daemon scheduling integration must
+authenticate its exact dispatch correlation against the ended attempt before
+accepting the effect as already committed; absent or cross-wired evidence must
+fail closed, and a failed reread must retain the handoff for same-incarnation
+reconciliation without repeating the effect.
 
 The child's normal terminal completion transaction concatenates the definitive
 ordered `AssistantText` entries from its proof-bearing completed call without a

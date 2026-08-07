@@ -16,6 +16,7 @@ mod repo_watch;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
+mod session_delegation;
 mod session_metadata;
 mod start_eligible_turn;
 mod startup_scan;
@@ -108,6 +109,7 @@ pub use scheduler::{
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
 };
+pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{
     ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionMetadataOutcome,
     ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
@@ -129,12 +131,13 @@ pub use submit_input::{
 };
 pub use tool_dispatch_gate::{InProcessToolDispatchGate, InProcessToolDispatchPermit};
 pub use tool_loop::{
-    CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence, DecideToolRequestService,
-    DuplicateToolDefinition, NoToolCatalog, RetainedToolExecutionState, ToolApprovalIdGenerator,
-    ToolArgumentValidator, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
-    ToolExecutionIdGenerator, ToolExecutionInvocation, ToolExecutionService,
-    ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorEvidence,
-    ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure, UuidV7ToolLoopIdGenerator,
+    CompiledTool, CompiledToolCatalog, CorrelatedDurableToolCompletion,
+    CorrelatedToolExecutorEvidence, DecideToolRequestService, DuplicateToolDefinition,
+    NoToolCatalog, RetainedToolExecutionState, ToolApprovalIdGenerator, ToolArgumentValidator,
+    ToolCatalog, ToolCatalogValidationFailure, ToolDefinition, ToolExecutionIdGenerator,
+    ToolExecutionInvocation, ToolExecutionService, ToolExecutionServiceError,
+    ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
+    ToolInputSchemaError, ToolInputSchemaFailure, UuidV7ToolLoopIdGenerator,
 };
 pub use tool_loop_ports::{
     DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
