@@ -41,7 +41,8 @@ use signalbox_persistence::{
 };
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSignal, FatalExecutionSupervisor, FileCredentialAccess,
-    HubModelConfiguration, PostgresProviderModelExecution, PostgresScriptedModelExecution,
+    HubModelConfiguration, ModelAdapter, PostgresProviderModelExecution,
+    PostgresScriptedModelExecution,
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::{
@@ -427,10 +428,13 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 .ok_or(DebugDriverError::Configuration)?
                 .credential_profile()
                 .to_owned();
-            let credential_access =
-                FileCredentialAccess::from_files(configuration.file_credential_profiles().map(
-                    |(reference, path)| (CredentialReference::new(reference), path.to_path_buf()),
-                ));
+            let credential_access = FileCredentialAccess::from_files(
+                configuration
+                    .file_credential_profiles(ModelAdapter::Anthropic)
+                    .map(|(reference, path)| {
+                        (CredentialReference::new(reference), path.to_path_buf())
+                    }),
+            );
             let credential_reference = ModelCallCredentialReference::new(credential_profile);
             let mut adapter_configuration = AnthropicConfig::new();
             adapter_configuration.model_capabilities =

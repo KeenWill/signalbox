@@ -1116,7 +1116,9 @@ its preferred member alone. Because one CLI runtime per adapter carries one
 credential reference, two families of one CLI adapter resolving to different
 profiles is a typed startup failure rather than a silent pin of whichever parsed
 last. Direct HTTP adapters instead resolve the exact session-pinned reference
-from their complete file credential catalog.
+from their complete adapter-scoped file credential catalog; a profile declared
+for another adapter is unmapped even if a later configuration routes the same
+model family through this adapter.
 
 Admission is fail-closed. Startup rejects a pool with no members, a duplicate
 member profile, a member naming an undeclared profile, a mapping naming an
