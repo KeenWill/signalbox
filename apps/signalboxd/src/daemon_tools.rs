@@ -1592,6 +1592,8 @@ mod tests {
     const BRIDGE_EXIT_TIMEOUT: Duration = Duration::from_secs(12);
     const BRIDGE_CHILD_TEST_TIMEOUT: Duration = Duration::from_millis(25);
     const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+    #[cfg(target_os = "linux")]
+    const LINUX_NANOSLEEP_WAIT_CHANNEL: &str = "nanosleep";
     static BRIDGE_BUILD_LOCK: Mutex<()> = Mutex::new(());
 
     fn wait_for_child(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
@@ -2075,18 +2077,32 @@ mod tests {
             Self { child }
         }
 
+        #[cfg(target_os = "linux")]
         #[track_caller]
-        fn finish_failure(mut self) {
-            let status = wait_for_child(&mut self.child, BRIDGE_EXIT_TIMEOUT)
-                .expect("bridge readiness failure is observed")
-                .unwrap_or_else(|| {
-                    terminate_child(&mut self.child);
-                    panic!("bridge readiness failure exceeded its timeout");
-                });
-            assert!(
-                !status.success(),
-                "bridge does not publish readiness before listing tools"
-            );
+        fn await_polling(&mut self) {
+            let wait_channel = Path::new("/proc")
+                .join(self.child.id().to_string())
+                .join("wchan");
+            let deadline = Instant::now() + BRIDGE_RESPONSE_TIMEOUT;
+            loop {
+                assert!(
+                    self.child
+                        .try_wait()
+                        .expect("bridge readiness waiter status is readable")
+                        .is_none(),
+                    "bridge readiness waiter remains active while synchronizing"
+                );
+                let observed = fs::read_to_string(&wait_channel)
+                    .expect("bridge readiness waiter exposes its Linux wait channel");
+                if observed.contains(LINUX_NANOSLEEP_WAIT_CHANNEL) {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "bridge readiness waiter reaches its polling sleep"
+                );
+                thread::sleep(CHILD_POLL_INTERVAL);
+            }
         }
 
         #[track_caller]
@@ -2608,6 +2624,7 @@ mod tests {
         assert_eq!(listed["result"]["tools"], expected);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn claude_mcp_bridge_publishes_readiness_only_after_listing_tools() {
         let mut fixture = McpBridgeFixture::start();
@@ -2615,21 +2632,16 @@ mod tests {
         fixture.initialize();
         fixture.synchronize_without_listing();
         assert!(!fixture.ready_path.exists());
-        let waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
+        let mut waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
             executable: &fixture.executable,
             ready: &fixture.ready_path,
             workspace: fixture.workspace.path(),
         });
-        waiter.finish_failure();
+        waiter.await_polling();
         assert!(!fixture.ready_path.exists());
         fixture.list_tools();
-        assert!(fixture.ready_path.is_file());
-        let waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
-            executable: &fixture.executable,
-            ready: &fixture.ready_path,
-            workspace: fixture.workspace.path(),
-        });
         waiter.finish_success();
+        assert!(fixture.ready_path.is_file());
         fixture.finish();
     }
 
