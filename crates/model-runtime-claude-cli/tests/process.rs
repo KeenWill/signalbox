@@ -639,6 +639,44 @@ async fn non_utf8_bridge_path_is_a_preparation_defect_before_spawn() {
     assert_eq!(spawn_count(temporary.path()), 0);
 }
 
+/// A line the runner rejects by its own bound never reaches the decoder, so the
+/// tool fact is withheld: that line may itself have been the `assistant` event
+/// carrying a `tool_use` block.
+///
+/// The bound is lowered rather than the fixture enlarged so the test states the
+/// one value the behavior depends on.
+#[tokio::test]
+async fn a_line_rejected_by_the_event_bound_withholds_the_tool_fact() {
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let mut config = ClaudeCliConfig::new(
+        fake_cli(),
+        bridge_cli(),
+        temporary.path(),
+        CredentialReference::new(CREDENTIAL_REFERENCE),
+    );
+    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.interrupt_grace = Duration::from_millis(100);
+    config.event_limit = 16;
+    let runtime = ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid");
+    let prepared = prepare(
+        &runtime,
+        operation("normal_completion", OperationShape::Text),
+    )
+    .await;
+    let report = runtime
+        .execute(prepared, &mut Vec::new(), CancellationSignal::never())
+        .await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report.evidence else {
+        panic!("a line past the event bound is boundary loss");
+    };
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+}
+
 async fn execute_scenario(scenario: &str, shape: OperationShape) -> ExecutionResult {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let runtime = runtime(temporary.path(), &fake_cli());

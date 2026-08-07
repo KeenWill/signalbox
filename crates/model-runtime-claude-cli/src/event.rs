@@ -967,6 +967,14 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         EventDecoder::boundary_loss(self, cause)
     }
 
+    fn undelivered_line_loss(mut self, cause: LossCause) -> TerminalEvidence {
+        // The rejected line may itself have been the `assistant` event carrying
+        // a `tool_use` block. Nothing about it was examined, and the previous
+        // event's examination says nothing about this one.
+        self.current_event_examined = false;
+        EventDecoder::loss_at_decode_failure(self, cause)
+    }
+
     fn boundary_loss_unless_provider_failure(
         self,
         cause: LossCause,

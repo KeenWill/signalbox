@@ -587,6 +587,10 @@ fn process_streamed_chunk<C: Clone>(
     let outcome = framing.push(&bytes[..accepted]);
     for (index, record) in outcome.records.into_iter().enumerate() {
         if index > 0 && cancellation.is_cancelled() {
+            // The records this chunk framed but the loop has not applied are
+            // dropped here. They are already out of the framer, so
+            // `holds_unframed_bytes` cannot see them: mark them explicitly.
+            decoder.note_discarded_unexamined_bytes();
             return Some(decoder.cancelled());
         }
         match decoder.apply(&record, correlation, sink) {

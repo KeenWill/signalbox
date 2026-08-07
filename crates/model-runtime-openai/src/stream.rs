@@ -897,24 +897,73 @@ mod tests {
     /// A loss raised while the framer still holds bytes discards material the
     /// decoder never saw, so the fact is withheld even though every record that
     /// did reach the decoder was scanned.
+    /// Frames exactly one record from `chunk` and applies it, asserting both
+    /// the record count and that the decoder kept going.
+    ///
+    /// Plumbing: every fixture below sends one record per chunk, and stating
+    /// that expectation here keeps the iteration out of the test bodies.
+    #[track_caller]
+    fn apply_one_record(
+        framing: &mut SseFraming,
+        decoder: &mut StreamDecoder,
+        observations: &mut Vec<Observation<String>>,
+        chunk: &[u8],
+    ) {
+        let records = push_ok(framing, chunk);
+        let [record] = records.as_slice() else {
+            panic!("fixture chunk frames exactly one record");
+        };
+        assert!(matches!(
+            decoder.apply(record, &"call-1".to_string(), observations),
+            StreamStep::Continue
+        ));
+    }
+
     #[test]
     fn a_loss_with_unframed_bytes_held_withholds_the_tool_fact() {
         let mut framing = SseFraming::new(1024 * 1024);
         let mut decoder = StreamDecoder::new(exchange(), StopSequences::NotDeclared);
         let mut observations: Vec<Observation<String>> = Vec::new();
-        let correlation = "call-1".to_string();
-        for record in push_ok(&mut framing, first_chunk()) {
-            assert!(matches!(
-                decoder.apply(&record, &correlation, &mut observations),
-                StreamStep::Continue
-            ));
-        }
+        apply_one_record(&mut framing, &mut decoder, &mut observations, first_chunk());
         // A partial record: accepted by the transport, never framed, never seen.
         assert_eq!(
             push_ok(&mut framing, b"data: {\"choices\":[{\"index\""),
             vec![]
         );
         assert!(framing.holds_unframed_bytes());
+        decoder.note_discarded_unexamined_bytes();
+
+        let TerminalEvidence::BoundaryLoss(loss) = decoder.lost(StreamInterruption::EndOfStream)
+        else {
+            panic!("an interrupted stream is boundary loss");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// Records framed from one chunk but dropped before the decoder applied
+    /// them are out of the framer's hands, so `holds_unframed_bytes` cannot see
+    /// them and the decoder is told directly. Without that, a cancellation that
+    /// lands mid-chunk would state a negative about records it discarded.
+    #[test]
+    fn records_dropped_before_the_decoder_applies_them_withhold() {
+        let mut framing = SseFraming::new(1024 * 1024);
+        let mut decoder = StreamDecoder::new(exchange(), StopSequences::NotDeclared);
+        let mut observations: Vec<Observation<String>> = Vec::new();
+        apply_one_record(&mut framing, &mut decoder, &mut observations, first_chunk());
+        // Framed cleanly and then dropped unapplied, exactly as the runtime's
+        // mid-chunk cancellation does.
+        assert_eq!(
+            push_ok(
+                &mut framing,
+                b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\"}]}}]}\n\n"
+            )
+            .len(),
+            1
+        );
+        assert!(
+            !framing.holds_unframed_bytes(),
+            "a framed record leaves the framer holding nothing"
+        );
         decoder.note_discarded_unexamined_bytes();
 
         let TerminalEvidence::BoundaryLoss(loss) = decoder.lost(StreamInterruption::EndOfStream)

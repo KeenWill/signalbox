@@ -209,6 +209,19 @@ pub trait CliSession<C>: Sized {
     fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence;
     /// Produces typed boundary-loss evidence.
     fn boundary_loss(self, cause: LossCause) -> TerminalEvidence;
+    /// Boundary loss for a line the runner never delivered to the decoder.
+    ///
+    /// The bytes were read off the process and then rejected by the line bound,
+    /// so nothing about that event was examined. An adapter whose partial facts
+    /// track per-event examination must answer from that state rather than from
+    /// the previous event; the default is the ordinary loss, which is correct
+    /// for an adapter that never claims a negative it did not establish.
+    fn undelivered_line_loss(self, cause: LossCause) -> TerminalEvidence
+    where
+        Self: Sized,
+    {
+        self.boundary_loss(cause)
+    }
     /// Preserves a provider failure while demoting an incomplete upload.
     fn boundary_loss_unless_provider_failure(
         self,
@@ -573,7 +586,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 force_kill(&mut child).await;
                 abort_stderr_task(&mut stderr_task).await;
                 redacting_sink.finish();
-                return decoder.boundary_loss(LossCause::StreamProtocolViolation {
+                return decoder.undelivered_line_loss(LossCause::StreamProtocolViolation {
                     detail: error.to_string(),
                 });
             }

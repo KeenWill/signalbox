@@ -59,6 +59,12 @@ enum BlockBuilder {
 }
 
 /// Incremental decoder for one message stream.
+/// The one SSE event whose payload can open a tool call.
+///
+/// Named once because two rules depend on it: dispatch, and whether a payload
+/// that never parsed leaves the tool question unexamined.
+const CONTENT_BLOCK_START_EVENT: &str = "content_block_start";
+
 pub(crate) struct StreamDecoder {
     exchange: ExchangeFacts,
     started: bool,
@@ -108,14 +114,16 @@ impl StreamDecoder {
             return self.undecoded_violation("SSE record without an event name");
         };
         if let Err(error) = validate_provider_json_nesting(record.data.as_bytes()) {
-            return self
-                .undecoded_violation(format!("SSE event payload exceeds the JSON bound: {error}"));
+            return self.unparsed_payload_violation(
+                event,
+                format!("SSE event payload exceeds the JSON bound: {error}"),
+            );
         }
         match event {
             "ping" => StreamStep::Continue,
             "error" => self.apply_error(record),
             "message_start" => self.apply_message_start(record, correlation, sink),
-            "content_block_start" => self.apply_block_start(record, correlation, sink),
+            CONTENT_BLOCK_START_EVENT => self.apply_block_start(record, correlation, sink),
             "content_block_delta" => self.apply_block_delta(record, correlation, sink),
             "content_block_stop" => self.apply_block_stop(record, correlation, sink),
             "message_delta" => self.apply_message_delta(record, correlation, sink),
@@ -238,6 +246,21 @@ impl StreamDecoder {
         StreamStep::Terminal(Box::new(self.violation_evidence(detail)))
     }
 
+    /// A violation raised without examining the payload of the named event.
+    ///
+    /// The event name is already decoded — it is what dispatches the handler —
+    /// and only `content_block_start` carries material that can open a tool
+    /// call. For every other name the discriminator settles the question, so
+    /// the negative is stated rather than withheld even though the payload
+    /// itself never parsed.
+    fn unparsed_payload_violation(&self, event: &str, detail: impl Into<String>) -> StreamStep {
+        if event == CONTENT_BLOCK_START_EVENT {
+            self.undecoded_violation(detail)
+        } else {
+            self.violation(detail)
+        }
+    }
+
     /// Whether an error classification names no failure at all, and so adds
     /// nothing to an already-reported stop reason.
     ///
@@ -267,7 +290,10 @@ impl StreamDecoder {
         event: &str,
     ) -> Result<T, Box<StreamStep>> {
         serde_json::from_str(&record.data).map_err(|error| {
-            Box::new(self.undecoded_violation(format!("malformed {event} event payload: {error}")))
+            Box::new(self.unparsed_payload_violation(
+                event,
+                format!("malformed {event} event payload: {error}"),
+            ))
         })
     }
 
@@ -1262,36 +1288,93 @@ mod tests {
         assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
     }
 
-    /// Every `content_block_start` exit taken before its inner `content_block`
-    /// parses leaves unexamined the one place a `tool_use` block can open, so
-    /// the fact is withheld even though the outer event itself decoded.
-    #[test]
-    fn content_block_start_exits_before_the_payload_parses_withhold() {
-        let reopen = b"event: content_block_start\n\
-                       data: {\"type\":\"content_block_start\",\"index\":0,\
-                       \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
-            .as_slice();
-        let cases: Vec<Vec<&[u8]>> = vec![
-            // before message_start
-            vec![reopen],
-            // wrong inner discriminator
-            vec![
-                message_start(),
-                b"event: content_block_start\n\
-                  data: {\"type\":\"quasar\",\"index\":0,\
-                  \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
-            ],
-            // reopened index
-            vec![message_start(), reopen, reopen],
-        ];
+    /// A well-formed `content_block_start` opening a text block at index 0.
+    ///
+    /// Plumbing: three exits below reject this same record for reasons that have
+    /// nothing to do with its payload, which is exactly the point — the payload
+    /// never parses, whatever the reason.
+    fn text_block_start() -> &'static [u8] {
+        b"event: content_block_start\n\
+          data: {\"type\":\"content_block_start\",\"index\":0,\
+          \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+    }
 
-        for chunks in cases {
-            let (evidence, _) = drive(&chunks);
-            let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
-                panic!("a rejected content_block_start is a protocol violation");
-            };
-            assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
-        }
+    #[track_caller]
+    fn assert_block_start_withholds(chunks: &[&[u8]]) {
+        let (evidence, _) = drive(chunks);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("a rejected content_block_start is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// Rejected before `message_start`: the exit precedes even the outer parse,
+    /// so the block payload is unexamined.
+    #[test]
+    fn a_content_block_start_before_message_start_withholds() {
+        assert_block_start_withholds(&[text_block_start()]);
+    }
+
+    /// Rejected for its outer discriminator: the event decoded, but its inner
+    /// `content_block` is still a `RawValue`.
+    #[test]
+    fn a_content_block_start_with_a_wrong_discriminator_withholds() {
+        assert_block_start_withholds(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"quasar\",\"index\":0,\
+              \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        ]);
+    }
+
+    /// Rejected for reopening an index: likewise decided before the payload.
+    #[test]
+    fn a_content_block_start_reopening_an_index_withholds() {
+        assert_block_start_withholds(&[message_start(), text_block_start(), text_block_start()]);
+    }
+
+    /// A payload that never parsed still states the negative when its event
+    /// name precludes a tool call: the name is decoded, and only
+    /// `content_block_start` opens one.
+    #[test]
+    fn an_unparsed_non_start_event_payload_states_the_negative() {
+        let (evidence, _) = drive(&[
+            message_start(),
+            b"event: message_delta\ndata: {not-json\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("an unparsed event payload is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// The same unparsed payload under the one event name that can open a tool
+    /// call withholds, which is what makes the rule a statement about the name.
+    #[test]
+    fn an_unparsed_content_block_start_payload_withholds() {
+        let (evidence, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\ndata: {not-json\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("an unparsed event payload is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+    }
+
+    /// A record with no event name at all withholds: without a name the rule
+    /// above has nothing to decide on.
+    #[test]
+    fn a_record_without_an_event_name_withholds() {
+        let (evidence, _) = drive(&[message_start(), b"data: {\"type\":\"ping\"}\n\n"]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("a record without an event name is a protocol violation");
+        };
+        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
     }
 
     /// A `content_block_delta` cannot open a tool call — it carries arguments

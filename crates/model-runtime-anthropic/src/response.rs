@@ -706,37 +706,62 @@ mod tests {
         );
     }
 
-    /// Rejecting the *last* block leaves nothing unexamined, so the negative is
-    /// a fact. The withholding is about blocks the loop never reached, not
-    /// about the rejection itself.
-    #[test]
-    fn a_rejection_on_the_final_block_states_the_negative() {
-        for content in [
-            r#"{"type": "fallback", "to_model": "other-model"}"#,
-            r#"{"type": "thinking", "thinking": "hm", "signature": ""}"#,
-            r#"{"type": "quasar"}"#,
-        ] {
-            let (evidence, _) = decode(&format!(
-                r#"{{
-                    "id": "msg_1",
-                    "type": "message",
-                    "role": "assistant",
-                    "model": "model-exact-1",
-                    "content": [{content}],
-                    "stop_reason": "end_turn",
-                    "usage": {{"input_tokens": 3, "output_tokens": 1}}
-                }}"#
-            ));
+    /// Decodes a body whose only content block is `content`, asserting the tool
+    /// fact its rejection carries.
+    ///
+    /// Plumbing only: the body shape is irrelevant to what each case states, and
+    /// the block under test stays at its own call site.
+    #[track_caller]
+    fn assert_sole_block_tool_fact(content: &str, expected: ToolCallsAtLoss) {
+        let (evidence, _) = decode(&format!(
+            r#"{{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [{content}],
+                "stop_reason": "end_turn",
+                "usage": {{"input_tokens": 3, "output_tokens": 1}}
+            }}"#
+        ));
 
-            let TerminalEvidence::BoundaryLoss(loss) = evidence else {
-                panic!("a rejected content block is not definitive completion material");
-            };
-            assert_eq!(
-                loss.tool_calls,
-                ToolCallsAtLoss::NoneOpened,
-                "sole block {content} leaves no later block unexamined"
-            );
-        }
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a rejected content block is not definitive completion material");
+        };
+        assert_eq!(loss.tool_calls, expected);
+    }
+
+    /// A sole fallback marker is classified and known not to be a tool call,
+    /// and nothing follows it, so the negative is a fact.
+    #[test]
+    fn a_sole_fallback_block_states_the_negative() {
+        assert_sole_block_tool_fact(
+            r#"{"type": "fallback", "to_model": "other-model"}"#,
+            ToolCallsAtLoss::NoneOpened,
+        );
+    }
+
+    /// The same for a sole thinking block rejected for its missing signature.
+    #[test]
+    fn a_sole_unsigned_thinking_block_states_the_negative() {
+        assert_sole_block_tool_fact(
+            r#"{"type": "thinking", "thinking": "hm", "signature": ""}"#,
+            ToolCallsAtLoss::NoneOpened,
+        );
+    }
+
+    /// An unrecognized block type is still classified — serde matching no known
+    /// variant proves it is not `tool_use` — so it too states the negative.
+    #[test]
+    fn a_sole_unrecognized_block_states_the_negative() {
+        assert_sole_block_tool_fact(r#"{"type": "quasar"}"#, ToolCallsAtLoss::NoneOpened);
+    }
+
+    /// A block whose own bytes never parsed withholds even as the sole block:
+    /// its content is unexamined whatever its position.
+    #[test]
+    fn a_sole_unparsed_block_withholds() {
+        assert_sole_block_tool_fact(r#"{"type": 7}"#, ToolCallsAtLoss::Unobserved);
     }
 
     /// The same rejections with a block still behind them withhold, which is
@@ -760,28 +785,6 @@ mod tests {
 
         let TerminalEvidence::BoundaryLoss(loss) = evidence else {
             panic!("a fallback block is not definitive completion material");
-        };
-        assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
-    }
-
-    /// A block whose own bytes never parsed withholds even as the final block:
-    /// its content is unexamined whatever its position.
-    #[test]
-    fn an_unparsed_final_block_still_withholds() {
-        let (evidence, _) = decode(
-            r#"{
-                "id": "msg_1",
-                "type": "message",
-                "role": "assistant",
-                "model": "model-exact-1",
-                "content": [{"type": 7}],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 3, "output_tokens": 1}
-            }"#,
-        );
-
-        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
-            panic!("a malformed content block is not definitive completion material");
         };
         assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
     }
