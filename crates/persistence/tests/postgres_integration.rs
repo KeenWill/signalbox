@@ -219,10 +219,11 @@ const DELEGATION_CHILD_STREAM_FIXTURE_SEED: u128 = 0xd770;
 const DELEGATION_PARENT_STREAM_FIXTURE_SEED: u128 = 0xd780;
 const DELEGATION_DUPLICATE_MESSAGE_FIXTURE_SEED: u128 = 0xd790;
 const DELEGATION_REVERSE_INSERT_FIXTURE_SEED: u128 = 0xd7a0;
-const DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED: u128 = 0xd7b0;
-const DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED: u128 = 0xd7c0;
-const DELEGATION_REPOSITORY_MESSAGE_SEED: u128 = 0xd7d0;
-const DELEGATION_REPOSITORY_MESSAGE_RACE_SECOND_SEED: u128 = 0xe7d0;
+const DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED: u128 = 0x10000;
+const DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED: u128 = 0x12000;
+const DELEGATION_REPOSITORY_SECOND_BACKGROUND_WAIT_SEED: u128 = 0x14000;
+const DELEGATION_REPOSITORY_MESSAGE_SEED: u128 = 0x16000;
+const DELEGATION_REPOSITORY_MESSAGE_RACE_SECOND_SEED: u128 = 0x18000;
 const DELEGATION_OUTBOX_COMMAND_ID: u128 = 0xdc00;
 const DELEGATION_LIFECYCLE_COMMAND_ID: u128 = 0xdd10;
 const DELEGATION_CASCADE_ROOT_COMMAND_ID: u128 = 0xe640;
@@ -1082,7 +1083,7 @@ async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
     let RecordDelegationWaitOutcome::Recorded(replayed) = replayed else {
         panic!("the equal wait replay returns its recorded receipt")
     };
-    let second_seed = DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED;
+    let second_seed = DELEGATION_REPOSITORY_SECOND_BACKGROUND_WAIT_SEED;
     let second_fixture =
         prepare_delegation_repository_fixture(&pool, second_seed, "background").await?;
     let second_dispatch = repository_wait_dispatch(&pool, second_fixture, second_seed).await?;
@@ -1349,6 +1350,49 @@ async fn s17_inv010_inv012_background_wait_replay_requires_exact_terminal_attemp
     assert_eq!(
         delegation_corruption(error),
         SessionDelegationCorruption::Inconsistent("stored wait attempt")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-010 / INV-012: equal wait replay requires the durable parent
+/// update emitted with the original registration.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv010_inv012_wait_replay_requires_update_outbox_satellite()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository.record_wait(request.clone(), &dispatch).await?;
+    sqlx::query("ALTER TABLE delegation_update_outbox_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM delegation_update_outbox_event
+          WHERE update_kind = 'child_waiting'
+            AND awaiting_tool_request_id = $1",
+    )
+    .bind(fixture.awaiting_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = repository
+        .record_wait(request, &dispatch)
+        .await
+        .expect_err("wait replay requires its update outbox satellite");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Missing("wait update outbox satellite")
     );
 
     pool.close().await;
@@ -1900,6 +1944,111 @@ async fn s18_inv010_inv012_message_replay_requires_complete_tool_provenance()
     assert_eq!(
         delegation_corruption(error),
         SessionDelegationCorruption::Inconsistent("message provenance")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-010 / INV-012: a message event cannot authenticate a cross-kind
+/// child-result satellite attached to its ordinal.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_message_event_rejects_child_result_satellite()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let message_dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
+    let message_request = DelegationMessageRequest::parse(
+        message_dispatch.request().clone(),
+        fixture.child,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository
+        .record_message(
+            message_request,
+            DelegationMessageId::from_uuid(fixture.message_id),
+            &message_dispatch,
+        )
+        .await?;
+    let wait_dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let wait_request = DelegationAwaitRequest::parse(
+        wait_dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
+    sqlx::query("ALTER TABLE session_child_result DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, content_text)
+         VALUES ($1, 2, 'outcome_recorded', 'child_failed', NULL)",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = repository
+        .record_wait(wait_request, &wait_dispatch)
+        .await
+        .expect_err("message event rejects a child-result satellite");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("message event result payload")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-010: reciprocal relationship rows cannot make peer lookup choose
+/// one direction nondeterministically.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_message_lookup_rejects_reciprocal_relationships() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationMessageRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    sqlx::query("ALTER TABLE session_delegation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind)
+         VALUES ($1, $2, $3, $4, 'background')",
+    )
+    .bind(Uuid::from_u128(seed + 0x900))
+    .bind(fixture.child.into_uuid())
+    .bind(fixture.initial_turn.into_uuid())
+    .bind(fixture.parent.into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = SessionDelegationRepository::new(pool.clone())
+        .record_message(
+            request,
+            DelegationMessageId::from_uuid(fixture.message_id),
+            &dispatch,
+        )
+        .await
+        .expect_err("reciprocal relationships are ambiguous corruption");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("ambiguous delegation message endpoints")
     );
 
     pool.close().await;
