@@ -355,7 +355,9 @@ struct ProcessSessionCreationRetryState {
   }
 }
 
-private struct ProcessSessionCreationSheet: View {
+/// Internal rather than private so the snapshot suite can render the sheet's
+/// content as a standalone screen: nothing in process presents a sheet.
+struct ProcessSessionCreationSheet: View {
   @EnvironmentObject private var coordinator: AppCoordinator
   @Environment(\.dismiss) private var dismiss
   let didCreate: () async -> Void
