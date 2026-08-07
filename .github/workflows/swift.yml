@@ -369,15 +369,28 @@ jobs:
             # after the artifact lookup and before the download, so a
             # candidate is rejected on the cheap call rather than the
             # expensive one.
-            if ! step_ok="$(gh api \
-              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
+            # Checked before it is filtered, for the same reason as the
+            # artifact list above: `pipefail` is not on, so the substitution
+            # would carry jq's status, and jq exits zero on empty input. A
+            # failed request produced an empty `step_ok`, which then read as
+            # "this run did not finish its tests" — false, and it made the
+            # could-not-be-read branch unreachable.
+            if ! jobs_json="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100")"; then
+              [ -n "$reason" ] || reason="the jobs of run $run_id could not be read"
+              continue
+            fi
+            step_ok="$(printf '%s' "$jobs_json" \
               | jq -r --arg step "$TEST_STEP_NAME" '
                   [.jobs[]?.steps[]? | select(.name == $step)] as $steps
                   | if ($steps | length) == 0 then "missing"
                     elif all($steps[]; .conclusion == "success") then "yes"
                     else "no"
-                    end')"; then
-              [ -n "$reason" ] || reason="the jobs of run $run_id could not be read"
+                    end')"
+            # A run predating the step's current name reports `missing`, which
+            # is a name mismatch and not a statement about its tests.
+            if [ "$step_ok" = 'missing' ]; then
+              [ -n "$reason" ] || reason="run $run_id has no \`$TEST_STEP_NAME\` step to judge its measurement by"
               continue
             fi
             if [ "$step_ok" != 'yes' ]; then
@@ -487,6 +500,10 @@ jobs:
           BASELINE_LABEL: ${{ steps.baseline.outputs.label }}
           BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
           BASELINE_DATE: ${{ steps.baseline.outputs.date }}
+          # Distinguishes "no baseline was ever asked for" (a push to main)
+          # from "the fetch step did not complete", which look identical in
+          # the outputs but must not read the same to a reviewer.
+          EVENT_NAME: ${{ github.event_name }}
           BASELINE_SUMMARY: ${{ runner.temp }}/native-coverage-baseline/coverage.json
           # Anything but `success` means the bundles did not all run, so the
           # measurement below is partial and its delta is the missing tests
@@ -506,6 +523,14 @@ jobs:
               --baseline-date "$BASELINE_DATE"
           elif [ -n "$BASELINE_REASON" ]; then
             set -- --baseline-unavailable "$BASELINE_REASON"
+          elif [ "$EVENT_NAME" = 'pull_request' ]; then
+            # The fetch step writes an `available=` output on every path it
+            # controls, so an empty one means the step itself did not finish —
+            # it is `continue-on-error`, and a runner-level failure writes
+            # nothing. On a pull request a delta was expected, and omitting it
+            # silently reads as "no change": the exact misreading the stated
+            # reason exists to prevent.
+            set -- --baseline-unavailable "the baseline fetch step did not complete"
           else
             set --
           fi
