@@ -492,7 +492,10 @@ command. This proposal is accepted with the implementing stack's merge.
    revalidates complete authority — it never trusts the pre-send projection —
    checks the observation's correlation against fresh state, and atomically
    commits the call disposition, attempt and turn transitions, semantic entries,
-   terminal frontier, and outbox rows.
+   terminal frontier, and outbox rows. If the frozen credential-pool policy
+   derives a quarantine, pending displacement, or membership exclusion from that
+   observation, the same transaction commits the action record with the
+   observation's exact correlation; neither side may commit alone.
 
 Failure keeps its stage: `ModelCallExecutionError` names which of prepare,
 render, capability, capability-failure commit, capability-failure reread,
@@ -615,6 +618,24 @@ deadline. The scheduler releases it when that deadline passes. If no member
 reported a reset, the wait has no deadline and only a durable
 member-availability update wakes it. A parked turn holds its session slot,
 appends no failure entry, and is not a terminal outcome.
+
+**Committed unimplemented functionality — pre-call pool-exhaustion failure.** No
+present domain transition, repository shape, or process event can produce this
+failure. Its implementing child must add the sealed
+`CredentialPoolExhaustedFailure` value carrying the immutable pool-policy
+identity and a complete nonempty evidence list in policy-member order. Each
+member item carries the profile reference, the one closed exclusion kind
+(`profile_quarantine`, `membership_exclusion`, `session_displacement`, or
+`chain_exclusion`), its durable record generation or predecessor-observation
+correlation, and its optional reset. It carries no provider prose or credential
+value. The guarded transition requires an active turn whose current attempt has
+no model call, ends that attempt `KnownFailure`, terminalizes the turn `Failed`,
+appends the ordinary `TurnFailed { turn }` marker to that attempt's source
+frontier, and atomically emits the typed preparation-failure event owned by
+[process protocol](process-protocol.md#credential-pool-preparation-failure).
+Partial evidence, a member outside the frozen policy, duplicate or reordered
+members, or any correlated record that is no longer exclusion evidence fails
+closed. Persistence owns the corresponding all-or-nothing representation below.
 
 Each successor durably records the predecessor call it follows and the cause
 that authorized it, so a chain reads as evidence rather than as two calls that

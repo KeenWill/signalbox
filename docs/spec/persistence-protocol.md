@@ -1326,6 +1326,36 @@ superseded stored token again. Provisioning replaces the quarantined generation
 with a fresh authorization in one transaction. This paragraph constrains the
 future schema; no present storage surface provides it.
 
+**Committed unimplemented functionality — credential-pool state.** No present
+migration stores a pool-policy revision, pool action, or pre-call exhaustion
+failure. The implementing schema must intern each policy as one immutable header
+plus ordered membership and action rows, with a deferred uniqueness constraint
+over the complete canonical structural value. The surrogate identity is reused
+only after full relational equality succeeds; a digest is not identity. Cursor
+rows key that identity and priority, so an unchanged policy retains its cursor
+across restart and an edited policy cannot inherit one.
+
+Profile-quarantine, membership-exclusion, and session-displacement rows each
+carry a positive generation, active/cleared state, and their exact scope. A
+provider-observation-derived row also carries the model-call observation
+correlation; deferred constraints require it and that exact terminal observation
+to exist together in the same transaction. A delivery-layer quarantine instead
+correlates its typed pre-request failure. A session displacement stores its
+source turn and cannot apply within that turn. Clearing marks the exact
+generation inactive rather than deleting it, which supplies the replay and
+`already_cleared` contract.
+
+Pre-call exhaustion uses one turn-correlated failure header with cause exactly
+`credential_pool_exhausted`, the current attempt, and the immutable policy
+identity, plus contiguous member rows in policy order carrying the closed
+exclusion kind, correlated record generation or predecessor observation, and
+optional reset. Deferred constraints require the complete policy membership, no
+model call for the attempt, `KnownFailure` attempt end, `Failed` turn, exact
+`TurnFailed` marker and terminal frontier, and one typed preparation-failure
+outbox row in the same commit. Reconstitution rejects a missing, duplicate,
+reordered, stale, or foreign evidence row. This paragraph constrains the future
+schema; no present storage surface provides it.
+
 **Committed unimplemented functionality — availability-successor storage.** No
 present migration, repository operation, or reconstitution path stores an
 availability successor or credential-availability wait. Its implementing child

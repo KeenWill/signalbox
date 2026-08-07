@@ -102,8 +102,22 @@ reconstitute it only from that complete evidence. The scheduler must make a
 deadline reached or a durable member-availability update eligible; release
 returns the same turn to `Running` with a fresh attempt and a fresh availability
 chain while carrying forward member evidence whose reset has not passed, every
-durable membership exclusion, and every profile quarantine. This compatibility
-constraint does not add that phase to the implemented closed vocabulary above.
+durable membership exclusion, and every profile quarantine.
+
+The wait has an exact occupied-slot control matrix. `steer` is accepted as
+ordinary pending steering bound to this source turn and remains pending until a
+release transaction consumes it with the fresh call. `stop_turn` is admitted:
+under the scheduler lock it revalidates the exact wait, accepts the configured
+immediate-successor origin, records the ordinary applied-interrupt proof, closes
+the wait as interrupted, appends `TurnCancelled` after the wait's latest
+frontier, and terminalizes `Cancelled`, all atomically. Equal replay returns
+that receipt; a released or otherwise changed wait returns the ordinary
+active-turn mismatch. A goal `stop_goal` or supersede command remains a
+goal-state transition and does not manufacture turn-interrupt authority; if the
+caller also wants to release this active slot it submits the existing
+`stop_turn` command. No approval or reconciliation command applies to the wait.
+This compatibility constraint does not add that phase or these branches to the
+implemented closed vocabulary above.
 
 At most one turn per session is `active`. Enforcement is layered:
 

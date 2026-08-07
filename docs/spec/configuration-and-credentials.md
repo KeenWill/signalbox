@@ -758,9 +758,13 @@ requires the one credential variable its adapter contract names —
 forwarded and process-control names such as `HOME`, `CODEX_HOME`, and `PATH`.
 This is the delivery for every credential that has an external source of truth —
 provider API keys, and any long-lived bearer token a provider's own tooling
-mints for unattended use. For one adapter, an absolute file path may appear on
-only one profile in a document: two names for the same bytes are not independent
-credentials and cannot authorize two attempts in one successor chain.
+mints for unattended use. Before comparing paths, startup lexically normalizes
+each absolute path by removing redundant separators and `.` components and
+folding each `..` component without permitting it to cross the root; that
+operation performs no filesystem lookup and follows no symlink. For one adapter,
+one normalized absolute file path may appear on only one profile in a document:
+two names for the same bytes are not independent credentials and cannot
+authorize two attempts in one successor chain.
 [Credential operations policy](#credential-operations-policy) applies to it
 unchanged.
 
@@ -783,12 +787,13 @@ observe which side of it a given operator is on.
 
 Two profiles naming different directories are independent token families with
 nothing shared, so a pool holds as many as a deployment has and runs them
-concurrently. One directory may not appear on two profiles, which is what makes
-that independence real rather than assumed. The operations policy does not
-apply, because rotation happens inside the store rather than at an external
-source of truth. And a process the daemon did not start — an operator running
-the CLI by hand against the same directory — is outside anything the daemon can
-coordinate.
+concurrently. The same lexical normalization used for `file` paths applies to
+these directories, and one normalized directory may not appear on two profiles,
+which is what makes that independence real rather than assumed. The operations
+policy does not apply, because rotation happens inside the store rather than at
+an external source of truth. And a process the daemon did not start — an
+operator running the CLI by hand against the same directory — is outside
+anything the daemon can coordinate.
 
 Where `max_concurrent_invocations` is set and reached, that member is skipped
 during selection exactly as an excluded member is. Contention is not exhaustion:
@@ -805,9 +810,14 @@ its own.
 `client_id`, `token_url`, `device_authorization_url`, and `scopes` its provider
 requires. These are configuration, never build-provided constants: which OAuth
 client a deployment presents is the operator's decision and is recorded in the
-operator's own document, not asserted by this build. Both endpoint values must
-be absolute `https` URLs; startup rejects every other scheme and provides no
-plaintext or local-host exception.
+operator's own document, not asserted by this build. `client_id` is a TOML
+string of 1 through 1,024 UTF-8 bytes with no NUL; its bytes are preserved
+exactly, including whitespace. `scopes` is a TOML array of 1 through 64 strings,
+each 1 through 256 UTF-8 bytes and NUL-free. Declared order is request order,
+exact duplicate strings are rejected, and no trimming, case folding, sorting, or
+other normalization occurs. Both endpoint values must be absolute `https` URLs;
+startup rejects every other scheme and provides no plaintext or local-host
+exception.
 
 **Committed unimplemented functionality — OAuth delivery and administration.**
 No present configuration composition, runtime path, API, process message, CLI
@@ -823,7 +833,15 @@ Provisioning is explicit and never automatic. An operator-invoked command
 creates a scratch credential home, runs the adapter's own CLI device
 authorization inside it, relays the user code and verification URL, and on
 success harvests the resulting refresh token and non-secret account metadata
-into one transaction before destroying the scratch home. The interactive flow
+into one transaction before destroying the scratch home. Scratch homes live
+beneath one daemon-owned `0700` root, are themselves `0700`, contain only
+daemon-owned `0600` regular files, and are created and removed through
+descriptor-relative operations that reject symlinks. Normal completion removes
+the home before returning. Before accepting work at every startup, the daemon
+scavenges every entry it can prove is an owned scratch home beneath that root;
+an ownership, type, or containment mismatch fails startup and removes nothing.
+Thus a host or daemon crash can leave only owner-restricted residue until the
+next startup, never an indefinitely trusted login store. The interactive flow
 therefore stays in the provider's own client. Because each authorization mints
 an independent token family, provisioning neither disturbs nor depends on any
 other login for that account: an operator's existing CLI logins on this or any
@@ -850,13 +868,15 @@ keeps access tokens out of the database and preserves configuration-independent
 recovery even when a token endpoint is unavailable.
 
 Dispatch supplies each invocation a scratch credential home carrying a
-daemon-minted access token, discarded when the process ends. The refresh token
-is not absent from the design — it is the whole of it — but it stays with the
-daemon and is never copied into a scratch home. Withholding it is what buys the
-concurrency: a CLI process holding a refresh token could decide to refresh, so N
-concurrent processes could race exactly as they do under `codex_home`. Holding
-none, they share no mutable authorization state, and the daemon refreshes once
-under its row lock on behalf of all of them.
+daemon-minted access token. It uses the same restrictive root, file modes,
+descriptor-relative operations, normal cleanup, and pre-work startup scavenging
+as provisioning; the access token is otherwise retained only in memory. The
+refresh token is not absent from the design — it is the whole of it — but it
+stays with the daemon and is never copied into a scratch home. Withholding it is
+what buys the concurrency: a CLI process holding a refresh token could decide to
+refresh, so N concurrent processes could race exactly as they do under
+`codex_home`. Holding none, they share no mutable authorization state, and the
+daemon refreshes once under its row lock on behalf of all of them.
 
 A daemon-minted access token can expire while a long invocation is still
 running, and that is not an authorization failure. The daemon minted the token
@@ -915,12 +935,14 @@ The five admitted actions are:
 | `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an operator clears it.                                               |
 
 `switch_next_turn` creates a durable pending displacement scoped to the session,
-pool-policy snapshot, and member that observed the trigger. It survives restart
-and excludes that member from the next model-call preparation for that pool. The
-transaction that successfully prepares a call through another member consumes
-the displacement. If no other member is admissible, the displacement remains
-pending while the pool's exhaustion policy runs; it cannot expire merely because
-a preparation found no successor. An explicit operator clear may remove it.
+pool-policy snapshot, member, and exact source turn that observed the trigger.
+It survives restart and is ignored by every later preparation inside that source
+turn, including a tool-round continuation. The first distinct turn in the
+session that prepares against that pool excludes the member; the transaction
+that successfully prepares that turn through another member consumes the
+displacement. If no other member is admissible, the displacement remains pending
+while the pool's exhaustion policy runs; it cannot expire merely because a
+preparation found no successor. An explicit operator clear may remove it.
 
 An `avoid_new_sessions` exclusion is durable and scoped to the membership that
 observed it, not to every pool containing the profile. A reported reset time
@@ -929,6 +951,15 @@ explicit operator clear or a zero-cost, no-model probe reports availability.
 Restart does not clear it. The session test in the table is evaluated against
 that pool: a completed call through another pool does not make this member
 sticky or exempt from the exclusion.
+
+Every trigger action is a derived effect of its exact classified observation.
+The observation-commit transaction atomically stores the terminal observation
+and any profile quarantine, pending displacement, or reset-aware membership
+exclusion it causes. The action record names that observation's correlation and
+cannot exist without it; the observation cannot commit without the configured
+action record. Delivery-layer quarantine that occurs before a provider request
+instead names its own typed refresh or credential-home failure and commits that
+evidence atomically with quarantine.
 
 `switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
 `on_overloaded`, because only those causes carry proof that the request was not
@@ -945,34 +976,47 @@ resolved target's family, preparation reads the session's current immutable
 pool-policy snapshot from its credential history, then admits members in
 priority order, skipping any excluded by an action above, and breaks a priority
 tie by the snapshot's rule. `round_robin` owns one durable global cursor per
-immutable pool-policy revision and priority value; every session history entry
-that copied that validated revision refers to the same cursor, rather than
-creating a session-local one. When that rule must choose among two or more
-admitted equal-priority members, the transaction that commits the selected
-call's `Prepared` record also advances the cursor to the member after the one it
-selected, wrapping in declared order. A failed preparation advances nothing;
-restart preserves the cursor. Stickiness and a sole admitted member require no
-tie-break and do not advance it. Stickiness needs no separate durable state:
-preparation prefers the member the session's most recent `Prepared` call on that
-pool pinned, including a call that later failed under `stay`, so a session stays
-on one account until a trigger displaces it. When the pool admits no member,
-`on_pool_exhausted` decides — `park` parks the turn in the durable wait carrying
-the earliest reset the pool's members reported. When no excluded member reports
-a reset, `park` records an indefinite durable wait with no deadline; only an
-operator clear, a zero-cost no-model availability probe, or another durable
-member-availability update wakes it. A restart alone does not. `fail` instead
-fails the turn as a known failure. Quarantine is durable and scoped to the
-profile rather than to the pool that observed it, because a rejected credential
-is a property of the account: a profile ranked in two pools is excluded from
-both. It is cleared only by an explicit operator command, or by a probe that
-costs nothing and calls no model where the adapter offers one — never by a
-timer, since a revoked credential does not heal on a schedule, and never by a
-restart. Why an operator command rather than rediscovery: for a `codex_home` or
-`oauth` profile the repair is an interactive re-authorization the operator
-performs, so the operator knows the moment it is fixed, and rediscovering it
-instead would spend a real model call to learn what they could have said.
-Reading a quarantine record is never on the recovery path for acknowledged work,
-so INV-034 is unaffected.
+immutable pool-policy revision and priority value. The repository interns the
+policy's complete canonical structural value — pool name, ordered members and
+membership settings, tie-break, exhaustion rule, and trigger actions — under a
+uniqueness constraint on that value. An unchanged document therefore reuses the
+same immutable surrogate revision across restarts, while any changed field
+creates a new revision; a later exact reversion reuses the old one. Hashes may
+accelerate lookup but never establish equality without comparing the complete
+value. Every session history entry that copied that validated revision refers to
+the same cursor, rather than creating a session-local one. When that rule must
+choose among two or more admitted equal-priority members, the transaction that
+commits the selected call's `Prepared` record also advances the cursor to the
+member after the one it selected, wrapping in declared order. A failed
+preparation advances nothing; restart preserves the cursor. Stickiness and a
+sole admitted member require no tie-break and do not advance it. Stickiness
+needs no separate durable state: preparation prefers the member the session's
+most recent `Prepared` call on that pool pinned, including a call that later
+failed under `stay`, so a session stays on one account until a trigger displaces
+it. When the pool admits no member, `on_pool_exhausted` decides — `park` parks
+the turn in the durable wait carrying the earliest reset the pool's members
+reported. When no excluded member reports a reset, `park` records an indefinite
+durable wait with no deadline; only an operator clear, a zero-cost no-model
+availability probe, or another durable member-availability update wakes it. A
+restart alone does not. `fail` instead fails the turn as a known failure.
+Quarantine is durable and scoped to the profile rather than to the pool that
+observed it, because a rejected credential is a property of the account: a
+profile ranked in two pools is excluded from both. It is cleared only by an
+explicit operator command, or by a probe that costs nothing and calls no model
+where the adapter offers one — never by a timer, since a revoked credential does
+not heal on a schedule, and never by a restart. Why an operator command rather
+than rediscovery: for a `codex_home` or `oauth` profile the repair is an
+interactive re-authorization the operator performs, so the operator knows the
+moment it is fixed, and rediscovering it instead would spend a real model call
+to learn what they could have said. Reading a quarantine record is never on the
+recovery path for acknowledged work, so INV-034 is unaffected.
+
+The exact future operator-clear request, target correlations, replay behavior,
+and receipt are owned by
+[credential-exclusion administration](process-protocol.md#credential-exclusion-administration).
+No present process or application surface implements that request, so every
+explicit-clear path above remains committed unimplemented functionality; the
+parser slice does not claim that an indefinite wait can presently be released.
 
 The durable record is unchanged in kind. A session's credential history event
 carries a complete family-to-pool-policy snapshot where it previously carried a
@@ -1277,10 +1321,15 @@ deployment-side rules that code cannot enforce are stated in
 - **Resolution timing.** Each direct HTTP adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
   before send authorization — and scopes the resulting value to that request
-  (INV-002 boundary type). Each CLI adapter validates that the operation carries
-  its pinned external-login reference and then prepares the process capability
-  without reading a credential value. The shared cancellation contract for
-  preparation and execution is owned by
+  (INV-002 boundary type). An ambient or credential-home CLI operation validates
+  its pinned external-login reference and prepares the process capability
+  without reading a credential value. A file-delivered Codex operation instead
+  resolves its pinned reference during capability preparation and, after the
+  common trailing-termination narrowing, admits exactly a nonempty NUL-free
+  UTF-8 value of at most 65,536 bytes. Empty, non-UTF-8, NUL-containing, or
+  oversized content fails preparation as typed `CredentialUnusable`; no child is
+  spawned. Leading and interior whitespace remain credential bytes. The shared
+  cancellation contract for preparation and execution is owned by
   [model-call-execution](model-call-execution.md#staged-execution). A code-host
   tool resolves its fixed `github-primary` reference only after the durable tool
   attempt is authorized `InFlight` and immediately before its typed transport

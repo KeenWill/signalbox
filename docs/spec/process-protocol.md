@@ -297,6 +297,38 @@ than a retarget. Unknown delivery tags or members, explicit JSON null in place
 of a delivery object, and every other correlation of delivery with the nullable
 defaults member are malformed.
 
+### Credential-exclusion administration
+
+**Committed unimplemented functionality.** No present process request, server
+message, application command, or repository operation supplies this
+administrative surface; the implemented request inventory above remains closed
+and rejects it. The implementing stack must add one `clear_credential_exclusion`
+mutation carrying a user-global `command_id` and one closed `target` object:
+
+- `profile_quarantine { profile, record_generation }` names one non-OAuth
+  profile-wide quarantine;
+- `membership_exclusion { pool_policy_id, profile, record_generation }` names
+  one `avoid_new_sessions` exclusion; and
+- `session_displacement { session_id, pool_policy_id, profile, record_generation }`
+  names one `switch_next_turn` displacement.
+
+Every identity is a nonempty bounded configuration or durable identity already
+owned by the credential contract, and `record_generation` is a positive
+canonical decimal string. The mutation atomically marks only that exact active
+generation cleared. A later active generation is `stale_generation`; a target
+with no such generation is `unknown_credential_exclusion`; and ordinary
+authorization failure is `credential_administration_forbidden`. OAuth quarantine
+rejects this mutation because only re-provisioning can clear it.
+
+Success returns `credential_exclusion_cleared { target, outcome }`, where
+`outcome` is `cleared` for the winning transition or `already_cleared` when a
+fresh command names that same inactive generation. The inactive generation is
+retained so the latter result is durable. Equal `command_id` replay returns its
+original logical receipt before inspecting current state; structurally different
+reuse is the ordinary durable-command conflict. These rules give an indefinite
+`park` wait a concrete writer without making a model call or inventing adapter
+liveness evidence.
+
 The session-placement object is exactly `pathless {}`, `scoped { path }`, or
 `root_global_read { path, intent: "acknowledged" }`. A path is one through 64
 nonempty dot-separated ASCII label segments; each segment is at most 64 bytes
@@ -2455,6 +2487,31 @@ without adding a delimiter.
 
 The existing `signalbox-debug` binary is unchanged and remains a development
 harness, not a protocol client.
+
+### Credential-pool preparation failure
+
+**Committed unimplemented functionality.** No present event or transcript state
+admits this shape. The implementing wire slice must add
+`failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, members }`
+as a distinct `transcript_turn.state` variant and
+`turn_credential_pool_exhausted { turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id, pool_policy_id, members }`
+as its live event. The two `members` arrays have identical nonempty content in
+frozen policy order. Each item carries `profile`, required-nullable
+`reset_at_unix_ms`, and one closed `exclusion` object:
+
+- `profile_quarantine { record_generation }`;
+- `membership_exclusion { record_generation }`;
+- `session_displacement { record_generation }`; or
+- `chain_exclusion { predecessor_model_call_id }`.
+
+Generations and reset instants are positive canonical decimal strings; every
+other identity uses its already-owned bounded wire spelling. The snapshot and
+event carry no credential bytes, path, provider prose, or current-configuration
+lookup. The client validates complete membership order and identity equality
+before exposing the terminal state, so reconnect and live follow project the
+same typed cause rather than a generic failed turn. Until the coordinated
+daemon-and-client slice lands, version one rejects both new variants and no
+present producer may terminalize a turn for this pre-call cause.
 
 **Committed unimplemented functionality — credential-availability projection.**
 No present request, event, transcript message, or closed turn-state object
