@@ -461,11 +461,14 @@ fail-closed:
   whose own fields [credential deliveries](#credential-deliveries) owns. The
   name is 1 through 256 UTF-8 bytes, unpadded, and NUL-free. Duplicate names,
   unknown adapters, unknown kinds, an unknown delivery, a delivery its adapter
-  does not admit, and unknown fields are rejected. No credential path is opened
-  and no provider is contacted at startup, matching the no-preflight rule below.
-  Billing kind belongs to authentication, not to the adapter a mapping selects.
-  A profile name is otherwise opaque to code: no build-provided constant is
-  compared against it, so a deployment names its accounts as it chooses.
+  does not admit, and unknown fields are rejected. Parsing opens no credential
+  path and contacts no provider. After configuration-independent recovery and
+  before scheduling, startup establishes each `codex_home` identity as its
+  delivery contract requires; every other credential remains lazy, matching the
+  no-preflight rule below. Billing kind belongs to authentication, not to the
+  adapter a mapping selects. A profile name is otherwise opaque to code: no
+  build-provided constant is compared against it, so a deployment names its
+  accounts as it chooses.
 - At least one `[[credential_pools]]` entry is required.
   [Credential pools and selection](#credential-pools-and-selection) owns its
   complete grammar and admission rules.
@@ -498,19 +501,19 @@ record with its own exact `model_family`, provider model, `max_output_tokens`,
 and `context_window_tokens`. Every serving record states its family, and that
 family must name one declared `[[adapter_mappings]]` entry; the mapping, not the
 selectable record naming the target, supplies the serving record's adapter and
-credential profile, so nothing is inferred from the pointing model. Because the
-durable credential remains pinned through the selectable model's family, the
-serving mapping must select the same credential profile. A serving record
-omitting `model_family`, naming an unmapped one, or selecting another profile is
-a typed startup failure. Startup also rejects a missing, selectable,
-cross-adapter, or otherwise conflicting alternate target. An enabled call uses
-that serving record's provider identity and output-token request limit, while
-the client's durable selection remains unchanged. Capability values are
-validated against the selected adapter's explicit mapping table during startup,
-so an adapter cannot silently drop a configured setting. Input guarding, output
-reservation, and post-response usage enforcement use the effective serving
-record's limits for that enabled call rather than the selectable source record's
-limits.
+credential pool, so nothing is inferred from the pointing model. At preparation
+the enabled call uses ordinary selection against that family's immutable pool
+policy from the session's credential history and pins the selected member on the
+call exactly like any other resolved target. A serving record omitting
+`model_family`, or naming an unmapped one, is a typed startup failure. Startup
+rejects a missing, selectable, cross-adapter, or otherwise conflicting alternate
+target. An enabled call uses that serving record's provider identity and
+output-token request limit, while the client's durable selection remains
+unchanged. Capability values are validated against the selected adapter's
+explicit mapping table during startup, so an adapter cannot silently drop a
+configured setting. Input guarding, output reservation, and post-response usage
+enforcement use the effective serving record's limits for that enabled call
+rather than the selectable source record's limits.
 
 The conversation-import bound was verified against PR #401
 (`agent/import-chunks-protocol`). The optional `[conversation_import]` table has
@@ -810,11 +813,14 @@ and NUL-free, and malformed static input fails startup. Its only optional field
 is `max_concurrent_invocations`, a TOML integer from 1 through 4,294,967,295;
 zero, a negative or larger integer, and every non-integer value are rejected.
 The daemon supplies the directory as that process's credential home and never
-opens or interprets its entries. It does open the directory itself at startup to
-establish which mutable store the path denotes. A descriptor-relative walk from
-the filesystem root rejects a symlink in any component and requires the final
+opens or interprets its entries. Static parsing records only the lexically
+normalized path. After the configuration-independent recovery scan completes but
+before scheduling is enabled, startup opens the directory itself to establish
+which mutable store the path denotes. A descriptor-relative walk from the
+filesystem root rejects a symlink in any component and requires the final
 component to be a directory, then records its device and inode as the profile's
-credential-home identity. Two `codex_home` profiles may not resolve to the same
+credential-home identity; failure blocks scheduling but cannot block recovery of
+acknowledged work. Two `codex_home` profiles may not resolve to the same
 identity even when their lexically normalized paths differ. Before every
 preparation, the daemon repeats that no-symlink walk and requires the same
 identity before it reserves capacity or starts a child; replacement or aliasing
@@ -1474,9 +1480,9 @@ deployment-side rules that code cannot enforce are stated in
   lowercase hyphenated session UUID, positive decimal ordinal, and closed model
   family spelling. The one member is the exact legacy reference with priority 1,
   no headroom reserve, and the registered adapter and delivery kind; `tie_break`
-  is `first`, `on_pool_exhausted` is `fail`, and every trigger action is `stay`.
-  Those values preserve the former one-account, no-automatic-failover behavior
-  instead of inventing parking or substitution. The backfill transaction locks
+  is `first_listed`, `on_pool_exhausted` is `fail`, and every trigger action is
+  `stay`. Those values preserve the former one-account, no-automatic-failover
+  behavior instead of inventing parking or substitution. The transaction locks
   the legacy entry, interns that complete value, and rewrites the entry to its
   policy identity atomically; replay observes the already stored policy. The
   migrated policy is independent of the document's current mapping, so even a

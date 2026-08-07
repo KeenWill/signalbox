@@ -1431,10 +1431,11 @@ the referenced profile registration, copies that registration's adapter and
 delivery kind, and never consults the current family mapping or pool table. It
 interns the deterministic `legacy/<session-uuid>/<event-ordinal>/<model-family>`
 singleton policy defined by the configuration contract: one priority-1 member,
-no headroom reserve, `first`, `fail`, and `stay` for every trigger. The policy
-insert and entry rewrite are atomic and idempotent; a missing registration
-aborts before any rewrite. Thus the migration has an authoritative source for
-its two profile-owned fields and canonical values for every policy-owned field.
+no headroom reserve, `first_listed`, `fail`, and `stay` for every trigger. The
+policy insert and entry rewrite are atomic and idempotent; a missing
+registration aborts before any rewrite. Thus the migration has an authoritative
+source for its two profile-owned fields and canonical values for every
+policy-owned field.
 
 Every pool-selected model call stores the immutable policy identity beside its
 credential reference as an insert-only authorization fact. Observation commit
