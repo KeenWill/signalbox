@@ -1156,6 +1156,16 @@ impl CaseSnapshot {
     }
 
     fn workspace_natural_requests_passed(&self) -> bool {
+        let mutation_requests = self
+            .requests
+            .iter()
+            .filter(|request| {
+                matches!(
+                    request.name.as_str(),
+                    WRITE_FILE_NAME | EDIT_FILE_NAME | APPLY_PATCH_NAME
+                )
+            })
+            .collect::<Vec<_>>();
         let read = self.requests.iter().position(|request| {
             request.name == READ_FILE_NAME
                 && request.attempt_succeeded
@@ -1170,11 +1180,13 @@ impl CaseSnapshot {
                         && arguments["content"] == WORKSPACE_ANSWER
                 })
         });
-        read.zip(write).is_some_and(|(read, write)| {
-            read < write
-                && self.requests[read].producing_model_call_id
-                    != self.requests[write].producing_model_call_id
-        })
+        mutation_requests.len() == 1
+            && mutation_requests[0].name == WRITE_FILE_NAME
+            && read.zip(write).is_some_and(|(read, write)| {
+                read < write
+                    && self.requests[read].producing_model_call_id
+                        != self.requests[write].producing_model_call_id
+            })
     }
 
     fn git_natural_requests_passed(&self) -> EvalResult<bool> {
@@ -1673,6 +1685,43 @@ fn workspace_natural_state_requires_a_later_model_call_for_the_write() {
                 name: String::from(WRITE_FILE_NAME),
                 arguments_text: String::from(
                     r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
+                ),
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!snapshot.workspace_natural_requests_passed());
+}
+
+#[test]
+fn workspace_natural_state_rejects_an_unrelated_mutation() {
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(READ_FILE_NAME),
+                arguments_text: String::from(r#"{"path":"brief.txt"}"#),
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(WRITE_FILE_NAME),
+                arguments_text: String::from(
+                    r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
+                ),
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_ATTEMPT_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(EDIT_FILE_NAME),
+                arguments_text: String::from(
+                    r#"{"new_string":"changed","old_string":"alpha","path":"brief.txt"}"#,
                 ),
                 attempt_succeeded: true,
             },
