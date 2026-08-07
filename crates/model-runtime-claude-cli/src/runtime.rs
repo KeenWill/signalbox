@@ -13,7 +13,7 @@ use signalbox_model_runtime::{
 };
 use tempfile::TempDir;
 
-use crate::bridge::SERVER_NAME;
+use crate::bridge::{Catalog, SERVER_NAME};
 use crate::config::ClaudeCliConfig;
 use crate::event::EventDecoder;
 use crate::translate::{TranslationError, qualified_tool_name, translate};
@@ -439,8 +439,7 @@ fn create_support_files(
     let ready_text = ready
         .to_str()
         .ok_or_else(|| "MCP readiness path is not valid UTF-8".to_string())?;
-    let catalog_bytes = serde_json::to_vec(&translated.catalog)
-        .map_err(|error| format!("could not serialize MCP catalog: {error}"))?;
+    let catalog_bytes = serialize_mcp_catalog(&translated.catalog)?;
     std::fs::write(&catalog, catalog_bytes)
         .map_err(|error| format!("could not write MCP catalog: {error}"))?;
     let mcp = serde_json::json!({
@@ -476,6 +475,10 @@ fn create_support_files(
         mcp_config,
         settings,
     })
+}
+
+pub(crate) fn serialize_mcp_catalog(catalog: &Catalog) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(catalog).map_err(|error| format!("could not serialize MCP catalog: {error}"))
 }
 
 fn shell_quote(value: &str) -> String {

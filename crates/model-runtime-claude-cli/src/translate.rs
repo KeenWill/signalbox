@@ -102,29 +102,14 @@ pub(crate) fn translate<C>(
         .iter()
         .map(render_message)
         .collect::<Result<Vec<_>, _>>()?;
-    let mut catalog_tools = operation
-        .tools
-        .iter()
-        .map(|tool| {
-            validate_tool_name(tool.name.as_str())?;
-            parse_object_schema(
-                &tool.input_schema,
-                &format!("tool `{}` input schema", tool.name.as_str()),
-            )?;
-            Ok(CatalogTool {
-                name: tool.name.as_str().to_string(),
-                description: tool.description.clone(),
-                input_schema: tool.input_schema.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, TranslationError>>()?;
+    let mut catalog = translate_tool_catalog(&operation.tools)?;
     if let Some(contract) = &operation.output_contract {
         validate_tool_name(contract.name.as_str())?;
         parse_object_schema(
             &contract.schema,
             &format!("structured output `{}` schema", contract.name.as_str()),
         )?;
-        catalog_tools.push(CatalogTool {
+        catalog.tools.push(CatalogTool {
             name: contract.name.as_str().to_string(),
             description: contract.description.clone(),
             input_schema: contract.schema.clone(),
@@ -192,11 +177,30 @@ pub(crate) fn translate<C>(
 
     Ok(TranslatedOperation {
         prompt,
-        catalog: Catalog {
-            tools: catalog_tools,
-        },
+        catalog,
         tool_requirement,
     })
+}
+
+pub(crate) fn translate_tool_catalog(
+    tools: &[signalbox_model_runtime::ToolDefinition],
+) -> Result<Catalog, TranslationError> {
+    let tools = tools
+        .iter()
+        .map(|tool| {
+            validate_tool_name(tool.name.as_str())?;
+            parse_object_schema(
+                &tool.input_schema,
+                &format!("tool `{}` input schema", tool.name.as_str()),
+            )?;
+            Ok(CatalogTool {
+                name: tool.name.as_str().to_string(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, TranslationError>>()?;
+    Ok(Catalog { tools })
 }
 
 pub(crate) fn qualified_tool_name(name: &str) -> String {
@@ -306,11 +310,30 @@ fn schema_describes_object(raw: &RawValue) -> bool {
     let Ok(members) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(raw.get()) else {
         return false;
     };
-    members
+    if members
         .get("type")
         .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
         .as_deref()
         == Some("object")
+    {
+        return true;
+    }
+    let Some(one_of) = members.get("oneOf") else {
+        return false;
+    };
+    let Ok(alternatives) =
+        serde_json::from_str::<Vec<BTreeMap<String, Box<RawValue>>>>(one_of.get())
+    else {
+        return false;
+    };
+    !alternatives.is_empty()
+        && alternatives.iter().all(|alternative| {
+            alternative
+                .get("type")
+                .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
+                .as_deref()
+                == Some("object")
+        })
 }
 
 fn validate_settings<C>(operation: &ModelOperation<C>) -> Result<(), TranslationError> {
@@ -346,4 +369,37 @@ fn validate_settings<C>(operation: &ModelOperation<C>) -> Result<(), Translation
 pub(crate) enum TranslationError {
     Failure(PreparationFailure),
     Defect(PreparationDefect),
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::value::RawValue;
+
+    use super::schema_describes_object;
+
+    fn raw_schema(value: &str) -> Box<RawValue> {
+        serde_json::from_str(value).expect("fixture schema is valid JSON")
+    }
+
+    #[test]
+    fn object_schema_is_object_shaped() {
+        let schema = raw_schema(r#"{"type":"object"}"#);
+
+        assert!(schema_describes_object(&schema));
+    }
+
+    #[test]
+    fn object_only_one_of_schema_is_object_shaped() {
+        let schema =
+            raw_schema(r#"{"oneOf":[{"type":"object","required":["scope"]},{"type":"object"}]}"#);
+
+        assert!(schema_describes_object(&schema));
+    }
+
+    #[test]
+    fn mixed_one_of_schema_is_not_object_shaped() {
+        let schema = raw_schema(r#"{"oneOf":[{"type":"object"},{"type":"string"}]}"#);
+
+        assert!(!schema_describes_object(&schema));
+    }
 }

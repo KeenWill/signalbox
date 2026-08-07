@@ -1341,17 +1341,18 @@ mod tests {
         let tools = definitions
             .iter()
             .map(|definition| {
-                serde_json::json!({
-                    "name": definition.name().as_str(),
-                    "description": definition.description(),
-                    "inputSchema": serde_json::from_str::<serde_json::Value>(
-                        definition.input_schema().as_str(),
-                    )
-                    .expect("daemon tool schema remains valid JSON"),
-                })
+                signalbox_model_runtime::ToolDefinition::with_raw_schema(
+                    definition.name().as_str(),
+                    definition.description(),
+                    serde_json::from_str(definition.input_schema().as_str())
+                        .expect("daemon tool schema remains valid raw JSON"),
+                )
             })
             .collect::<Vec<_>>();
-        serde_json::json!({"tools": tools})
+        let catalog =
+            signalbox_model_runtime_claude_cli::serialize_mcp_tool_catalog_for_conformance(&tools)
+                .expect("daemon tool catalog is representable for the Claude MCP bridge");
+        serde_json::from_slice(&catalog).expect("Claude MCP catalog serialization is valid JSON")
     }
 
     const SYNTHETIC_BRIDGE_TOOL_NAME: &str = "synthetic_bridge_tool";
@@ -2263,6 +2264,7 @@ mod tests {
             assert!(status.success());
         }
 
+        #[track_caller]
         fn join_reader(&mut self) {
             if let Some(reader) = self.reader.take() {
                 reader.join().expect("bridge response reader exits");
