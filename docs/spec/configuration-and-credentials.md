@@ -811,8 +811,17 @@ each absolute path by removing redundant separators and `.` components and
 folding each `..` component without permitting it to cross the root; that
 operation performs no filesystem lookup and follows no symlink. For one adapter,
 one normalized absolute file path may appear on only one profile in a document:
-two names for the same bytes are not independent credentials and cannot
-authorize two attempts in one successor chain.
+two spellings of one path are not independent credentials and cannot authorize
+two attempts in one successor chain. That test is deliberately lexical only.
+signalboxd opens no credential file before preparation, so a startup identity
+check would trade the no-startup-preflight rule in
+[credential lifecycle](#credential-lifecycle) for a guarantee an ordinary copy
+defeats anyway. Two distinct paths that a symlink, a hard link, or a copy
+resolves to the same secret therefore remain two members. The accepted cost is
+bounded and stated rather than hidden: such a pair can spend one extra successor
+attempt that fails exactly as its predecessor did, after which that member is
+excluded and the chain ends. It admits no credential the pool did not already
+grant and cannot lengthen a chain beyond the pool's member count.
 [Credential operations policy](#credential-operations-policy) applies to it
 unchanged.
 
@@ -882,21 +891,28 @@ distinct pools serialize against the same bound without a lock-order cycle.
 Under those locks the transaction counts live reservations, chooses the member,
 and acquires its `pending_spawn` reservation together with the call's `Prepared`
 record; a database constraint rejects a live count above the configured bound.
-Spawn failure or another pre-send closure releases that pending reservation.
-Immediately after a successful spawn, the daemon replaces `pending_spawn` with
-`spawned { process_group_identity }`, carrying the process group's reuse-safe
-host identity; terminal observation atomically releases that reservation and
-emits the durable availability update that makes the waiter eligible. Startup
-retains a `spawned` reservation owned by the live fenced process. It may close
-an earlier-process `spawned` reservation as lost and make its waiters eligible
-only after it proves that exact group absent, or terminates that exact group and
-then proves it absent; the daemon fence generation alone is not process-death
-evidence. An earlier-process `pending_spawn` record is deliberately ambiguous:
-the prior daemon may have crashed immediately after the child started but before
-attaching its identity, so startup fails before scheduling rather than releasing
-capacity without proof. No provider request is repeated because a contended
-waiter has not issued one. Partial, foreign, or stale reservation evidence
-likewise fails reconstitution closed.
+That bound is read from the profile's current registration and is never frozen
+into a pool policy, because `max_concurrent_invocations` guards a live refresh
+race the operator is adjusting now: a session pinned to an older policy must not
+keep running against a limit the operator has since tightened. A raised bound
+therefore admits more work at the next preparation, and a lowered one restricts
+the next admission without revoking a reservation already committed — a live
+count above a freshly lowered bound drains as those invocations complete rather
+than terminating them. Spawn failure or another pre-send closure releases that
+pending reservation. Immediately after a successful spawn, the daemon replaces
+`pending_spawn` with `spawned { process_group_identity }`, carrying the process
+group's reuse-safe host identity; terminal observation atomically releases that
+reservation and emits the durable availability update that makes the waiter
+eligible. Startup retains a `spawned` reservation owned by the live fenced
+process. It may close an earlier-process `spawned` reservation as lost and make
+its waiters eligible only after it proves that exact group absent, or terminates
+that exact group and then proves it absent; the daemon fence generation alone is
+not process-death evidence. An earlier-process `pending_spawn` record is
+deliberately ambiguous: the prior daemon may have crashed immediately after the
+child started but before attaching its identity, so startup fails before
+scheduling rather than releasing capacity without proof. No provider request is
+repeated because a contended waiter has not issued one. Partial, foreign, or
+stale reservation evidence likewise fails reconstitution closed.
 
 **`oauth`** is spelled `delivery = "oauth"` with exactly four required fields:
 TOML strings `client_id`, `token_url`, and `device_authorization_url`, plus TOML
@@ -945,6 +961,20 @@ an independent token family, provisioning neither disturbs nor depends on any
 other login for that account: an operator's existing CLI logins on this or any
 other machine keep working, and deleting the profile's stored authorization ends
 only the daemon's own family.
+
+A stored authorization is bound to the tuple it was minted under. Provisioning
+persists, in the same transaction as the token generation, the exact
+`client_id`, `token_url`, `device_authorization_url`, and ordered `scopes` the
+authorization used. Every later refresh and every dispatch first compares that
+stored tuple byte for byte with the profile's current registration, under the
+profile row lock and before any request is formed. A mismatch never sends the
+stored token: the generation quarantines and re-provisioning is the only
+recovery, exactly as for a rejected refresh. Why this is a storage rule rather
+than a review rule: a refresh token is bearer material for one authorization
+server, so a mistaken or hostile edit of `token_url` in a document that ordinary
+restart deliberately honors would otherwise disclose it to a host the operator's
+authorization never named, and a changed `client_id` or scope set would corrupt
+the family the operator believes they hold.
 
 The daemon is the sole refresher of a stored authorization. Before contacting
 the provider, it locks the profile row, reads the stored token, and
@@ -1102,6 +1132,20 @@ cannot exist without it; the observation cannot commit without the configured
 action record. Delivery-layer quarantine that occurs before a provider request
 instead names its own typed refresh or credential-home failure and commits that
 evidence atomically with quarantine.
+
+Two sessions can observe the same trigger for one profile at the same moment,
+and their session-scheduler locks do not serialize that. Every transaction that
+mints, activates, or clears an exclusion therefore first locks the affected
+profile's durable action head `FOR UPDATE` — after its session scheduler lock,
+before any bounded-profile capacity row or policy cursor row, and in
+profile-reference byte order when it touches more than one — and rereads the
+current generation under that lock. The first commit mints the generation. A
+later commit for an exclusion already active at the same scope records its own
+observation correlation against that existing generation and mints no second
+one, so a repeated trigger is idempotent on the exclusion and can never make a
+uniqueness conflict block the terminal observation that requires it. An operator
+clear takes the same lock, which is what lets a clear and a concurrent
+re-observation agree on which generation is current.
 
 `switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
 `on_overloaded`, because only those causes carry proof that the request was not
@@ -1491,9 +1535,12 @@ deployment-side rules that code cannot enforce are stated in
   ([credential pools and selection](#credential-pools-and-selection)). For each
   existing family-to-reference entry, its post-schema backfill must consult only
   the validated profile registration named by that reference, never the
-  document's current family mapping or pool table; a missing registration fails
-  startup before any entry is rewritten. It must intern one canonical singleton
-  policy whose pool name is
+  document's current family mapping or pool table. It must run where the
+  `codex_home` identity check runs — after the configuration-independent
+  recovery scan completes and before scheduling is enabled — so a missing
+  registration rewrites no entry and blocks scheduling without blocking recovery
+  of acknowledged work (INV-034). It must intern one canonical singleton policy
+  whose pool name is
   `legacy/<session-uuid>/<event-ordinal>/sha256:<model-family-digest>`, using
   the canonical lowercase hyphenated session UUID, positive decimal ordinal, and
   the 64 lowercase hexadecimal characters of SHA-256 over the exact UTF-8 model

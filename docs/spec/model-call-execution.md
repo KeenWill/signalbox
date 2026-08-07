@@ -645,11 +645,15 @@ identity and a complete nonempty evidence list in policy-member order. Each
 member item carries the profile reference, the one closed exclusion kind
 (`profile_quarantine`, `membership_exclusion`, `session_displacement`, or
 `chain_exclusion`), its durable record generation or predecessor-observation
-correlation, and its optional reset. It carries no provider prose or credential
-value. The guarded transition requires an active turn whose current attempt has
-no model call, ends that attempt `KnownFailure`, terminalizes the turn `Failed`,
-appends the ordinary `TurnFailed { turn }` marker to that attempt's source
-frontier, and atomically emits the typed preparation-failure event owned by
+correlation, and its optional reset. A member covered by several at once selects
+one kind by the widest-scope-first precedence, and reports a reset only when
+every exclusion then active for it reported one, exactly as
+[process protocol](process-protocol.md#credential-pool-preparation-failure)
+requires. It carries no provider prose or credential value. The guarded
+transition requires an active turn whose current attempt has no model call, ends
+that attempt `KnownFailure`, terminalizes the turn `Failed`, appends the
+ordinary `TurnFailed { turn }` marker to that attempt's source frontier, and
+atomically emits the typed preparation-failure event owned by
 [process protocol](process-protocol.md#credential-pool-preparation-failure).
 Partial evidence, a member outside the frozen policy, duplicate or reordered
 members, or a correlation that did not supply active exclusion evidence in the
