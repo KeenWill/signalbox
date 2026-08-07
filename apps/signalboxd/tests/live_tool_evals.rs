@@ -100,7 +100,7 @@ const GIT_MODEL: &str = "gpt-5-mini";
 const MAX_OUTPUT_TOKENS: u32 = 1_024;
 const CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-const TURN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const TURN_TIMEOUT: Duration = Duration::from_secs(3 * 2 * 60 + 60);
 const LIVE_EVAL_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 const GIT_AUTHOR_NAME: &str = "Signalbox Tool Eval";
 const GIT_AUTHOR_EMAIL: &str = "signalbox-tool-eval@example.test";
@@ -110,6 +110,7 @@ const GIT_COMMIT_PATH: &str = "commit-me.txt";
 const GIT_NATURAL_PATH: &str = "eval.txt";
 const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
+const WORKSPACE_SEED: &str = "alpha\n";
 const WORKSPACE_ANSWER_PATH: &str = "answer.txt";
 const WORKSPACE_ANSWER: &str = "model loop observed\n";
 const WEB_ORIGIN: &str = "https://example.com";
@@ -124,6 +125,7 @@ const ARBITRARY_EVAL_TURN_ATTEMPT_ID: u128 = 0x9106;
 const ARBITRARY_EVAL_SESSION_ID: u128 = 0x9107;
 const ARBITRARY_EVAL_MODEL_CALL_ID: u128 = 0x9108;
 const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x9109;
+const ARBITRARY_SECOND_EVAL_REQUEST_ID: u128 = 0x910a;
 const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
 
 type EvalResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -398,7 +400,7 @@ impl FamilySuite {
 
     fn workspace() -> EvalResult<Self> {
         let workspace = tempfile::tempdir()?;
-        fs::write(workspace.path().join(WORKSPACE_SEED_PATH), "alpha\n")?;
+        fs::write(workspace.path().join(WORKSPACE_SEED_PATH), WORKSPACE_SEED)?;
         let reads = WorkspaceReadTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
         let mutations =
             WorkspaceMutationTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
@@ -916,10 +918,13 @@ struct OperationTrackerState {
 impl OperationTracker {
     fn observe(&self, operation: &ModelOperation<ModelCallId>) {
         let carries_result = operation.messages.iter().any(|message| {
-            message
-                .parts
-                .iter()
-                .any(|part| matches!(part, MessagePart::ToolResult(_)))
+            message.parts.iter().any(|part| match part {
+                MessagePart::ToolResult(_) => true,
+                MessagePart::Text(_)
+                | MessagePart::ToolCall(_)
+                | MessagePart::Thinking { .. }
+                | MessagePart::RedactedThinking { .. } => false,
+            })
         });
         if carries_result {
             self.state
@@ -1149,9 +1154,10 @@ impl CaseSnapshot {
     fn workspace_natural_requests_passed(&self) -> bool {
         let read = self.requests.iter().position(|request| {
             request.name == READ_FILE_NAME
+                && request.attempt_succeeded
                 && request
                     .arguments()
-                    .is_some_and(|arguments| arguments["path"] == WORKSPACE_SEED_PATH)
+                    .is_some_and(|arguments| workspace_read_covers_seed(&arguments))
         });
         let write = self.requests.iter().position(|request| {
             request.name == WRITE_FILE_NAME
@@ -1198,6 +1204,16 @@ impl CaseSnapshot {
                     != self.requests[fetch].producing_model_call_id
         }))
     }
+}
+
+fn workspace_read_covers_seed(arguments: &serde_json::Value) -> bool {
+    let full_seed_bytes =
+        u64::try_from(WORKSPACE_SEED.len()).expect("the workspace seed fixture length fits in u64");
+    arguments["path"] == WORKSPACE_SEED_PATH
+        && arguments
+            .get("max_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .is_none_or(|max_bytes| max_bytes >= full_seed_bytes)
 }
 
 fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid> {
@@ -1598,6 +1614,34 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(READ_FILE_NAME),
                 arguments_text: String::from(r#"{"path":"brief.txt"}"#),
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!snapshot.workspace_natural_requests_passed());
+}
+
+#[test]
+fn workspace_natural_state_requires_the_read_to_cover_the_full_brief() {
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(READ_FILE_NAME),
+                arguments_text: String::from(r#"{"max_bytes":1,"path":"brief.txt"}"#),
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(WRITE_FILE_NAME),
+                arguments_text: String::from(
+                    r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
+                ),
                 attempt_succeeded: true,
             },
         ],
