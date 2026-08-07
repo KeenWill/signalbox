@@ -158,6 +158,27 @@ class CommentProvenanceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("ADR-0010", result.stdout)
 
+    def test_a_python_comment_citing_a_process_document_reports(self) -> None:
+        files = {
+            MODULE: "//! Owned.\n",
+            "scripts/tool.py": '"""Doc."""\n# See docs/agents/testing-style.md for the rule.\n',
+        }
+
+        result = check("SR-2", files)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("scripts/tool.py", result.stdout)
+
+    def test_a_citation_inside_a_python_docstring_is_prose(self) -> None:
+        files = {
+            MODULE: "//! Owned.\n",
+            "scripts/tool.py": '"""Describes docs/agents/testing-style.md."""\nX = 1\n',
+        }
+
+        result = check("SR-2", files)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_a_toml_comment_citing_a_date_reports(self) -> None:
         files = {
             MODULE: "//! Owned.\n",
@@ -589,6 +610,23 @@ class AppSqlTableAccessTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("turn_lifecycle", result.stdout)
+
+    def test_sql_inside_an_inline_test_module_passes(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub fn run() {}\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            '    const READ: &str = "SELECT id FROM turn_lifecycle";\n'
+            "}\n"
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_app_calling_a_repository_method_passes(self) -> None:
         source = "//! Owned.\npub async fn read(store: &Store) {\n    store.turn(id).await;\n}\n"

@@ -346,8 +346,32 @@ PROCESS_CITATIONS = (
 # citation is most tempting: `deny.toml` opens with one today. The comment
 # character is unambiguous once string bodies are blanked.
 TOML_GLOBS = ("*.toml",)
+# The checker's own comments are in scope, and this rule finds violations in
+# them. That is the point: a rule whose author exempted the file stating it
+# would be worth less than no rule.
+PYTHON_GLOBS = ("scripts/*.py", "clients/native/scripts/*.py")
+PYTHON_STRING = re.compile(
+    r'"""(?:\\.|[^\\])*?"""|\'\'\'(?:\\.|[^\\])*?\'\'\''
+    r'|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\''
+)
+PYTHON_COMMENT = re.compile(r"#[^\n]*")
 TOML_STRING = re.compile(r'"""(?:.|\n)*?"""|\'\'\'(?:.|\n)*?\'\'\'|"[^"\n]*"|\'[^\'\n]*\'')
 TOML_COMMENT = re.compile(r"#[^\n]*")
+
+
+def _python_comments(text: str) -> Iterator[tuple[int, str]]:
+    """Yield each Python comment with the line it starts on.
+
+    A docstring is a string, not a comment, so blanking string bodies first also
+    keeps prose that documents a pattern out of the scan — including this
+    module's own docstring, which names documents it is describing rather than
+    citing as authority.
+    """
+    scrubbed = PYTHON_STRING.sub(
+        lambda match: re.sub(r"[^\n]", " ", match.group()), text
+    )
+    for match in PYTHON_COMMENT.finditer(scrubbed):
+        yield text.count("\n", 0, match.start()) + 1, text[match.start() : match.end()]
 
 
 def _toml_comments(text: str) -> Iterator[tuple[int, str]]:
@@ -393,6 +417,9 @@ def check_comment_provenance(repository: Repository) -> Iterator[Finding]:
     for path in repository.files(TOML_GLOBS):
         label = path.relative_to(repository.root).as_posix()
         commented.append((label, _toml_comments(path.read_text(encoding="utf-8"))))
+    for path in repository.files(PYTHON_GLOBS):
+        label = path.relative_to(repository.root).as_posix()
+        commented.append((label, _python_comments(path.read_text(encoding="utf-8"))))
     for path, comments in commented:
         for line, comment in comments:
             for label, pattern in PROCESS_CITATIONS:
@@ -699,7 +726,17 @@ def check_app_sql_table_access(repository: Repository) -> Iterator[Finding]:
     for source in repository.sources(APPS_GLOBS):
         if source.path == SQL_RULE_EXCEPTION:
             continue
+        # The rule says production, and an inline `#[cfg(test)]` module is not
+        # that: a fixture asserting durable state through raw SQL is a test
+        # reading its own setup, and counting it inflates a burndown with work
+        # the rule never asked for. SR-11 already excludes these spans.
+        test_lines = {
+            (source.code.count("\n", 0, start) + 1, source.code.count("\n", 0, end) + 1)
+            for start, end in _inline_test_spans(source.code)
+        }
         for line, literal in _string_literals(source.text):
+            if any(first <= line <= last for first, last in test_lines):
+                continue
             for match in SQL_TABLE_REFERENCE.finditer(literal):
                 if match.group(1).lower() not in tables:
                     continue
