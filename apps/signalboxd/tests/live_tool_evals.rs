@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 
-use git2::{IndexAddOption, Repository, Signature, Status};
+use git2::{IndexAddOption, Oid, Repository, Signature, Status};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
@@ -421,6 +421,7 @@ const EXEC_CASES: &[ForcedCase] = &[
 struct FamilySuite {
     family: EvalFamily,
     workspace: TempDir,
+    git_seed: Option<Oid>,
     catalog: MergedCatalog,
     executor: SharedFamilyExecutor,
 }
@@ -428,7 +429,7 @@ struct FamilySuite {
 impl FamilySuite {
     fn git() -> EvalResult<Self> {
         let workspace = tempfile::tempdir()?;
-        seed_git_repository(workspace.path())?;
+        let git_seed = seed_git_repository(workspace.path())?;
         let tools = LocalGitTools::try_new(
             LocalWorkspaceFileSystem,
             workspace.path(),
@@ -438,6 +439,7 @@ impl FamilySuite {
         Ok(Self {
             family: EvalFamily::Git,
             workspace,
+            git_seed: Some(git_seed),
             catalog: MergedCatalog::try_new([catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Git(executor)),
         })
@@ -454,6 +456,7 @@ impl FamilySuite {
         Ok(Self {
             family: EvalFamily::Workspace,
             workspace,
+            git_seed: None,
             catalog: MergedCatalog::try_new([read_catalog, mutation_catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Workspace {
                 read: read_executor,
@@ -478,6 +481,7 @@ impl FamilySuite {
         Ok(Self {
             family: EvalFamily::Web,
             workspace,
+            git_seed: None,
             catalog: MergedCatalog::try_new([fetch_catalog, search_catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Web {
                 fetch: fetch_executor,
@@ -542,6 +546,21 @@ impl FamilySuite {
                 io::Error::other("the forced eval inventory differs from its catalog").into(),
             );
         }
+        for case in cases {
+            self.validate_forced_case(case)?;
+        }
+        Ok(())
+    }
+
+    fn validate_forced_case(&self, case: &ForcedCase) -> EvalResult {
+        let name = DomainToolName::try_new(case.name.to_owned())
+            .map_err(|_| io::Error::other("the forced eval tool name is invalid"))?;
+        let arguments =
+            NormalizedToolArguments::try_from_provider_text(case.expected_arguments.to_owned())
+                .map_err(|_| io::Error::other("the forced eval arguments do not normalize"))?;
+        self.catalog
+            .validate_arguments(&name, &arguments)
+            .map_err(|_| io::Error::other("the forced eval arguments violate the tool contract"))?;
         Ok(())
     }
 
@@ -574,8 +593,13 @@ impl FamilySuite {
 
     fn natural_state_passed(&self, snapshot: &CaseSnapshot) -> EvalResult<bool> {
         match self.family {
-            EvalFamily::Git => Ok(git_natural_state_passed(self.workspace.path())?
-                && snapshot.git_natural_requests_passed()?),
+            EvalFamily::Git => {
+                let seed = self.git_seed.ok_or_else(|| {
+                    io::Error::other("the Git eval suite has no captured seed identity")
+                })?;
+                Ok(git_natural_state_passed(self.workspace.path(), seed)?
+                    && snapshot.git_natural_requests_passed()?)
+            }
             EvalFamily::Workspace => {
                 let bytes_match = fs::read(self.workspace.path().join(WORKSPACE_ANSWER_PATH))
                     .ok()
@@ -610,7 +634,7 @@ fn normalized_arguments_text(arguments: &str) -> EvalResult<String> {
         .map_err(|_| io::Error::other("the eval fixture arguments do not normalize").into())
 }
 
-fn seed_git_repository(root: &Path) -> EvalResult {
+fn seed_git_repository(root: &Path) -> EvalResult<Oid> {
     let repository = Repository::init(root)?;
     fs::write(root.join(GIT_SEED_PATH), "seed\n")?;
     fs::write(root.join(GIT_STAGE_PATH), "stage me\n")?;
@@ -632,7 +656,7 @@ fn seed_git_repository(root: &Path) -> EvalResult {
     )?;
     let commit = repository.find_commit(commit)?;
     repository.branch("switch-target", &commit, false)?;
-    Ok(())
+    Ok(commit.id())
 }
 
 fn stage_path(root: &Path, path: &str) -> EvalResult {
@@ -661,17 +685,14 @@ fn commit_staged_paths(root: &Path, message: &str) -> EvalResult {
     Ok(())
 }
 
-fn git_natural_state_passed(root: &Path) -> EvalResult<bool> {
+fn git_natural_state_passed(root: &Path, seed: Oid) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let head = repository.head()?.peel_to_commit()?;
     let message_matches = head.message()? == GIT_NATURAL_MESSAGE;
     let Ok(parent) = head.parent(0) else {
         return Ok(false);
     };
-    let seed = repository
-        .find_reference("refs/heads/switch-target")?
-        .peel_to_commit()?;
-    let exactly_one_descendant_commit = parent.id() == seed.id();
+    let exactly_one_descendant_commit = parent.id() == seed;
     let parent_tree = parent.tree()?;
     let head_tree = head.tree()?;
     let diff = repository.diff_tree_to_tree(Some(&parent_tree), Some(&head_tree), None)?;
@@ -1767,34 +1788,60 @@ fn unforced_git_tier_requires_both_task_tools() {
 #[test]
 fn git_natural_state_rejects_a_commit_with_an_unrelated_fixture() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    seed_git_repository(workspace.path())?;
+    let seed = seed_git_repository(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     stage_path(workspace.path(), GIT_STAGE_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
 
-    assert!(!git_natural_state_passed(workspace.path())?);
+    assert!(!git_natural_state_passed(workspace.path(), seed)?);
     Ok(())
 }
 
 #[test]
 fn git_natural_state_rejects_an_unrelated_earlier_commit() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    seed_git_repository(workspace.path())?;
+    let seed = seed_git_repository(workspace.path())?;
     stage_path(workspace.path(), GIT_STAGE_PATH)?;
     commit_staged_paths(workspace.path(), "unrelated eval commit")?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
 
-    assert!(!git_natural_state_passed(workspace.path())?);
+    assert!(!git_natural_state_passed(workspace.path(), seed)?);
     Ok(())
 }
 
 #[test]
 fn git_natural_state_rejects_a_parentless_seed_commit() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    seed_git_repository(workspace.path())?;
+    let seed = seed_git_repository(workspace.path())?;
 
-    assert!(!git_natural_state_passed(workspace.path())?);
+    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    Ok(())
+}
+
+#[test]
+fn git_natural_state_keeps_the_captured_seed_after_a_branch_switch() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let seed = seed_git_repository(workspace.path())?;
+    let repository = Repository::open(workspace.path())?;
+    repository.set_head("refs/heads/switch-target")?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+
+    assert!(git_natural_state_passed(workspace.path(), seed)?);
+    Ok(())
+}
+
+#[test]
+fn forced_case_validation_rejects_schema_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let drifted = ForcedCase {
+        name: GIT_STATUS_NAME,
+        expected_arguments: r#"{"unexpected":true}"#,
+        prompt: "synthetic invalid forced case",
+    };
+
+    assert!(suite.validate_forced_case(&drifted).is_err());
     Ok(())
 }
 
