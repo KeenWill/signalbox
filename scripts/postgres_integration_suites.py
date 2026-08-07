@@ -82,6 +82,15 @@ ARCHIVED_RUN_OPTIONS = {
 WORKSPACE_SELECTORS = ("--workspace", "--all")
 AGGREGATE_JOB = "postgres-integration"
 RUN_JOB = "postgres-integration-run"
+BUILD_JOB = "postgres-integration-build"
+# A step or job that may fail without failing anything above it. The archived
+# run carrying this would let every shard fail while the matrix job reports
+# success and the aggregate's assertion passes.
+CONTINUE_ON_ERROR = re.compile(
+    r"^[ ]*(?:-[ ]+)?continue-on-error:[ ]*(?P<value>\S+)"
+)
+# Bash's `command [-pVv] name [args]` runs `name`; only `-v`/`-V` print instead.
+COMMAND_BUILTIN_OPTIONS = ("-p",)
 ENV_KEY = re.compile(r"^(?P<indent>[ ]*)(?P<dash>-[ ]+)?env:[ ]*$")
 ALWAYS_CONDITION = re.compile(r"^[ ]*if:.*\balways\(\)", re.MULTILINE)
 # A path value may contain spaces inside a `${{ … }}` expression, so it runs
@@ -348,15 +357,10 @@ def job_lines(text: str, name: str) -> list[str]:
     return []
 
 
-def step_matrix_variables(lines: list[str], run_index: int, indent: int) -> dict[str, str]:
-    """Return the matrix bindings in scope for one `run:` scalar's own step.
+def step_span(lines: list[str], run_index: int, indent: int) -> tuple[int, int]:
+    """Return the line range of the step enclosing one `run:` scalar.
 
-    Collected from the step the command belongs to, never from the file: a run
-    step pinning `PARTITION: "1"` while some other step still binds
-    `PARTITION: ${{ matrix.partition }}` would otherwise read as parameterised
-    while every shard ran the same partition.
-
-    The step is the list item enclosing the command — bounded by the nearest
+    The step is the list item containing the command, bounded by the nearest
     `- ` at the command key's own indentation on either side.
     """
     start = 0
@@ -375,6 +379,35 @@ def step_matrix_variables(lines: list[str], run_index: int, indent: int) -> dict
         if depth < indent or (depth == indent and line.lstrip().startswith("- ")):
             end = index
             break
+    return start, end
+
+
+def step_is_blocking(lines: list[str], start: int, end: int) -> bool:
+    """Return whether a step's failure still fails its job.
+
+    `continue-on-error: true` on the archived run would let every shard fail
+    while the matrix job reported success and the aggregate's assertion passed
+    — the required check green with nothing enforced.
+    """
+    for line in lines[start:end]:
+        match = CONTINUE_ON_ERROR.match(line)
+        if match is not None and match.group("value").strip("\"'") == "true":
+            return False
+    return True
+
+
+def step_matrix_variables(lines: list[str], run_index: int, indent: int) -> dict[str, str]:
+    """Return the matrix bindings in scope for one `run:` scalar's own step.
+
+    Collected from the step the command belongs to, never from the file: a run
+    step pinning `PARTITION: "1"` while some other step still binds
+    `PARTITION: ${{ matrix.partition }}` would otherwise read as parameterised
+    while every shard ran the same partition.
+
+    The step is the list item enclosing the command — bounded by the nearest
+    `- ` at the command key's own indentation on either side.
+    """
+    start, end = step_span(lines, run_index, indent)
     return {
         match.group("field"): match.group("variable")
         for line in lines[start:end]
@@ -382,7 +415,9 @@ def step_matrix_variables(lines: list[str], run_index: int, indent: int) -> dict
     }
 
 
-def workflow_shell_commands(text: str) -> list[tuple[str, dict[str, str]]]:
+def workflow_shell_commands(
+    text: str,
+) -> list[tuple[str, dict[str, str], bool]]:
     """Return each `run:`/`command:` scalar in a workflow, flattened to one line.
 
     A shell command in a workflow can be spelled four ways — inline, a literal
@@ -415,7 +450,7 @@ def workflow_shell_commands(text: str) -> list[tuple[str, dict[str, str]]]:
                 break
             inert.add(following)
 
-    commands: list[tuple[str, dict[str, str]]] = []
+    commands: list[tuple[str, dict[str, str], bool]] = []
     index = 0
     while index < len(lines):
         match = SHELL_SCALAR.match(lines[index])
@@ -424,6 +459,7 @@ def workflow_shell_commands(text: str) -> list[tuple[str, dict[str, str]]]:
             continue
         indentation = len(match.group("indent"))
         variables = step_matrix_variables(lines, index, indentation)
+        blocking = step_is_blocking(lines, *step_span(lines, index, indentation))
         # `|`, `>-`, `|+2` and friends open a block; they are not command text.
         # Which one decides how the block's lines rejoin: a literal `|` block
         # keeps its newlines, and a newline separates commands, while a folded
@@ -454,7 +490,7 @@ def workflow_shell_commands(text: str) -> list[tuple[str, dict[str, str]]]:
             joined = stripped if not joined else f"{joined}{pending}{stripped}"
             pending = " " if continues else separator
         if joined:
-            commands.append((joined, variables))
+            commands.append((joined, variables, blocking))
     return commands
 
 
@@ -526,15 +562,25 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     # so an archived run is judged against the variables it can actually see.
     executed = [
         (tokens, variables)
-        for command, variables in commands
+        for command, variables, _ in commands
         for tokens in simple_commands(command)
     ]
 
+    # Scoped to the job whose steps actually consume the reader's output: the
+    # same invocation sitting in an unrelated step proves nothing about whether
+    # the archive plan and the shard matrix still come from the manifest.
+    build_job = "\n".join(job_lines(text, BUILD_JOB))
+    build_commands = [
+        tokens
+        for command, _, _ in workflow_shell_commands(build_job)
+        for tokens in simple_commands(command)
+    ]
     for mode in REQUIRED_MODES:
-        if not any(invokes_reader(tokens, mode) for tokens, _ in executed):
+        if not any(invokes_reader(tokens, mode) for tokens in build_commands):
             failures.append(
-                f"{WORKFLOW} executes no `{EMITTER} {mode}` command, so its "
-                f"PostgreSQL integration jobs no longer derive from {MANIFEST}"
+                f"{WORKFLOW} job `{BUILD_JOB}` executes no `{EMITTER} {mode}` "
+                f"command, so its PostgreSQL integration jobs no longer derive "
+                f"from {MANIFEST}"
             )
 
     uploads = uploaded_artifacts(text)
@@ -589,13 +635,14 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
 
     shard_job = "\n".join(job_lines(text, RUN_JOB))
     shard_commands = [
-        (tokens, variables)
-        for command, variables in workflow_shell_commands(shard_job)
+        (tokens, variables, blocking)
+        for command, variables, blocking in workflow_shell_commands(shard_job)
         for tokens in simple_commands(command)
     ]
+    # Blocking, because a step allowed to fail enforces nothing.
     if not any(
-        runs_archived_ignored_tests(tokens, variables)
-        for tokens, variables in shard_commands
+        runs_archived_ignored_tests(tokens, variables) and blocking
+        for tokens, variables, blocking in shard_commands
     ):
         failures.append(
             f"{WORKFLOW} job `{RUN_JOB}` runs no archive-backed `cargo nextest "
@@ -622,7 +669,7 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     }
     aggregate_commands = [
         tokens
-        for command, _ in workflow_shell_commands(aggregate)
+        for command, _, _ in workflow_shell_commands(aggregate)
         for tokens in simple_commands(command)
     ]
     for job in ("build", "run"):
@@ -647,10 +694,20 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
                 f"take that value from the matrix {MANIFEST} generates"
             )
 
-    targets = {match.group("target") for match in RUNS_ON.finditer(text)}
+    # Only the jobs whose environment reaches the archived suites. The archives
+    # are built and run on the same OS by construction, and a Docker-backed
+    # PostgreSQL suite is not portable off it — but an unrelated macOS or
+    # Windows job elsewhere in this workflow is nobody's business here.
+    integration = "\n".join(
+        job_lines(text, BUILD_JOB) + job_lines(text, RUN_JOB)
+    )
+    targets = {match.group("target") for match in RUNS_ON.finditer(integration)}
     if targets and targets != {"ubuntu-latest"}:
         listing = ", ".join(sorted(targets))
-        failures.append(f"Rust CI target changed from ubuntu-latest: {listing}")
+        failures.append(
+            f"{WORKFLOW} runs the PostgreSQL integration jobs somewhere other "
+            f"than ubuntu-latest: {listing}"
+        )
 
     return failures
 
@@ -687,9 +744,14 @@ def normalized_cargo_arguments(arguments: list[str]) -> list[str]:
 def launched_command(tokens: list[str]) -> list[str]:
     """Strip environment prefixes and `env` wrappers from one command.
 
-    `RUST_LOG=debug cargo test …` and `env RUST_LOG=debug cargo test …` both run
-    Cargo; only the command word differs. Left unstripped they read as some
-    other program entirely, which is silence rather than disagreement.
+    `RUST_LOG=debug cargo test …`, `env RUST_LOG=debug cargo test …`, and
+    `command cargo test …` all run Cargo; only the command word differs. Left
+    unstripped they read as some other program entirely, which is silence
+    rather than disagreement.
+
+    `command -v cargo` is not one of these: `-v` and `-V` make the builtin
+    print a description instead of running anything, so the prefix is only
+    stripped when it still launches its argument.
     """
     index = 0
     while index < len(tokens):
@@ -697,6 +759,17 @@ def launched_command(tokens: list[str]) -> list[str]:
         if ENVIRONMENT_ASSIGNMENT.fullmatch(word):
             index += 1
             continue
+        if word == "command":
+            following = index + 1
+            while following < len(tokens) and tokens[following] in (
+                *COMMAND_BUILTIN_OPTIONS,
+                "--",
+            ):
+                following += 1
+            if following < len(tokens) and not tokens[following].startswith("-"):
+                index = following
+                continue
+            break
         if word.rsplit("/", 1)[-1] == "env":
             index += 1
             while index < len(tokens):

@@ -596,7 +596,9 @@ class WorkflowAgreementTests(unittest.TestCase):
             "          echo second\n"
         )
 
-        self.assertEqual([command for command, _ in commands], ["echo first\necho second"])
+        self.assertEqual(
+            [command for command, _, _ in commands], ["echo first\necho second"]
+        )
 
     def test_a_global_option_before_the_subcommand_is_reported(self) -> None:
         failures = self.disagreements(
@@ -732,7 +734,7 @@ class WorkflowAgreementTests(unittest.TestCase):
         self.assertEqual(
             [
                 command
-                for command, _ in workflow_shell_commands(
+                for command, _, _ in workflow_shell_commands(
                     "jobs:\n  a:\n    steps:\n      - run: echo 'a # b'\n"
                 )
             ],
@@ -763,6 +765,76 @@ class WorkflowAgreementTests(unittest.TestCase):
 
         self.assertEqual(len(failures), 1)
         self.assertIn("manifest-driven", failures[0])
+
+    def test_a_reader_invocation_outside_the_build_job_does_not_count(self) -> None:
+        # A stale literal matrix in the build job, with the invocation left in
+        # an unrelated step, would run one row and skip the rest.
+        stripped = AGREEING_WORKFLOW.replace(
+            "      - run: python3 scripts/postgres_integration_suites.py --matrix\n",
+            "",
+        )
+        failures = self.disagreements(
+            stripped
+            + "  decoy:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: python3 scripts/postgres_integration_suites.py --matrix\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("--matrix", failures[0])
+
+    def test_a_non_blocking_archived_run_is_reported(self) -> None:
+        # `continue-on-error: true` lets every shard fail while the job reports
+        # success and the aggregate's assertion passes.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                "      - env:\n          SUITE:",
+                "      - continue-on-error: true\n        env:\n          SUITE:",
+            )
+        )
+
+        self.assertTrue(any("runs no archive-backed" in failure for failure in failures))
+
+    def test_an_unrelated_non_ubuntu_job_is_allowed(self) -> None:
+        # Cross-platform CI elsewhere in this workflow is nobody's business
+        # here; only the jobs whose environment reaches the archives matter.
+        self.assertEqual(
+            self.disagreements(
+                AGREEING_WORKFLOW
+                + "  cross-platform:\n"
+                "    runs-on: macos-latest\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+            ),
+            [],
+        )
+
+    def test_an_integration_job_leaving_ubuntu_is_reported(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                "  postgres-integration-run:\n    runs-on: ubuntu-latest\n",
+                "  postgres-integration-run:\n    runs-on: macos-latest\n",
+            )
+        )
+
+        self.assertTrue(any("macos-latest" in failure for failure in failures))
+
+    def test_the_command_builtin_does_not_hide_the_command(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "      - run: command cargo test -p alpha --tests -- --ignored\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("outside", failures[0])
+
+    def test_command_v_prints_rather_than_runs(self) -> None:
+        # `command -v cargo` describes Cargo; it runs nothing.
+        self.assertEqual(
+            self.disagreements(AGREEING_WORKFLOW + "      - run: command -v cargo\n"),
+            [],
+        )
 
     def test_an_aggregate_check_without_always_is_reported(self) -> None:
         # Without `always()` the job is skipped when a dependency fails, and a
@@ -922,7 +994,7 @@ class WorkflowAgreementTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            [command for command, _ in commands],
+            [command for command, _, _ in commands],
             ["cargo nextest run --workspace-remap .", "echo indented"],
         )
 
