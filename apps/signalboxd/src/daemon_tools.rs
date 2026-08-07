@@ -2058,7 +2058,6 @@ mod tests {
     struct McpBridgeReadyWaiterSpawn<'a> {
         executable: &'a Path,
         ready: &'a Path,
-        started: &'a Path,
         workspace: &'a Path,
     }
 
@@ -2067,49 +2066,31 @@ mod tests {
             let child = Command::new(config.executable)
                 .arg("--wait-ready")
                 .arg(config.ready)
-                .arg(config.started)
                 .current_dir(config.workspace)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
                 .expect("bridge readiness waiter starts");
-            let mut waiter = Self { child };
-            waiter.await_started(config.started);
-            waiter
+            Self { child }
         }
 
         #[track_caller]
-        fn await_started(&mut self, started: &Path) {
-            let deadline = Instant::now() + BRIDGE_RESPONSE_TIMEOUT;
-            while !started.is_file() {
-                assert!(
-                    self.child
-                        .try_wait()
-                        .expect("bridge readiness waiter status is readable")
-                        .is_none(),
-                    "bridge readiness waiter remains active while starting"
-                );
-                assert!(
-                    Instant::now() < deadline,
-                    "bridge readiness waiter reports entering its wait loop"
-                );
-                thread::sleep(CHILD_POLL_INTERVAL);
-            }
-        }
-
-        #[track_caller]
-        fn assert_waiting(&mut self) {
+        fn finish_failure(mut self) {
+            let status = wait_for_child(&mut self.child, BRIDGE_EXIT_TIMEOUT)
+                .expect("bridge readiness failure is observed")
+                .unwrap_or_else(|| {
+                    terminate_child(&mut self.child);
+                    panic!("bridge readiness failure exceeded its timeout");
+                });
             assert!(
-                wait_for_child(&mut self.child, BRIDGE_CHILD_TEST_TIMEOUT)
-                    .expect("bridge readiness waiter remains observable")
-                    .is_none(),
-                "bridge readiness waiter stays active before tool discovery"
+                !status.success(),
+                "bridge does not publish readiness before listing tools"
             );
         }
 
         #[track_caller]
-        fn finish(mut self) {
+        fn finish_success(mut self) {
             let Some(status) = wait_for_child(&mut self.child, BRIDGE_EXIT_TIMEOUT)
                 .expect("bridge readiness exit is observed")
             else {
@@ -2634,17 +2615,21 @@ mod tests {
         fixture.initialize();
         fixture.synchronize_without_listing();
         assert!(!fixture.ready_path.exists());
-        let waiter_started = fixture.workspace.path().join("waiter-started");
-        let mut waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
+        let waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
             executable: &fixture.executable,
             ready: &fixture.ready_path,
-            started: &waiter_started,
             workspace: fixture.workspace.path(),
         });
-        waiter.assert_waiting();
+        waiter.finish_failure();
+        assert!(!fixture.ready_path.exists());
         fixture.list_tools();
-        waiter.finish();
         assert!(fixture.ready_path.is_file());
+        let waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
+            executable: &fixture.executable,
+            ready: &fixture.ready_path,
+            workspace: fixture.workspace.path(),
+        });
+        waiter.finish_success();
         fixture.finish();
     }
 
