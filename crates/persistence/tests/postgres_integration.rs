@@ -1237,6 +1237,51 @@ async fn s18_inv010_inv012_spawn_reconstitution_rejects_contradictory_provenance
     Ok(())
 }
 
+/// S18 / INV-010 / INV-012: a spawn event cannot carry a child-result
+/// satellite belonging only to a terminal outcome event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_spawn_reconstitution_rejects_result_satellite()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
+    sqlx::query("ALTER TABLE session_child_result DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, content_text)
+         VALUES ($1, 1, 'outcome_recorded', 'child_failed', NULL)",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_child_result ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = SessionDelegationRepository::new(pool.clone())
+        .record_wait(request, &dispatch)
+        .await
+        .expect_err("spawn replay rejects a cross-kind child-result satellite");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("spawn event provenance")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S18 / INV-010 / INV-012: relationship reconstitution rejects stored outcome
 /// provenance carrying a field outside the selected provenance variant.
 #[tokio::test(flavor = "multi_thread")]
@@ -1441,6 +1486,59 @@ async fn s17_inv010_inv012_wait_replay_requires_update_outbox_header() -> Result
     assert_eq!(
         delegation_corruption(error),
         SessionDelegationCorruption::Missing("header_event_sequence")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-010 / INV-012: equal wait replay rejects subject payloads that do
+/// not belong to a child-waiting update.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv010_inv012_wait_replay_rejects_unused_update_payload() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository.record_wait(request.clone(), &dispatch).await?;
+    sqlx::query(
+        "ALTER TABLE delegation_update_outbox_event
+         DROP CONSTRAINT delegation_update_subject_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE delegation_update_outbox_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE delegation_update_outbox_event
+            SET outcome_kind = 'child_failed'
+          WHERE update_kind = 'child_waiting'
+            AND awaiting_tool_request_id = $1",
+    )
+    .bind(fixture.awaiting_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE delegation_update_outbox_event ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .record_wait(request, &dispatch)
+        .await
+        .expect_err("wait replay rejects an unused outcome payload");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("stored wait update")
     );
 
     pool.close().await;
@@ -20219,9 +20317,12 @@ async fn delegated_capability_failure_fixture(
 
 #[derive(Clone, Copy)]
 enum DelegatedCapabilityResultDamage {
+    InitialTask,
     Result,
     Update,
+    UpdateHeaderKind,
     Wake,
+    WakeHeaderKind,
 }
 
 async fn assert_delegated_capability_reread_rejects_damage(
@@ -20238,6 +20339,21 @@ async fn assert_delegated_capability_reread_rejects_damage(
         RetainedCapabilityFailureStatus::AlreadyCommitted
     );
     match damage {
+        DelegatedCapabilityResultDamage::InitialTask => {
+            sqlx::query("ALTER TABLE session_delegation_initial_task DISABLE TRIGGER ALL")
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "DELETE FROM session_delegation_initial_task
+                  WHERE spawning_tool_request_id = $1",
+            )
+            .bind(fixture.spawning_request.into_uuid())
+            .execute(&pool)
+            .await?;
+            sqlx::query("ALTER TABLE session_delegation_initial_task ENABLE TRIGGER ALL")
+                .execute(&pool)
+                .await?;
+        }
         DelegatedCapabilityResultDamage::Result => {
             sqlx::query("ALTER TABLE session_child_result DISABLE TRIGGER ALL")
                 .execute(&pool)
@@ -20266,6 +20382,24 @@ async fn assert_delegated_capability_reread_rejects_damage(
                 .execute(&pool)
                 .await?;
         }
+        DelegatedCapabilityResultDamage::UpdateHeaderKind => {
+            sqlx::query("ALTER TABLE delegation_outbox_event DISABLE TRIGGER ALL")
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "UPDATE delegation_outbox_event AS header
+                    SET event_kind = 'delegation_wake'
+                   FROM delegation_update_outbox_event AS parent_update
+                  WHERE header.event_sequence = parent_update.event_sequence
+                    AND parent_update.result_spawning_request_id = $1",
+            )
+            .bind(fixture.spawning_request.into_uuid())
+            .execute(&pool)
+            .await?;
+            sqlx::query("ALTER TABLE delegation_outbox_event ENABLE TRIGGER ALL")
+                .execute(&pool)
+                .await?;
+        }
         DelegatedCapabilityResultDamage::Wake => {
             sqlx::query("ALTER TABLE delegation_wake_outbox_event DISABLE TRIGGER ALL")
                 .execute(&pool)
@@ -20279,6 +20413,24 @@ async fn assert_delegated_capability_reread_rejects_damage(
             .execute(&pool)
             .await?;
             sqlx::query("ALTER TABLE delegation_wake_outbox_event ENABLE TRIGGER ALL")
+                .execute(&pool)
+                .await?;
+        }
+        DelegatedCapabilityResultDamage::WakeHeaderKind => {
+            sqlx::query("ALTER TABLE delegation_outbox_event DISABLE TRIGGER ALL")
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "UPDATE delegation_outbox_event AS header
+                    SET event_kind = 'delegation_update'
+                   FROM delegation_wake_outbox_event AS parent_wake
+                  WHERE header.event_sequence = parent_wake.event_sequence
+                    AND parent_wake.result_spawning_request_id = $1",
+            )
+            .bind(fixture.spawning_request.into_uuid())
+            .execute(&pool)
+            .await?;
+            sqlx::query("ALTER TABLE delegation_outbox_event ENABLE TRIGGER ALL")
                 .execute(&pool)
                 .await?;
         }
@@ -20298,6 +20450,19 @@ async fn assert_delegated_capability_reread_rejects_damage(
     pool.close().await;
     drop(container);
     Ok(())
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: a retained relationship with a missing
+/// immutable initial task is corruption, not an ordinary-session reread.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_capability_reread_requires_initial_task()
+-> Result<(), Box<dyn Error>> {
+    assert_delegated_capability_reread_rejects_damage(
+        0xe080,
+        DelegatedCapabilityResultDamage::InitialTask,
+    )
+    .await
 }
 
 /// S18 / INV-006 / INV-010 / INV-032: ambiguous capability-failure reread
@@ -20327,6 +20492,19 @@ async fn s18_inv006_inv010_inv032_capability_reread_requires_delegated_update()
 }
 
 /// S18 / INV-006 / INV-010 / INV-032: ambiguous capability-failure reread
+/// requires the canonical delegated parent-update outbox kind.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_capability_reread_requires_update_header_kind()
+-> Result<(), Box<dyn Error>> {
+    assert_delegated_capability_reread_rejects_damage(
+        0xe280,
+        DelegatedCapabilityResultDamage::UpdateHeaderKind,
+    )
+    .await
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: ambiguous capability-failure reread
 /// authenticates the exact delegated parent wake satellite.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -20334,6 +20512,422 @@ async fn s18_inv006_inv010_inv032_capability_reread_requires_delegated_wake()
 -> Result<(), Box<dyn Error>> {
     assert_delegated_capability_reread_rejects_damage(0xe300, DelegatedCapabilityResultDamage::Wake)
         .await
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: ambiguous capability-failure reread
+/// requires the canonical delegated parent-wake outbox kind.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_capability_reread_requires_wake_header_kind()
+-> Result<(), Box<dyn Error>> {
+    assert_delegated_capability_reread_rejects_damage(
+        0xe380,
+        DelegatedCapabilityResultDamage::WakeHeaderKind,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum DelegatedObservationDisposition {
+    Completed,
+    KnownFailed,
+    Refused,
+    Cancelled,
+}
+
+async fn assert_delegated_observation_reread_requires_result(
+    seed: u128,
+    disposition: DelegatedObservationDisposition,
+) -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = authorize_delegated_model_call_fixture(&pool, seed).await?;
+    let (observation, identities) = match disposition {
+        DelegatedObservationDisposition::Completed => (
+            fixture
+                .authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+                    assistant_text: vec![
+                        AssistantText::try_new(String::from("authenticated delegated result"))
+                            .expect("fixture delegated result is admitted"),
+                    ],
+                }),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 30,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+            )),
+        ),
+        DelegatedObservationDisposition::KnownFailed => (
+            fixture
+                .authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed),
+            ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 30)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 31)),
+            )),
+        ),
+        DelegatedObservationDisposition::Refused => (
+            fixture
+                .authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Refused),
+            ModelCallTerminalIdentities::Refused(
+                signalbox_domain::RefusedModelCallTurnIdentities::new(
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30)),
+                ),
+            ),
+        ),
+        DelegatedObservationDisposition::Cancelled => (
+            fixture
+                .authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Cancelled),
+            ModelCallTerminalIdentities::PhysicalCancellation(
+                PhysicalCancellationModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 30)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 31)),
+                ),
+            ),
+        ),
+    };
+    fixture
+        .repository
+        .apply_terminal_observation(fixture.child, observation.clone(), identities, |_| {
+            panic!("the delegated observation fixture has no steering")
+        })
+        .await?;
+    assert_eq!(
+        fixture
+            .repository
+            .reread_terminal_observation(fixture.child, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+    sqlx::query("ALTER TABLE session_child_result DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM session_child_result WHERE spawning_tool_request_id = $1")
+        .bind(fixture.spawning_request.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_child_result ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = fixture
+        .repository
+        .reread_terminal_observation(fixture.child, &observation)
+        .await
+        .expect_err("a delegated observation reread requires its child result closure");
+    assert!(matches!(
+        error,
+        ModelCallRepositoryError::InvalidTransition(
+            "retained observation delegated result closure changed"
+        )
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: a completed delegated observation reread
+/// authenticates its exact delivered child result.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_completed_observation_reread_requires_result()
+-> Result<(), Box<dyn Error>> {
+    assert_delegated_observation_reread_requires_result(
+        0xe400,
+        DelegatedObservationDisposition::Completed,
+    )
+    .await
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: a known-failed delegated observation
+/// reread authenticates its exact delivered child result.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_failed_observation_reread_requires_result()
+-> Result<(), Box<dyn Error>> {
+    assert_delegated_observation_reread_requires_result(
+        0xe500,
+        DelegatedObservationDisposition::KnownFailed,
+    )
+    .await
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: a refused delegated observation reread
+/// authenticates its exact delivered child result.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_refused_observation_reread_requires_result()
+-> Result<(), Box<dyn Error>> {
+    assert_delegated_observation_reread_requires_result(
+        0xe600,
+        DelegatedObservationDisposition::Refused,
+    )
+    .await
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: a cancelled delegated observation reread
+/// authenticates its exact delivered child result.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_cancelled_observation_reread_requires_result()
+-> Result<(), Box<dyn Error>> {
+    assert_delegated_observation_reread_requires_result(
+        0xe700,
+        DelegatedObservationDisposition::Cancelled,
+    )
+    .await
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: authoritative terminal reread
+/// authenticates the complete delivery set for waits that predated the result.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_observation_reread_requires_wait_delivery()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xe800;
+    let fixture = authorize_delegated_model_call_fixture(&pool, seed).await?;
+    let observation = fixture
+        .authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![
+                AssistantText::try_new(String::from("delivered delegated result"))
+                    .expect("fixture delegated result is admitted"),
+            ],
+        });
+    fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            observation.clone(),
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 30,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+            )),
+            |_| panic!("the delegated observation fixture has no steering"),
+        )
+        .await?;
+    let awaiting_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 40));
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation_wait DISABLE TRIGGER ALL;
+         ALTER TABLE session_pending_delivery DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wait
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, parent_turn_id, child_session_id, wait_mode)
+         SELECT $1, relation.spawning_tool_request_id,
+                relation.parent_session_id, relation.parent_turn_id,
+                relation.child_session_id, 'background'
+           FROM session_delegation AS relation
+          WHERE relation.spawning_tool_request_id = $2",
+    )
+    .bind(awaiting_request.into_uuid())
+    .bind(fixture.spawning_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_pending_delivery
+            (recipient_session_id, delivery_sequence, delivery_kind)
+         VALUES ($1, 1, 'background_result')",
+    )
+    .bind(fixture.parent.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result_delivery
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, delivery_sequence, delivery_kind)
+         VALUES ($1, $2, $3, 1, 'background_result')",
+    )
+    .bind(awaiting_request.into_uuid())
+    .bind(fixture.spawning_request.into_uuid())
+    .bind(fixture.parent.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation_wait ENABLE TRIGGER ALL;
+         ALTER TABLE session_pending_delivery ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery ENABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    assert_eq!(
+        fixture
+            .repository
+            .reread_terminal_observation(fixture.child, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+    sqlx::query("ALTER TABLE session_child_result_delivery DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM session_child_result_delivery
+          WHERE awaiting_tool_request_id = $1",
+    )
+    .bind(awaiting_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_child_result_delivery ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = fixture
+        .repository
+        .reread_terminal_observation(fixture.child, &observation)
+        .await
+        .expect_err("a terminal reread requires every pre-existing wait delivery");
+
+    assert!(matches!(
+        error,
+        ModelCallRepositoryError::InvalidTransition(
+            "retained observation delegated result closure changed"
+        )
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum DelegatedNonterminalObservation {
+    CompletedWithTools,
+    Ambiguous,
+}
+
+async fn assert_delegated_nonterminal_reread_rejects_result(
+    seed: u128,
+    kind: DelegatedNonterminalObservation,
+) -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = authorize_delegated_model_call_fixture(&pool, seed).await?;
+    let (observation, identities) = match kind {
+        DelegatedNonterminalObservation::CompletedWithTools => {
+            let request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 30));
+            let response =
+                ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+                    ToolCallProposal::new(
+                        ToolName::try_new(String::from("current_time"))
+                            .expect("valid fixture tool name"),
+                        NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                            .expect("bounded fixture arguments"),
+                    ),
+                )])
+                .expect("the proposal forms a tool-using response");
+            (
+                fixture
+                    .authorized
+                    .observation_correlation()
+                    .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+                        response,
+                    }),
+                ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                    vec![ToolResponsePartIdentity::tool_call(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+                        request,
+                        InitialToolApproval::Confirm,
+                    )],
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+                    None,
+                )),
+            )
+        }
+        DelegatedNonterminalObservation::Ambiguous => (
+            fixture
+                .authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Ambiguous),
+            ModelCallTerminalIdentities::Ambiguous(AmbiguousModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30)),
+            )),
+        ),
+    };
+    fixture
+        .repository
+        .apply_terminal_observation(fixture.child, observation.clone(), identities, |_| {
+            panic!("the delegated nonterminal fixture has no steering")
+        })
+        .await?;
+    assert_eq!(
+        fixture
+            .repository
+            .reread_terminal_observation(fixture.child, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+    sqlx::query("ALTER TABLE session_child_result DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, content_text)
+         VALUES ($1, 1, 'outcome_recorded', 'child_failed', NULL)",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_child_result ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = fixture
+        .repository
+        .reread_terminal_observation(fixture.child, &observation)
+        .await
+        .expect_err("a nonterminal observation cannot retain delegated result evidence");
+
+    assert!(matches!(
+        error,
+        ModelCallRepositoryError::InvalidTransition(
+            "retained observation delegated result closure changed"
+        )
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: a tool-round observation cannot retain
+/// child-result closure while the delegated child continues.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_tool_round_reread_rejects_delegated_result()
+-> Result<(), Box<dyn Error>> {
+    assert_delegated_nonterminal_reread_rejects_result(
+        0xe900,
+        DelegatedNonterminalObservation::CompletedWithTools,
+    )
+    .await
+}
+
+/// S18 / INV-006 / INV-010 / INV-032: an ambiguous observation cannot retain
+/// child-result closure while recovery remains authoritative.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv006_inv010_inv032_ambiguous_reread_rejects_delegated_result()
+-> Result<(), Box<dyn Error>> {
+    assert_delegated_nonterminal_reread_rejects_result(
+        0xea00,
+        DelegatedNonterminalObservation::Ambiguous,
+    )
+    .await
 }
 
 fn delegated_tool_crash_scan_ids(seed: u128) -> FixedStartupScanIds {

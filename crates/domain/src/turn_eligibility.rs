@@ -3872,14 +3872,9 @@ fn reconstitute_inner(
                 defaults_version,
                 selected,
             } => {
-                let configuration_matches = records_by_turn.get(turn).map_or_else(
-                    || {
-                        delegated_turns.get(turn).is_some_and(|fact| {
-                            fact.defaults_version() == *defaults_version
-                                && fact.selected() == *selected
-                        })
-                    },
-                    |record| {
+                let Some(configuration_matches) = records_by_turn
+                    .get(turn)
+                    .map(|record| {
                         !matches!(
                             &record.state,
                             AcceptedInputTurnSchedulingRecordState::Queued
@@ -3891,8 +3886,20 @@ fn reconstitute_inner(
                                 .model()
                                 .selected_direct()
                                 == *selected
-                    },
-                );
+                    })
+                    .or_else(|| {
+                        delegated_turns.get(turn).map(|fact| {
+                            fact.defaults_version() == *defaults_version
+                                && fact.selected() == *selected
+                        })
+                    })
+                else {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
+                            entry: candidate.identity(),
+                        },
+                    );
+                };
                 if !configuration_matches {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {
@@ -3912,19 +3919,26 @@ fn reconstitute_inner(
                 }
             }
             InitialSemanticTranscriptEntryPayload::TurnFailed { turn } => {
-                let state_matches = records_by_turn.get(turn).map_or_else(
-                    || {
-                        delegated_turns.get(turn).is_some_and(|fact| {
-                            fact.state() == DelegatedTurnSchedulingState::TerminalFailed
-                        })
-                    },
-                    |record| {
+                let Some(state_matches) = records_by_turn
+                    .get(turn)
+                    .map(|record| {
                         matches!(
                             &record.state,
                             AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }
                         )
-                    },
-                );
+                    })
+                    .or_else(|| {
+                        delegated_turns.get(turn).map(|fact| {
+                            fact.state() == DelegatedTurnSchedulingState::TerminalFailed
+                        })
+                    })
+                else {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
+                            entry: candidate.identity(),
+                        },
+                    );
+                };
                 if !state_matches {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {
@@ -3954,19 +3968,26 @@ fn reconstitute_inner(
             | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
             | InitialSemanticTranscriptEntryPayload::DelegationResult { .. } => {}
             InitialSemanticTranscriptEntryPayload::TurnCompleted { turn } => {
-                let state_matches = records_by_turn.get(turn).map_or_else(
-                    || {
-                        delegated_turns.get(turn).is_some_and(|fact| {
-                            fact.state() == DelegatedTurnSchedulingState::TerminalCompleted
-                        })
-                    },
-                    |record| {
+                let Some(state_matches) = records_by_turn
+                    .get(turn)
+                    .map(|record| {
                         matches!(
                             &record.state,
                             AcceptedInputTurnSchedulingRecordState::TerminalCompleted { .. }
                         )
-                    },
-                );
+                    })
+                    .or_else(|| {
+                        delegated_turns.get(turn).map(|fact| {
+                            fact.state() == DelegatedTurnSchedulingState::TerminalCompleted
+                        })
+                    })
+                else {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
+                            entry: candidate.identity(),
+                        },
+                    );
+                };
                 if !state_matches {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {
@@ -3983,19 +4004,26 @@ fn reconstitute_inner(
                 }
             }
             InitialSemanticTranscriptEntryPayload::TurnCancelled { turn } => {
-                let state_matches = records_by_turn.get(turn).map_or_else(
-                    || {
-                        delegated_turns.get(turn).is_some_and(|fact| {
-                            fact.state() == DelegatedTurnSchedulingState::TerminalCancelled
-                        })
-                    },
-                    |record| {
+                let Some(state_matches) = records_by_turn
+                    .get(turn)
+                    .map(|record| {
                         matches!(
                             &record.state,
                             AcceptedInputTurnSchedulingRecordState::TerminalCancelled { .. }
                         )
-                    },
-                );
+                    })
+                    .or_else(|| {
+                        delegated_turns.get(turn).map(|fact| {
+                            fact.state() == DelegatedTurnSchedulingState::TerminalCancelled
+                        })
+                    })
+                else {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
+                            entry: candidate.identity(),
+                        },
+                    );
+                };
                 if !state_matches {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {

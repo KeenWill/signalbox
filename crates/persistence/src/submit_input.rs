@@ -822,6 +822,20 @@ where
         };
     }
 
+    if matches!(
+        command.delivery(),
+        DeliveryRequest::Interrupt {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        }
+    ) {
+        sqlx::query(crate::lock_inventory::DELEGATION_TERMINATION_SESSION_FRONTIER)
+            .bind(session_id_to_uuid(command.session()))
+            .bind("cancelled")
+            .execute(&mut *connection)
+            .await?;
+    }
+
     let PreparedAgainstLockedState {
         prepared,
         scheduling,

@@ -85,6 +85,9 @@ pub(crate) const SUBMIT_INPUT_DEFAULTS: &str = "SELECT current_version
           WHERE session_id = $1
           FOR UPDATE";
 
+pub(crate) const DELEGATION_TERMINATION_SESSION_FRONTIER: &str =
+    "SELECT lock_delegation_termination_session_frontier($1, $2)";
+
 pub(crate) const DELEGATION_TERMINAL_RELATION: &str =
     "SELECT task.spawning_tool_request_id, relation.parent_session_id
        FROM session_delegation_initial_task AS task
