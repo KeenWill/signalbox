@@ -41,6 +41,7 @@ use signalbox_persistence::{
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
 };
+use signalbox_test_bin::test_bin_path;
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration,
     PostgresGoalPassDisposition, PostgresProviderModelExecution,
@@ -607,7 +608,7 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn debug_driver_prints_the_scripted_terminal_transcript() -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
-    let output = Command::new(env!("CARGO_BIN_EXE_signalbox-debug"))
+    let output = Command::new(test_bin_path!("signalbox-debug"))
         .env("SIGNALBOX_DEBUG_DATABASE_URL", database_url)
         .args(["driver user request", "driver assistant reply"])
         .output()?;
@@ -631,7 +632,7 @@ async fn debug_driver_prints_the_scripted_terminal_transcript() -> Result<(), Bo
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn debug_driver_rejects_invalid_reply_before_durable_writes() -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
-    let output = Command::new(env!("CARGO_BIN_EXE_signalbox-debug"))
+    let output = Command::new(test_bin_path!("signalbox-debug"))
         .env("SIGNALBOX_DEBUG_DATABASE_URL", database_url)
         .args(["valid user input", ""])
         .output()?;

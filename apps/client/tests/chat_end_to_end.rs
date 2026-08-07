@@ -39,6 +39,7 @@ use signalbox_persistence::{
     local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
     scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
 };
+use signalbox_test_bin::test_bin_path;
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
@@ -412,7 +413,7 @@ context_window_tokens = {CONTEXT_WINDOW_TOKENS}
     }
 
     async fn create_session(&self) -> Result<String, Box<dyn Error>> {
-        let output = Command::new(env!("CARGO_BIN_EXE_signalbox"))
+        let output = Command::new(test_bin_path!("signalbox"))
             .env_remove("SIGNALBOX_SOCKET_PATH")
             .arg("--socket")
             .arg(self.socket_directory.socket())
@@ -455,7 +456,7 @@ async fn activate_turn(pool: &PgPool, session_id: Uuid) -> Result<(), Box<dyn Er
 }
 
 async fn create_session(socket: &Path, selection: Uuid) -> Result<String, Box<dyn Error>> {
-    let output = Command::new(env!("CARGO_BIN_EXE_signalbox"))
+    let output = Command::new(test_bin_path!("signalbox"))
         .env_remove("SIGNALBOX_SOCKET_PATH")
         .arg("--socket")
         .arg(socket)
@@ -529,7 +530,7 @@ fn last_line_position(lines: &[String], needle: &str) -> Result<usize, Box<dyn E
 async fn chat_streams_and_approves_one_scripted_tool_turn() -> Result<(), Box<dyn Error>> {
     let fixture = RunningChatFixture::start().await?;
     let session_id = fixture.create_session().await?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_signalbox"))
+    let mut child = Command::new(test_bin_path!("signalbox"))
         .kill_on_drop(true)
         .env_remove("SIGNALBOX_SOCKET_PATH")
         .arg("--socket")
@@ -615,7 +616,7 @@ async fn chat_streams_and_approves_one_scripted_tool_turn() -> Result<(), Box<dy
 async fn chat_steers_then_stops_one_active_turn() -> Result<(), Box<dyn Error>> {
     let fixture = RunningIdleFixture::start().await?;
     let session_id = fixture.create_session().await?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_signalbox"))
+    let mut child = Command::new(test_bin_path!("signalbox"))
         .kill_on_drop(true)
         .env_remove("SIGNALBOX_SOCKET_PATH")
         .arg("--socket")
@@ -694,7 +695,7 @@ async fn chat_steers_then_stops_one_active_turn() -> Result<(), Box<dyn Error>> 
 async fn chat_ctrl_c_exits_with_blocked_stdin_and_active_turn() -> Result<(), Box<dyn Error>> {
     let fixture = RunningIdleFixture::start().await?;
     let session_id = fixture.create_session().await?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_signalbox"))
+    let mut child = Command::new(test_bin_path!("signalbox"))
         .kill_on_drop(true)
         .env_remove("SIGNALBOX_SOCKET_PATH")
         .arg("--socket")
