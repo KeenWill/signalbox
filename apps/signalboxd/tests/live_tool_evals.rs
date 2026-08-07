@@ -108,6 +108,7 @@ const MAX_OUTPUT_TOKENS: u32 = 1_024;
 const CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const TURN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const LIVE_EVAL_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 const GIT_AUTHOR_NAME: &str = "Signalbox Tool Eval";
 const GIT_AUTHOR_EMAIL: &str = "signalbox-tool-eval@example.test";
 const GIT_SEED_PATH: &str = "seed.txt";
@@ -144,10 +145,25 @@ const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
 
 type EvalResult<T = ()> = Result<T, Box<dyn Error>>;
 
-#[tokio::test(flavor = "multi_thread")]
+#[test]
 #[ignore = "spends real OpenAI exchanges; run only from the gated tool-eval workflow"]
-async fn live_model_in_the_loop_evaluates_one_daemon_tool_family() -> EvalResult {
-    run_selected_family_if_enabled().await
+fn live_model_in_the_loop_evaluates_one_daemon_tool_family() -> EvalResult {
+    let outcome = std::thread::Builder::new()
+        .name(String::from("live-tool-eval"))
+        .stack_size(LIVE_EVAL_THREAD_STACK_BYTES)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(LIVE_EVAL_THREAD_STACK_BYTES)
+                .build()
+                .map_err(|error| error.to_string())?;
+            runtime
+                .block_on(run_selected_family_if_enabled())
+                .map_err(|error| error.to_string())
+        })?
+        .join()
+        .map_err(|_| io::Error::other("the live tool eval thread panicked"))?;
+    outcome.map_err(|error| io::Error::other(error).into())
 }
 
 async fn run_selected_family_if_enabled() -> EvalResult {
