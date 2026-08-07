@@ -115,8 +115,11 @@ const WORKSPACE_ANSWER: &str = "model loop observed\n";
 const EXEC_SUPERVISOR_VARIABLE: &str = "SIGNALBOX_EXEC_SUPERVISOR";
 const EXEC_RESULT_PATH: &str = "exec-result.txt";
 const EXEC_RESULT: &str = "model loop observed\n";
+const EXEC_FORCED_SANDBOXED_OUTPUT: &str = "forced sandboxed eval\n";
 const EXEC_FORCED_READ_ONLY_PROGRAM: &str = "/usr/bin/printf";
 const EXEC_FORCED_READ_ONLY_OUTPUT: &str = "forced unsandboxed eval\n";
+const EXEC_NATURAL_PROGRAM: &str = "/bin/sh";
+const EXEC_NATURAL_SCRIPT: &str = "printf 'model loop observed\\n' > exec-result.txt";
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
 const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
@@ -165,7 +168,7 @@ async fn run_forced_tier(
 ) -> EvalResult<Vec<CaseOutcome>> {
     let mut outcomes = Vec::new();
     for case in suite.forced_cases() {
-        suite.prepare_for(case.name)?;
+        suite.prepare_for(case.name).await?;
         outcomes.push(run_case(database, suite, Some(case.name), case.prompt).await?);
     }
     Ok(outcomes)
@@ -213,7 +216,7 @@ async fn run_case(
     Ok(CaseOutcome {
         target: forced_tool.map(str::to_owned),
         execution_completed,
-        result_round_trips: tracker.result_round_trips(),
+        tool_results: tracker.tool_results(),
         snapshot,
     })
 }
@@ -450,6 +453,7 @@ impl FamilySuite {
                 sandboxed: sandboxed_executor,
                 unsandboxed: unsandboxed_executor,
                 diagnostics: diagnostics_executor,
+                case: ExecEvalCase::Natural,
             }),
         })
     }
@@ -475,14 +479,17 @@ impl FamilySuite {
                 "Search the web for 'Signalbox tool evaluation', then fetch the result at https://example.com/eval. Use the available tools, then briefly report what you found."
             }
             EvalFamily::Exec => {
-                "Use sandboxed_exec to create exec-result.txt containing exactly 'model loop observed' followed by a newline. Keep every side effect inside the current workspace, then briefly report completion."
+                "Use sandboxed_exec with exactly {\"program\":\"/bin/sh\",\"arguments\":[\"-c\",\"printf 'model loop observed\\n' > exec-result.txt\"],\"working_directory\":\".\",\"timeout_seconds\":30} to create exec-result.txt. Keep every side effect inside the current workspace, then briefly report completion."
             }
         }
     }
 
-    fn prepare_for(&self, tool: &str) -> EvalResult {
+    async fn prepare_for(&self, tool: &str) -> EvalResult {
         if self.family == EvalFamily::Git && tool == GIT_CREATE_COMMIT_NAME {
             stage_path(self.workspace.path(), GIT_COMMIT_PATH)?;
+        }
+        if self.family == EvalFamily::Exec {
+            self.executor.prepare_exec_case(tool).await?;
         }
         Ok(())
     }
@@ -507,11 +514,13 @@ impl FamilySuite {
 
 fn seed_exec_workspace(root: &Path) -> EvalResult {
     fs::create_dir(root.join("src"))?;
+    fs::create_dir(root.join(".cargo"))?;
     fs::write(
         root.join("Cargo.toml"),
-        "[package]\nname = \"tool-eval-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        "[package]\nname = \"tool-eval-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
     )?;
     fs::write(root.join("src/lib.rs"), "pub fn fixture() {}\n")?;
+    fs::write(root.join(".cargo/config.toml"), "[net]\noffline = true\n")?;
     Ok(())
 }
 
@@ -632,7 +641,70 @@ enum FamilyExecutor {
         sandboxed: ExecExecutor<SandboxedCommandRunner<TokioProcessRunner>>,
         unsandboxed: ExecExecutor<UnsandboxedCommandRunner<TokioProcessRunner>>,
         diagnostics: CargoDiagnosticsExecutor<TokioProcessRunner>,
+        case: ExecEvalCase,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecEvalCase {
+    Natural,
+    ForcedSandboxed,
+    ForcedUnsandboxed,
+    ForcedDiagnostics,
+}
+
+impl ExecEvalCase {
+    fn for_forced_tool(tool: &str) -> EvalResult<Self> {
+        match tool {
+            SANDBOXED_EXEC_NAME => Ok(Self::ForcedSandboxed),
+            UNSANDBOXED_EXEC_NAME => Ok(Self::ForcedUnsandboxed),
+            CARGO_DIAGNOSTICS_NAME => Ok(Self::ForcedDiagnostics),
+            _ => Err(io::Error::other("the forced exec eval tool is unsupported").into()),
+        }
+    }
+
+    fn admits(self, name: &str, arguments: &NormalizedToolArguments) -> bool {
+        let (expected_name, expected_arguments) = match self {
+            Self::Natural => (
+                SANDBOXED_EXEC_NAME,
+                serde_json::json!({
+                    "program": EXEC_NATURAL_PROGRAM,
+                    "arguments": ["-c", EXEC_NATURAL_SCRIPT],
+                    "working_directory": ".",
+                    "timeout_seconds": 30,
+                }),
+            ),
+            Self::ForcedSandboxed => (
+                SANDBOXED_EXEC_NAME,
+                serde_json::json!({
+                    "program": "printf",
+                    "arguments": [EXEC_FORCED_SANDBOXED_OUTPUT],
+                    "working_directory": ".",
+                    "timeout_seconds": 30,
+                }),
+            ),
+            Self::ForcedUnsandboxed => (
+                UNSANDBOXED_EXEC_NAME,
+                serde_json::json!({
+                    "program": EXEC_FORCED_READ_ONLY_PROGRAM,
+                    "arguments": [EXEC_FORCED_READ_ONLY_OUTPUT],
+                    "working_directory": ".",
+                    "timeout_seconds": 30,
+                }),
+            ),
+            Self::ForcedDiagnostics => (
+                CARGO_DIAGNOSTICS_NAME,
+                serde_json::json!({
+                    "command": "check",
+                    "timeout_seconds": 120,
+                }),
+            ),
+        };
+        let expected =
+            NormalizedToolArguments::try_from_provider_text(expected_arguments.to_string())
+                .expect("the static exec eval arguments normalize");
+        name == expected_name && arguments == &expected
+    }
 }
 
 #[derive(Clone)]
@@ -645,6 +717,15 @@ impl SharedFamilyExecutor {
         Self {
             inner: Arc::new(Mutex::new(inner)),
         }
+    }
+
+    async fn prepare_exec_case(&self, tool: &str) -> EvalResult {
+        let mut inner = self.inner.lock().await;
+        let FamilyExecutor::Exec { case, .. } = &mut *inner else {
+            return Err(io::Error::other("the selected eval executor is not Exec").into());
+        };
+        *case = ExecEvalCase::for_forced_tool(tool)?;
+        Ok(())
     }
 }
 
@@ -701,20 +782,30 @@ impl ToolExecutor for SharedFamilyExecutor {
                 .execute(invocation)
                 .await
                 .map_err(|_| FamilyExecutorError),
-            FamilyExecutor::Exec { sandboxed, .. } if name == SANDBOXED_EXEC_NAME => sandboxed
-                .execute(invocation)
-                .await
-                .map_err(|_| FamilyExecutorError),
-            FamilyExecutor::Exec { unsandboxed, .. } if name == UNSANDBOXED_EXEC_NAME => {
-                unsandboxed
-                    .execute(invocation)
-                    .await
-                    .map_err(|_| FamilyExecutorError)
+            FamilyExecutor::Exec {
+                sandboxed,
+                unsandboxed,
+                diagnostics,
+                case,
+            } => {
+                if !case.admits(name.as_str(), invocation.request().arguments()) {
+                    return Err(FamilyExecutorError);
+                }
+                match name.as_str() {
+                    SANDBOXED_EXEC_NAME => sandboxed
+                        .execute(invocation)
+                        .await
+                        .map_err(|_| FamilyExecutorError),
+                    UNSANDBOXED_EXEC_NAME => unsandboxed
+                        .execute(invocation)
+                        .await
+                        .map_err(|_| FamilyExecutorError),
+                    _ => diagnostics
+                        .execute(invocation)
+                        .await
+                        .map_err(|_| FamilyExecutorError),
+                }
             }
-            FamilyExecutor::Exec { diagnostics, .. } => diagnostics
-                .execute(invocation)
-                .await
-                .map_err(|_| FamilyExecutorError),
         }
     }
 }
@@ -842,30 +933,39 @@ struct OperationTracker {
 
 #[derive(Default)]
 struct OperationTrackerState {
-    result_round_trips: usize,
+    tool_results: Vec<TrackedToolResult>,
+}
+
+#[derive(Clone)]
+struct TrackedToolResult {
+    content: String,
+    is_error: bool,
 }
 
 impl OperationTracker {
     fn observe(&self, operation: &ModelOperation<ModelCallId>) {
-        let carries_result = operation.messages.iter().any(|message| {
-            message
-                .parts
-                .iter()
-                .any(|part| matches!(part, MessagePart::ToolResult(_)))
+        let tool_results = operation.messages.iter().flat_map(|message| {
+            message.parts.iter().filter_map(|part| match part {
+                MessagePart::ToolResult(result) => Some(TrackedToolResult {
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                }),
+                _ => None,
+            })
         });
-        if carries_result {
-            self.state
-                .lock()
-                .expect("operation-tracker lock is available")
-                .result_round_trips += 1;
-        }
-    }
-
-    fn result_round_trips(&self) -> usize {
         self.state
             .lock()
             .expect("operation-tracker lock is available")
-            .result_round_trips
+            .tool_results
+            .extend(tool_results);
+    }
+
+    fn tool_results(&self) -> Vec<TrackedToolResult> {
+        self.state
+            .lock()
+            .expect("operation-tracker lock is available")
+            .tool_results
+            .clone()
     }
 }
 
@@ -1039,15 +1139,10 @@ struct PendingApproval {
 
 impl PendingApproval {
     fn is_exact_read_only_unsandboxed_request(&self) -> EvalResult<bool> {
-        let arguments = serde_json::from_str::<serde_json::Value>(&self.arguments_text)?;
-        Ok(self.tool_name == UNSANDBOXED_EXEC_NAME
-            && arguments
-                == serde_json::json!({
-                    "program": EXEC_FORCED_READ_ONLY_PROGRAM,
-                    "arguments": [EXEC_FORCED_READ_ONLY_OUTPUT],
-                    "working_directory": ".",
-                    "timeout_seconds": 30,
-                }))
+        let arguments =
+            NormalizedToolArguments::try_from_provider_text(self.arguments_text.clone())
+                .map_err(|_| io::Error::other("the pending exec arguments do not normalize"))?;
+        Ok(ExecEvalCase::ForcedUnsandboxed.admits(&self.tool_name, &arguments))
     }
 }
 
@@ -1131,7 +1226,7 @@ impl CaseSnapshot {
 struct CaseOutcome {
     target: Option<String>,
     execution_completed: bool,
-    result_round_trips: usize,
+    tool_results: Vec<TrackedToolResult>,
     snapshot: CaseSnapshot,
 }
 
@@ -1144,7 +1239,7 @@ impl CaseOutcome {
             self.execution_completed
                 && self.snapshot.turn_disposition.as_deref() == Some("completed")
                 && self.snapshot.model_calls >= MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP
-                && self.result_round_trips >= 1
+                && self.forced_result_passed(target)
                 && self.snapshot.requests.len() == 1
                 && self.snapshot.requests[0].name == target
                 && self.snapshot.requests[0].attempt_disposition.as_deref() == Some("completed"),
@@ -1161,7 +1256,7 @@ impl CaseOutcome {
         EvalDisposition::from_passed(
             self.execution_completed
                 && self.snapshot.turn_disposition.as_deref() == Some("completed")
-                && self.result_round_trips >= 1
+                && !self.tool_results.is_empty()
                 && required_names.iter().all(|required| {
                     self.snapshot
                         .requests
@@ -1172,8 +1267,39 @@ impl CaseOutcome {
                     .snapshot
                     .requests
                     .iter()
-                    .all(|request| request.attempt_disposition.as_deref() == Some("completed")),
+                    .all(|request| request.attempt_disposition.as_deref() == Some("completed"))
+                && (family != EvalFamily::Exec
+                    || (self.snapshot.requests.len() == 1
+                        && self.snapshot.requests[0].name == SANDBOXED_EXEC_NAME)),
         )
+    }
+
+    fn forced_result_passed(&self, target: &str) -> bool {
+        if !matches!(
+            target,
+            SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
+        ) {
+            return !self.tool_results.is_empty();
+        }
+        let [result] = self.tool_results.as_slice() else {
+            return false;
+        };
+        if result.is_error {
+            return false;
+        }
+        let Ok(result) = serde_json::from_str::<serde_json::Value>(&result.content) else {
+            return false;
+        };
+        let execution = if target == CARGO_DIAGNOSTICS_NAME {
+            &result["execution"]
+        } else {
+            &result
+        };
+        execution["outcome"]["kind"] == "exited"
+            && execution["outcome"]["code"] == 0
+            && (target != CARGO_DIAGNOSTICS_NAME
+                || (execution["preparation_failure"].is_null()
+                    && execution["cargo_failure"].is_null()))
     }
 }
 
@@ -1183,7 +1309,10 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
     let outcome = CaseOutcome {
         target: Some(String::from(target)),
         execution_completed: true,
-        result_round_trips: 1,
+        tool_results: vec![TrackedToolResult {
+            content: String::from("fixture result"),
+            is_error: false,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: Some(String::from("completed")),
             requests: vec![RequestSnapshot {
@@ -1203,7 +1332,7 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
     let outcome = CaseOutcome {
         target: Some(String::from(target)),
         execution_completed: true,
-        result_round_trips: 0,
+        tool_results: Vec::new(),
         snapshot: CaseSnapshot {
             turn_disposition: Some(String::from("completed")),
             requests: vec![RequestSnapshot {
@@ -1222,7 +1351,10 @@ fn unforced_git_tier_requires_both_task_tools() {
     let outcome = CaseOutcome {
         target: None,
         execution_completed: true,
-        result_round_trips: 1,
+        tool_results: vec![TrackedToolResult {
+            content: String::from("fixture result"),
+            is_error: false,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: Some(String::from("completed")),
             requests: vec![RequestSnapshot {
@@ -1235,6 +1367,79 @@ fn unforced_git_tier_requires_both_task_tools() {
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Git),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
+fn exec_eval_rejects_model_argument_drift_before_dispatch() {
+    let drifted = NormalizedToolArguments::try_from_provider_text(
+        serde_json::json!({
+            "program": "curl",
+            "arguments": ["https://example.com"],
+            "working_directory": ".",
+            "timeout_seconds": 30,
+        })
+        .to_string(),
+    )
+    .expect("drifted fixture arguments normalize");
+
+    assert!(!ExecEvalCase::ForcedSandboxed.admits(SANDBOXED_EXEC_NAME, &drifted));
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_nonzero_process_result() {
+    let target = SANDBOXED_EXEC_NAME;
+    let outcome = CaseOutcome {
+        target: Some(String::from(target)),
+        execution_completed: true,
+        tool_results: vec![TrackedToolResult {
+            content: serde_json::json!({
+                "outcome": {"kind": "exited", "code": 1},
+            })
+            .to_string(),
+            is_error: false,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: Some(String::from("completed")),
+            requests: vec![RequestSnapshot {
+                name: String::from(target),
+                attempt_disposition: Some(String::from("completed")),
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn unforced_exec_tier_rejects_an_additional_tool_call() {
+    let outcome = CaseOutcome {
+        target: None,
+        execution_completed: true,
+        tool_results: vec![TrackedToolResult {
+            content: String::from("fixture result"),
+            is_error: false,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: Some(String::from("completed")),
+            requests: vec![
+                RequestSnapshot {
+                    name: String::from(SANDBOXED_EXEC_NAME),
+                    attempt_disposition: Some(String::from("completed")),
+                },
+                RequestSnapshot {
+                    name: String::from(CARGO_DIAGNOSTICS_NAME),
+                    attempt_disposition: Some(String::from("completed")),
+                },
+            ],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
         EvalDisposition::Miss
     );
 }
@@ -1292,7 +1497,7 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         markdown.push_str(&format!(
             "| `{target}` | {result} | {} | {} | `{turn}` |\n",
             outcome.snapshot.called_names(),
-            outcome.result_round_trips,
+            outcome.tool_results.len(),
         ));
     }
     let natural = report
@@ -1303,7 +1508,7 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state |\n| --- | --- | ---: | --- |\n| {} | {} | {} | {} |\n\nAll outcomes are report-only; a model miss does not fail this workflow.\n",
         natural.label(),
         report.natural.snapshot.called_names(),
-        report.natural.result_round_trips,
+        report.natural.tool_results.len(),
         report.natural_state.label(),
     ));
     fs::write(summary_path, &markdown)?;
