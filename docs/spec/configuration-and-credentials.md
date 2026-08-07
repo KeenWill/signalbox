@@ -909,8 +909,8 @@ provider rotation, its persistence commit is ambiguous, or the daemon restarts
 with the marker still present, it never replays the stored token. It first
 rereads the durable generation: a committed replacement is adopted; an uncleared
 marker quarantines the profile and requires re-provisioning. After a successful
-replacement commit, the refresh owner publishes the one in-memory access token
-to every joined preparation. A definitely non-rotating failure first clears the
+replacement commit, the refresh task publishes the one in-memory access token to
+every joined preparation. A definitely non-rotating failure first clears the
 marker, then publishes its one typed result. An ambiguous exchange, ambiguous
 commit, or refresh-task loss first commits quarantine from the retained marker,
 then publishes that typed result and wakes every joiner. Cancellation follows
