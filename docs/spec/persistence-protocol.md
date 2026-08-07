@@ -1530,12 +1530,18 @@ current attempt as `WithoutStop(YieldedToDurableWait)` in the same transaction.
 Release atomically consumes the wait and creates its fresh `Prepared` successor
 attempt; `stop_turn` instead atomically consumes it, creates the fresh
 immediate-successor attempt, applies the interrupt proof, ends that attempt
-`AfterCancellation(Cancelled)`, and terminalizes the turn. Each reservation
-stores the child process group's reuse-safe host identity. Startup closes a
-prior-process reservation as lost only after proving that exact group absent or
-terminating it and then proving absence; failure to establish absence fails
-startup before scheduling. It retains reservations owned by the live fenced
-process. These are the shapes required by
+`AfterCancellation(Cancelled)`, and terminalizes the turn. Each reservation has
+a closed `pending_spawn` state with no process identity and a
+`spawned { process_group_identity }` state carrying the child process group's
+reuse-safe host identity. Successful spawn replaces `pending_spawn` with
+`spawned` immediately. Startup closes a prior-process `spawned` reservation as
+lost only after proving that exact group absent or terminating it and then
+proving absence; failure to establish absence fails startup before scheduling.
+It retains a `spawned` reservation owned by the live fenced process. A
+prior-process `pending_spawn` reservation is ambiguous because its child may
+have started before the identity update, so startup fails before scheduling
+rather than releasing it without process-death proof. These are the shapes
+required by
 [turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
 Reconstitution and wake must fail closed on partial, stale, or mismatched
 evidence. This paragraph constrains that future schema; no present storage
