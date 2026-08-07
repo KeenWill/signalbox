@@ -207,6 +207,136 @@ enum DelegationResponse {
     Unexpected,
 }
 
+#[derive(Clone, Copy)]
+enum DelegationRejectionOperation {
+    Spawn,
+    Await { child: CanonicalUuid },
+    Message { peer: CanonicalUuid },
+}
+
+impl DelegationRejectionOperation {
+    const fn is_spawn(self) -> bool {
+        match self {
+            Self::Spawn => true,
+            Self::Await { .. } | Self::Message { .. } => false,
+        }
+    }
+
+    const fn is_await(self) -> bool {
+        match self {
+            Self::Await { .. } => true,
+            Self::Spawn | Self::Message { .. } => false,
+        }
+    }
+
+    const fn is_message(self) -> bool {
+        match self {
+            Self::Message { .. } => true,
+            Self::Spawn | Self::Await { .. } => false,
+        }
+    }
+
+    const fn peer(self) -> Option<CanonicalUuid> {
+        match self {
+            Self::Spawn => None,
+            Self::Await { child } => Some(child),
+            Self::Message { peer } => Some(peer),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DelegationRejectionExpectation {
+    session: CanonicalUuid,
+    turn: CanonicalUuid,
+    tool_request: CanonicalUuid,
+    operation: DelegationRejectionOperation,
+}
+
+fn delegation_rejection_matches(
+    detail: Option<RejectionDetail>,
+    expected: DelegationRejectionExpectation,
+) -> bool {
+    let Some(detail) = detail else {
+        return false;
+    };
+    match detail {
+        RejectionDetail::DelegationRequestNotInTurn {
+            session_id,
+            turn_id,
+            tool_request_id,
+        } => {
+            session_id == expected.session
+                && turn_id == expected.turn
+                && tool_request_id == expected.tool_request
+        }
+        RejectionDetail::DelegationToolRequestNotExecutable {
+            tool_request_id, ..
+        } => tool_request_id == expected.tool_request,
+        RejectionDetail::DelegationSpawnConflict { tool_request_id } => {
+            expected.operation.is_spawn() && tool_request_id == expected.tool_request
+        }
+        RejectionDetail::DelegatedChildIdentityCollision { .. } => expected.operation.is_spawn(),
+        RejectionDetail::DelegationRelationNotFound {
+            session_id,
+            peer_session_id,
+        } => {
+            !expected.operation.is_spawn()
+                && session_id == expected.session
+                && expected.operation.peer() == Some(peer_session_id)
+        }
+        RejectionDetail::DelegationAwaitConflict { tool_request_id } => {
+            expected.operation.is_await() && tool_request_id == expected.tool_request
+        }
+        RejectionDetail::DelegationMessageConflict { tool_request_id } => {
+            expected.operation.is_message() && tool_request_id == expected.tool_request
+        }
+        RejectionDetail::DelegationMessageIdentityCollision { .. } => {
+            expected.operation.is_message()
+        }
+        RejectionDetail::DelegationEventOrdinalExhausted { .. } => {
+            expected.operation.is_await() || expected.operation.is_message()
+        }
+        RejectionDetail::DelegationDeliverySequenceExhausted {
+            recipient_session_id,
+            ..
+        } => match expected.operation {
+            DelegationRejectionOperation::Spawn => false,
+            DelegationRejectionOperation::Await { .. } => recipient_session_id == expected.session,
+            DelegationRejectionOperation::Message { peer } => recipient_session_id == peer,
+        },
+        RejectionDetail::UnsupportedReasoningLevel { .. }
+        | RejectionDetail::UnsupportedFastMode { .. }
+        | RejectionDetail::UnsupportedServiceTier { .. }
+        | RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::SessionPlacementCurrentVersionMismatch { .. }
+        | RejectionDetail::SessionPlacementVersionExhausted { .. }
+        | RejectionDetail::GoalCommandRejected { .. }
+        | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::ActiveTurnMismatch { .. }
+        | RejectionDetail::NoActiveTurn { .. }
+        | RejectionDetail::TurnNotAwaitingReconciliation { .. }
+        | RejectionDetail::InterruptAlreadyApplied { .. }
+        | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
+        | RejectionDetail::SafePointUnavailableWhileStopping { .. }
+        | RejectionDetail::ToolRequestNotFound { .. }
+        | RejectionDetail::ToolRequestAlreadyResolved { .. }
+        | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
+        | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::DefaultsVersionMismatch { .. }
+        | RejectionDetail::UnknownModelAlias { .. }
+        | RejectionDetail::AcceptancePositionExhausted { .. }
+        | RejectionDetail::DefaultsVersionExhausted { .. }
+        | RejectionDetail::ImportedConversationNotFound { .. }
+        | RejectionDetail::ImportedFrontierPositionOutOfRange { .. }
+        | RejectionDetail::ConversationImportAlreadyInProgress {}
+        | RejectionDetail::ConversationImportNotInProgress {}
+        | RejectionDetail::ConversationImportSourceTooLarge { .. }
+        | RejectionDetail::ConversationImportSourceSizeMismatch { .. }
+        | RejectionDetail::ConversationImportConversionFailed { .. } => false,
+    }
+}
+
 fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
     match message {
         ServerMessage::SessionSpawned {
@@ -1160,7 +1290,25 @@ async fn session_delegation(
                     code,
                     message,
                     detail,
-                } => Err(ClientError::remote(code, message, detail).mutation()),
+                } => {
+                    if code == ErrorCode::Rejected
+                        && !delegation_rejection_matches(
+                            detail.value(),
+                            DelegationRejectionExpectation {
+                                session: session_id,
+                                turn: turn_id,
+                                tool_request: tool_request_id,
+                                operation: DelegationRejectionOperation::Spawn,
+                            },
+                        )
+                    {
+                        return Err(ClientError::Protocol(
+                            "spawn returned an incoherent rejection",
+                        )
+                        .mutation());
+                    }
+                    Err(ClientError::remote(code, message, detail).mutation())
+                }
                 DelegationResponse::AwaitRegistered { .. }
                 | DelegationResponse::ChildResult { .. }
                 | DelegationResponse::MessageSent { .. }
@@ -1244,7 +1392,27 @@ async fn session_delegation(
                     code,
                     message,
                     detail,
-                } => Err(ClientError::remote(code, message, detail).mutation()),
+                } => {
+                    if code == ErrorCode::Rejected
+                        && !delegation_rejection_matches(
+                            detail.value(),
+                            DelegationRejectionExpectation {
+                                session: session_id,
+                                turn: turn_id,
+                                tool_request: tool_request_id,
+                                operation: DelegationRejectionOperation::Await {
+                                    child: child_session_id,
+                                },
+                            },
+                        )
+                    {
+                        return Err(ClientError::Protocol(
+                            "await returned an incoherent rejection",
+                        )
+                        .mutation());
+                    }
+                    Err(ClientError::remote(code, message, detail).mutation())
+                }
                 DelegationResponse::Spawned { .. }
                 | DelegationResponse::MessageSent { .. }
                 | DelegationResponse::Unexpected => {
@@ -1300,7 +1468,27 @@ async fn session_delegation(
                     code,
                     message,
                     detail,
-                } => Err(ClientError::remote(code, message, detail).mutation()),
+                } => {
+                    if code == ErrorCode::Rejected
+                        && !delegation_rejection_matches(
+                            detail.value(),
+                            DelegationRejectionExpectation {
+                                session: session_id,
+                                turn: turn_id,
+                                tool_request: tool_request_id,
+                                operation: DelegationRejectionOperation::Message {
+                                    peer: peer_session_id,
+                                },
+                            },
+                        )
+                    {
+                        return Err(ClientError::Protocol(
+                            "message returned an incoherent rejection",
+                        )
+                        .mutation());
+                    }
+                    Err(ClientError::remote(code, message, detail).mutation())
+                }
                 DelegationResponse::Spawned { .. }
                 | DelegationResponse::AwaitRegistered { .. }
                 | DelegationResponse::ChildResult { .. }
@@ -5119,24 +5307,26 @@ mod tests {
     }
 
     use super::{
-        ConversationImportOutcome, ConversationsPageRequest, GoalHistoryReplay,
-        MAX_CONTENT_FRAGMENT_BYTES, MAX_INPUT_CONTENT_BYTES, MAX_REVIEW_FINDINGS_PER_RUN,
-        MAX_REVIEW_JSON_INPUT_BYTES, MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ModelSystemPromptChoice,
-        ProcessClient, ReviewCommand, ReviewConcernsFile, ReviewFindingsFile,
-        SessionMetadataPageRequest, SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument,
-        TurnTerminal, TurnWaitMode, await_turn_terminal, collect_import_paths, continue_imported,
+        ConversationImportOutcome, ConversationsPageRequest, DelegationRejectionExpectation,
+        DelegationRejectionOperation, GoalHistoryReplay, MAX_CONTENT_FRAGMENT_BYTES,
+        MAX_INPUT_CONTENT_BYTES, MAX_REVIEW_FINDINGS_PER_RUN, MAX_REVIEW_JSON_INPUT_BYTES,
+        MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ModelSystemPromptChoice, ProcessClient,
+        ReviewCommand, ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest,
+        SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
+        await_turn_terminal, collect_import_paths, continue_imported,
         conversation_import_chunk_read_limit, conversations, create, decide,
-        decode_goal_mutation_receipt, descendant_scope, import_conversation_file, imported,
-        model_call_recovery_transition, open_scanned_import_source,
-        placement_update_receipt_matches, placement_update_rejection_matches, read_goal_text_file,
-        read_import_file, read_input, read_review_json_file, read_system_prompt_file,
-        reconcile_turn, replace_session_model, replacement_receipt_settings_match, review,
-        review_concern_state_is_coherent, review_finding_event_status,
-        review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
-        review_pass_completion_is_coherent, review_publication_state_is_coherent,
-        review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
-        source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
-        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
+        decode_goal_mutation_receipt, delegation_rejection_matches, descendant_scope,
+        import_conversation_file, imported, model_call_recovery_transition,
+        open_scanned_import_source, placement_update_receipt_matches,
+        placement_update_rejection_matches, read_goal_text_file, read_import_file, read_input,
+        read_review_json_file, read_system_prompt_file, reconcile_turn, replace_session_model,
+        replacement_receipt_settings_match, review, review_concern_state_is_coherent,
+        review_finding_event_status, review_judgment_effect_state_is_coherent,
+        review_judgment_plan_state_is_coherent, review_pass_completion_is_coherent,
+        review_publication_state_is_coherent, review_repair_state_is_coherent, run, search,
+        session_recovery_transition, socket_path, source_fits_single_shot_import, stop_turn,
+        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
+        tool_recovery_transition,
     };
     use crate::{child_lifecycle_terminalization, error::ClientError, presentation::Output};
 
@@ -5146,6 +5336,164 @@ mod tests {
 
     fn followed_session() -> CanonicalUuid {
         CanonicalUuid::from_uuid(Uuid::from_u128(FOLLOWED_SESSION_IDENTITY))
+    }
+
+    fn delegation_rejection_expectation(
+        operation: DelegationRejectionOperation,
+    ) -> DelegationRejectionExpectation {
+        DelegationRejectionExpectation {
+            session: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            turn: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            tool_request: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+            operation,
+        }
+    }
+
+    /// INV-033: spawn rejection evidence names the exact logical tool request.
+    #[test]
+    fn inv033_spawn_rejection_requires_exact_tool_request() {
+        let expected = delegation_rejection_expectation(DelegationRejectionOperation::Spawn);
+        let exact = RejectionDetail::DelegationSpawnConflict {
+            tool_request_id: expected.tool_request,
+        };
+        let cross_wired = RejectionDetail::DelegationSpawnConflict {
+            tool_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+        };
+
+        assert!(delegation_rejection_matches(Some(exact), expected));
+        assert!(!delegation_rejection_matches(Some(cross_wired), expected));
+    }
+
+    /// INV-033: a spawn mutation cannot accept an await-family rejection.
+    #[test]
+    fn inv033_spawn_rejection_rejects_await_family() {
+        let expected = delegation_rejection_expectation(DelegationRejectionOperation::Spawn);
+        let await_rejection = RejectionDetail::DelegationAwaitConflict {
+            tool_request_id: expected.tool_request,
+        };
+
+        assert!(!delegation_rejection_matches(
+            Some(await_rejection),
+            expected
+        ));
+    }
+
+    /// INV-033: common delegation rejection evidence repeats the exact
+    /// request-supplied session, turn, and logical request identities.
+    #[test]
+    fn inv033_await_rejection_requires_exact_request_tuple() {
+        let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let expected =
+            delegation_rejection_expectation(DelegationRejectionOperation::Await { child });
+        let exact = RejectionDetail::DelegationRequestNotInTurn {
+            session_id: expected.session,
+            turn_id: expected.turn,
+            tool_request_id: expected.tool_request,
+        };
+        let cross_wired = RejectionDetail::DelegationRequestNotInTurn {
+            session_id: expected.session,
+            turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+            tool_request_id: expected.tool_request,
+        };
+
+        assert!(delegation_rejection_matches(Some(exact), expected));
+        assert!(!delegation_rejection_matches(Some(cross_wired), expected));
+    }
+
+    /// INV-033: await missing-relationship evidence repeats both requested
+    /// endpoints.
+    #[test]
+    fn inv033_await_rejection_requires_exact_relationship_endpoints() {
+        let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let expected =
+            delegation_rejection_expectation(DelegationRejectionOperation::Await { child });
+        let exact = RejectionDetail::DelegationRelationNotFound {
+            session_id: expected.session,
+            peer_session_id: child,
+        };
+        let cross_wired = RejectionDetail::DelegationRelationNotFound {
+            session_id: expected.session,
+            peer_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+        };
+
+        assert!(delegation_rejection_matches(Some(exact), expected));
+        assert!(!delegation_rejection_matches(Some(cross_wired), expected));
+    }
+
+    /// INV-033: await delivery exhaustion names the requesting parent as the
+    /// result recipient.
+    #[test]
+    fn inv033_await_delivery_exhaustion_requires_parent_recipient() {
+        let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let expected =
+            delegation_rejection_expectation(DelegationRejectionOperation::Await { child });
+        let exact = RejectionDetail::DelegationDeliverySequenceExhausted {
+            recipient_session_id: expected.session,
+            last: CanonicalU64::new(u64::MAX),
+        };
+        let cross_wired = RejectionDetail::DelegationDeliverySequenceExhausted {
+            recipient_session_id: child,
+            last: CanonicalU64::new(u64::MAX),
+        };
+
+        assert!(delegation_rejection_matches(Some(exact), expected));
+        assert!(!delegation_rejection_matches(Some(cross_wired), expected));
+    }
+
+    /// INV-033: message missing-relationship evidence repeats both requested
+    /// endpoints.
+    #[test]
+    fn inv033_message_rejection_requires_exact_relationship_endpoints() {
+        let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let expected =
+            delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
+        let exact = RejectionDetail::DelegationRelationNotFound {
+            session_id: expected.session,
+            peer_session_id: peer,
+        };
+        let cross_wired = RejectionDetail::DelegationRelationNotFound {
+            session_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+            peer_session_id: peer,
+        };
+
+        assert!(delegation_rejection_matches(Some(exact), expected));
+        assert!(!delegation_rejection_matches(Some(cross_wired), expected));
+    }
+
+    /// INV-033: message delivery exhaustion names the requested peer as its
+    /// recipient.
+    #[test]
+    fn inv033_message_delivery_exhaustion_requires_peer_recipient() {
+        let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let expected =
+            delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
+        let exact = RejectionDetail::DelegationDeliverySequenceExhausted {
+            recipient_session_id: peer,
+            last: CanonicalU64::new(u64::MAX),
+        };
+        let cross_wired = RejectionDetail::DelegationDeliverySequenceExhausted {
+            recipient_session_id: expected.session,
+            last: CanonicalU64::new(u64::MAX),
+        };
+
+        assert!(delegation_rejection_matches(Some(exact), expected));
+        assert!(!delegation_rejection_matches(Some(cross_wired), expected));
+    }
+
+    /// INV-033: a message mutation cannot accept an await-family rejection.
+    #[test]
+    fn inv033_message_rejection_rejects_await_family() {
+        let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let expected =
+            delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
+        let await_rejection = RejectionDetail::DelegationAwaitConflict {
+            tool_request_id: expected.tool_request,
+        };
+
+        assert!(!delegation_rejection_matches(
+            Some(await_rejection),
+            expected
+        ));
     }
 
     async fn accept_request_and_reply(
