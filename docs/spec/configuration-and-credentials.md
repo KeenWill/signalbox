@@ -496,16 +496,19 @@ record with its own exact `model_family`, provider model, `max_output_tokens`,
 and `context_window_tokens`. Every serving record states its family, and that
 family must name one declared `[[adapter_mappings]]` entry; the mapping, not the
 selectable record naming the target, supplies the serving record's adapter and
-credential profile, so nothing is inferred from the pointing model. A serving
-record omitting `model_family`, or naming an unmapped one, is a typed startup
-failure. Startup rejects a missing, selectable, cross-adapter, or otherwise
-conflicting alternate target. An enabled call uses that serving record's
-provider identity and output-token request limit, while the client's durable
-selection remains unchanged. Capability values are validated against the
-selected adapter's explicit mapping table during startup, so an adapter cannot
-silently drop a configured setting. Input guarding, output reservation, and
-post-response usage enforcement use the effective serving record's limits for
-that enabled call rather than the selectable source record's limits.
+credential profile, so nothing is inferred from the pointing model. Because the
+durable credential remains pinned through the selectable model's family, the
+serving mapping must select the same credential profile. A serving record
+omitting `model_family`, naming an unmapped one, or selecting another profile is
+a typed startup failure. Startup also rejects a missing, selectable,
+cross-adapter, or otherwise conflicting alternate target. An enabled call uses
+that serving record's provider identity and output-token request limit, while
+the client's durable selection remains unchanged. Capability values are
+validated against the selected adapter's explicit mapping table during startup,
+so an adapter cannot silently drop a configured setting. Input guarding, output
+reservation, and post-response usage enforcement use the effective serving
+record's limits for that enabled call rather than the selectable source record's
+limits.
 
 The conversation-import bound was verified against PR #401
 (`agent/import-chunks-protocol`). The optional `[conversation_import]` table has

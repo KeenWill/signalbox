@@ -82,6 +82,9 @@ members = [
   { profile = "anthropic-primary", priority = 1 },
   { profile = "anthropic-overflow", priority = 2 },
 ]
+# This parser slice validates and retains trigger policy but does not yet observe
+# provider failures, rotate members, or quarantine profiles. Calls continue to
+# select the preferred member above until the selection slice lands.
 on_quota_exhausted = "switch_now"
 on_rate_limited = "switch_now"
 on_overloaded = "switch_next_turn"
@@ -115,8 +118,9 @@ credential_pool = "anthropic-main"
 # This is the delivery that supports several subscription accounts in one pool:
 # nothing is shared or written back, so concurrent invocations cannot collide.
 # The OAuth client and endpoints are yours to choose; nothing here is a
-# build-provided constant. Provision with:
-#   signalbox credential provision --profile codex-subscription-primary
+# build-provided constant. This build has no provisioning command or runtime
+# delivery for this committed syntax, so uncommenting it remains a typed startup
+# error until the OAuth delivery slice lands.
 # [[credential_profiles]]
 # name = "codex-subscription-primary"
 # adapter = "codex_cli"

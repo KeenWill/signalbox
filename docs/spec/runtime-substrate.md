@@ -19,8 +19,10 @@ ambient-skill catalog probe, and pinned version were verified against the
 twice-daily schedule and workflow-self-change trigger were verified through PR
 #471 (`agent/codex-smoke-schedule`). The `signalboxd` names this page states for
 the composition root, its telemetry, and the production `FileCredentialAccess`
-were verified through PR #258 (`agent/signalboxd-rename`); the Anthropic
-adapter's server-side `fallback`-block recognition was verified through PR #280
+were verified through PR #258 (`agent/signalboxd-rename`); the Anthropic and
+OpenAI adapter-scoped file catalogs are verified against this PR
+(`agent/credential-pools-parser`). The Anthropic adapter's server-side
+`fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The HTTP fallback-body redaction
 ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
 persistence-repository families in the operator-failure inventory were verified
@@ -1061,8 +1063,9 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
   secret bytes.
 - The production implementation is signalboxd's `FileCredentialAccess`.
-  Composition supplies the complete map of every `file` profile reference to its
-  catalog path, whatever direct HTTP adapter consumes it. Each resolve rereads
+  Composition supplies each direct HTTP adapter with the complete map of every
+  `file` profile reference declared for that adapter to its catalog path. A
+  profile declared for another adapter remains unmapped. Each resolve rereads
   the mapped file and feeds the selected runtime.
 - The resolved value is scoped to the one prepared request as a
   sensitivity-marked HTTP header; execute performs no second lookup.
