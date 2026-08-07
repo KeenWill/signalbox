@@ -1126,7 +1126,22 @@ impl CaseSnapshot {
                     arguments_text: arguments.clone(),
                     attempt_succeeded: successful_requests.contains(&request.into_uuid()),
                 }),
-                _ => None,
+                ProcessTranscriptEntry::AssistantToolUse { .. }
+                | ProcessTranscriptEntry::DelegatedTask { .. }
+                | ProcessTranscriptEntry::DelegationMessage { .. }
+                | ProcessTranscriptEntry::DelegationResult { .. }
+                | ProcessTranscriptEntry::ModelIdentityChanged { .. }
+                | ProcessTranscriptEntry::ContextSummary { .. }
+                | ProcessTranscriptEntry::User { .. }
+                | ProcessTranscriptEntry::Assistant { .. }
+                | ProcessTranscriptEntry::ToolExecutionResult { .. }
+                | ProcessTranscriptEntry::ToolDenied { .. }
+                | ProcessTranscriptEntry::ToolClosed { .. }
+                | ProcessTranscriptEntry::TurnFailed { .. }
+                | ProcessTranscriptEntry::TurnCompleted { .. }
+                | ProcessTranscriptEntry::TurnCancelled { .. }
+                | ProcessTranscriptEntry::ImportedText { .. }
+                | ProcessTranscriptEntry::Imported { .. } => None,
             })
             .collect();
         let model_calls = i64::try_from(
