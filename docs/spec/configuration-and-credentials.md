@@ -840,13 +840,13 @@ descriptor-relative operations that reject symlinks. Normal completion removes
 the home before returning. Before accepting work at every startup, the daemon
 scavenges every entry it can prove is an owned scratch home beneath that root;
 an ownership, type, or containment mismatch fails startup and removes nothing.
-Thus a host or daemon crash can leave only owner-restricted residue until the
-next startup, never an indefinitely trusted login store. The interactive flow
-therefore stays in the provider's own client. Because each authorization mints
-an independent token family, provisioning neither disturbs nor depends on any
-other login for that account: an operator's existing CLI logins on this or any
-other machine keep working, and deleting the profile's stored authorization ends
-only the daemon's own family.
+Thus a host or daemon crash can leave only effective-user-restricted residue
+until the next startup, never an indefinitely trusted login store. The
+interactive flow therefore stays in the provider's own client. Because each
+authorization mints an independent token family, provisioning neither disturbs
+nor depends on any other login for that account: an operator's existing CLI
+logins on this or any other machine keep working, and deleting the profile's
+stored authorization ends only the daemon's own family.
 
 The daemon is the sole refresher of a stored authorization. Before contacting
 the provider, it locks the profile row, reads the stored token, and
