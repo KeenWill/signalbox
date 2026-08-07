@@ -1401,7 +1401,7 @@ mod tests {
 
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
-        let configured_target_dir = configured_cargo_target_dir();
+        let configured_target_dir = configured_cargo_target_dir(&current);
         let default_target_dir = cargo_metadata_target_dir();
         let known_targets = rustc_target_names();
         reject_unrecognized_default_target(
@@ -1419,11 +1419,22 @@ mod tests {
         )
     }
 
-    fn configured_cargo_target_dir() -> Option<PathBuf> {
+    fn configured_cargo_target_dir(current: &Path) -> Option<PathBuf> {
         let configured = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR")?);
-        configured
-            .is_absolute()
-            .then(|| canonicalized_target_dir(&configured))
+        let configured = configured_cargo_target_dir_for(current, &configured);
+        Some(canonicalized_target_dir(&configured))
+    }
+
+    fn configured_cargo_target_dir_for(current: &Path, configured: &Path) -> PathBuf {
+        if configured.is_absolute() {
+            return configured.to_path_buf();
+        }
+        let configured = lexically_normalized(configured);
+        current
+            .ancestors()
+            .find(|ancestor| ancestor.ends_with(&configured))
+            .expect("relative Cargo target directory is an ancestor of the test executable")
+            .to_path_buf()
     }
 
     fn canonicalized_target_dir(configured: &Path) -> PathBuf {
@@ -1774,6 +1785,28 @@ mod tests {
         });
     }
 
+    #[test]
+    fn bridge_artifact_selection_preserves_a_target_with_a_relative_configured_directory() {
+        let invocation = Path::new("synthetic-invocation");
+        let target_dir = invocation.join("relative-target");
+        let executable = target_dir
+            .join(SYNTHETIC_CARGO_TARGET)
+            .join("debug/deps/daemon-tools-test");
+        let configured_target_dir =
+            configured_cargo_target_dir_for(&executable, Path::new("relative-target"));
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: &target_dir,
+            configured_target_dir: Some(&configured_target_dir),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: Some(SYNTHETIC_CARGO_TARGET),
+            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
+        });
+    }
+
     const BRIDGE_BUILD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
     const BRIDGE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
     const BRIDGE_EXIT_TIMEOUT: Duration = Duration::from_secs(12);
@@ -1917,6 +1950,7 @@ mod tests {
         reader.join().expect("descendant stderr reader exits");
     }
 
+    #[track_caller]
     fn ensure_claude_mcp_bridge_executable() -> PathBuf {
         let _build_guard = BRIDGE_BUILD_LOCK
             .lock()
@@ -1971,6 +2005,7 @@ mod tests {
         executable
     }
 
+    #[track_caller]
     fn require_direct_bridge_execution(selection: &BridgeArtifactSelection) {
         assert!(
             selection.target.is_none(),
@@ -2097,17 +2132,25 @@ mod tests {
         }
     }
 
+    const SYNTHETIC_BRIDGE_READER_ERROR_KIND: ErrorKind = ErrorKind::BrokenPipe;
+
     struct FailingBridgeReader;
 
     impl Read for FailingBridgeReader {
         fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::new(ErrorKind::BrokenPipe, "synthetic failure"))
+            Err(io::Error::new(
+                SYNTHETIC_BRIDGE_READER_ERROR_KIND,
+                "synthetic failure",
+            ))
         }
     }
 
     impl BufRead for FailingBridgeReader {
         fn fill_buf(&mut self) -> io::Result<&[u8]> {
-            Err(io::Error::new(ErrorKind::BrokenPipe, "synthetic failure"))
+            Err(io::Error::new(
+                SYNTHETIC_BRIDGE_READER_ERROR_KIND,
+                "synthetic failure",
+            ))
         }
 
         fn consume(&mut self, _amount: usize) {}
@@ -2169,7 +2212,7 @@ mod tests {
             .recv_timeout(BRIDGE_RESPONSE_TIMEOUT)
             .expect("failure arrives")
             .expect_err("read failure is preserved");
-        assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+        assert_eq!(error.kind(), SYNTHETIC_BRIDGE_READER_ERROR_KIND);
         reader.join().expect("response reader exits");
     }
 
@@ -2785,6 +2828,7 @@ mod tests {
     }
 
     impl McpBridgeFixture {
+        #[track_caller]
         fn start() -> Self {
             let workspace = tempfile::tempdir().expect("workspace root exists");
             let catalog = mapped_daemon_catalog(workspace.path());
