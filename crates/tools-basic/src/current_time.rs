@@ -356,7 +356,7 @@ mod tests {
 
     use super::*;
     use signalbox_application::{
-        InProcessToolDispatchGate, PrepareToolContinuationOutcome,
+        CorrelatedDurableChildWait, InProcessToolDispatchGate, PrepareToolContinuationOutcome,
         RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus, ToolCatalog,
         ToolCatalogValidationFailure, ToolContinuationIdentities, ToolCrashClosureIdentities,
         ToolDefinition, ToolExecutionService, ToolExecutionServiceOutcome,
@@ -489,6 +489,20 @@ mod tests {
             _attempt: TurnAttemptId,
         ) -> Result<bool, Self::Error> {
             panic!("current-time fixtures never contain a delegated child wait")
+        }
+
+        async fn reread_durable_child_wait(
+            &mut self,
+            _wait: CorrelatedDurableChildWait,
+        ) -> Result<bool, Self::Error> {
+            panic!("current-time fixtures never park on a delegated child wait")
+        }
+
+        async fn reread_durable_completion(
+            &mut self,
+            _correlation: signalbox_domain::ToolAttemptDispatchCorrelation,
+        ) -> Result<bool, Self::Error> {
+            panic!("current-time fixtures never report a durable completion")
         }
 
         async fn load_active_batch(

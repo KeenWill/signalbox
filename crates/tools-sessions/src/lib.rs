@@ -341,6 +341,13 @@ pub struct DeliveredChildResult {
 }
 
 impl DeliveredChildResult {
+    /// Projects an outcome already selected by the persistence boundary's
+    /// exact foreground-wait correlation query.
+    pub fn from_stored_outcome(wait: DelegationWait, outcome: DelegationOutcome) -> Option<Self> {
+        (wait.mode() == DelegationWaitMode::Foreground && outcome_is_deliverable(&outcome))
+            .then_some(Self { wait, outcome })
+    }
+
     /// Admits only a deliverable outcome event from the exact validated relation.
     pub fn try_new(
         wait: DelegationWait,
@@ -353,21 +360,12 @@ impl DeliveredChildResult {
                 event: Box::new(event.clone()),
             });
         };
-        let valid_kind = match outcome.kind() {
-            DelegationOutcomeKind::ResultReturned
-            | DelegationOutcomeKind::ChildFailed
-            | DelegationOutcomeKind::ChildStopped
-            | DelegationOutcomeKind::ChildCancelled => true,
-            DelegationOutcomeKind::AlreadyTerminal | DelegationOutcomeKind::ContinueRunning => {
-                false
-            }
-        };
         if wait.mode() != DelegationWaitMode::Foreground
             || wait.spawning_request() != relation.spawning_request()
             || wait.parent() != relation.parent()
             || wait.child() != relation.child()
             || relation.lifecycle() != signalbox_domain::DelegationLifecycle::Terminal
-            || !valid_kind
+            || !outcome_is_deliverable(outcome)
             || !relation.events().iter().any(|candidate| candidate == event)
         {
             return Err(DeliveredChildResultError {
@@ -412,6 +410,16 @@ impl DeliveredChildResult {
     }
 }
 
+const fn outcome_is_deliverable(outcome: &DelegationOutcome) -> bool {
+    match outcome.kind() {
+        DelegationOutcomeKind::ResultReturned
+        | DelegationOutcomeKind::ChildFailed
+        | DelegationOutcomeKind::ChildStopped
+        | DelegationOutcomeKind::ChildCancelled => true,
+        DelegationOutcomeKind::AlreadyTerminal | DelegationOutcomeKind::ContinueRunning => false,
+    }
+}
+
 /// A nonterminal or cross-wired relationship event was offered for delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveredChildResultError {
@@ -441,6 +449,8 @@ pub enum SessionDelegationPortOutcome<Value> {
     Applied(Value),
     /// Domain or durable admission definitively refused the request.
     Rejected,
+    /// A definitive refusal and its known-failed attempt end are already durable.
+    DurablyRejected,
 }
 
 /// Nonblocking result of registering or observing one child wait.
@@ -455,6 +465,8 @@ pub enum AwaitSessionPortOutcome {
     ForegroundPending(DelegationWait),
     /// Domain or durable admission definitively refused the request.
     Rejected,
+    /// A definitive refusal and its known-failed attempt end are already durable.
+    DurablyRejected,
 }
 
 /// Nonblocking durable boundary for the session-delegation tool family.
@@ -944,14 +956,12 @@ where
             UnboundExecutionDisposition::Completed(evidence) => Ok(
                 SessionDelegationExecutionDisposition::Completed(invocation.bind(evidence)),
             ),
-            UnboundExecutionDisposition::DurableCompletion(
-                ToolExecutorEvidence::CompletedText(_),
-            ) => Ok(SessionDelegationExecutionDisposition::DurableCompletion(
-                invocation.durable_completion(),
-            )),
-            UnboundExecutionDisposition::DurableCompletion(
-                ToolExecutorEvidence::KnownFailed { .. } | ToolExecutorEvidence::Ambiguous,
-            ) => Err(SessionDelegationExecutorError::PortContract),
+            UnboundExecutionDisposition::DurableCompletion(evidence) => {
+                let _ = evidence;
+                Ok(SessionDelegationExecutionDisposition::DurableCompletion(
+                    invocation.durable_completion(),
+                ))
+            }
             UnboundExecutionDisposition::ForegroundDelivered(result) => {
                 Ok(SessionDelegationExecutionDisposition::ForegroundDelivered(
                     ForegroundAwaitDelivered {
@@ -990,6 +1000,7 @@ where
                         durably_completed(encode_spawn_receipt(receipt)?)
                     }
                     SessionDelegationPortOutcome::Rejected => self.rejected(),
+                    SessionDelegationPortOutcome::DurablyRejected => self.durably_rejected(),
                     SessionDelegationPortOutcome::Applied(_) => {
                         Err(SessionDelegationExecutorError::PortContract)
                     }
@@ -1033,6 +1044,7 @@ where
                         Ok(UnboundExecutionDisposition::ForegroundPending(wait))
                     }
                     AwaitSessionPortOutcome::Rejected => self.rejected(),
+                    AwaitSessionPortOutcome::DurablyRejected => self.durably_rejected(),
                     AwaitSessionPortOutcome::BackgroundRegistered(_)
                     | AwaitSessionPortOutcome::Delivered(_)
                     | AwaitSessionPortOutcome::ForegroundPending(_) => {
@@ -1053,6 +1065,7 @@ where
                         durably_completed(encode_message_receipt(receipt)?)
                     }
                     SessionDelegationPortOutcome::Rejected => self.rejected(),
+                    SessionDelegationPortOutcome::DurablyRejected => self.durably_rejected(),
                 }
             }
         }
@@ -1062,6 +1075,16 @@ where
         &self,
     ) -> Result<UnboundExecutionDisposition, SessionDelegationExecutorError<Port::Error>> {
         Ok(UnboundExecutionDisposition::Completed(
+            ToolExecutorEvidence::KnownFailed {
+                detail: Some(self.rejected_detail.clone()),
+            },
+        ))
+    }
+
+    fn durably_rejected(
+        &self,
+    ) -> Result<UnboundExecutionDisposition, SessionDelegationExecutorError<Port::Error>> {
+        Ok(UnboundExecutionDisposition::DurableCompletion(
             ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.rejected_detail.clone()),
             },
