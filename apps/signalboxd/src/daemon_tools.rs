@@ -1396,9 +1396,7 @@ mod tests {
     }
 
     fn configured_cargo_target_dir(workspace: &Path) -> Option<PathBuf> {
-        let Some(configured) = std::env::var_os("CARGO_TARGET_DIR") else {
-            return None;
-        };
+        let configured = std::env::var_os("CARGO_TARGET_DIR")?;
         let configured = PathBuf::from(configured);
         if configured.is_absolute() {
             Some(configured)
