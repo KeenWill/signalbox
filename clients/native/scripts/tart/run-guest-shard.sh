@@ -34,11 +34,7 @@ Environment:
   SCREENSHOT_DEVICE_NAMES       Override screenshot device list.
   SCREENSHOT_STATE_NAMES        Limit screenshot states.
   TART_SERVER_URL                  Server URL reachable from inside the VM.
-  TART_SECRET_ENV_PATH          Optional mounted dotenv file containing
-                                SIGNALBOX_NATIVE_REAL_SERVER_API_KEY.
   SIGNALBOX_NATIVE_REAL_SERVER_URL   Real-smoke server URL override.
-  SIGNALBOX_NATIVE_REAL_SERVER_API_KEY
-                                Real-smoke API key override; not printed.
 EOF
 }
 
@@ -73,9 +69,6 @@ run_step() {
 
 load_server_environment_if_present() {
 	load_known_dotenv_keys_if_present "$SERVER_ENV_ROOT/.env" preserve
-	if [[ -n "${TART_SECRET_ENV_PATH:-}" ]]; then
-		load_known_dotenv_keys_if_present "$TART_SECRET_ENV_PATH" override
-	fi
 }
 
 load_known_dotenv_keys_if_present() {
@@ -128,11 +121,6 @@ assign_known_dotenv_key() {
 	local assignment_policy="$3"
 
 	case "$key" in
-	SIGNALBOX_API_KEY)
-		if should_assign_dotenv_key SIGNALBOX_API_KEY "$assignment_policy"; then
-			export SIGNALBOX_API_KEY="$value"
-		fi
-		;;
 	SIGNALBOX_BASE_URL)
 		if should_assign_dotenv_key SIGNALBOX_BASE_URL "$assignment_policy"; then
 			export SIGNALBOX_BASE_URL="$value"
@@ -141,11 +129,6 @@ assign_known_dotenv_key() {
 	SIGNALBOX_NATIVE_REAL_SERVER_URL)
 		if should_assign_dotenv_key SIGNALBOX_NATIVE_REAL_SERVER_URL "$assignment_policy"; then
 			export SIGNALBOX_NATIVE_REAL_SERVER_URL="$value"
-		fi
-		;;
-	SIGNALBOX_NATIVE_REAL_SERVER_API_KEY)
-		if should_assign_dotenv_key SIGNALBOX_NATIVE_REAL_SERVER_API_KEY "$assignment_policy"; then
-			export SIGNALBOX_NATIVE_REAL_SERVER_API_KEY="$value"
 		fi
 		;;
 	esac
@@ -188,31 +171,12 @@ resolved_real_server_url() {
 	host_router_server_url
 }
 
-resolved_real_server_api_key() {
-	if [[ -n "${SIGNALBOX_NATIVE_REAL_SERVER_API_KEY:-}" ]]; then
-		printf '%s\n' "$SIGNALBOX_NATIVE_REAL_SERVER_API_KEY"
-		return 0
-	fi
-	if [[ -n "${SIGNALBOX_API_KEY:-}" ]]; then
-		printf '%s\n' "$SIGNALBOX_API_KEY"
-		return 0
-	fi
-	return 1
-}
-
-# The two helpers below have parenthesised bodies, so they always run in a
-# subshell. Environment-file values loaded inside them stay in that subshell and
-# never become exported state of the shard process, which keeps the real server
-# API key out of every build/test process except the one command that is given
-# it explicitly.
+# Parenthesised body, so this always runs in a subshell. Environment-file
+# values loaded inside it stay in that subshell and never become exported
+# state of the shard process.
 load_and_resolve_real_server_url() (
 	load_server_environment_if_present
 	resolved_real_server_url
-)
-
-load_and_resolve_real_server_api_key() (
-	load_server_environment_if_present
-	resolved_real_server_api_key
 )
 
 assert_xcresult_passed() {

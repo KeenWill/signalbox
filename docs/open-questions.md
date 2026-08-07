@@ -236,15 +236,38 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
 ## Model fallback and provenance
 
-- **Whether version one supports automatic fallback.** Leaning: none until an
-  explicit policy is justified. Deferrable for the first provider slice. (S22,
-  S23)
-- **Which failure classes permit fallback, if it exists.** Leaning: narrow
-  allowlist of classified availability failures; refusal alone never qualifies.
-  Blocks fallback. (S22, S23)
-- **Fallback configuration and visibility.** Requires explicit session/turn
-  policy, per-call provenance, and clear UI; no constructible fallback
-  configuration exists in the baseline. Blocks fallback. (S20, S22)
+- **Whether automatic fallback is supported.** Decided: a classified
+  availability failure may be followed by a distinct successor model call
+  authenticated by another credential profile. The compatibility constraint this
+  places on present change is recorded in
+  [one call, one physical interaction](spec/model-call-execution.md#one-call-one-physical-interaction);
+  no present surface implements it. (S22, S23)
+- **Which failure classes permit fallback.** Decided: only provider quota
+  exhaustion, rate limiting, and overload accompanied by distinct typed evidence
+  that the request was not accepted. The availability classification alone is
+  insufficient. Refusal never qualifies. An ambiguous outcome never qualifies,
+  because a lost acknowledgement cannot prove the provider did not act
+  (INV-025). Credential resolution failure never qualifies: it is deployment
+  misconfiguration, and substitution would hide it. (S22, S23)
+- **Fallback configuration.** Decided in shape: a deployment groups
+  interchangeable credential profiles into a pool, ranks each membership within
+  its own pool rather than globally, and states the per-trigger response,
+  tie-break rule, and pool-exhaustion behavior as closed vocabularies admitted
+  at startup. Exact configuration grammar is an implementation choice for the
+  change that introduces it. What remains open is the per-turn client visibility
+  surface while a successor call is selected. (S20, S22)
+- **Whether an automatic successor may cross adapter kinds.** Decided for the
+  first slice: no. A pool's members share one adapter, so cross-kind
+  substitution is inexpressible rather than merely disabled, and moving a
+  session between adapter kinds stays an explicit defaults replacement. Whether
+  mixed pools are ever admitted remains open. (S22)
+- **Provider headroom observation.** Selecting a profile by remaining capacity
+  requires an observation surface no adapter currently captures: the Anthropic
+  HTTP adapter reads only a request identifier from response headers, and the
+  Codex CLI adapter's documented percentage headers are not established as
+  reachable through its process boundary. Which adapters can supply headroom,
+  and what a deployment may configure where none can, remains undecided. Blocks
+  capacity-aware selection, not availability failover. (S22)
 - **Detailed provider provenance representation.** Model identifier
   normalization is decided: the
   [provider-target identity rule](spec/model-call-execution.md#provider-target-identity)
@@ -255,10 +278,13 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   the durable per-call provenance schema that would record the concrete served
   identity and a substitution as evidence rather than as operator diagnostics
   and a fail-closed error. Blocks the provider provenance schema. (S20–S23)
-- **Future known-provider-failure retry.** Version one never automatically
-  retries a known or ambiguous provider failure; any later retry command or
-  policy, including backoff and resource limits, is a separate decision the
-  accepted no-retry policy leaves open. Blocks retry features. (S02, S04, S22)
+- **Future same-profile retry.** Repeating a known provider failure or ambiguous
+  outcome against the target and credential profile that produced it remains
+  outside every accepted policy; the successor-call decision above authorizes
+  same-target failover through another eligible profile, never a repeat of the
+  same profile. Any later same-profile retry command or policy, including
+  backoff and resource limits, is a separate decision the accepted no-retry
+  policy leaves open. Blocks retry features. (S02, S04, S22)
 
 ## Scheduling and runners
 
