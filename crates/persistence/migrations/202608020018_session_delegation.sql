@@ -2379,13 +2379,14 @@ BEGIN
 END;
 $$;
 
--- A descendant-scoped parent command takes the complete relationship frontier
--- before its repository can allocate any outbox sequence. Spawn admission takes
--- the same parent-session lock first, so the two writers never invert the
--- session/outbox order. Re-evaluate after waits because each statement gets a
--- fresh READ COMMITTED snapshot and may reveal a spawn that committed while a
--- parent lock was being acquired.
-CREATE FUNCTION lock_delegation_termination_frontier(
+-- A descendant-scoped parent command first takes the complete session frontier
+-- before its ordinary root and scheduler locks. Its command trigger later
+-- completes the relationship frontier before any outbox allocation. Spawn
+-- admission takes the same parent-session lock first, so the writers never
+-- invert the session/outbox order. Re-evaluate after waits because each
+-- statement gets a fresh READ COMMITTED snapshot and may reveal a spawn that
+-- committed while a parent lock was being acquired.
+CREATE FUNCTION lock_delegation_termination_session_frontier(
     checked_root_session uuid,
     checked_root_kind text
 )
@@ -2399,6 +2400,10 @@ BEGIN
           FROM session
          WHERE session_id IN (
             SELECT checked_root_session
+            UNION
+            SELECT relation.parent_session_id
+              FROM session_delegation AS relation
+             WHERE relation.child_session_id = checked_root_session
             UNION
             SELECT frontier.parent_session_id
               FROM delegation_cascade_expected_frontier(
@@ -2420,7 +2425,19 @@ BEGIN
         EXIT WHEN current_edge_count = prior_edge_count;
         prior_edge_count := current_edge_count;
     END LOOP;
+END;
+$$;
 
+CREATE FUNCTION lock_delegation_termination_frontier(
+    checked_root_session uuid,
+    checked_root_kind text
+)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM lock_delegation_termination_session_frontier(
+        checked_root_session,
+        checked_root_kind
+    );
     PERFORM 1
       FROM session_delegation
      WHERE spawning_tool_request_id IN (

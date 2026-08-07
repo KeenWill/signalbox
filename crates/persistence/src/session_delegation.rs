@@ -1395,6 +1395,25 @@ async fn validate_wait_replay_update(
                 update.storage_version, update.session_id, update.update_kind,
                 update.spawning_tool_request_id, update.child_session_id,
                 update.awaiting_tool_request_id, update.wait_mode,
+                (update.policy_kind IS NULL
+                    AND update.on_parent_stopped IS NULL
+                    AND update.on_parent_cancelled IS NULL
+                    AND update.delegation_event_ordinal IS NULL
+                    AND update.delegation_event_kind IS NULL
+                    AND update.outcome_kind IS NULL
+                    AND update.reason_kind IS NULL
+                    AND update.provenance_kind IS NULL
+                    AND update.provenance_session_id IS NULL
+                    AND update.provenance_turn_id IS NULL
+                    AND update.provenance_goal_generation IS NULL
+                    AND update.provenance_command_id IS NULL
+                    AND update.result_spawning_request_id IS NULL
+                    AND update.message_id IS NULL
+                    AND update.sender_session_id IS NULL
+                    AND update.recipient_session_id IS NULL
+                    AND update.message_ordinal IS NULL
+                    AND update.content_text IS NULL)
+                    AS unused_subject_fields_absent,
                 header.event_sequence AS header_event_sequence,
                 header.event_kind AS header_event_kind,
                 header.storage_version AS header_storage_version,
@@ -1429,6 +1448,7 @@ async fn validate_wait_replay_update(
         || tool_request_id_from_uuid(required(&row, "awaiting_tool_request_id")?)
             != wait.awaiting_request()
         || required::<String>(&row, "wait_mode")? != delegation_wait_mode_to_str(wait.mode())
+        || !required::<bool>(&row, "unused_subject_fields_absent")?
     {
         return Err(SessionDelegationCorruption::Inconsistent("stored wait update").into());
     }
@@ -1715,12 +1735,16 @@ fn validate_spawn_event(
     let request = tool_request_id_from_uuid(required(row, "provenance_tool_request_id")?);
     let goal_generation: Option<Decimal> = optional(row, "provenance_goal_generation")?;
     let command: Option<Uuid> = optional(row, "provenance_command_id")?;
+    let result_kind: Option<String> = optional(row, "result_outcome_kind")?;
+    let result_content: Option<String> = optional(row, "result_content_text")?;
     if kind != "tool_request"
         || session != spawn.request().session()
         || turn != spawn.request().turn()
         || request != spawn.request().id()
         || goal_generation.is_some()
         || command.is_some()
+        || result_kind.is_some()
+        || result_content.is_some()
     {
         return Err(SessionDelegationCorruption::Inconsistent("spawn event provenance").into());
     }

@@ -307,9 +307,7 @@ fn delegation_rejection_matches(
         RejectionDetail::DelegationMessageIdentityCollision { .. } => {
             expected.operation.is_message()
         }
-        RejectionDetail::DelegationEventOrdinalExhausted { .. } => {
-            expected.operation.is_await() || expected.operation.is_message()
-        }
+        RejectionDetail::DelegationEventOrdinalExhausted { .. } => false,
         RejectionDetail::DelegationDeliverySequenceExhausted {
             recipient_session_id,
             ..
@@ -5489,6 +5487,23 @@ mod tests {
         assert!(!delegation_rejection_matches(Some(cross_wired), expected));
     }
 
+    /// INV-033: relationship event exhaustion does not carry enough evidence
+    /// to correlate an await mutation, so the response remains ambiguous.
+    #[test]
+    fn inv033_await_rejects_uncorrelated_event_ordinal_exhaustion() {
+        let child = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let expected = delegation_rejection_expectation(DelegationRejectionOperation::Await {
+            child,
+            mode: DelegationWaitMode::Background,
+        });
+        let uncorrelated = RejectionDetail::DelegationEventOrdinalExhausted {
+            spawning_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+            last: CanonicalU64::new(u64::MAX),
+        };
+
+        assert!(!delegation_rejection_matches(Some(uncorrelated), expected));
+    }
+
     /// INV-033: background-await delivery exhaustion names the requesting
     /// parent as the result recipient.
     #[test]
@@ -5549,6 +5564,21 @@ mod tests {
 
         assert!(delegation_rejection_matches(Some(exact), expected));
         assert!(!delegation_rejection_matches(Some(cross_wired), expected));
+    }
+
+    /// INV-033: relationship event exhaustion cannot authenticate which peer
+    /// message mutation exhausted the shared relationship ordinal.
+    #[test]
+    fn inv033_message_rejects_uncorrelated_event_ordinal_exhaustion() {
+        let peer = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let expected =
+            delegation_rejection_expectation(DelegationRejectionOperation::Message { peer });
+        let uncorrelated = RejectionDetail::DelegationEventOrdinalExhausted {
+            spawning_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+            last: CanonicalU64::new(u64::MAX),
+        };
+
+        assert!(!delegation_rejection_matches(Some(uncorrelated), expected));
     }
 
     /// INV-033: message delivery exhaustion names the requested peer as its
