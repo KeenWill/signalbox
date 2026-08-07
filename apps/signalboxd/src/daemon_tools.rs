@@ -1062,11 +1062,14 @@ where
 #[cfg(test)]
 mod tests {
     use std::{
+        ffi::OsString,
         fmt, fs,
         io::{BufRead, BufReader, Write},
         path::{Path, PathBuf},
-        process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-        time::SystemTime,
+        process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio},
+        sync::mpsc::{self, Receiver, RecvTimeoutError},
+        thread::{self, JoinHandle},
+        time::{Duration, Instant, SystemTime},
     };
 
     use signalbox_application::ToolCatalog;
@@ -1312,29 +1315,114 @@ mod tests {
         ))
     }
 
+    const BRIDGE_BUILD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+    const BRIDGE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+    const BRIDGE_EXIT_TIMEOUT: Duration = Duration::from_secs(12);
+    const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+    fn wait_for_child(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(Some(status));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            thread::sleep(CHILD_POLL_INTERVAL);
+        }
+    }
+
+    fn terminate_child(child: &mut Child) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    fn ensure_claude_mcp_bridge_executable() -> PathBuf {
+        let executable = claude_mcp_bridge_executable();
+        if executable.is_file() {
+            return executable;
+        }
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut build = Command::new(cargo)
+            .args([
+                "build",
+                "--offline",
+                "-p",
+                "signalbox-model-runtime-claude-cli",
+                "--bin",
+                "signalbox-claude-mcp-bridge",
+            ])
+            .current_dir(workspace)
+            .spawn()
+            .expect("bridge binary build starts");
+        let Some(status) = wait_for_child(&mut build, BRIDGE_BUILD_TIMEOUT)
+            .expect("bridge binary build is observed")
+        else {
+            terminate_child(&mut build);
+            panic!("bridge binary build exceeded its timeout");
+        };
+        assert!(status.success(), "bridge binary build succeeds");
+        assert!(
+            executable.is_file(),
+            "bridge binary build produces its target"
+        );
+        executable
+    }
+
+    fn bridge_response_reader(
+        output: ChildStdout,
+    ) -> (Receiver<Result<String, std::io::Error>>, JoinHandle<()>) {
+        let (sender, receiver) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut output = BufReader::new(output);
+            loop {
+                let mut response = String::new();
+                match output.read_line(&mut response) {
+                    Ok(0) => return,
+                    Ok(_) => {
+                        if sender.send(Ok(response)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        return;
+                    }
+                }
+            }
+        });
+        (receiver, reader)
+    }
+
     struct McpBridgeProcess {
         child: Child,
         input: Option<ChildStdin>,
-        output: BufReader<ChildStdout>,
+        responses: Receiver<Result<String, std::io::Error>>,
+        reader: Option<JoinHandle<()>>,
     }
 
     impl McpBridgeProcess {
-        fn spawn(catalog: &Path, ready: &Path) -> Self {
-            let mut child = Command::new(claude_mcp_bridge_executable())
+        fn spawn(executable: &Path, catalog: &Path, ready: &Path, workspace: &Path) -> Self {
+            let mut child = Command::new(executable)
                 .arg("--serve")
                 .arg(catalog)
                 .arg(ready)
+                .current_dir(workspace)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
                 .expect("Claude MCP bridge binary starts");
             let input = child.stdin.take().expect("bridge stdin is piped");
-            let output = BufReader::new(child.stdout.take().expect("bridge stdout is piped"));
+            let (responses, reader) =
+                bridge_response_reader(child.stdout.take().expect("bridge stdout is piped"));
             Self {
                 child,
                 input: Some(input),
-                output,
+                responses,
+                reader: Some(reader),
             }
         }
 
@@ -1343,10 +1431,17 @@ mod tests {
             serde_json::to_writer(&mut *input, request).expect("MCP request serializes");
             input.write_all(b"\n").expect("MCP request is written");
             input.flush().expect("MCP request is flushed");
-            let mut response = String::new();
-            self.output
-                .read_line(&mut response)
-                .expect("MCP response is read");
+            let response = match self.responses.recv_timeout(BRIDGE_RESPONSE_TIMEOUT) {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => panic!("MCP response read failed: {error}"),
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("MCP bridge closed stdout before responding")
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    terminate_child(&mut self.child);
+                    panic!("MCP bridge response exceeded its timeout")
+                }
+            };
             serde_json::from_str(&response).expect("MCP response is JSON")
         }
 
@@ -1359,18 +1454,52 @@ mod tests {
 
         fn finish(mut self) {
             drop(self.input.take());
-            let status = self.child.wait().expect("bridge process is reaped");
+            let Some(status) = wait_for_child(&mut self.child, BRIDGE_EXIT_TIMEOUT)
+                .expect("bridge process exit is observed")
+            else {
+                terminate_child(&mut self.child);
+                panic!("MCP bridge exit exceeded its timeout");
+            };
+            self.join_reader();
             assert!(status.success());
+        }
+
+        fn join_reader(&mut self) {
+            if let Some(reader) = self.reader.take() {
+                reader.join().expect("bridge response reader exits");
+            }
         }
     }
 
     impl Drop for McpBridgeProcess {
         fn drop(&mut self) {
             if self.child.try_wait().ok().flatten().is_none() {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
+                terminate_child(&mut self.child);
             }
+            self.join_reader();
         }
+    }
+
+    fn wait_for_bridge_ready(executable: &Path, ready: &Path, workspace: &Path) {
+        let mut waiter = Command::new(executable)
+            .arg("--wait-ready")
+            .arg(ready)
+            .current_dir(workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("bridge readiness waiter starts");
+        let Some(status) = wait_for_child(&mut waiter, BRIDGE_EXIT_TIMEOUT)
+            .expect("bridge readiness exit is observed")
+        else {
+            terminate_child(&mut waiter);
+            panic!("bridge readiness wait exceeded its timeout");
+        };
+        assert!(
+            status.success(),
+            "bridge publishes readiness after listing tools"
+        );
     }
 
     #[test]
@@ -1734,7 +1863,13 @@ mod tests {
             serde_json::to_vec(&bridge_catalog).expect("bridge catalog serializes"),
         )
         .expect("bridge catalog is written");
-        let mut bridge = McpBridgeProcess::spawn(&catalog_path, &ready_path);
+        let bridge_executable = ensure_claude_mcp_bridge_executable();
+        let mut bridge = McpBridgeProcess::spawn(
+            &bridge_executable,
+            &catalog_path,
+            &ready_path,
+            workspace.path(),
+        );
         let protocol_version = "2025-11-25";
         let initialized = bridge.request(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -1746,12 +1881,14 @@ mod tests {
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
         }));
+        assert!(!ready_path.exists());
         let listed = bridge.request(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/list",
             "params": {},
         }));
+        wait_for_bridge_ready(&bridge_executable, &ready_path, workspace.path());
         let target = workspace.path().join("bridge-must-not-write.txt");
         let called = bridge.request(&serde_json::json!({
             "jsonrpc": "2.0",
