@@ -48,6 +48,7 @@ use signalbox_tools_conversations::{
     LIST_CONVERSATIONS_NAME, READ_CONVERSATION_NAME, READ_IMPORTED_CONVERSATION_NAME,
     READ_OWN_CONVERSATION_NAME,
 };
+use signalbox_tools_exec::UNSANDBOXED_EXEC_NAME;
 use signalbox_tools_plan::{PLAN_READ_NAME, PLAN_WRITE_NAME};
 use signalbox_tools_web::{BRAVE_SEARCH_CREDENTIAL_REFERENCE, WEB_FETCH_NAME, WEB_SEARCH_NAME};
 use signalboxd::{
@@ -103,6 +104,7 @@ const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/";
 const UNUSED_WEB_SEARCH_CREDENTIAL_FILE: &str = "unused-brave-key";
 const DENIED_WEB_SEARCH_QUERY: &str = "synthetic denied search";
+const DENIED_UNSANDBOXED_PROGRAM: &str = "/bin/false";
 const DENIED_WRITE_PATH: &str = "denied.txt";
 const DENIED_PATCH_PATH: &str = "denied-patch.txt";
 
@@ -221,6 +223,9 @@ async fn run_live_smoke() -> SmokeResult {
     let github_egress_policy = daemon_configuration.github_egress_policy();
     let configured_workspace = daemon_configuration.workspace_root().to_path_buf();
     let git_identity = daemon_configuration.git_identity().clone();
+    let exec_supervisor_executable = daemon_configuration
+        .exec_supervisor_executable()
+        .to_path_buf();
     let web_fetch_egress_policy = model_configuration.web_fetch_egress_policy();
 
     let listener = LocalProcessListener::bind(&socket)?;
@@ -262,6 +267,7 @@ async fn run_live_smoke() -> SmokeResult {
         github_egress_policy,
         &configured_workspace,
         git_identity,
+        &exec_supervisor_executable,
         web_fetch_egress_policy,
     )?;
     let (tool_catalog, tool_executor) = tools.into_parts();
@@ -469,6 +475,9 @@ workspace_root = "{}"
 family = "conversations"
 adapter = "application"
 
+[daemon_tools]
+exec_supervisor_executable = "{}"
+
 [git_identity]
 author_name = "Signalbox Live Smoke"
 author_email = "signalbox-live@example.test"
@@ -492,6 +501,7 @@ selection_id = "00000000-0000-0000-0000-000000000001"
         executable.display(),
         workspace.display(),
         workspace.display(),
+        executable.display(),
     );
     Ok(HubModelConfiguration::parse(&configuration)?)
 }
@@ -687,6 +697,10 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<ScriptedToolCall> {
         call(
             SESSION_STATUS_UPDATE_NAME,
             json!({"title": "denied", "tags": [], "attributes": {}, "archived": false}),
+        ),
+        call(
+            UNSANDBOXED_EXEC_NAME,
+            json!({"program": DENIED_UNSANDBOXED_PROGRAM}),
         ),
         call(WEB_FETCH_NAME, json!({"url": WEB_URL})),
         call(WEB_SEARCH_NAME, json!({"query": DENIED_WEB_SEARCH_QUERY})),
