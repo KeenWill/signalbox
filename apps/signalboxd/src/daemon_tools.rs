@@ -1422,7 +1422,11 @@ mod tests {
         let configured = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR")?);
         configured
             .is_absolute()
-            .then(|| lexically_normalized(&configured))
+            .then(|| canonicalized_target_dir(&configured))
+    }
+
+    fn canonicalized_target_dir(configured: &Path) -> PathBuf {
+        fs::canonicalize(configured).expect("configured Cargo target directory canonicalizes")
     }
 
     fn cargo_metadata_target_dir() -> PathBuf {
@@ -1707,6 +1711,19 @@ mod tests {
             expected_target: None,
             recognized_target: None,
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_artifact_selection_canonicalizes_a_symlinked_target_directory() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let target_dir = parent.path().join("target-output");
+        let target_link = parent.path().join("target-link");
+        fs::create_dir(&target_dir).expect("fixture target directory exists");
+        std::os::unix::fs::symlink(&target_dir, &target_link)
+            .expect("fixture target symlink exists");
+
+        assert_eq!(canonicalized_target_dir(&target_link), target_dir);
     }
 
     #[test]
