@@ -107,7 +107,7 @@ pub(crate) const DELEGATION_TERMINAL_RELATION_IDENTITY: &str =
       WHERE task.child_session_id = $1
         AND task.turn_id = $2";
 
-pub(crate) const DELEGATION_TERMINAL_PARENT_SESSION: &str =
+pub(crate) const DELEGATION_TERMINAL_ENDPOINT_SESSION: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
 pub(crate) const DELEGATION_FIND_RELATION_FOR_WAIT: &str = "SELECT spawning_tool_request_id
