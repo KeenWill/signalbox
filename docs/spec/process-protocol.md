@@ -2592,9 +2592,12 @@ remain storage-only until an implementing wire slice adds a version-one shape
 for them together with its daemon and client consumers. That future slice must
 project a wait as an active state retaining the same turn and session slot, and
 must expose a completed successor chain without requiring a client to infer it
-from usage-row order. Until then, transcript snapshots continue to expose the
-existing per-call usage rows and final turn state only; no current
-client-visible claim is made for the committed storage evidence.
+from usage-row order. The runtime-and-storage child that first makes either wait
+reachable must include this coordinated wire slice; admitting `park` in static
+configuration alone does not make the state reachable. Until then, transcript
+snapshots continue to expose the existing per-call usage rows and final turn
+state only; no current client-visible claim is made for the committed storage
+evidence.
 
 ## Open edges
 

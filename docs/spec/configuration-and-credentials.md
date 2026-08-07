@@ -768,7 +768,10 @@ CLI adapter process environment exposes only one such authentication context, a
 document may declare at most one `ambient` profile for `claude_cli` and at most
 one for `codex_cli`, regardless of which pools contain it. Giving that same
 login two profile names would not make two credentials and could not authorize a
-successor call.
+successor call. A document that declares an `ambient` `codex_cli` profile may
+not also declare a `codex_home` profile: static configuration cannot prove that
+the ambient login store and the explicitly named directory differ, so admitting
+both could give one physical login two availability and capacity identities.
 
 **`file`** is spelled `delivery = "file"` with required TOML string `file`
 naming an absolute deployment-owned path and, only for a CLI adapter, required
@@ -870,19 +873,23 @@ preparation may select, in profile-reference byte order. The rows are
 profile-scoped rather than session- or pool-scoped, so concurrent sessions and
 distinct pools serialize against the same bound without a lock-order cycle.
 Under those locks the transaction counts live reservations, chooses the member,
-and acquires its reservation together with the call's `Prepared` record; a
-database constraint rejects a live count above the configured bound. Every
-pre-send closure or terminal observation atomically releases it and emits the
-durable availability update that makes the waiter eligible. Each reservation
-carries the spawned process group's reuse-safe host identity. Startup retains
-reservations owned by the live fenced process. It may close an earlier-process
-reservation as lost and make its waiters eligible only after it proves that
-exact group absent, or terminates that exact group and then proves it absent;
-the daemon fence generation alone is not process-death evidence. Failure to
-establish absence fails startup before scheduling, so an orphan cannot be made
-concurrent with its replacement. No provider request is repeated because a
-contended waiter has not issued one. Partial, foreign, or stale reservation
-evidence fails reconstitution closed.
+and acquires its `pending_spawn` reservation together with the call's `Prepared`
+record; a database constraint rejects a live count above the configured bound.
+Spawn failure or another pre-send closure releases that pending reservation.
+Immediately after a successful spawn, the daemon replaces `pending_spawn` with
+`spawned { process_group_identity }`, carrying the process group's reuse-safe
+host identity; terminal observation atomically releases that reservation and
+emits the durable availability update that makes the waiter eligible. Startup
+retains a `spawned` reservation owned by the live fenced process. It may close
+an earlier-process `spawned` reservation as lost and make its waiters eligible
+only after it proves that exact group absent, or terminates that exact group and
+then proves it absent; the daemon fence generation alone is not process-death
+evidence. An earlier-process `pending_spawn` record is deliberately ambiguous:
+the prior daemon may have crashed immediately after the child started but before
+attaching its identity, so startup fails before scheduling rather than releasing
+capacity without proof. No provider request is repeated because a contended
+waiter has not issued one. Partial, foreign, or stale reservation evidence
+likewise fails reconstitution closed.
 
 **`oauth`** is spelled `delivery = "oauth"` with exactly four required fields:
 TOML strings `client_id`, `token_url`, and `device_authorization_url`, plus TOML
@@ -1427,10 +1434,14 @@ deployment-side rules that code cannot enforce are stated in
   record or log ever needs the secret (INV-035). The two integration constants
   are `brave-search-primary` and `github-primary`; every model-provider
   reference is a configured profile name this build never spells.
-- **File-based supply, reread per preparation.** `FileCredentialAccess` binds a
-  map of references to deployment paths — one entry per profile whose delivery
-  is `file`, whatever its adapter, plus the two integration constants — and
-  reads the file for every model call, web search, code-host operation, or
+- **File-based supply, reread per preparation.** Each `FileCredentialAccess`
+  instance binds one consumer-scoped map of references to deployment paths: a
+  model adapter receives the complete catalog of that adapter's `file` profiles,
+  while web search and code-host operations each receive a singleton map under
+  their fixed integration constant. A model-profile name equal to an integration
+  constant therefore remains a distinct reference in a different consumer's map;
+  no lookup or insertion crosses those boundaries. The selected instance reads
+  the file for every model call, web search, code-host operation, or
   pull-request tool operation preparation that resolves one; nothing is cached.
   Why: atomic file replacement rotates any credential without restarting
   signalboxd, and an in-flight operation keeps the value it authenticated with.

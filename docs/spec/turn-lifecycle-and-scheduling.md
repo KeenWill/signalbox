@@ -111,16 +111,19 @@ pre-call failure and `TurnFailed`. Startup reconstitutes the persisted choice
 without reclassifying it, and release consumes only a stored wait. Entering
 either wait form atomically ends the call-free current attempt as
 `WithoutStop(YieldedToDurableWait)` and stores the wait, leaving no live
-attempt. Each reservation carries the child process group's reuse-safe host
-identity. Startup retains live-process reservations and closes a fenced
+attempt. A reservation is `pending_spawn` from its atomic acquisition with the
+`Prepared` call until successful spawn durably attaches the child process
+group's reuse-safe host identity as `spawned { process_group_identity }`.
+Startup retains live-process `spawned` reservations and closes a fenced
 prior-process reservation as lost only after proving that exact process group
-absent, or terminating it and then proving absence; otherwise startup fails
-before scheduling. The scheduler makes a reached deadline, an exact reservation
-release, or a durable member-availability update eligible. Release atomically
-consumes the wait, creates a fresh `Prepared` successor attempt, and returns the
-same turn to `Running` with a fresh availability chain while carrying forward
-member evidence whose reset has not passed, every durable membership exclusion,
-and every profile quarantine.
+absent, or terminating it and then proving absence. A prior-process
+`pending_spawn` reservation is ambiguous and fails startup before scheduling.
+The scheduler makes a reached deadline, an exact reservation release, or a
+durable member-availability update eligible. Release atomically consumes the
+wait, creates a fresh `Prepared` successor attempt, and returns the same turn to
+`Running` with a fresh availability chain while carrying forward member evidence
+whose reset has not passed, every durable membership exclusion, and every
+profile quarantine.
 
 The wait has an exact occupied-slot control matrix. `steer` is accepted as
 ordinary pending steering bound to this source turn and remains pending until a
