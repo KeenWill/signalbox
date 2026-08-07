@@ -26,10 +26,12 @@ use crate::{
         DELEGATION_FIND_RELATION_FOR_WAIT, DELEGATION_LOAD_RELATION, ordered_session_pair,
     },
     mapping::{
-        DelegationPolicyStorageKind, bound_child_action_from_str,
+        DelegationPolicyStorageKind, DelegationRejectionStorageKind, bound_child_action_from_str,
         delegation_message_direction_from_str, delegation_message_direction_to_str,
         delegation_outcome_kind_from_str, delegation_outcome_reason_from_str,
-        delegation_policy_kind_from_str, delegation_wait_mode_from_str,
+        delegation_policy_kind_from_str, delegation_rejection_kind_from_str,
+        delegation_rejection_kind_to_str, delegation_transition_failure_from_str,
+        delegation_transition_failure_to_str, delegation_wait_mode_from_str,
         delegation_wait_mode_to_str, durable_command_id_from_uuid, session_id_from_uuid,
         session_id_to_uuid, tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid,
         turn_id_to_uuid,
@@ -2597,19 +2599,25 @@ fn encode_wait_rejection(
     SessionDelegationRepositoryError,
 > {
     match rejection {
-        DelegationOperationRejection::RelationshipNotFound => {
-            Ok(("relationship_not_found", None, None))
-        }
-        DelegationOperationRejection::DeliverySequenceExhausted => {
-            Ok(("delivery_sequence_exhausted", None, None))
-        }
+        DelegationOperationRejection::RelationshipNotFound => Ok((
+            delegation_rejection_kind_to_str(DelegationRejectionStorageKind::RelationshipNotFound),
+            None,
+            None,
+        )),
+        DelegationOperationRejection::DeliverySequenceExhausted => Ok((
+            delegation_rejection_kind_to_str(
+                DelegationRejectionStorageKind::DeliverySequenceExhausted,
+            ),
+            None,
+            None,
+        )),
         DelegationOperationRejection::Transition {
             spawning_request,
             failure,
         } => Ok((
-            "transition",
+            delegation_rejection_kind_to_str(DelegationRejectionStorageKind::Transition),
             Some(spawning_request),
-            Some(transition_failure_to_str(failure)),
+            Some(delegation_transition_failure_to_str(failure)),
         )),
         DelegationOperationRejection::StaleDispatch { .. }
         | DelegationOperationRejection::MessageIdentityCollision => {
@@ -2625,27 +2633,33 @@ fn decode_wait_rejection(
     spawning_request: Option<ToolRequestId>,
     transition_failure: Option<&str>,
 ) -> Result<DelegationOperationRejection, SessionDelegationRepositoryError> {
+    let kind = delegation_rejection_kind_from_str(kind).ok_or_else(|| {
+        SessionDelegationCorruption::Unsupported {
+            field: "rejection_kind",
+            value: kind.to_owned(),
+        }
+    })?;
     match (kind, spawning_request, transition_failure) {
-        ("relationship_not_found", None, None) => {
+        (DelegationRejectionStorageKind::RelationshipNotFound, None, None) => {
             Ok(DelegationOperationRejection::RelationshipNotFound)
         }
-        ("delivery_sequence_exhausted", None, None) => {
+        (DelegationRejectionStorageKind::DeliverySequenceExhausted, None, None) => {
             Ok(DelegationOperationRejection::DeliverySequenceExhausted)
         }
-        ("transition", Some(spawning_request), Some(failure)) => {
+        (DelegationRejectionStorageKind::Transition, Some(spawning_request), Some(failure)) => {
             Ok(DelegationOperationRejection::Transition {
                 spawning_request,
-                failure: transition_failure_from_str(failure)?,
+                failure: decode_transition_failure(failure)?,
             })
         }
-        ("relationship_not_found" | "delivery_sequence_exhausted" | "transition", _, _) => {
-            Err(SessionDelegationCorruption::Inconsistent("wait rejection shape").into())
-        }
-        (unsupported, _, _) => Err(SessionDelegationCorruption::Unsupported {
-            field: "rejection_kind",
-            value: unsupported.to_owned(),
-        }
-        .into()),
+        (
+            DelegationRejectionStorageKind::RelationshipNotFound
+            | DelegationRejectionStorageKind::DeliverySequenceExhausted
+            | DelegationRejectionStorageKind::Transition
+            | DelegationRejectionStorageKind::MessageIdentityCollision,
+            _,
+            _,
+        ) => Err(SessionDelegationCorruption::Inconsistent("wait rejection shape").into()),
     }
 }
 
@@ -2685,22 +2699,32 @@ fn encode_message_rejection(
     SessionDelegationRepositoryError,
 > {
     match rejection {
-        DelegationOperationRejection::RelationshipNotFound => {
-            Ok(("relationship_not_found", None, None))
-        }
-        DelegationOperationRejection::MessageIdentityCollision => {
-            Ok(("message_identity_collision", None, None))
-        }
-        DelegationOperationRejection::DeliverySequenceExhausted => {
-            Ok(("delivery_sequence_exhausted", None, None))
-        }
+        DelegationOperationRejection::RelationshipNotFound => Ok((
+            delegation_rejection_kind_to_str(DelegationRejectionStorageKind::RelationshipNotFound),
+            None,
+            None,
+        )),
+        DelegationOperationRejection::MessageIdentityCollision => Ok((
+            delegation_rejection_kind_to_str(
+                DelegationRejectionStorageKind::MessageIdentityCollision,
+            ),
+            None,
+            None,
+        )),
+        DelegationOperationRejection::DeliverySequenceExhausted => Ok((
+            delegation_rejection_kind_to_str(
+                DelegationRejectionStorageKind::DeliverySequenceExhausted,
+            ),
+            None,
+            None,
+        )),
         DelegationOperationRejection::Transition {
             spawning_request,
             failure,
         } => Ok((
-            "transition",
+            delegation_rejection_kind_to_str(DelegationRejectionStorageKind::Transition),
             Some(spawning_request),
-            Some(transition_failure_to_str(failure)),
+            Some(delegation_transition_failure_to_str(failure)),
         )),
         DelegationOperationRejection::StaleDispatch { .. } => {
             Err(SessionDelegationRepositoryError::InvalidTransition(
@@ -2715,73 +2739,49 @@ fn decode_message_rejection(
     spawning_request: Option<ToolRequestId>,
     transition_failure: Option<&str>,
 ) -> Result<DelegationOperationRejection, SessionDelegationRepositoryError> {
+    let kind = delegation_rejection_kind_from_str(kind).ok_or_else(|| {
+        SessionDelegationCorruption::Unsupported {
+            field: "rejection_kind",
+            value: kind.to_owned(),
+        }
+    })?;
     match (kind, spawning_request, transition_failure) {
-        ("relationship_not_found", None, None) => {
+        (DelegationRejectionStorageKind::RelationshipNotFound, None, None) => {
             Ok(DelegationOperationRejection::RelationshipNotFound)
         }
-        ("message_identity_collision", None, None) => {
+        (DelegationRejectionStorageKind::MessageIdentityCollision, None, None) => {
             Ok(DelegationOperationRejection::MessageIdentityCollision)
         }
-        ("delivery_sequence_exhausted", None, None) => {
+        (DelegationRejectionStorageKind::DeliverySequenceExhausted, None, None) => {
             Ok(DelegationOperationRejection::DeliverySequenceExhausted)
         }
-        ("transition", Some(spawning_request), Some(failure)) => {
+        (DelegationRejectionStorageKind::Transition, Some(spawning_request), Some(failure)) => {
             Ok(DelegationOperationRejection::Transition {
                 spawning_request,
-                failure: transition_failure_from_str(failure)?,
+                failure: decode_transition_failure(failure)?,
             })
         }
         (
-            "relationship_not_found"
-            | "message_identity_collision"
-            | "delivery_sequence_exhausted"
-            | "transition",
+            DelegationRejectionStorageKind::RelationshipNotFound
+            | DelegationRejectionStorageKind::MessageIdentityCollision
+            | DelegationRejectionStorageKind::DeliverySequenceExhausted
+            | DelegationRejectionStorageKind::Transition,
             _,
             _,
         ) => Err(SessionDelegationCorruption::Inconsistent("message rejection shape").into()),
-        (unsupported, _, _) => Err(SessionDelegationCorruption::Unsupported {
-            field: "rejection_kind",
-            value: unsupported.to_owned(),
-        }
-        .into()),
     }
 }
 
-const fn transition_failure_to_str(failure: DelegationTransitionFailure) -> &'static str {
-    match failure {
-        DelegationTransitionFailure::SameSession => "same_session",
-        DelegationTransitionFailure::AlreadyTerminal => "already_terminal",
-        DelegationTransitionFailure::MissingSpawnEvent => "missing_spawn_event",
-        DelegationTransitionFailure::InvalidProvenance => "invalid_provenance",
-        DelegationTransitionFailure::DescendantsNotSelected => "descendants_not_selected",
-        DelegationTransitionFailure::DuplicateMessageIdentity => "duplicate_message_identity",
-        DelegationTransitionFailure::ConflictingMessageReplay => "conflicting_message_replay",
-        DelegationTransitionFailure::DuplicateOutcomeAuthority => "duplicate_outcome_authority",
-        DelegationTransitionFailure::OutcomeReasonMismatch => "outcome_reason_mismatch",
-        DelegationTransitionFailure::EventOrdinalExhausted => "event_ordinal_exhausted",
-    }
-}
-
-fn transition_failure_from_str(
+fn decode_transition_failure(
     value: &str,
 ) -> Result<DelegationTransitionFailure, SessionDelegationRepositoryError> {
-    match value {
-        "same_session" => Ok(DelegationTransitionFailure::SameSession),
-        "already_terminal" => Ok(DelegationTransitionFailure::AlreadyTerminal),
-        "missing_spawn_event" => Ok(DelegationTransitionFailure::MissingSpawnEvent),
-        "invalid_provenance" => Ok(DelegationTransitionFailure::InvalidProvenance),
-        "descendants_not_selected" => Ok(DelegationTransitionFailure::DescendantsNotSelected),
-        "duplicate_message_identity" => Ok(DelegationTransitionFailure::DuplicateMessageIdentity),
-        "conflicting_message_replay" => Ok(DelegationTransitionFailure::ConflictingMessageReplay),
-        "duplicate_outcome_authority" => Ok(DelegationTransitionFailure::DuplicateOutcomeAuthority),
-        "outcome_reason_mismatch" => Ok(DelegationTransitionFailure::OutcomeReasonMismatch),
-        "event_ordinal_exhausted" => Ok(DelegationTransitionFailure::EventOrdinalExhausted),
-        unsupported => Err(SessionDelegationCorruption::Unsupported {
+    delegation_transition_failure_from_str(value).ok_or_else(|| {
+        SessionDelegationCorruption::Unsupported {
             field: "transition_failure_kind",
-            value: unsupported.to_owned(),
+            value: value.to_owned(),
         }
-        .into()),
-    }
+        .into()
+    })
 }
 
 async fn message_outcome_exists(
