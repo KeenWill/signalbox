@@ -1414,6 +1414,7 @@ mod tests {
             &current,
             CARGO_TEST_PROFILE,
             configured_target_dir.as_deref(),
+            &default_target_dir,
             &known_targets,
         )
     }
@@ -1506,10 +1507,12 @@ mod tests {
         current: &Path,
         debug_profile: &str,
         configured_target_dir: Option<&Path>,
+        default_target_dir: &Path,
         known_targets: &BTreeSet<OsString>,
     ) -> BridgeArtifactSelection {
         let current = lexically_normalized(current);
         let configured_target_dir = configured_target_dir.map(lexically_normalized);
+        let default_target_dir = lexically_normalized(default_target_dir);
         let profile_dir = current
             .parent()
             .and_then(Path::parent)
@@ -1546,7 +1549,9 @@ mod tests {
                     Some(artifact_parent_name.to_os_string()),
                 )
             }
-        } else if known_targets.contains(artifact_parent_name) {
+        } else if artifact_parent.parent() == Some(default_target_dir.as_path())
+            && known_targets.contains(artifact_parent_name)
+        {
             (
                 artifact_parent
                     .parent()
@@ -1568,6 +1573,7 @@ mod tests {
         executable: &'a Path,
         target_dir: &'a Path,
         configured_target_dir: Option<&'a Path>,
+        default_target_dir: &'a Path,
         debug_profile: &'a str,
         expected_profile: &'a str,
         expected_target: Option<&'a str>,
@@ -1585,6 +1591,7 @@ mod tests {
             expectation.executable,
             expectation.debug_profile,
             expectation.configured_target_dir,
+            expectation.default_target_dir,
             &known_targets,
         );
 
@@ -1607,6 +1614,7 @@ mod tests {
             executable,
             target_dir: Path::new("synthetic-target"),
             configured_target_dir: None,
+            default_target_dir: Path::new("synthetic-target"),
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: CARGO_TEST_PROFILE,
             expected_target: None,
@@ -1622,6 +1630,7 @@ mod tests {
             executable,
             target_dir: Path::new("synthetic-target"),
             configured_target_dir: None,
+            default_target_dir: Path::new("synthetic-target"),
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: "release",
             expected_target: None,
@@ -1637,6 +1646,7 @@ mod tests {
             executable,
             target_dir: Path::new("synthetic-target"),
             configured_target_dir: None,
+            default_target_dir: Path::new("synthetic-target"),
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: "ci-fast",
             expected_target: None,
@@ -1656,9 +1666,27 @@ mod tests {
             executable: &executable,
             target_dir: Path::new("synthetic-target"),
             configured_target_dir: None,
+            default_target_dir: Path::new("synthetic-target"),
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: CARGO_TEST_PROFILE,
             expected_target: Some(SYNTHETIC_CARGO_TARGET),
+            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
+        });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_does_not_infer_target_from_cli_target_dir_name() {
+        let target_dir = Path::new("synthetic-parent").join(SYNTHETIC_CARGO_TARGET);
+        let executable = target_dir.join("debug/deps/daemon-tools-test");
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: &target_dir,
+            configured_target_dir: None,
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
             recognized_target: Some(SYNTHETIC_CARGO_TARGET),
         });
     }
@@ -1678,6 +1706,7 @@ mod tests {
             executable: &executable,
             target_dir,
             configured_target_dir: Some(target_dir),
+            default_target_dir: target_dir,
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: CARGO_TEST_PROFILE,
             expected_target: None,
@@ -1706,6 +1735,7 @@ mod tests {
             executable: &executable,
             target_dir: normalized_target_dir,
             configured_target_dir: Some(configured_target_dir),
+            default_target_dir: normalized_target_dir,
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: CARGO_TEST_PROFILE,
             expected_target: None,
@@ -1736,6 +1766,7 @@ mod tests {
             executable: &executable,
             target_dir: &target_dir,
             configured_target_dir: None,
+            default_target_dir: &target_dir,
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: CARGO_TEST_PROFILE,
             expected_target: None,
@@ -1791,6 +1822,33 @@ mod tests {
         thread::sleep(Duration::from_secs(2));
     }
 
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess fixture that holds its parent's stderr open"]
+    fn bridge_wait_descendant_fixture() {
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess fixture that records and waits for a descendant"]
+    fn bridge_wait_child_with_descendant_fixture() {
+        let current = std::env::current_exe().expect("test executable path is available");
+        let descendant = Command::new(current)
+            .arg("daemon_tools::tests::bridge_wait_descendant_fixture")
+            .args(["--exact", "--ignored"])
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("bounded-wait descendant starts");
+        eprintln!("{}", descendant.id());
+        io::stderr()
+            .flush()
+            .expect("descendant identity is flushed");
+        descendant
+            .wait_with_output()
+            .expect("bounded-wait descendant is observed");
+    }
+
     #[test]
     fn wait_for_child_returns_none_at_its_deadline_and_cleanup_reaps() {
         let current = std::env::current_exe().expect("test executable path is available");
@@ -1816,6 +1874,47 @@ mod tests {
                 .expect("cleaned child status is readable")
                 .is_some()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_process_group_cleanup_terminates_a_descendant_holding_stderr() {
+        let current = std::env::current_exe().expect("test executable path is available");
+        let mut child_command = Command::new(current);
+        child_command
+            .arg("daemon_tools::tests::bridge_wait_child_with_descendant_fixture")
+            .args(["--exact", "--ignored", "--nocapture"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        configure_owned_process_group(&mut child_command);
+        let mut child = child_command
+            .spawn()
+            .expect("bounded-wait child with descendant starts");
+        let child_pid = child.id();
+        let (descendant_output, reader) = response_reader(BufReader::new(
+            child.stderr.take().expect("bounded-wait stderr is piped"),
+        ));
+        let descendant_pid = descendant_output
+            .recv_timeout(BRIDGE_RESPONSE_TIMEOUT)
+            .expect("descendant identity arrives")
+            .expect("descendant identity read succeeds")
+            .trim()
+            .parse::<u32>()
+            .expect("descendant identity is a process id");
+
+        assert_ne!(descendant_pid, child_pid);
+        assert!(
+            wait_for_child(&mut child, BRIDGE_CHILD_TEST_TIMEOUT)
+                .expect("bounded wait observes the live child")
+                .is_none()
+        );
+        terminate_owned_process_group(&mut child);
+        assert!(matches!(
+            descendant_output.recv_timeout(BRIDGE_RESPONSE_TIMEOUT),
+            Err(RecvTimeoutError::Disconnected)
+        ));
+        reader.join().expect("descendant stderr reader exits");
     }
 
     fn ensure_claude_mcp_bridge_executable() -> PathBuf {
@@ -1965,6 +2064,10 @@ mod tests {
         release_read: Receiver<()>,
     }
 
+    fn bridge_response_line() -> &'static str {
+        "response\n"
+    }
+
     impl Read for OneLineThenPanic {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
             let available = self.fill_buf()?;
@@ -1986,7 +2089,7 @@ mod tests {
             self.release_read
                 .recv()
                 .expect("first read is released by the fixture");
-            Ok(b"response\n")
+            Ok(bridge_response_line().as_bytes())
         }
 
         fn consume(&mut self, _amount: usize) {
@@ -2012,14 +2115,15 @@ mod tests {
 
     #[test]
     fn bridge_response_reader_delivers_one_complete_line() {
-        let (responses, reader) = response_reader(Cursor::new(b"response\n"));
+        let expected_response = bridge_response_line();
+        let (responses, reader) = response_reader(Cursor::new(expected_response.as_bytes()));
 
         assert_eq!(
             responses
                 .recv_timeout(BRIDGE_RESPONSE_TIMEOUT)
                 .expect("response arrives")
                 .expect("response read succeeds"),
-            "response\n"
+            expected_response
         );
         reader.join().expect("response reader exits");
     }
@@ -2146,6 +2250,7 @@ mod tests {
             input.flush().expect("MCP notification is flushed");
         }
 
+        #[track_caller]
         fn finish(mut self) {
             drop(self.input.take());
             let Some(status) = wait_for_child(&mut self.child, BRIDGE_EXIT_TIMEOUT)
@@ -2798,6 +2903,7 @@ mod tests {
                 }))
         }
 
+        #[track_caller]
         fn finish(&mut self) {
             self.bridge.take().expect("bridge remains active").finish();
         }
