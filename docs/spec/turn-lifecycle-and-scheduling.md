@@ -102,9 +102,16 @@ the earliest reset as its optional deadline. The contended form carries every
 durable exclusion in the selection snapshot and the complete nonempty set of
 otherwise-admissible bounded members with exact invocation-reservation
 identities and generations. Startup may reconstitute either only from that
-complete evidence. Entering either form atomically ends the call-free current
-attempt as `WithoutStop(YieldedToDurableWait)` and stores the wait, leaving no
-live attempt. Each reservation carries the child process group's reuse-safe host
+complete evidence. The pool outcome rule is owned by
+[configuration and credentials](configuration-and-credentials.md#credential-pools-and-selection):
+capacity contention enters `contended`; complete exclusion under
+`on_pool_exhausted = "park"` enters `exhausted`; and complete exclusion under
+`on_pool_exhausted = "fail"` stores no wait and instead produces the typed
+pre-call failure and `TurnFailed`. Startup reconstitutes the persisted choice
+without reclassifying it, and release consumes only a stored wait. Entering
+either wait form atomically ends the call-free current attempt as
+`WithoutStop(YieldedToDurableWait)` and stores the wait, leaving no live
+attempt. Each reservation carries the child process group's reuse-safe host
 identity. Startup retains live-process reservations and closes a fenced
 prior-process reservation as lost only after proving that exact process group
 absent, or terminating it and then proving absence; otherwise startup fails

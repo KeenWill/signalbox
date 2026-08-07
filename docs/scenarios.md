@@ -88,8 +88,12 @@ INV-tagged test names and attached doc comments.
   retried, and an ambiguous outcome never creates a successor. When pool policy
   selects `switch_now`, a proven availability failure may create the S22
   successor on a new attempt against the same target and a different credential
-  profile. No partial draft becomes final content. A later authorized call must
-  retain steering already committed to turn history.
+  profile, under
+  [availability successor calls](spec/model-call-execution.md#availability-successor-calls)
+  and
+  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
+  No partial draft becomes final content. A later authorized call must retain
+  steering already committed to turn history.
 - **Required invariants:** INV-005, INV-008, INV-014, INV-015, INV-032, INV-035.
 - **Remaining questions:** Whether a future known-failure retry command is
   introduced, streaming checkpoints, transient provider-delta relay, browser
@@ -708,12 +712,16 @@ INV-tagged test names and attached doc comments.
   available, failure classification, and typed non-acceptance evidence; evaluate
   the session-pinned pool policy; create a distinct successor attempt and model
   call that pin the same target, a different eligible profile from that pool,
-  the predecessor call, and the qualifying cause.
+  the predecessor call, and the qualifying cause, as owned by
+  [availability successor calls](spec/model-call-execution.md#availability-successor-calls)
+  and
+  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
 - **State transitions:** Predecessor call → known availability failure and
   predecessor attempt → known failed; turn → successor eligible; successor
   attempt/call → terminal. Each availability-successor chain is bounded to at
   most one call per pool member; a successful call or release from a parked wait
-  ends that chain before later continuation.
+  ends that chain before later continuation
+  ([availability successor calls](spec/model-call-execution.md#availability-successor-calls)).
 - **Transient updates:** No current client update announces that a successor is
   being considered or selected. The predecessor, cause, and successor remain
   durable storage evidence afterward; no current process-protocol snapshot or
@@ -726,8 +734,10 @@ INV-tagged test names and attached doc comments.
   alone is insufficient. Ambiguity, refusal, credential resolution failure, and
   credential rejection never do. The successor cannot cross adapters or change
   the exact target. Exhausting the pool follows its configured durable park or
-  known-failure outcome. A provider-reported mismatch against either call's own
-  target follows the accepted timing-sensitive mismatch failure rule
+  known-failure outcome
+  ([credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection)).
+  A provider-reported mismatch against either call's own target follows the
+  accepted timing-sensitive mismatch failure rule
   ([model-call-execution](spec/model-call-execution.md)) and is never an allowed
   substitution.
 - **Required invariants:** INV-014, INV-018.

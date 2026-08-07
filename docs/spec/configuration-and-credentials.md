@@ -1428,13 +1428,14 @@ deployment-side rules that code cannot enforce are stated in
   lowercase hyphenated session UUID, positive decimal ordinal, and closed model
   family spelling. The one member is the exact legacy reference with priority 1,
   no headroom reserve, and the registered adapter and delivery kind; `tie_break`
-  is `first`, `on_pool_exhausted` is `fail`, and every trigger action is `stay`.
-  Those values preserve the former one-account, no-automatic-failover behavior
-  instead of inventing parking or substitution. The transaction locks the legacy
-  entry, interns that complete value, and rewrites the entry to its policy
-  identity atomically; replay observes the already stored policy. The migrated
-  policy is independent of the document's current mapping, so even a mapping
-  that now names a multi-member pool cannot broaden the session's credentials.
+  is `first_listed`, `on_pool_exhausted` is `fail`, and every trigger action is
+  `stay`. Those values preserve the former one-account, no-automatic-failover
+  behavior instead of inventing parking or substitution. The transaction locks
+  the legacy entry, interns that complete value, and rewrites the entry to its
+  policy identity atomically; replay observes the already stored policy. The
+  migrated policy is independent of the document's current mapping, so even a
+  mapping that now names a multi-member pool cannot broaden the session's
+  credentials.
 - **Resolution timing.** Each direct HTTP adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
   before send authorization — and scopes the resulting value to that request
