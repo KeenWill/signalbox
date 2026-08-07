@@ -1420,14 +1420,9 @@ mod tests {
 
     fn configured_cargo_target_dir() -> Option<PathBuf> {
         let configured = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR")?);
-        let absolute = if configured.is_absolute() {
-            configured
-        } else {
-            std::env::current_dir()
-                .expect("test working directory is available")
-                .join(configured)
-        };
-        Some(lexically_normalized(&absolute))
+        configured
+            .is_absolute()
+            .then(|| lexically_normalized(&configured))
     }
 
     fn cargo_metadata_target_dir() -> PathBuf {
@@ -2094,6 +2089,7 @@ mod tests {
             }
         }
 
+        #[track_caller]
         fn request(&mut self, request: &serde_json::Value) -> serde_json::Value {
             let request_id = request
                 .get("id")
@@ -2125,6 +2121,7 @@ mod tests {
             response
         }
 
+        #[track_caller]
         fn notify(&mut self, notification: &serde_json::Value) {
             let input = self.input.as_mut().expect("bridge stdin remains open");
             serde_json::to_writer(&mut *input, notification).expect("MCP notification serializes");
@@ -2641,6 +2638,7 @@ mod tests {
 
     const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
     const MCP_SERVER_NAME: &str = "signalbox-claude-cli-bridge";
+    const MCP_CLIENT_NAME: &str = "signalboxd-mcp-conformance";
     const MCP_INITIALIZE_REQUEST_ID: u64 = 1;
     const MCP_LIST_TOOLS_REQUEST_ID: u64 = 2;
     const MCP_CALL_WRITE_FILE_REQUEST_ID: u64 = 3;
@@ -2693,6 +2691,7 @@ mod tests {
             }
         }
 
+        #[track_caller]
         fn initialize(&mut self) -> serde_json::Value {
             let initialized = self
                 .bridge
@@ -2706,7 +2705,7 @@ mod tests {
                         "protocolVersion": MCP_PROTOCOL_VERSION,
                         "capabilities": {},
                         "clientInfo": {
-                            "name": "signalboxd-mcp-conformance",
+                            "name": MCP_CLIENT_NAME,
                             "version": env!("CARGO_PKG_VERSION"),
                         },
                     },
@@ -2721,6 +2720,7 @@ mod tests {
             initialized
         }
 
+        #[track_caller]
         fn list_tools(&mut self) -> serde_json::Value {
             self.bridge
                 .as_mut()
@@ -2733,6 +2733,7 @@ mod tests {
                 }))
         }
 
+        #[track_caller]
         fn synchronize_without_listing(&mut self) {
             self.bridge
                 .as_mut()
@@ -2745,6 +2746,7 @@ mod tests {
                 }));
         }
 
+        #[track_caller]
         fn call_write_file(&mut self) -> serde_json::Value {
             self.bridge
                 .as_mut()
@@ -2763,6 +2765,7 @@ mod tests {
                 }))
         }
 
+        #[track_caller]
         fn call_undeclared_tool(&mut self) -> serde_json::Value {
             self.bridge
                 .as_mut()
