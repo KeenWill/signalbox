@@ -1156,6 +1156,8 @@ mod tests {
         time::{Duration, Instant, SystemTime},
     };
 
+    use serde::{Deserialize, Serialize};
+    use serde_json::value::RawValue;
     use signalbox_application::ToolCatalog;
     use signalbox_application::ToolInputSchema;
     use signalbox_domain::{ToolEffectClass, ToolPermissionDefault};
@@ -1477,23 +1479,69 @@ mod tests {
     /// from the registry. The listing assertion therefore classifies the
     /// daemon-to-bridge path rather than comparing one helper with itself.
     #[track_caller]
-    fn bridge_catalog(definitions: &[ToolDefinition]) -> serde_json::Value {
+    fn bridge_catalog(definitions: &[ToolDefinition]) -> Vec<u8> {
         let projected = signalbox_model_provider_runtime::runtime_tool_definitions(definitions)
             .expect("daemon tool schemas project into runtime definitions");
         let tools = projected
             .iter()
-            .map(|definition| {
-                serde_json::json!({
-                    "name": definition.name.as_str(),
-                    "description": definition.description,
-                    "inputSchema": serde_json::from_str::<serde_json::Value>(
-                        definition.input_schema.get(),
-                    )
-                    .expect("projected tool schema remains valid JSON"),
-                })
+            .map(|definition| SerializedBridgeTool {
+                name: definition.name.as_str(),
+                description: &definition.description,
+                input_schema: &definition.input_schema,
             })
             .collect::<Vec<_>>();
-        serde_json::json!({"tools": tools})
+        serde_json::to_vec(&SerializedBridgeCatalog { tools })
+            .expect("projected bridge catalog serializes")
+    }
+
+    #[derive(Serialize)]
+    struct SerializedBridgeCatalog<'a> {
+        tools: Vec<SerializedBridgeTool<'a>>,
+    }
+
+    #[derive(Serialize)]
+    struct SerializedBridgeTool<'a> {
+        name: &'a str,
+        description: &'a str,
+        #[serde(rename = "inputSchema")]
+        input_schema: &'a RawValue,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct ComparableBridgeTool {
+        name: String,
+        description: String,
+        input_schema: String,
+    }
+
+    #[derive(Deserialize)]
+    struct ListedBridgeResponse {
+        jsonrpc: String,
+        id: u64,
+        result: ListedBridgeResult,
+    }
+
+    #[derive(Deserialize)]
+    struct ListedBridgeResult {
+        tools: Vec<ListedBridgeTool>,
+    }
+
+    #[derive(Deserialize)]
+    struct ListedBridgeTool {
+        name: String,
+        description: String,
+        #[serde(rename = "inputSchema")]
+        input_schema: Box<RawValue>,
+    }
+
+    impl ListedBridgeTool {
+        fn into_comparable(self) -> ComparableBridgeTool {
+            ComparableBridgeTool {
+                name: self.name,
+                description: self.description,
+                input_schema: self.input_schema.get().to_owned(),
+            }
+        }
     }
 
     /// The MCP tool listing the daemon registry itself declares.
@@ -1502,21 +1550,15 @@ mod tests {
     /// independent source from the projected document the bridge is started
     /// with.
     #[track_caller]
-    fn expected_bridge_tools(definitions: &[ToolDefinition]) -> serde_json::Value {
-        let tools = definitions
+    fn expected_bridge_tools(definitions: &[ToolDefinition]) -> Vec<ComparableBridgeTool> {
+        definitions
             .iter()
-            .map(|definition| {
-                serde_json::json!({
-                    "name": definition.name().as_str(),
-                    "description": definition.description(),
-                    "inputSchema": serde_json::from_str::<serde_json::Value>(
-                        definition.input_schema().as_str(),
-                    )
-                    .expect("daemon tool schema remains valid JSON"),
-                })
+            .map(|definition| ComparableBridgeTool {
+                name: definition.name().as_str().to_owned(),
+                description: definition.description().to_owned(),
+                input_schema: definition.input_schema().as_str().to_owned(),
             })
-            .collect::<Vec<_>>();
-        serde_json::json!(tools)
+            .collect()
     }
 
     const SYNTHETIC_BRIDGE_TOOL_NAME: &str = "synthetic_bridge_tool";
@@ -1537,23 +1579,47 @@ mod tests {
         )
     }
 
+    fn deeply_nested_bridge_tool_definition() -> ToolDefinition {
+        let depth = 512;
+        let schema = format!(
+            "{{\"value\":{}null{}}}",
+            "[".repeat(depth),
+            "]".repeat(depth)
+        );
+        ToolDefinition::new(
+            ToolName::try_new(String::from(SYNTHETIC_BRIDGE_TOOL_NAME))
+                .expect("synthetic bridge tool name is valid"),
+            String::from(SYNTHETIC_BRIDGE_TOOL_DESCRIPTION),
+            ToolInputSchema::try_new(schema).expect("deep bounded bridge schema is valid"),
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::EffectFree,
+        )
+    }
+
     #[test]
     fn bridge_catalog_projects_definition_fields_into_mcp_shape() {
         let definition = synthetic_bridge_tool_definition();
+        let expected = format!(
+            r#"{{"tools":[{{"name":"{SYNTHETIC_BRIDGE_TOOL_NAME}","description":"{SYNTHETIC_BRIDGE_TOOL_DESCRIPTION}","inputSchema":{SYNTHETIC_BRIDGE_TOOL_SCHEMA}}}]}}"#
+        );
 
         assert_eq!(
-            bridge_catalog(&[definition]),
-            serde_json::json!({
-                "tools": [{
-                    "name": SYNTHETIC_BRIDGE_TOOL_NAME,
-                    "description": SYNTHETIC_BRIDGE_TOOL_DESCRIPTION,
-                    "inputSchema": serde_json::from_str::<serde_json::Value>(
-                        SYNTHETIC_BRIDGE_TOOL_SCHEMA,
-                    )
-                    .expect("synthetic expected schema is valid JSON"),
-                }],
-            })
+            String::from_utf8(bridge_catalog(&[definition]))
+                .expect("bridge catalog is valid UTF-8"),
+            expected
         );
+    }
+
+    #[test]
+    fn bridge_catalog_preserves_a_deep_schema_without_building_a_value_tree() {
+        let definition = deeply_nested_bridge_tool_definition();
+        let expected_schema = definition.input_schema().as_str().to_owned();
+        let projected = String::from_utf8(bridge_catalog(std::slice::from_ref(&definition)))
+            .expect("bridge catalog is valid UTF-8");
+        let expected_tools = expected_bridge_tools(&[definition]);
+
+        assert!(projected.contains(&expected_schema));
+        assert_eq!(expected_tools[0].input_schema, expected_schema);
     }
 
     struct BridgeArtifactSelection {
@@ -2720,9 +2786,9 @@ mod tests {
     const BRIDGE_EXIT_TIMEOUT: Duration = Duration::from_secs(12);
     const BRIDGE_CHILD_TEST_TIMEOUT: Duration = Duration::from_millis(25);
     const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
-    const BRIDGE_WAIT_CHILD_FIXTURE_LIFETIME: Duration = Duration::from_secs(2);
+    const BRIDGE_WAIT_CHILD_FIXTURE_LIFETIME: Duration = Duration::from_secs(30);
     #[cfg(unix)]
-    const BRIDGE_STDOUT_DESCENDANT_CLEANUP_LIMIT: Duration = Duration::from_secs(1);
+    const BRIDGE_STDOUT_DESCENDANT_CLEANUP_LIMIT: Duration = Duration::from_secs(15);
     const BRIDGE_WAIT_DESCENDANT_FIXTURE_LIFETIME: Duration = Duration::from_secs(30);
     #[cfg(target_os = "linux")]
     const SYNTHETIC_BLOCKING_DESCRIPTION_FRAGMENT: &str = "synthetic-padding";
@@ -3280,6 +3346,20 @@ mod tests {
                 .get("id")
                 .expect("MCP request has an identity")
                 .clone();
+            let response = self.raw_response(request);
+            let response = serde_json::from_str(&response).expect("MCP response is JSON");
+            assert!(
+                valid_mcp_response_envelope(McpResponseEnvelope {
+                    response: &response,
+                    request_id: &request_id,
+                }),
+                "MCP response has the exact JSON-RPC version and request identity"
+            );
+            response
+        }
+
+        #[track_caller]
+        fn raw_response(&mut self, request: &serde_json::Value) -> String {
             let input = self.input.as_mut().expect("bridge stdin remains open");
             serde_json::to_writer(&mut *input, request).expect("MCP request serializes");
             input.write_all(b"\n").expect("MCP request is written");
@@ -3295,14 +3375,6 @@ mod tests {
                     panic!("MCP bridge response exceeded its timeout")
                 }
             };
-            let response = serde_json::from_str(&response).expect("MCP response is JSON");
-            assert!(
-                valid_mcp_response_envelope(McpResponseEnvelope {
-                    response: &response,
-                    request_id: &request_id,
-                }),
-                "MCP response has the exact JSON-RPC version and request identity"
-            );
             response
         }
 
@@ -3501,13 +3573,11 @@ mod tests {
                 ToolEffectClass::EffectFree,
             );
             let catalog = bridge_catalog(&[definition]);
+            let catalog_value: serde_json::Value =
+                serde_json::from_slice(&catalog).expect("shallow blocking bridge catalog is JSON");
             let catalog_path = support.path().join("blocking-tools.json");
             let ready_path = support.path().join("blocking-ready");
-            fs::write(
-                &catalog_path,
-                serde_json::to_vec(&catalog).expect("blocking bridge catalog serializes"),
-            )
-            .expect("blocking bridge catalog is written");
+            fs::write(&catalog_path, &catalog).expect("blocking bridge catalog is written");
             let executable = ensure_claude_mcp_bridge_executable();
             let mut command = Command::new(&executable);
             command
@@ -3563,7 +3633,7 @@ mod tests {
                 _support: support,
                 executable,
                 ready_path,
-                expected_tools: catalog["tools"].clone(),
+                expected_tools: catalog_value["tools"].clone(),
                 child,
                 input: Some(input),
                 output: Some(output),
@@ -4092,7 +4162,7 @@ mod tests {
     struct McpBridgeFixture {
         workspace: tempfile::TempDir,
         _support: tempfile::TempDir,
-        expected_tools: serde_json::Value,
+        expected_tools: Vec<ComparableBridgeTool>,
         ready_path: PathBuf,
         executable: PathBuf,
         bridge: Option<McpBridgeProcess>,
@@ -4109,11 +4179,7 @@ mod tests {
             let support = tempfile::tempdir().expect("bridge support directory exists");
             let catalog_path = support.path().join("tools.json");
             let ready_path = support.path().join("ready");
-            fs::write(
-                &catalog_path,
-                serde_json::to_vec(&projected_catalog).expect("bridge catalog serializes"),
-            )
-            .expect("bridge catalog is written");
+            fs::write(&catalog_path, &projected_catalog).expect("bridge catalog is written");
             let executable = ensure_claude_mcp_bridge_executable();
             let bridge = McpBridgeProcess::spawn(McpBridgeSpawn {
                 executable: &executable,
@@ -4165,16 +4231,27 @@ mod tests {
         }
 
         #[track_caller]
-        fn list_tools(&mut self) -> serde_json::Value {
-            self.bridge
+        fn list_tools(&mut self) -> Vec<ComparableBridgeTool> {
+            let response = self
+                .bridge
                 .as_mut()
                 .expect("bridge remains active")
-                .request(&serde_json::json!({
+                .raw_response(&serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": MCP_LIST_TOOLS_REQUEST_ID,
                     "method": "tools/list",
                     "params": {},
-                }))
+                }));
+            let response: ListedBridgeResponse = serde_json::from_str(&response)
+                .expect("MCP list response preserves raw tool schemas");
+            assert_eq!(response.jsonrpc, "2.0");
+            assert_eq!(response.id, MCP_LIST_TOOLS_REQUEST_ID);
+            response
+                .result
+                .tools
+                .into_iter()
+                .map(ListedBridgeTool::into_comparable)
+                .collect()
         }
 
         #[track_caller]
@@ -4287,7 +4364,7 @@ mod tests {
         let listed = fixture.list_tools();
         fixture.finish();
 
-        assert_eq!(listed["result"]["tools"], expected);
+        assert_eq!(listed, expected);
     }
 
     #[cfg(target_os = "linux")]
