@@ -1251,12 +1251,14 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     struct OfflineCredentials;
 
+    const SYNTHETIC_OFFLINE_CREDENTIAL: &[u8] = b"offline-token";
+
     impl CredentialAccess for OfflineCredentials {
         async fn resolve(
             &self,
             _reference: &CredentialReference,
         ) -> Result<CredentialValue, CredentialAccessError> {
-            Ok(CredentialValue::new(b"offline-token".to_vec()))
+            Ok(CredentialValue::new(SYNTHETIC_OFFLINE_CREDENTIAL.to_vec()))
         }
     }
 
@@ -1894,19 +1896,28 @@ mod tests {
         let actual = std::env::current_dir().ok()?;
         let package = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace = package.parent().and_then(Path::parent)?;
-        verified_compiler_invocation_directory_for(&reported, &actual, workspace, package)
+        verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
+            reported: &reported,
+            actual: &actual,
+            workspace,
+            package,
+        })
+    }
+
+    struct CompilerInvocationDirectories<'a> {
+        reported: &'a Path,
+        actual: &'a Path,
+        workspace: &'a Path,
+        package: &'a Path,
     }
 
     fn verified_compiler_invocation_directory_for(
-        reported: &Path,
-        actual: &Path,
-        workspace: &Path,
-        package: &Path,
+        directories: CompilerInvocationDirectories<'_>,
     ) -> Option<PathBuf> {
-        let reported = fs::canonicalize(reported).ok()?;
-        let actual = fs::canonicalize(actual).ok()?;
-        let workspace = fs::canonicalize(workspace).ok()?;
-        let package = fs::canonicalize(package).ok()?;
+        let reported = fs::canonicalize(directories.reported).ok()?;
+        let actual = fs::canonicalize(directories.actual).ok()?;
+        let workspace = fs::canonicalize(directories.workspace).ok()?;
+        let package = fs::canonicalize(directories.package).ok()?;
         ((reported == workspace && actual == workspace)
             || (reported == package && actual == package))
             .then_some(reported)
@@ -2717,13 +2728,21 @@ mod tests {
         let expected_workspace = fs::canonicalize(&workspace).expect("workspace canonicalizes");
 
         assert_eq!(
-            verified_compiler_invocation_directory_for(
-                &workspace, &workspace, &workspace, &package,
-            ),
+            verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
+                reported: &workspace,
+                actual: &workspace,
+                workspace: &workspace,
+                package: &package,
+            }),
             Some(expected_workspace)
         );
         assert_eq!(
-            verified_compiler_invocation_directory_for(&stale, &stale, &workspace, &package),
+            verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
+                reported: &stale,
+                actual: &stale,
+                workspace: &workspace,
+                package: &package,
+            }),
             None
         );
     }
@@ -2735,7 +2754,12 @@ mod tests {
         let package = workspace.join("package");
         fs::create_dir_all(&package).expect("package fixture exists");
         assert_eq!(
-            verified_compiler_invocation_directory_for(&workspace, &package, &workspace, &package,),
+            verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
+                reported: &workspace,
+                actual: &package,
+                workspace: &workspace,
+                package: &package,
+            }),
             None
         );
     }
@@ -2749,7 +2773,12 @@ mod tests {
         let expected_package = fs::canonicalize(&package).expect("package canonicalizes");
 
         assert_eq!(
-            verified_compiler_invocation_directory_for(&package, &package, &workspace, &package,),
+            verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
+                reported: &package,
+                actual: &package,
+                workspace: &workspace,
+                package: &package,
+            }),
             Some(expected_package)
         );
     }
@@ -2765,7 +2794,12 @@ mod tests {
         fs::create_dir(&package).expect("package fixture exists");
 
         assert_eq!(
-            verified_compiler_invocation_directory_for(&workspace, &actual, &workspace, &package,),
+            verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
+                reported: &workspace,
+                actual: &actual,
+                workspace: &workspace,
+                package: &package,
+            }),
             None
         );
     }

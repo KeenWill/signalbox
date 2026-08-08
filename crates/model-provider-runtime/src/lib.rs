@@ -3402,10 +3402,8 @@ mod tests {
         let expected_source = source.to_string();
         let error = InvalidRuntimeToolSchema { source };
 
-        assert_eq!(
-            error.to_string(),
-            "application tool schema is invalid at the runtime bridge"
-        );
+        expect!["application tool schema is invalid at the runtime bridge"]
+            .assert_eq(&error.to_string());
         assert_eq!(
             std::error::Error::source(&error).map(ToString::to_string),
             Some(expected_source)
