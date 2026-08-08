@@ -65,9 +65,12 @@ use signalbox_persistence::{
     tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_tools_exec::{
-    CARGO_DIAGNOSTICS_NAME, CargoDiagnosticsExecutor, CargoDiagnosticsTool, ExecExecutor,
-    SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner,
-    UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
+    CARGO_DIAGNOSTICS_NAME, CaptureCompleteness, CargoDiagnosticRecords, CargoDiagnosticsCommand,
+    CargoDiagnosticsExecution, CargoDiagnosticsExecutor, CargoDiagnosticsResult,
+    CargoDiagnosticsStream, CargoDiagnosticsTool, CargoEvidenceProvenance, CargoTestRecords,
+    ExecExecutor, ExecutionConfinement, OutputEncoding, ProcessOutcome, SANDBOXED_EXEC_NAME,
+    SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME,
+    UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
 use signalbox_tools_git::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
@@ -1662,7 +1665,7 @@ enum SnapshotTurnDisposition {
     /// The exchange did not reach a model-behavior outcome and cannot be
     /// scored as a model miss.
     Infrastructure,
-    Other,
+    Refused,
 }
 
 impl SnapshotTurnDisposition {
@@ -1682,13 +1685,13 @@ impl SnapshotTurnDisposition {
             | ProcessTurnState::QueuedDelegationWake { .. }
             | ProcessTurnState::DelegationTerminated { .. }
             | ProcessTurnState::ActiveRunning { .. }
-            | ProcessTurnState::Refused { .. }
             | ProcessTurnState::ActiveAwaitingToolApproval { .. }
-            | ProcessTurnState::ActiveAwaitingChild { .. } => Self::Other,
-            ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
+            | ProcessTurnState::ActiveAwaitingChild { .. }
+            | ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
             | ProcessTurnState::ActiveAwaitingToolRecovery { .. }
             | ProcessTurnState::Cancelled { .. }
             | ProcessTurnState::ReconciliationRequired { .. } => Self::Infrastructure,
+            ProcessTurnState::Refused { .. } => Self::Refused,
         }
     }
 
@@ -1710,14 +1713,14 @@ impl SnapshotTurnDisposition {
     const fn is_completed(self) -> bool {
         match self {
             Self::Completed => true,
-            Self::ProviderFailure(_) | Self::Infrastructure | Self::Other => false,
+            Self::ProviderFailure(_) | Self::Infrastructure | Self::Refused => false,
         }
     }
 
     const fn is_infrastructure(self) -> bool {
         match self {
             Self::ProviderFailure(_) | Self::Infrastructure => true,
-            Self::Completed | Self::Other => false,
+            Self::Completed | Self::Refused => false,
         }
     }
 
@@ -1731,7 +1734,7 @@ impl SnapshotTurnDisposition {
                 format!("provider failure: {}", provider_failure_cause_label(cause))
             }
             Self::Infrastructure => String::from("infrastructure recovery"),
-            Self::Other => String::from("not completed"),
+            Self::Refused => String::from("refused"),
         }
     }
 }
@@ -2015,6 +2018,18 @@ fn turn_snapshot_reports_target_resolution_failure_as_infrastructure() {
         )),
         terminal_attempt: None,
         terminal_model_call: None,
+    };
+
+    assert_eq!(
+        SnapshotTurnDisposition::from_process_state(&state),
+        SnapshotTurnDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn turn_snapshot_reports_parked_tool_approval_as_infrastructure() {
+    let state = ProcessTurnState::ActiveAwaitingToolApproval {
+        request: ToolRequestId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)),
     };
 
     assert_eq!(
@@ -2468,29 +2483,36 @@ fn confined_exit(stdout: &str) -> serde_json::Value {
 
 /// One complete, successful Cargo check result in the eval workspace.
 fn successful_cargo_diagnostics_result() -> serde_json::Value {
-    serde_json::json!({
-        "command": "check",
-        "execution": {
-            "confinement": {"kind": "filesystem_confined"},
-            "outcome": {"kind": "exited", "code": 0},
-            "stdout": {"completeness": "complete", "encoding": "utf8"},
-            "stderr": {"completeness": "complete", "encoding": "utf8"},
-            "cargo_failure": null,
-            "preparation_failure": null,
+    let stream = CargoDiagnosticsStream {
+        completeness: CaptureCompleteness::Complete,
+        encoding: OutputEncoding::Utf8,
+    };
+    let records = CargoDiagnosticRecords {
+        values: Vec::new(),
+        limit_reached: false,
+        provenance: CargoEvidenceProvenance::WorkspaceInfluenced,
+        known_truncated: false,
+    };
+    let tests = CargoTestRecords {
+        values: Vec::new(),
+        limit_reached: false,
+        provenance: CargoEvidenceProvenance::WorkspaceInfluenced,
+        known_truncated: false,
+    };
+    serde_json::to_value(CargoDiagnosticsResult {
+        command: CargoDiagnosticsCommand::Check,
+        execution: CargoDiagnosticsExecution {
+            confinement: ExecutionConfinement::FilesystemConfined,
+            outcome: ProcessOutcome::Exited { code: Some(0) },
+            stdout: stream,
+            stderr: stream,
+            cargo_failure: None,
+            preparation_failure: None,
         },
-        "diagnostics": {
-            "values": [],
-            "limit_reached": false,
-            "provenance": "workspace_influenced",
-            "known_truncated": false,
-        },
-        "tests": {
-            "values": [],
-            "limit_reached": false,
-            "provenance": "workspace_influenced",
-            "known_truncated": false,
-        },
+        diagnostics: records,
+        tests,
     })
+    .expect("producer Cargo diagnostics result serializes")
 }
 
 #[test]
