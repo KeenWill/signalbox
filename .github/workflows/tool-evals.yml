@@ -26,6 +26,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - "Cargo.lock"
       - "crates/tools-git/**"
       - "crates/tools-web/**"
       - "crates/tools-workspace/**"
@@ -46,6 +47,7 @@ on:
   push:
     branches: [main]
     paths:
+      - "Cargo.lock"
       - "crates/tools-git/**"
       - "crates/tools-web/**"
       - "crates/tools-workspace/**"
