@@ -1373,6 +1373,9 @@ enum SnapshotTurnDisposition {
     /// The turn terminalized on a definitive provider failure, carrying the
     /// closed cause the daemon retained for it when one was recorded.
     ProviderFailure(Option<ProcessProviderModelCallFailureCause>),
+    /// The exchange did not reach a model-behavior outcome and cannot be
+    /// scored as a model miss.
+    Infrastructure,
     Other,
 }
 
@@ -1393,13 +1396,13 @@ impl SnapshotTurnDisposition {
             | ProcessTurnState::QueuedDelegationWake { .. }
             | ProcessTurnState::DelegationTerminated { .. }
             | ProcessTurnState::ActiveRunning { .. }
-            | ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
-            | ProcessTurnState::Cancelled { .. }
             | ProcessTurnState::Refused { .. }
             | ProcessTurnState::ActiveAwaitingToolApproval { .. }
-            | ProcessTurnState::ActiveAwaitingChild { .. }
+            | ProcessTurnState::ActiveAwaitingChild { .. } => Self::Other,
+            ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
             | ProcessTurnState::ActiveAwaitingToolRecovery { .. }
-            | ProcessTurnState::ReconciliationRequired { .. } => Self::Other,
+            | ProcessTurnState::Cancelled { .. }
+            | ProcessTurnState::ReconciliationRequired { .. } => Self::Infrastructure,
         }
     }
 
@@ -1413,20 +1416,21 @@ impl SnapshotTurnDisposition {
             Some((ProcessFailedModelCallDisposition::KnownFailed, cause)) => {
                 Self::ProviderFailure(cause)
             }
-            Some((ProcessFailedModelCallDisposition::Cancelled, _)) | None => Self::Other,
+            Some((ProcessFailedModelCallDisposition::Cancelled, _)) => Self::Infrastructure,
+            None => Self::Other,
         }
     }
 
     const fn is_completed(self) -> bool {
         match self {
             Self::Completed => true,
-            Self::ProviderFailure(_) | Self::Other => false,
+            Self::ProviderFailure(_) | Self::Infrastructure | Self::Other => false,
         }
     }
 
-    const fn is_provider_failure(self) -> bool {
+    const fn is_infrastructure(self) -> bool {
         match self {
-            Self::ProviderFailure(_) => true,
+            Self::ProviderFailure(_) | Self::Infrastructure => true,
             Self::Completed | Self::Other => false,
         }
     }
@@ -1440,6 +1444,7 @@ impl SnapshotTurnDisposition {
             Self::ProviderFailure(Some(cause)) => {
                 format!("provider failure: {}", provider_failure_cause_label(cause))
             }
+            Self::Infrastructure => String::from("infrastructure recovery"),
             Self::Other => String::from("not completed"),
         }
     }
@@ -1471,7 +1476,7 @@ struct CaseOutcome {
 
 impl CaseOutcome {
     fn forced_disposition(&self) -> EvalDisposition {
-        if self.snapshot.turn_disposition.is_provider_failure() {
+        if self.snapshot.turn_disposition.is_infrastructure() {
             return EvalDisposition::Infrastructure;
         }
         let Some(target) = self.target.as_deref() else {
@@ -1493,7 +1498,7 @@ impl CaseOutcome {
     }
 
     fn natural_loop_disposition(&self, family: EvalFamily) -> EvalDisposition {
-        if self.snapshot.turn_disposition.is_provider_failure() {
+        if self.snapshot.turn_disposition.is_infrastructure() {
             return EvalDisposition::Infrastructure;
         }
         let required_names: &[&str] = match family {
@@ -1556,7 +1561,7 @@ fn successful_tool_requests_rejects_a_typed_known_failure() {
 }
 
 #[test]
-fn turn_snapshot_reports_ambiguous_model_recovery_as_a_miss() {
+fn turn_snapshot_reports_ambiguous_model_recovery_as_infrastructure() {
     let state = ProcessTurnState::ActiveAwaitingModelCallRecovery {
         ended_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_TURN_ATTEMPT_ID)),
         recovery_call: ModelCallId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID)),
@@ -1564,7 +1569,7 @@ fn turn_snapshot_reports_ambiguous_model_recovery_as_a_miss() {
 
     assert_eq!(
         SnapshotTurnDisposition::from_process_state(&state),
-        SnapshotTurnDisposition::Other
+        SnapshotTurnDisposition::Infrastructure
     );
 }
 
@@ -1593,13 +1598,13 @@ fn turn_snapshot_retains_the_closed_provider_failure_cause() {
 }
 
 #[test]
-fn a_cancelled_terminal_model_call_is_not_a_provider_failure() {
+fn a_cancelled_terminal_model_call_reports_infrastructure() {
     assert_eq!(
         SnapshotTurnDisposition::from_failed_model_call(Some((
             ProcessFailedModelCallDisposition::Cancelled,
             None
         ))),
-        SnapshotTurnDisposition::Other
+        SnapshotTurnDisposition::Infrastructure
     );
 }
 
