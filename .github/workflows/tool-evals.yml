@@ -30,7 +30,15 @@ on:
       - "crates/tools-web/**"
       - "crates/tools-workspace/**"
       - "crates/tools-exec/**"
+      - "apps/signalboxd/src/lib.rs"
+      - "apps/signalboxd/src/process_runtime.rs"
       - "apps/signalboxd/tests/live_tool_evals.rs"
+      - "crates/application/src/model_execution.rs"
+      - "crates/application/src/tool_loop.rs"
+      - "crates/model-provider-runtime/src/lib.rs"
+      - "crates/persistence/src/model_execution.rs"
+      - "crates/persistence/src/process_read.rs"
+      - "crates/persistence/src/tool_loop.rs"
       - ".github/workflows/tool-evals.yml"
   push:
     branches: [main]
@@ -39,7 +47,15 @@ on:
       - "crates/tools-web/**"
       - "crates/tools-workspace/**"
       - "crates/tools-exec/**"
+      - "apps/signalboxd/src/lib.rs"
+      - "apps/signalboxd/src/process_runtime.rs"
       - "apps/signalboxd/tests/live_tool_evals.rs"
+      - "crates/application/src/model_execution.rs"
+      - "crates/application/src/tool_loop.rs"
+      - "crates/model-provider-runtime/src/lib.rs"
+      - "crates/persistence/src/model_execution.rs"
+      - "crates/persistence/src/process_read.rs"
+      - "crates/persistence/src/tool_loop.rs"
       - ".github/workflows/tool-evals.yml"
   # One daily provider/model drift sample. GitHub schedules only the copy on
   # the default branch, so this starts after owner merge.
