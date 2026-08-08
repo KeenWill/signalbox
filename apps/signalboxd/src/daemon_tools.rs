@@ -1420,6 +1420,54 @@ mod tests {
         .0
     }
 
+    #[test]
+    fn production_constructor_matches_the_complete_mapped_catalog() {
+        let expected_workspace = tempfile::tempdir().expect("expected workspace exists");
+        let expected_catalog = mapped_daemon_catalog(expected_workspace.path());
+        let expected_definitions = expected_catalog.definitions();
+        let expected_names = definition_names(&expected_definitions);
+        let workspace = tempfile::tempdir().expect("production workspace exists");
+        git2::Repository::init(workspace.path()).expect("production repository initializes");
+        let support = tempfile::tempdir().expect("credential fixture root exists");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("production fixture runtime builds");
+        let _runtime_guard = runtime.enter();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(SYNTHETIC_GOAL_DATABASE_URL)
+            .expect("synthetic production pool is valid");
+        let tools = DaemonTools::try_new_production(
+            || SystemTime::UNIX_EPOCH,
+            pool,
+            MappedDaemonCredentialInputs {
+                web_search: FileCredentialAccess::new(
+                    support.path().join("web-search"),
+                    CredentialReference::new("synthetic-web-search"),
+                ),
+                code_host: FileCredentialAccess::new(
+                    support.path().join("code-host"),
+                    CredentialReference::new("synthetic-code-host"),
+                ),
+                github: FileCredentialAccess::new(
+                    support.path().join("github"),
+                    CredentialReference::new("synthetic-github"),
+                ),
+            },
+            GitHubCodeHostTransport::try_new().expect("offline code-host transport constructs"),
+            GitHubEgressPolicy::github_api_only(),
+            workspace.path(),
+            git_identity(),
+            &std::env::current_exe().expect("test executable path is available"),
+            WebFetchEgressPolicy::deny_all(),
+        )
+        .expect("production daemon tools compile");
+        let (catalog, _executor) = tools.into_parts();
+        let actual_definitions = catalog.definitions();
+
+        assert_eq!(definition_names(&actual_definitions), expected_names);
+    }
+
     /// Renders the bridge catalog document from the daemon registry through the
     /// production projection every adapter receives.
     ///
@@ -1708,10 +1756,13 @@ mod tests {
     #[track_caller]
     fn cargo_metadata_target_dir() -> PathBuf {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-        let output = Command::new(cargo)
-            .args(["metadata", "--no-deps", "--format-version", "1"])
-            .output()
-            .expect("Cargo target metadata is available");
+        let mut command = Command::new(cargo);
+        command.args(["metadata", "--no-deps", "--format-version", "1"]);
+        let Some(output) = bounded_command_output(&mut command, BRIDGE_DISCOVERY_TIMEOUT)
+            .expect("Cargo target metadata is available")
+        else {
+            panic!("Cargo target metadata exceeded its timeout");
+        };
         assert!(output.status.success(), "Cargo target metadata succeeds");
         let metadata: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("Cargo target metadata is valid JSON");
@@ -1751,7 +1802,7 @@ mod tests {
         let rustc = normalized_rustc_override().unwrap_or_else(|| PathBuf::from("rustc"));
         let mut command = Command::new(rustc);
         command.args(["--print", "target-list"]);
-        let Some(output) = bounded_command_output(&mut command, RUSTC_TARGET_INVENTORY_TIMEOUT)
+        let Some(output) = bounded_command_output(&mut command, BRIDGE_DISCOVERY_TIMEOUT)
             .expect("rustc target inventory is available")
         else {
             panic!("rustc target inventory exceeded its timeout");
@@ -1766,11 +1817,35 @@ mod tests {
 
     fn normalized_rustc_override() -> Option<PathBuf> {
         let configured = std::env::var_os("RUSTC")?;
-        let invocation_directory = std::env::current_dir().ok();
+        let invocation_directory = verified_compiler_invocation_directory();
+        let configured_path = Path::new(&configured);
+        assert!(
+            configured_path.is_absolute()
+                || is_bare_program_name(configured_path)
+                || invocation_directory.is_some(),
+            "relative RUSTC requires verified workspace-root invocation provenance"
+        );
         Some(rustc_command_for(
             Some(&configured),
             invocation_directory.as_deref(),
         ))
+    }
+
+    fn verified_compiler_invocation_directory() -> Option<PathBuf> {
+        let reported = PathBuf::from(std::env::var_os("PWD")?);
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)?;
+        verified_compiler_invocation_directory_for(&reported, workspace)
+    }
+
+    fn verified_compiler_invocation_directory_for(
+        reported: &Path,
+        workspace: &Path,
+    ) -> Option<PathBuf> {
+        let reported = fs::canonicalize(reported).ok()?;
+        let workspace = fs::canonicalize(workspace).ok()?;
+        (reported == workspace).then_some(reported)
     }
 
     fn rustc_command_for(
@@ -1804,15 +1879,12 @@ mod tests {
         let Some(configured) = std::env::var_os(variable) else {
             return;
         };
-        let invocation_directory = std::env::current_dir().ok();
-        match compiler_wrapper_command_for(&configured, invocation_directory.as_deref()) {
-            Some(wrapper) => {
-                command.env(variable, wrapper);
-            }
-            None => {
-                command.env_remove(variable);
-            }
-        }
+        let invocation_directory = verified_compiler_invocation_directory();
+        let wrapper = compiler_wrapper_command_for(&configured, invocation_directory.as_deref())
+            .unwrap_or_else(|| {
+                panic!("relative {variable} requires verified workspace-root invocation provenance")
+            });
+        command.env(variable, wrapper);
     }
 
     fn compiler_wrapper_command_for(
@@ -2541,6 +2613,25 @@ mod tests {
     }
 
     #[test]
+    fn bridge_compiler_invocation_accepts_only_the_workspace_root() {
+        let fixture = tempfile::tempdir().expect("fixture root exists");
+        let workspace = fixture.path().join("workspace");
+        let stale = fixture.path().join("stale");
+        fs::create_dir(&workspace).expect("workspace fixture exists");
+        fs::create_dir(&stale).expect("stale fixture exists");
+        let expected_workspace = fs::canonicalize(&workspace).expect("workspace canonicalizes");
+
+        assert_eq!(
+            verified_compiler_invocation_directory_for(&workspace, &workspace),
+            Some(expected_workspace)
+        );
+        assert_eq!(
+            verified_compiler_invocation_directory_for(&stale, &workspace),
+            None
+        );
+    }
+
+    #[test]
     fn bridge_artifact_selection_resolves_a_parent_only_relative_directory() {
         let target_dir = Path::new("synthetic-parent");
         let executable = target_dir.join("debug/deps/daemon-tools-test");
@@ -2589,7 +2680,7 @@ mod tests {
     }
 
     const BRIDGE_BUILD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-    const RUSTC_TARGET_INVENTORY_TIMEOUT: Duration = Duration::from_secs(30);
+    const BRIDGE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
     const BRIDGE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
     const BRIDGE_EXIT_TIMEOUT: Duration = Duration::from_secs(12);
     const BRIDGE_CHILD_TEST_TIMEOUT: Duration = Duration::from_millis(25);
