@@ -20,10 +20,12 @@ REST, WebSocket, or OpenAI-compatible surfaces.
   supersedes it.
 - Preserve queued input separately until matching transcript content appears.
 - Submit one exact, nonblank composer draft at a time with the session's
-  defaults version and retry the exact prepared command after `commit_ambiguous`
-  receipt loss, or a receive failure, with a finite schedule; if that schedule
-  is exhausted, retain the prepared command identity while its exact UTF-8
-  composer draft is unchanged and prepare a new identity after an edit.
+  defaults version.
+  - Retry the exact prepared command with a finite schedule after
+    `commit_ambiguous` receipt loss, or a receive failure.
+  - When that schedule is exhausted, retain the prepared command identity while
+    its exact UTF-8 composer draft is unchanged, and prepare a new identity
+    after an edit.
 - Treat unknown wire kinds conservatively without losing an entire page or
   stream.
 - Approve or deny pending tool requests, and stop an active turn while sending
@@ -136,16 +138,22 @@ none in a URL or log.
 ## Rewire inventory
 
 The live process path closes the imported transport and synchronization
-findings: settings now install only the client for the tested socket path, and
-stale connection or session-list probes cannot publish; every reconnect path is
-capped; deadlines are typed separately from heartbeat concerns; snapshot/stream
-ordering is owned by the synchronization machine; fallbacks preserve
-diagnostics; failed submission preserves the exact composer text; one submission
-is in flight at a time; an unresolved ambiguous submission, including a lost
-receipt or receive failure, preserves its prepared command identity while the
-exact UTF-8 draft is unchanged; process results remain neutral unless the wire
-reports a failure; internal wire details do not become legacy `visible_to_user`
-failures; and no credential crosses a plaintext URL.
+findings:
+
+- Settings now install only the client for the tested socket path.
+- Stale connection or session-list probes cannot publish.
+- Every reconnect path is capped.
+- Deadlines are typed separately from heartbeat concerns.
+- Snapshot/stream ordering is owned by the synchronization machine.
+- Fallbacks preserve diagnostics.
+- Failed submission preserves the exact composer text.
+- One submission is in flight at a time.
+- An unresolved ambiguous submission, including a lost receipt or receive
+  failure, preserves its prepared command identity while the exact UTF-8 draft
+  is unchanged.
+- Process results remain neutral unless the wire reports a failure.
+- Internal wire details do not become legacy `visible_to_user` failures.
+- No credential crosses a plaintext URL.
 
 The following work remains:
 

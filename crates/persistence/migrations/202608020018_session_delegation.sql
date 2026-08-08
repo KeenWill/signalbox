@@ -1032,6 +1032,114 @@ CREATE TABLE session_delegation_wait (
 CREATE INDEX session_delegation_wait_by_relation
     ON session_delegation_wait(spawning_tool_request_id, awaiting_tool_request_id);
 
+CREATE TABLE session_delegation_wait_rejection (
+    tool_request_id uuid PRIMARY KEY,
+    rejection_kind text NOT NULL CHECK (
+        rejection_kind IN (
+            'relationship_not_found', 'delivery_sequence_exhausted', 'transition'
+        )
+    ),
+    spawning_tool_request_id uuid,
+    transition_failure_kind text CHECK (
+        transition_failure_kind IS NULL OR transition_failure_kind IN (
+            'same_session', 'already_terminal', 'missing_spawn_event',
+            'invalid_provenance', 'descendants_not_selected',
+            'duplicate_message_identity', 'conflicting_message_replay',
+            'duplicate_outcome_authority', 'outcome_reason_mismatch',
+            'event_ordinal_exhausted'
+        )
+    ),
+    CONSTRAINT session_delegation_wait_rejection_shape CHECK (
+        (rejection_kind = 'transition'
+            AND spawning_tool_request_id IS NOT NULL
+            AND transition_failure_kind IS NOT NULL)
+        OR (rejection_kind <> 'transition'
+            AND spawning_tool_request_id IS NULL
+            AND transition_failure_kind IS NULL)
+    ),
+    FOREIGN KEY (tool_request_id)
+        REFERENCES tool_request(request_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (spawning_tool_request_id)
+        REFERENCES session_delegation(spawning_tool_request_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE FUNCTION require_delegation_wait_rejection_attempt()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (SELECT count(*) FROM tool_attempt
+         WHERE request_id = NEW.tool_request_id
+           AND state_kind = 'terminal'
+           AND terminal_disposition_kind = 'known_failed'
+           AND error_kind = 'execution_failed') <> 1 THEN
+        RAISE EXCEPTION 'delegation wait rejection lacks its terminal attempt'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'session_delegation_wait_rejection_attempt';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER session_delegation_wait_rejection_requires_attempt
+AFTER INSERT ON session_delegation_wait_rejection
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_wait_rejection_attempt();
+
+CREATE TABLE session_delegation_message_rejection (
+    tool_request_id uuid PRIMARY KEY,
+    message_id uuid NOT NULL,
+    rejection_kind text NOT NULL CHECK (
+        rejection_kind IN (
+            'relationship_not_found', 'message_identity_collision',
+            'delivery_sequence_exhausted', 'transition'
+        )
+    ),
+    spawning_tool_request_id uuid,
+    transition_failure_kind text CHECK (
+        transition_failure_kind IS NULL OR transition_failure_kind IN (
+            'same_session', 'already_terminal', 'missing_spawn_event',
+            'invalid_provenance', 'descendants_not_selected',
+            'duplicate_message_identity', 'conflicting_message_replay',
+            'duplicate_outcome_authority', 'outcome_reason_mismatch',
+            'event_ordinal_exhausted'
+        )
+    ),
+    CONSTRAINT session_delegation_message_rejection_shape CHECK (
+        (rejection_kind = 'transition'
+            AND spawning_tool_request_id IS NOT NULL
+            AND transition_failure_kind IS NOT NULL)
+        OR (rejection_kind <> 'transition'
+            AND spawning_tool_request_id IS NULL
+            AND transition_failure_kind IS NULL)
+    ),
+    FOREIGN KEY (tool_request_id)
+        REFERENCES tool_request(request_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (spawning_tool_request_id)
+        REFERENCES session_delegation(spawning_tool_request_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE FUNCTION require_delegation_message_rejection_attempt()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (SELECT count(*) FROM tool_attempt
+         WHERE request_id = NEW.tool_request_id
+           AND state_kind = 'terminal'
+           AND terminal_disposition_kind = 'known_failed'
+           AND error_kind = 'execution_failed') <> 1 THEN
+        RAISE EXCEPTION 'delegation message rejection lacks its terminal attempt'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'session_delegation_message_rejection_attempt';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER session_delegation_message_rejection_requires_attempt
+AFTER INSERT ON session_delegation_message_rejection
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_message_rejection_attempt();
+
 ALTER TABLE session_delegation_wait
     ADD CONSTRAINT session_delegation_wait_attempt_key
         UNIQUE (
@@ -2292,6 +2400,10 @@ BEGIN
           FROM session
          WHERE session_id IN (
             SELECT checked_root_session
+            UNION
+            SELECT relation.parent_session_id
+              FROM session_delegation AS relation
+             WHERE relation.child_session_id = checked_root_session
             UNION
             SELECT frontier.parent_session_id
               FROM delegation_cascade_expected_frontier(
@@ -5831,6 +5943,12 @@ FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 CREATE TRIGGER session_delegation_wait_is_append_only
 BEFORE UPDATE OR DELETE ON session_delegation_wait
 FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+CREATE TRIGGER session_delegation_wait_rejection_is_append_only
+BEFORE UPDATE OR DELETE ON session_delegation_wait_rejection
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+CREATE TRIGGER session_delegation_message_rejection_is_append_only
+BEFORE UPDATE OR DELETE ON session_delegation_message_rejection
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 CREATE TRIGGER session_delegation_parent_termination_is_append_only
 BEFORE UPDATE OR DELETE ON session_delegation_parent_termination
 FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
@@ -5863,6 +5981,12 @@ BEFORE TRUNCATE ON session_delegation_event
 FOR EACH STATEMENT EXECUTE FUNCTION reject_session_delegation_table_truncate();
 CREATE TRIGGER session_delegation_wait_cannot_be_truncated
 BEFORE TRUNCATE ON session_delegation_wait
+FOR EACH STATEMENT EXECUTE FUNCTION reject_session_delegation_table_truncate();
+CREATE TRIGGER session_delegation_wait_rejection_cannot_be_truncated
+BEFORE TRUNCATE ON session_delegation_wait_rejection
+FOR EACH STATEMENT EXECUTE FUNCTION reject_session_delegation_table_truncate();
+CREATE TRIGGER session_delegation_message_rejection_cannot_be_truncated
+BEFORE TRUNCATE ON session_delegation_message_rejection
 FOR EACH STATEMENT EXECUTE FUNCTION reject_session_delegation_table_truncate();
 CREATE TRIGGER session_delegation_parent_termination_cannot_be_truncated
 BEFORE TRUNCATE ON session_delegation_parent_termination
