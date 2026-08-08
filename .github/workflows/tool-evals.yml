@@ -27,6 +27,8 @@ on:
   pull_request:
     paths:
       - "Cargo.lock"
+      - "Cargo.toml"
+      - "apps/signalboxd/Cargo.toml"
       - "crates/tool-contract/**"
       - "crates/tools-git/**"
       - "crates/tools-web/**"
@@ -53,6 +55,8 @@ on:
     branches: [main]
     paths:
       - "Cargo.lock"
+      - "Cargo.toml"
+      - "apps/signalboxd/Cargo.toml"
       - "crates/tool-contract/**"
       - "crates/tools-git/**"
       - "crates/tools-web/**"
