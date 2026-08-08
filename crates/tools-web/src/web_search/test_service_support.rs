@@ -1,5 +1,5 @@
 use signalbox_application::{
-    InProcessToolDispatchGate, PrepareToolContinuationOutcome,
+    CorrelatedDurableChildWait, InProcessToolDispatchGate, PrepareToolContinuationOutcome,
     RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
     ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionService,
     ToolExecutionServiceOutcome, ToolExecutionTransaction, ToolExecutorEvidence,
@@ -408,6 +408,20 @@ impl ToolExecutionTransaction for ExecutorFixtureTransaction {
         panic!("web-search fixtures never contain a delegated child wait")
     }
 
+    async fn reread_durable_child_wait(
+        &mut self,
+        _wait: CorrelatedDurableChildWait,
+    ) -> Result<bool, Self::Error> {
+        panic!("web-search fixtures never park on a delegated child wait")
+    }
+
+    async fn reread_durable_completion(
+        &mut self,
+        _correlation: ToolAttemptDispatchCorrelation,
+    ) -> Result<bool, Self::Error> {
+        panic!("web-search fixtures never report a durable completion")
+    }
+
     async fn load_active_batch(
         &mut self,
         _session: SessionId,
@@ -732,6 +746,7 @@ pub(super) fn committed_tool_attempt_end(
         | ToolExecutionServiceOutcome::PreflightFailed(_)
         | ToolExecutionServiceOutcome::ObservationAlreadyCommitted(_)
         | ToolExecutionServiceOutcome::CrashClassified(_)
+        | ToolExecutionServiceOutcome::ChildWaitParked(_)
         | ToolExecutionServiceOutcome::ChildWaitResumed(_)
         | ToolExecutionServiceOutcome::ContinuationCheckpointed(_)
         | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => None,

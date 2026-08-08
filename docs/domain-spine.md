@@ -1069,12 +1069,22 @@ impl TerminalChildTurn {
 }
 
 pub struct DelegationProvenance { /* private typed authority */ }
+pub enum DelegationProvenanceProjection {
+    ToolRequest {
+        source_session: SessionId,
+        source_turn: TurnId,
+        request: ToolRequestId,
+    },
+    ChildTurn { terminal: TerminalChildTurn },
+    ParentCommand { authority: ParentTerminationAuthority },
+}
 impl DelegationProvenance {
     pub fn from_spawn(request: &DelegatedSpawnRequest) -> Self;
     pub fn from_await(request: &DelegationAwaitRequest) -> Self;
     pub fn from_message(request: &DelegationMessageRequest) -> Self;
     pub const fn from_terminal_child(terminal: TerminalChildTurn) -> Self;
     pub const fn from_parent_termination(authority: ParentTerminationAuthority) -> Self;
+    pub const fn projection(self) -> DelegationProvenanceProjection;
     // accessors: tool_request(), child_turn(), parent_command() returning the sealed authority
 }
 
@@ -1147,11 +1157,18 @@ impl ChildWait {
     // accessors: awaiting_request(), spawning_request(), child()
 }
 pub struct DelegationWait { /* private */ }
-// sealed: SessionDelegation::register_wait or DelegationWait::reconstitute
+// sealed: SessionDelegation::register_wait or DelegationWait reconstitution
 impl DelegationWait {
     pub fn reconstitute(
         relation: &SessionDelegation,
         awaiting_request: &DelegationAwaitRequest,
+    ) -> Option<Self>;
+    pub fn reconstitute_stored(
+        awaiting_request: &DelegationAwaitRequest,
+        spawning_request: ToolRequestId,
+        parent: SessionId,
+        child: SessionId,
+        mode: DelegationWaitMode,
     ) -> Option<Self>;
     // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
 }
@@ -2894,6 +2911,27 @@ impl AcceptedInputTurnSchedulingRecord {
     // origin_delivery(), origin_configuration(), configuration_provenance(), state()
 }
 
+pub enum DelegatedTurnSchedulingState {
+    Active,
+    RuntimeTerminal,
+    TerminalCompleted,
+    TerminalRefused,
+    TerminalFailed,
+    TerminalCancelled,
+    TerminalReconciliationRequired,
+}
+
+pub struct DelegatedTurnSchedulingFact { /* private */ }
+impl DelegatedTurnSchedulingFact {
+    pub const fn new(
+        turn: TurnId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        selected: DirectModelSelection,
+        state: DelegatedTurnSchedulingState,
+    ) -> Self;
+    // accessors: turn(), defaults_version(), selected(), state()
+}
+
 pub struct AcceptedInputSchedulingReconstitutionInput { /* private */ }
 impl AcceptedInputSchedulingReconstitutionInput {
     pub fn new(
@@ -2926,6 +2964,10 @@ impl AcceptedInputSchedulingReconstitutionInput {
         self,
         consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
     ) -> Self;
+    pub fn with_delegated_turn_facts(
+        self,
+        delegated_turns: Vec<DelegatedTurnSchedulingFact>,
+    ) -> Self;
     pub fn with_steering_continuation_rounds(
         self,
         steering_continuation_rounds: Vec<SteeringContinuationRoundReconstitutionInput>,
@@ -2948,6 +2990,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
     // accessors: session(), imported_session(), turns(), semantic_entries(),
     // snapshots(), pinned_targets(), model_calls(), compaction_calls(),
     // compactions(), consumed_steering(), delegated_consumed_steering(),
+    // delegated_turns(),
     // steering_continuation_rounds(), continuation_rounds(),
     // active_acceptance_tail()
 }
@@ -2971,6 +3014,7 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     SemanticEntrySubjectMissing { entry: SemanticTranscriptEntryId },
     SemanticEntryStateMismatch { entry: SemanticTranscriptEntryId },
     DuplicateSemanticEntryForSubject { entry: SemanticTranscriptEntryId },
+    DelegatedTurnFactMismatch { turn: TurnId },
     ConsumedSteeringSessionMismatch { accepted_input: AcceptedInputId },
     DuplicateConsumedSteering { accepted_input: AcceptedInputId },
     SteeringSemanticEntryMismatch { entry: SemanticTranscriptEntryId },
@@ -6138,6 +6182,7 @@ pub struct ToolExecutionInvocation { /* private */ }
 impl ToolExecutionInvocation {
     // accessors: request(), dispatch_authority(), definition(), correlation()
     pub fn bind(self, evidence: ToolExecutorEvidence) -> CorrelatedToolExecutorEvidence;
+    pub fn durable_completion(self) -> CorrelatedDurableToolCompletion;
 }
 
 pub enum ToolExecutorEvidence {
@@ -6154,12 +6199,38 @@ impl CorrelatedToolExecutorEvidence {
     // accessors: correlation(), evidence()
 }
 
+pub struct CorrelatedDurableToolCompletion { /* private */ }
+// sealed: ToolExecutionInvocation::durable_completion
+impl CorrelatedDurableToolCompletion {
+    pub const fn correlation(self) -> ToolAttemptDispatchCorrelation;
+}
+
+pub struct CorrelatedDurableChildWait { /* private */ }
+impl CorrelatedDurableChildWait {
+    pub fn try_new(
+        correlation: ToolAttemptDispatchCorrelation,
+        wait: DelegationWait,
+    ) -> Option<Self>;
+    // accessors: correlation(), wait(), child_wait()
+}
+
+pub enum ToolExecutorDisposition {
+    Completed(CorrelatedToolExecutorEvidence),
+    DurableCompletion(CorrelatedDurableToolCompletion),
+    DurableChildWait(CorrelatedDurableChildWait),
+}
 pub trait ToolExecutor {
     type Error: ClassifyOperatorFailure;
     fn execute(
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> impl Future<Output = Result<CorrelatedToolExecutorEvidence, Self::Error>> + Send;
+    fn execute_with_scheduling(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> impl Future<Output = Result<ToolExecutorDisposition, Self::Error>> + Send
+    where
+        Self: Send;
 }
 
 pub trait ToolApprovalIdGenerator {
@@ -6199,6 +6270,7 @@ pub enum ToolExecutionServiceOutcome {
     AwaitingApproval(ToolRequestId),
     AwaitingRecovery(ToolAttemptId),
     ChildWaitResumed(TurnAttemptId),
+    ChildWaitParked(ChildWait),
     AttemptCheckpointed(ToolAttemptId),
     PreflightFailed(Box<EndedToolAttempt>),
     ObservationCommitted(Box<EndedToolAttempt>),
@@ -6227,6 +6299,10 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     ExecutorCorrelationMismatchCrashClassification(TransactionError),
     ObservationCommit(TransactionError),
     ObservationReconciliation(TransactionError),
+    DurableCompletionReconciliation(TransactionError),
+    DurableCompletionMismatch,
+    ChildWaitReconciliation(TransactionError),
+    ChildWaitMismatch,
     CrashClassification(TransactionError),
     Continuation(TransactionError),
     CatalogDrift,
@@ -7272,6 +7348,18 @@ pub trait ClassifyOperatorFailure {
 }
 ```
 
+## application: session_delegation
+
+```rust
+pub trait DelegationMessageDeliveryProjection {
+    fn tool_request(&self) -> ToolRequestId;
+    fn message(&self) -> DelegationMessageId;
+    fn direction(&self) -> DelegationMessageDirection;
+    fn ordinal(&self) -> DelegationEventOrdinal;
+    fn delivery_sequence(&self) -> NonZeroU64;
+}
+```
+
 ## application: start_eligible_turn
 
 ```rust
@@ -7757,6 +7845,14 @@ pub trait ToolExecutionTransaction {
         &mut self,
         observation: &CorrelatedToolAttemptObservation,
     ) -> impl Future<Output = Result<RetainedToolAttemptObservationStatus, Self::Error>> + Send;
+    fn reread_durable_completion(
+        &mut self,
+        correlation: ToolAttemptDispatchCorrelation,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+    fn reread_durable_child_wait(
+        &mut self,
+        wait: CorrelatedDurableChildWait,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
     fn classify_crash_loss<NextTurn>(
         &mut self,
         session: SessionId,
@@ -9685,7 +9781,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_template                           | 6                     |
 | domain: session_placement                          | 18                    |
 | domain: session                                    | 22                    |
-| domain: session_delegation                         | 36 (+3 free fn)       |
+| domain: session_delegation                         | 37 (+3 free fn)       |
 | domain: imported_session                           | 18                    |
 | domain: configuration                              | 24                    |
 | domain: model_settings                             | 25                    |
@@ -9696,7 +9792,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: queue_order                                | 5 (+1 free fn)        |
 | domain: repo_watch                                 | 49                    |
 | domain: turn_lifecycle                             | 10                    |
-| domain: turn_eligibility                           | 35                    |
+| domain: turn_eligibility                           | 37                    |
 | domain: turn_attempt                               | 13                    |
 | domain: model_call                                 | 12                    |
 | domain: context_compaction                         | 12                    |
@@ -9715,7 +9811,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 63                    |
-| **signalbox-domain total**                         | **749 (+10 free fn)** |
+| **signalbox-domain total**                         | **752 (+10 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
@@ -9724,8 +9820,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
 | application: model_execution                       | 32 (incl. 8 traits)   |
-| application: tool_loop                             | 23 (incl. 5 traits)   |
+| application: tool_loop                             | 26 (incl. 5 traits)   |
 | application: operator_failure                      | 2 (incl. 1 trait)     |
+| application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
 | application: repo_watch                            | 33 (incl. 4 traits)   |
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
@@ -9737,4 +9834,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)    |
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **238**               |
+| **signalbox-application total**                    | **242**               |
