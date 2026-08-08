@@ -94,11 +94,11 @@ jobs:
         run: python3 clients/native/scripts/test_summarize_coverage.py
       - name: Build (iOS Simulator, Debug)
         run: clients/native/scripts/build-xcode.sh
-      # Runs the canonical test script with the UI-test bundle excluded. The
-      # UI and screenshot-capture suites need an interactive simulator
-      # session (and the Tart VM shards for the full device matrix), so they
-      # stay a manual/local flow via clients/native/scripts for now; the
-      # four unit-test bundles still run against a booted simulator the script
+      # Runs the canonical test script with two suites excluded. The UI-test
+      # bundle drives an interactive simulator session, so it stays a
+      # manual/local flow via clients/native/scripts for now; the in-process
+      # snapshot suite is skipped for the reason on its entry below. The four
+      # unit-test bundles still run against a booted simulator the script
       # resolves itself.
       #
       # Coverage rides along on this run rather than taking a macOS job of its
