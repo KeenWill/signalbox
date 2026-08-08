@@ -119,7 +119,14 @@ prior-process reservation as lost only after proving that exact process group
 absent, or terminating it and then proving absence. A prior-process
 `pending_spawn` reservation is ambiguous and fails startup before scheduling.
 The scheduler makes a reached deadline, an exact reservation release, or a
-durable member-availability update eligible. Release atomically consumes the
+durable member-availability update eligible. Because a capacity bound is a live
+configuration value rather than a frozen one, startup additionally re-evaluates
+every retained `contended` wait against the current registrations before
+enabling scheduling and makes eligible each one whose live reservation count is
+now below its profile's bound — including a profile whose bound was removed
+entirely. Without that pass a raised bound would not admit work until an
+unrelated old invocation happened to finish, since a configuration edit produces
+neither a release nor an availability update. Release atomically consumes the
 wait, creates a fresh `Prepared` successor attempt, and returns the same turn to
 `Running` with a fresh availability chain while carrying forward member evidence
 whose reset has not passed, every durable membership exclusion, and every

@@ -627,21 +627,27 @@ Locks per transaction, in acquisition order:
   child. When it is, they lock the immutable parent/child session pair
   `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
   scheduler lock. This is the shared prefix for any path that can record a child
-  result. Credential-pool call preparation additionally locks every potentially
-  selected bounded profile's shared capacity row `FOR UPDATE`, in
-  profile-reference byte order, after the scheduler lock and before reading
+  result. Credential-pool call preparation additionally locks the action head of
+  every member of the pinned policy it may select `FOR SHARE`, in
+  profile-reference byte order, immediately after the scheduler lock and before
+  it reads any exclusion state. It then locks every potentially selected bounded
+  profile's shared capacity row `FOR UPDATE`, in the same order, before reading
   reservation counts. When `round_robin` decides among the first admitted
   priority's members, preparation next locks that immutable-policy-and-priority
   cursor row `FOR UPDATE` before reading the cursor, choosing a member, or
   advancing it with `Prepared`. It rereads the protected selection facts after
-  acquiring the lock. A transaction that mints, activates, or clears a
-  credential exclusion — a terminal observation applying a pool trigger, a
-  delivery-layer quarantine, or an operator clear — instead locks each affected
-  profile's action head `FOR UPDATE`, in profile-reference byte order,
-  immediately after the scheduler lock and before any capacity or cursor row. No
-  other path may take a scheduler lock while holding an action-head, capacity-,
-  or cursor-row lock; take an action-head lock while holding a capacity-row or
-  cursor-row lock; or take a capacity-row lock while holding a cursor-row lock.
+  acquiring each lock and holds all of them through the `Prepared` insert. A
+  transaction that mints, activates, or clears a credential exclusion — a
+  terminal observation applying a pool trigger, a delivery-layer quarantine, or
+  an operator clear — takes those same action heads `FOR UPDATE` at that same
+  ordering position. Share and exclusive modes conflict, so one of the two
+  transactions waits: a `Prepared` insert either precedes the exclusion commit
+  or reads the member as already excluded. This is what a selection needs when
+  it takes no other lock the writer takes — an unbounded `first_listed` member
+  acquires neither a capacity row nor a cursor row. No other path may take a
+  scheduler lock while holding an action-head, capacity-, or cursor-row lock;
+  take an action-head lock while holding a capacity-row or cursor-row lock; or
+  take a capacity-row lock while holding a cursor-row lock.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -1491,7 +1497,10 @@ generation. Every transaction that mints, activates, or clears an exclusion
 locks that head `FOR UPDATE` before reading it, so concurrent observations in
 different sessions cannot mint two active generations for one profile and a
 uniqueness conflict cannot prevent a terminal observation from committing with
-its required action record.
+its required action record. Call preparation locks the head of every member it
+may select `FOR SHARE` before reading exclusion state and holds it through the
+`Prepared` insert, so selection and exclusion mutation are serialized against
+each other rather than only against their own kind.
 
 Profile-quarantine, membership-exclusion, and session-displacement rows each
 carry a positive generation, active/cleared state, and their exact scope. A
@@ -1543,12 +1552,18 @@ identities and generations. One shared capacity row per bounded profile
 serializes reservation admission across sessions and pools. Preparation locks
 all candidate capacity rows in profile-reference byte order, counts their live
 reservation rows under those locks, and inserts the selected reservation with
-the `Prepared` call. A deferred constraint rejects a committed live count above
-the bound the profile's current registration declares; the bound is a live
-profile property rather than a frozen policy field, so it governs the next
-admission and never retroactively invalidates a committed reservation.
-Invocation completion releases its reservation and writes the wake signal
-atomically. Entering either wait ends the call-free current attempt as
+the `Prepared` call. Every `codex_home` invocation inserts a reservation
+regardless of whether its profile currently declares a bound; the bound decides
+only whether preparation takes that capacity lock and counts, so an unbounded
+profile records the same supervision evidence without serializing. A deferred
+constraint rejects a committed live count above the bound the profile's current
+registration declares; the bound is a live profile property rather than a frozen
+policy field, so it governs the next admission and never retroactively
+invalidates a committed reservation. Because every invocation is recorded, a
+bound newly lowered from unbounded is still enforced against complete startup
+fencing evidence rather than against only the invocations that were bounded when
+they started. Invocation completion releases its reservation and writes the wake
+signal atomically. Entering either wait ends the call-free current attempt as
 `WithoutStop(YieldedToDurableWait)` in the same transaction. Release atomically
 consumes the wait and creates its fresh `Prepared` successor attempt;
 `stop_turn` instead atomically consumes it, creates the fresh
@@ -1563,8 +1578,12 @@ proving absence; failure to establish absence fails startup before scheduling.
 It retains a `spawned` reservation owned by the live fenced process. A
 prior-process `pending_spawn` reservation is ambiguous because its child may
 have started before the identity update, so startup fails before scheduling
-rather than releasing it without process-death proof. These are the shapes
-required by
+rather than releasing it without process-death proof. After that reconciliation
+and before scheduling is enabled, startup counts each bounded profile's
+surviving live reservations under its capacity lock and makes eligible every
+retained `contended` wait now under that profile's current bound, so a bound
+raised or removed across a restart admits work without waiting for an unrelated
+release. These are the shapes required by
 [turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
 Reconstitution and wake must fail closed on partial, stale, or mismatched
 evidence. This paragraph constrains that future schema; no present storage

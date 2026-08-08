@@ -347,16 +347,27 @@ persistence stores that UUID as the policy header's surrogate identity, and
 every request, receipt, snapshot, and event uses the same spelling. Each
 `record_generation` is a positive canonical decimal string. The mutation
 atomically marks only that exact active generation or predecessor correlation
-cleared. For a fresh command, the existence of any newer active generation
-returns `stale_generation` before the named older generation is considered for
-`already_cleared`; an operator can therefore never mistake clearing historical
-evidence for clearing the current exclusion. A chain target whose predecessor
-does not exactly correlate with the named profile's active exclusion, or any
-target with no such record, is `unknown_credential_exclusion`; and ordinary
-authorization failure is `credential_administration_forbidden`. Equal
-`command_id` replay still returns its stored receipt before this current-state
-precedence is evaluated. OAuth quarantine rejects this mutation because only
-re-provisioning can clear it.
+cleared. For a fresh command, the existence of a newer active generation *at the
+target's own exact scope* returns `stale_generation` before the named older
+generation is considered for `already_cleared`; an operator can therefore never
+mistake clearing historical evidence for clearing the current exclusion at that
+scope. The comparison is confined to that scope — the profile for
+`profile_quarantine`, the pool policy and profile for `membership_exclusion`,
+and the session, pool policy, and profile for `session_displacement` — because a
+newer generation elsewhere describes a different exclusion the operator did not
+name. Without that confinement a still-active target the listing API returned
+could not be cleared until every unrelated newer exclusion was cleared first,
+and a profile taking continuous triggers in another pool could block the
+requested repair indefinitely. A chain target whose named predecessor correlates
+with no retained record for that profile and scope, or whose retained record
+does not exactly match the named correlation, is `unknown_credential_exclusion`
+— as is any other target with no such record. An exact retained record that an
+earlier command already marked inactive is not unknown: it follows the
+`already_cleared` path below, so the idempotent repair returns one answer rather
+than depending on which command ran first. Ordinary authorization failure is
+`credential_administration_forbidden`. Equal `command_id` replay still returns
+its stored receipt before this current-state precedence is evaluated. OAuth
+quarantine rejects this mutation because only re-provisioning can clear it.
 
 Success returns `credential_exclusion_cleared { target, outcome }`, where
 `outcome` is `cleared` for the winning transition or `already_cleared` when a
@@ -2568,9 +2579,11 @@ closed `exclusion` object:
 - `chain_exclusion { predecessor_model_call_id }`.
 
 One member can satisfy several of these at once. The producer selects exactly
-one by the fixed precedence in which they are listed above — widest scope first,
-so a profile-wide quarantine outranks a session displacement, which outranks a
-membership exclusion, which outranks a chain exclusion — and two producers
+one by the fixed precedence in which they are listed above, which is
+widest-scope-first: a profile-wide `profile_quarantine` outranks a
+`membership_exclusion` covering one membership across every session, which
+outranks a `session_displacement` covering one session, which outranks a
+`chain_exclusion` covering one successor chain within one turn. Two producers
 therefore cannot describe one exhaustion differently. `reset_at_unix_ms` is
 present only when every exclusion active for that member at the failure commit
 reported a reset, and is then the latest of them; any exclusion with no reset
