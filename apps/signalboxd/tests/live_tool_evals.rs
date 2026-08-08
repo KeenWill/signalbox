@@ -144,6 +144,7 @@ const EXEC_FORCED_READ_ONLY_OUTPUT: &str = "forced unsandboxed eval\n";
 const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
+const WEB_QUERY: &str = "Signalbox tool evaluation";
 const EXPECTED_OPENAI_CREDENTIAL_REFERENCE: &str = "openai-tool-eval";
 const EXPECTED_WEB_CREDENTIAL_REFERENCE: &str = "brave-search-primary";
 const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
@@ -1088,14 +1089,14 @@ impl WebSearchTransport for FixtureWebSearchTransport {
         request: WebSearchRequest,
         credential: &CredentialValue,
     ) -> WebSearchTransportOutcome {
-        if request.query() != "Signalbox tool evaluation" {
+        if request.query() != WEB_QUERY {
             return WebSearchTransportOutcome::failed(
                 WebSearchTransportFailure::RequestFailed,
                 credential,
             );
         }
         let result = WebSearchResult::try_new(WebSearchResultFields {
-            title: String::from("Signalbox tool evaluation"),
+            title: String::from(WEB_QUERY),
             url: String::from(WEB_URL),
             snippet: String::from("Synthetic result for model-in-the-loop evaluation."),
         })
@@ -1586,7 +1587,9 @@ impl CaseSnapshot {
     }
 
     fn git_natural_requests_passed(&self) -> EvalResult<bool> {
-        let expected_stage = normalized_arguments_text(r#"{"paths":["eval.txt"]}"#)?;
+        let expected_stage = normalized_arguments_text(
+            &serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
+        )?;
         let expected_commit = normalized_arguments_text(r#"{"message":"tool eval commit"}"#)?;
         let mutation_requests = self
             .requests
@@ -1618,8 +1621,10 @@ impl CaseSnapshot {
     }
 
     fn web_natural_requests_passed(&self) -> EvalResult<bool> {
-        let expected_query = normalized_arguments_text(r#"{"query":"Signalbox tool evaluation"}"#)?;
-        let expected_url = normalized_arguments_text(r#"{"url":"https://example.com/eval"}"#)?;
+        let expected_query =
+            normalized_arguments_text(&serde_json::json!({"query": WEB_QUERY}).to_string())?;
+        let expected_url =
+            normalized_arguments_text(&serde_json::json!({"url": WEB_URL}).to_string())?;
         Ok(self
             .requests
             .iter()
@@ -1636,15 +1641,10 @@ impl CaseSnapshot {
     }
 
     fn exact_natural_request_failed(&self, family: EvalFamily) -> bool {
-        self.requests.iter().any(|request| {
+        self.requests.iter().enumerate().any(|(index, request)| {
             !request.attempt_succeeded
                 && match family {
-                    EvalFamily::Git => {
-                        (request.name == GIT_STAGE_NAME
-                            && request.arguments_text == r#"{"paths":["eval.txt"]}"#)
-                            || (request.name == GIT_CREATE_COMMIT_NAME
-                                && request.arguments_text == r#"{"message":"tool eval commit"}"#)
-                    }
+                    EvalFamily::Git => self.exact_git_natural_request_failed(index, request),
                     EvalFamily::Workspace => {
                         (request.name == READ_FILE_NAME
                             && request
@@ -1658,10 +1658,13 @@ impl CaseSnapshot {
                     }
                     EvalFamily::Web => {
                         (request.name == WEB_SEARCH_NAME
-                            && request.arguments_text == r#"{"query":"Signalbox tool evaluation"}"#)
+                            && request
+                                .arguments()
+                                .is_some_and(|arguments| arguments["query"] == WEB_QUERY))
                             || (request.name == WEB_FETCH_NAME
-                                && request.arguments_text
-                                    == r#"{"url":"https://example.com/eval"}"#)
+                                && request
+                                    .arguments()
+                                    .is_some_and(|arguments| arguments["url"] == WEB_URL))
                     }
                     EvalFamily::Exec => {
                         request.name == SANDBOXED_EXEC_NAME
@@ -1670,6 +1673,32 @@ impl CaseSnapshot {
                 }
         })
     }
+
+    fn exact_git_natural_request_failed(
+        &self,
+        request_index: usize,
+        request: &RequestSnapshot,
+    ) -> bool {
+        if request.name == GIT_STAGE_NAME && exact_git_natural_stage_arguments(request) {
+            return true;
+        }
+        request.name == GIT_CREATE_COMMIT_NAME
+            && request
+                .arguments()
+                .is_some_and(|arguments| arguments["message"] == GIT_NATURAL_MESSAGE)
+            && self.requests[..request_index].iter().any(|stage| {
+                stage.attempt_succeeded
+                    && stage.name == GIT_STAGE_NAME
+                    && exact_git_natural_stage_arguments(stage)
+                    && stage.producing_model_call_id != request.producing_model_call_id
+            })
+    }
+}
+
+fn exact_git_natural_stage_arguments(request: &RequestSnapshot) -> bool {
+    request
+        .arguments()
+        .is_some_and(|arguments| arguments["paths"] == serde_json::json!([GIT_NATURAL_PATH]))
 }
 
 fn workspace_read_covers_seed(arguments: &serde_json::Value) -> bool {
@@ -2288,7 +2317,7 @@ fn unforced_web_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_SEARCH_NAME),
-                arguments_text: String::from(r#"{"query":"Signalbox tool evaluation"}"#),
+                arguments_text: serde_json::json!({"query": WEB_QUERY}).to_string(),
                 attempt_succeeded: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -2320,6 +2349,67 @@ fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
                 arguments_text: serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
                 attempt_succeeded: false,
             }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Git),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn unforced_git_tier_reports_a_premature_commit_failure_as_a_miss() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        result_round_trips: 1,
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(GIT_CREATE_COMMIT_NAME),
+                arguments_text: serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
+                attempt_succeeded: false,
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Git),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
+fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        result_round_trips: 1,
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(GIT_STAGE_NAME),
+                    arguments_text: serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
+                    attempt_succeeded: true,
+                },
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                    name: String::from(GIT_CREATE_COMMIT_NAME),
+                    arguments_text: serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
+                    attempt_succeeded: false,
+                },
+            ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
     };
@@ -2379,7 +2469,7 @@ fn unforced_git_tier_requires_both_task_tools() {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_STAGE_NAME),
-                arguments_text: String::from(r#"{"paths":["eval.txt"]}"#),
+                arguments_text: serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
                 attempt_succeeded: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -2932,16 +3022,18 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(WRITE_FILE_NAME),
-                arguments_text: String::from(
-                    r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
-                ),
+                arguments_text: serde_json::json!({
+                    "content": WORKSPACE_ANSWER,
+                    "path": WORKSPACE_ANSWER_PATH,
+                })
+                .to_string(),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(READ_FILE_NAME),
-                arguments_text: String::from(r#"{"path":"brief.txt"}"#),
+                arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
                 attempt_succeeded: true,
             },
         ],
@@ -2960,16 +3052,22 @@ fn workspace_natural_state_requires_the_read_to_cover_the_full_brief() {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(READ_FILE_NAME),
-                arguments_text: String::from(r#"{"max_bytes":1,"path":"brief.txt"}"#),
+                arguments_text: serde_json::json!({
+                    "max_bytes": 1,
+                    "path": WORKSPACE_SEED_PATH,
+                })
+                .to_string(),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(WRITE_FILE_NAME),
-                arguments_text: String::from(
-                    r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
-                ),
+                arguments_text: serde_json::json!({
+                    "content": WORKSPACE_ANSWER,
+                    "path": WORKSPACE_ANSWER_PATH,
+                })
+                .to_string(),
                 attempt_succeeded: true,
             },
         ],
@@ -2988,16 +3086,18 @@ fn workspace_natural_state_requires_a_later_model_call_for_the_write() {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(READ_FILE_NAME),
-                arguments_text: String::from(r#"{"path":"brief.txt"}"#),
+                arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(WRITE_FILE_NAME),
-                arguments_text: String::from(
-                    r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
-                ),
+                arguments_text: serde_json::json!({
+                    "content": WORKSPACE_ANSWER,
+                    "path": WORKSPACE_ANSWER_PATH,
+                })
+                .to_string(),
                 attempt_succeeded: true,
             },
         ],
@@ -3016,25 +3116,30 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(READ_FILE_NAME),
-                arguments_text: String::from(r#"{"path":"brief.txt"}"#),
+                arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(WRITE_FILE_NAME),
-                arguments_text: String::from(
-                    r#"{"content":"model loop observed\n","path":"answer.txt"}"#,
-                ),
+                arguments_text: serde_json::json!({
+                    "content": WORKSPACE_ANSWER,
+                    "path": WORKSPACE_ANSWER_PATH,
+                })
+                .to_string(),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_ATTEMPT_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(EDIT_FILE_NAME),
-                arguments_text: String::from(
-                    r#"{"new_string":"changed","old_string":"alpha","path":"brief.txt"}"#,
-                ),
+                arguments_text: serde_json::json!({
+                    "new_string": "changed",
+                    "old_string": WORKSPACE_SEED.trim_end(),
+                    "path": WORKSPACE_SEED_PATH,
+                })
+                .to_string(),
                 attempt_succeeded: true,
             },
         ],
@@ -3076,14 +3181,18 @@ fn git_natural_state_requires_a_later_model_call_for_the_commit() -> EvalResult 
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_STAGE_NAME),
-                arguments_text: normalized_arguments_text(r#"{"paths":["eval.txt"]}"#)?,
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
+                )?,
                 attempt_succeeded: true,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_CREATE_COMMIT_NAME),
-                arguments_text: normalized_arguments_text(r#"{"message":"tool eval commit"}"#)?,
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
+                )?,
                 attempt_succeeded: true,
             },
         ],
@@ -3103,21 +3212,27 @@ fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalRe
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_STAGE_NAME),
-                arguments_text: normalized_arguments_text(r#"{"paths":["eval.txt"]}"#)?,
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
+                )?,
                 attempt_succeeded: true,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_CREATE_COMMIT_NAME),
-                arguments_text: normalized_arguments_text(r#"{"message":"tool eval commit"}"#)?,
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
+                )?,
                 attempt_succeeded: true,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_STAGE_NAME),
-                arguments_text: normalized_arguments_text(r#"{"paths":["stage-me.txt"]}"#)?,
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"paths": [GIT_STAGE_PATH]}).to_string(),
+                )?,
                 attempt_succeeded: true,
             },
         ],
@@ -3138,7 +3253,7 @@ fn web_natural_state_requires_a_later_model_call_for_the_fetch() -> EvalResult {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_SEARCH_NAME),
                 arguments_text: normalized_arguments_text(
-                    r#"{"query":"Signalbox tool evaluation"}"#,
+                    &serde_json::json!({"query": WEB_QUERY}).to_string(),
                 )?,
                 attempt_succeeded: true,
             },
@@ -3146,7 +3261,9 @@ fn web_natural_state_requires_a_later_model_call_for_the_fetch() -> EvalResult {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_FETCH_NAME),
-                arguments_text: normalized_arguments_text(r#"{"url":"https://example.com/eval"}"#)?,
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"url": WEB_URL}).to_string(),
+                )?,
                 attempt_succeeded: true,
             },
         ],
@@ -3173,7 +3290,7 @@ fn web_natural_state_requires_the_exact_query() -> EvalResult {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_FETCH_NAME),
-                arguments_text: String::from(r#"{"url":"https://example.com/eval"}"#),
+                arguments_text: serde_json::json!({"url": WEB_URL}).to_string(),
                 attempt_succeeded: true,
             },
         ],
@@ -3193,7 +3310,9 @@ fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResul
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_FETCH_NAME),
-                arguments_text: normalized_arguments_text(r#"{"url":"https://example.com/eval"}"#)?,
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"url": WEB_URL}).to_string(),
+                )?,
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -3201,7 +3320,7 @@ fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResul
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_SEARCH_NAME),
                 arguments_text: normalized_arguments_text(
-                    r#"{"query":"Signalbox tool evaluation"}"#,
+                    &serde_json::json!({"query": WEB_QUERY}).to_string(),
                 )?,
                 attempt_succeeded: true,
             },
@@ -3209,7 +3328,9 @@ fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResul
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_FETCH_NAME),
-                arguments_text: normalized_arguments_text(r#"{"url":"https://example.com/eval"}"#)?,
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"url": WEB_URL}).to_string(),
+                )?,
                 attempt_succeeded: true,
             },
         ],
