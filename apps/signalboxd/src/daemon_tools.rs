@@ -1907,7 +1907,7 @@ mod tests {
         let actual = fs::canonicalize(actual).ok()?;
         let workspace = fs::canonicalize(workspace).ok()?;
         let package = fs::canonicalize(package).ok()?;
-        ((reported == workspace && (actual == workspace || actual == package))
+        ((reported == workspace && actual == workspace)
             || (reported == package && actual == package))
             .then_some(reported)
     }
@@ -2729,16 +2729,14 @@ mod tests {
     }
 
     #[test]
-    fn bridge_compiler_invocation_preserves_workspace_root_for_cargo_package_cwd() {
+    fn bridge_compiler_invocation_rejects_workspace_report_from_package_cwd() {
         let fixture = tempfile::tempdir().expect("fixture root exists");
         let workspace = fixture.path().join("workspace");
         let package = workspace.join("package");
         fs::create_dir_all(&package).expect("package fixture exists");
-        let expected_workspace = fs::canonicalize(&workspace).expect("workspace canonicalizes");
-
         assert_eq!(
             verified_compiler_invocation_directory_for(&workspace, &package, &workspace, &package,),
-            Some(expected_workspace)
+            None
         );
     }
 
@@ -3560,6 +3558,17 @@ mod tests {
                 .spawn()
                 .expect("bridge readiness waiter starts");
             Self { child }
+        }
+
+        #[track_caller]
+        fn assert_running(&mut self) {
+            assert!(
+                self.child
+                    .try_wait()
+                    .expect("bridge readiness waiter status is readable")
+                    .is_none(),
+                "bridge readiness waiter blocks before tools/list"
+            );
         }
 
         #[track_caller]
@@ -4428,12 +4437,13 @@ mod tests {
         fixture.initialize();
         fixture.synchronize_without_listing();
         assert!(!fixture.ready_path.exists());
-        let waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
+        let mut waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
             executable: &fixture.executable,
             ready: &fixture.ready_path,
             workspace: fixture.workspace.path(),
         });
         assert!(!fixture.ready_path.exists());
+        waiter.assert_running();
         fixture.list_tools();
         waiter.finish_success();
         assert!(fixture.ready_path.is_file());
