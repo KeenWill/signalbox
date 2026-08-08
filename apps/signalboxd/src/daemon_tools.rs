@@ -1712,12 +1712,33 @@ mod tests {
         );
     }
 
-    /// Root-level JSON Schema keywords that are not an object declaration.
+    /// Root-level JSON Schema keywords an advertised argument schema may
+    /// carry: object declaration, its members, and annotations.
     ///
-    /// A root combinator leaves the argument shape to its branches, so a
-    /// validator that requires an object-typed root cannot accept it even
-    /// when a sibling `"type"` is present.
-    const ROOT_COMBINATORS: [&str; 5] = ["allOf", "anyOf", "not", "oneOf", "$ref"];
+    /// An allowlist rather than a list of known-bad combinators. A root
+    /// applicator leaves the argument shape to its branches, so a validator
+    /// requiring an object-typed root cannot accept it even beside a sibling
+    /// `"type"` — but `oneOf`, `anyOf`, `allOf`, `not`, and `$ref` are not the
+    /// closed set of those. JSON Schema also applies at the root through
+    /// `if`/`then`/`else`, `dependentSchemas`, and `unevaluatedProperties`,
+    /// and later drafts may add more. A blocklist naming today's rejects
+    /// therefore admits tomorrow's in silence, which is the exact failure this
+    /// gate exists to prevent: a root shape nobody enumerated reached a
+    /// provider once already and returned 400 for every exchange offering the
+    /// catalog.
+    ///
+    /// So the gate fails closed. A declaration needing a keyword absent here
+    /// fails this test and joins the list deliberately, with the wire question
+    /// answered once rather than assumed.
+    const PERMITTED_ROOT_KEYWORDS: [&str; 7] = [
+        "$defs",
+        "additionalProperties",
+        "description",
+        "properties",
+        "required",
+        "title",
+        "type",
+    ];
 
     /// Fails one advertised schema that a function-tool wire would reject.
     ///
@@ -1731,12 +1752,12 @@ mod tests {
     /// appear nowhere in that subset.
     ///
     /// This assertion pins the strictest reading of those two rules — a
-    /// declared `"type": "object"` root carrying no combinator at all — for
-    /// two reasons. The rejection this test exists to prevent was a root
-    /// `oneOf`, and a catalog that satisfies the strict-mode root rule stays
-    /// usable if a strict function contract is ever requested. Accepted
-    /// cost: a schema may not express a root-level union, and must instead
-    /// discriminate through one tag property, as
+    /// declared `"type": "object"` root carrying nothing outside
+    /// [`PERMITTED_ROOT_KEYWORDS`] — for two reasons. The rejection this test
+    /// exists to prevent was a root `oneOf`, and a catalog that satisfies the
+    /// strict-mode root rule stays usable if a strict function contract is
+    /// ever requested. Accepted cost: a schema may not express a root-level
+    /// union, and must instead discriminate through one tag property, as
     /// `signalbox_tool_contract::rendered_contract_schema` now renders
     /// internally tagged argument enums.
     ///
@@ -1746,6 +1767,7 @@ mod tests {
     /// The stake is the blast radius, not one tool. Every request carries the
     /// whole catalog, so one rejected schema returns 400 for every exchange
     /// that offers it — not merely for calls to the offending tool.
+    #[track_caller]
     fn assert_object_rooted(name: &str, schema: &str) {
         let decoded: serde_json::Value = serde_json::from_str(schema)
             .unwrap_or_else(|error| panic!("{name} schema is JSON: {error}"));
@@ -1757,16 +1779,47 @@ mod tests {
             Some("object"),
             "{name} schema root must declare \"type\": \"object\""
         );
-        for combinator in ROOT_COMBINATORS {
-            assert!(
-                !root.contains_key(combinator),
-                "{name} schema root must not carry `{combinator}`"
+        let unsupported = unsupported_root_keywords(root);
+        assert!(
+            unsupported.is_empty(),
+            "{name} schema root must carry no keyword outside the advertised \
+             object contract, found {unsupported:?}"
+        );
+    }
+
+    /// Names the keywords a schema root declares outside the object contract.
+    ///
+    /// Split from the assertion so the allowlist can be exercised directly:
+    /// what the gate rejects is the claim under review, and reading it back
+    /// through a caught panic would prove less about which keywords it names.
+    fn unsupported_root_keywords(root: &serde_json::Map<String, serde_json::Value>) -> Vec<&str> {
+        root.keys()
+            .map(String::as_str)
+            .filter(|keyword| !PERMITTED_ROOT_KEYWORDS.contains(keyword))
+            .collect()
+    }
+
+    /// Fails the first advertised declaration whose schema root a function-tool
+    /// wire would reject, naming it.
+    ///
+    /// The iteration lives here rather than in the test body. The sweep has to
+    /// cover the whole composed catalog — that is what makes a tool family
+    /// added later join without anyone remembering — while a test body stays
+    /// straight-line, so the loop sits behind a `#[track_caller]` helper that
+    /// names the failing declaration at the call site.
+    #[track_caller]
+    fn assert_every_definition_is_object_rooted(definitions: &[ToolDefinition]) {
+        for definition in definitions {
+            assert_object_rooted(
+                definition.name().as_str(),
+                definition.input_schema().as_str(),
             );
         }
     }
 
-    /// Every schema the daemon advertises satisfies the function-tool wire's
-    /// root constraint, so no single declaration can fail whole exchanges.
+    /// INV-055: every schema the daemon advertises satisfies the function-tool
+    /// wire's root constraint, so no single declaration can fail whole
+    /// exchanges.
     ///
     /// The sweep runs over the fully composed catalog rather than a listed
     /// subset: a tool family added later joins it without being remembered.
@@ -1779,15 +1832,34 @@ mod tests {
         let definitions = catalog.definitions();
 
         assert!(!definitions.is_empty(), "the composed catalog is not empty");
-        for definition in &definitions {
-            assert_object_rooted(
-                definition.name().as_str(),
-                definition.input_schema().as_str(),
-            );
-        }
+        assert_every_definition_is_object_rooted(&definitions);
         // `goal_declare` compiles only against a live pool, so the composed
         // catalog cannot carry it and its static declaration joins directly.
         assert_object_rooted(GOAL_DECLARE_NAME, crate::goal_mode::GOAL_DECLARE_SCHEMA);
+    }
+
+    /// The root gate names a conditional applicator, not merely the five
+    /// combinators the observed rejection happened to involve.
+    ///
+    /// `if`/`then`/`else` applies at the root exactly as `oneOf` does: it
+    /// makes the admitted argument shape depend on a branch, which is what a
+    /// function-tool root may not do. A gate written as a blocklist from one
+    /// observed 400 would pass this schema through to the provider and
+    /// recreate the whole-catalog rejection, so the allowlist is what is
+    /// pinned here.
+    #[test]
+    fn the_root_gate_names_a_conditional_applicator_as_unsupported() {
+        let declared = serde_json::json!({
+            "if": {"required": ["base"]},
+            "properties": {},
+            "then": {"required": ["head"]},
+            "type": "object"
+        });
+
+        assert_eq!(
+            unsupported_root_keywords(declared.as_object().expect("the fixture root is an object")),
+            vec!["if", "then"]
+        );
     }
 
     /// `git_diff` is the declaration whose root `oneOf` failed every Git

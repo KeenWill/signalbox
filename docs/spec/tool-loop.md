@@ -288,14 +288,15 @@ Local Git and execution tools bind the same configured workspace root used by
 the workspace families.
 
 Every advertised argument schema declares an object at its root and carries no
-root-level combinator. One request carries the whole catalog, so a provider that
-refuses a single schema refuses every exchange offering it: a root-level union
-is a family-wide outage, not a per-tool cost. An internally tagged argument type
-is therefore advertised as one object whose tag property holds the variant
-vocabulary and names what each variant requires, while its Rust type still
-decodes the tagged form unchanged; the advertised schema alone widens, and each
-family's own argument validation still refuses what the declaration excludes.
-The composed catalog is swept for this property offline.
+root keyword outside that object declaration (INV-055). One request carries the
+whole catalog, so a provider that refuses a single schema refuses every exchange
+offering it: a root-level union is a family-wide outage, not a per-tool cost. An
+internally tagged argument type is therefore advertised as one object whose tag
+property holds the variant vocabulary and names what each variant requires,
+while its Rust type still decodes the tagged form unchanged; the advertised
+schema alone widens, and each family's own argument validation still refuses
+what the declaration excludes. The composed catalog is swept for this property
+offline.
 
 The exact required inputs and fail-closed startup validation are owned by
 [configuration and credentials](configuration-and-credentials.md#daemon-tool-mapping-registry).

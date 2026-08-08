@@ -234,10 +234,38 @@ fn folded_tagged_union(
     Some(folded)
 }
 
-/// Decomposes one union branch, admitting only object-shaped schemas.
+/// Object-level keywords the fold can carry from a branch into the merged
+/// root.
+///
+/// The merged object is rebuilt from `type`, `properties`, `required`, and
+/// `additionalProperties`, with `description` spent on the tag's wording.
+/// A branch stating anything else — `minProperties`, `dependentRequired`,
+/// `patternProperties`, a branch-level `allOf` — constrains the argument
+/// object in a way the merge has no vocabulary to reproduce across variants,
+/// and reconstructing the root without it would advertise a contract weaker
+/// than the one declared. That is a wider widening than the fold accepts:
+/// merging is allowed to lose the *pairing* between a tag value and its
+/// payload, because each family's own validator still enforces it, but it is
+/// not allowed to lose a constraint outright.
+const FOLDABLE_VARIANT_KEYWORDS: [&str; 5] = [
+    "additionalProperties",
+    "description",
+    "properties",
+    "required",
+    "type",
+];
+
+/// Decomposes one union branch, admitting only object-shaped schemas whose
+/// every keyword the merge can reproduce.
 fn tagged_variant(branch: &serde_json::Value) -> Option<TaggedVariant<'_>> {
     let branch = branch.as_object()?;
     if branch.get("type")? != "object" {
+        return None;
+    }
+    if branch
+        .keys()
+        .any(|keyword| !FOLDABLE_VARIANT_KEYWORDS.contains(&keyword.as_str()))
+    {
         return None;
     }
     let properties = branch.get("properties")?.as_object()?;
@@ -253,11 +281,19 @@ fn tagged_variant(branch: &serde_json::Value) -> Option<TaggedVariant<'_>> {
         Some(description) => Some(description.as_str()?),
         None => None,
     };
+    // A schema-valued `additionalProperties` constrains what the extra
+    // properties may be, which the merged root cannot restate per variant;
+    // only the boolean forms survive the fold.
+    let closed = match branch.get("additionalProperties") {
+        Some(serde_json::Value::Bool(admitted)) => !admitted,
+        Some(_) => return None,
+        None => false,
+    };
     Some(TaggedVariant {
         description,
         properties,
         required,
-        closed: branch.get("additionalProperties") == Some(&serde_json::Value::Bool(false)),
+        closed,
     })
 }
 
@@ -836,7 +872,8 @@ mod tests {
     use signalbox_domain::{ToolEffectClass, ToolPermissionDefault};
 
     use super::{
-        ToolContract, compile_contract_definition, decode_canonical_uuid, rendered_contract_schema,
+        ToolContract, compile_contract_definition, decode_canonical_uuid, object_rooted_schema,
+        rendered_contract_schema,
     };
 
     /// Fixture newtype whose manual schema states a real constraint.
@@ -1055,5 +1092,62 @@ mod tests {
 
         assert!(schema.get("type").is_none());
         assert!(schema.get("oneOf").is_some());
+    }
+
+    /// A branch stating an object-level constraint the merge cannot restate
+    /// declines the fold rather than losing the constraint.
+    ///
+    /// `minProperties` counts the members of one variant's object. The merged
+    /// root describes every variant at once, so a per-variant count has
+    /// nowhere to live in it, and rebuilding the root from the keywords the
+    /// fold does reproduce would advertise a schema admitting objects the
+    /// declaration refuses. The fold is permitted to lose the pairing between
+    /// a tag value and its payload — each family's validator still enforces
+    /// that — but never a constraint outright, so the root union stands and
+    /// the catalog conformance gate reports it.
+    #[test]
+    fn a_variant_constraint_the_merge_cannot_restate_declines_the_fold() {
+        let declared = serde_json::json!({
+            "oneOf": [
+                {
+                    "properties": {"mode": {"const": "bare"}},
+                    "required": ["mode"],
+                    "type": "object"
+                },
+                {
+                    "minProperties": 2,
+                    "properties": {"label": {"type": "string"}, "mode": {"const": "labelled"}},
+                    "required": ["label", "mode"],
+                    "type": "object"
+                }
+            ]
+        });
+
+        assert_eq!(object_rooted_schema(declared.clone()), declared);
+    }
+
+    /// A schema-valued `additionalProperties` restricts what the extra members
+    /// may be, which the merged root cannot restate per variant, so it too
+    /// declines the fold. Only the boolean forms — closed, or silent — carry
+    /// through.
+    #[test]
+    fn a_schema_valued_additional_properties_declines_the_fold() {
+        let declared = serde_json::json!({
+            "oneOf": [
+                {
+                    "additionalProperties": {"type": "string"},
+                    "properties": {"mode": {"const": "open"}},
+                    "required": ["mode"],
+                    "type": "object"
+                },
+                {
+                    "properties": {"mode": {"const": "closed"}},
+                    "required": ["mode"],
+                    "type": "object"
+                }
+            ]
+        });
+
+        assert_eq!(object_rooted_schema(declared.clone()), declared);
     }
 }
