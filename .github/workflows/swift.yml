@@ -264,12 +264,32 @@ jobs:
             } >> "$GITHUB_OUTPUT"
             exit 0
           }
+          # The provenance is read from named variables rather than `$1`, `$2`,
+          # `$3`. They are three adjacent strings, so a transposition at the
+          # call site is a valid call that publishes a timestamp where the
+          # measured commit belongs — and two similarly named dates are in
+          # scope at that call site: `run_date`, the run's own, and
+          # `artifact_date`, the upload's, which is the one the report wants.
+          # `load_baseline` already refuses the same run positionally on the
+          # Python side; this was the last unlabelled link in the chain.
+          #
+          # Emptiness is checked rather than assumed. `set +e` is in force and
+          # `-u` deliberately is not, so an unset or misspelled name would
+          # otherwise expand to nothing and publish blank provenance — the
+          # silent version of the failure this labelling exists to prevent.
           available() {
+            for name in baseline_label baseline_sha baseline_date; do
+              if [ -z "${!name}" ]; then
+                printf 'internal error: %s unset at the available() boundary\n' \
+                  "$name" >&2
+                exit 1
+              fi
+            done
             {
               echo 'available=true'
-              echo "label=$1"
-              echo "sha=$2"
-              echo "date=$3"
+              echo "label=$baseline_label"
+              echo "sha=$baseline_sha"
+              echo "date=$baseline_date"
             } >> "$GITHUB_OUTPUT"
             exit 0
           }
@@ -445,6 +465,18 @@ jobs:
                   def okint: (type == "number")
                     or (type == "string" and test("^[+-]?[0-9]+$"));
                   def trunc: if . < 0 then -((-.) | floor) else floor end;
+                  # The largest counter the summarizer can carry through to a
+                  # rendered percentage. `okint` accepts any JSON number and
+                  # `1e999` is one: jq loads it as infinity, `json.loads` hands
+                  # `int()` that same infinity, and `int(inf)` raises
+                  # `OverflowError` — which the loader does not catch, so the
+                  # scan stopped on such a candidate and failed the report step
+                  # instead of falling through to an older artifact. An
+                  # unbounded digit string overflows one step later, when the
+                  # percentage is converted to floating point. 2^53-1 is where a
+                  # double stops representing integers exactly, which is also
+                  # where the comparisons below stop being trustworthy.
+                  def maxcounter: 9007199254740991;
                   ((.targets | type) == "array")
                   and ([.targets[]
                     | select(((.name // "") | endswith(".xctest")) | not)
@@ -458,23 +490,41 @@ jobs:
                         # is a corrupt measurement, not a 200% baseline.
                         and ((.coveredLines | tonumber | trunc) >= 0)
                         and ((.executableLines | tonumber | trunc) >= 0)
+                        and ((.coveredLines | tonumber | trunc) <= maxcounter)
+                        and ((.executableLines | tonumber | trunc) <= maxcounter)
                         and ((.coveredLines | tonumber | trunc)
                              <= (.executableLines | tonumber | trunc)))
                   and (([$products[].executableLines | tonumber | trunc]
-                        | add) // 0) > 0)
+                        | add) // 0
+                       | (. > 0) and (. <= maxcounter)))
                 ' "$baseline_dir/$SUMMARY_FILE" > /dev/null 2>&1; then
               [ -n "$reason" ] || reason="the \`$SUMMARY_FILE\` from run $run_id is not a readable coverage report"
               rm -f "$baseline_dir/$SUMMARY_FILE"
               continue
             fi
 
-            available "$label" "$run_sha" "$artifact_date"
+            baseline_label="$label"
+            baseline_sha="$run_sha"
+            baseline_date="$artifact_date"
+            available
           done <<<"$candidates"
 
           if [ -z "$reason" ]; then
             unavailable "no completed \`main\` run of this workflow was found"
           fi
-          unavailable "$reason (up to the $CANDIDATE_LIMIT most recent completed \`main\` runs were examined)"
+          # What was actually examined, which is not always "the most recent"
+          # runs. The exact-base run takes one of the cap's slots, and when it
+          # is older than the fallbacks the scanned set is that older run plus
+          # the newest ones — so naming the whole set "the N most recent"
+          # described a set that was never scanned, even though the count was
+          # right.
+          examined="$(printf '%s' "$candidates" | grep -c '[^[:space:]]')"
+          if [ "$(printf '%s' "$candidates" | head -n 1 | cut -f1)" = base ]; then
+            scope="the base commit's own run and the $((examined - 1)) most recent completed \`main\` runs"
+          else
+            scope="the $examined most recent completed \`main\` runs"
+          fi
+          unavailable "$reason ($scope were examined)"
       # Report only, and structurally incapable of gating: it never fails the
       # job, and it runs even when the tests failed, because a partial
       # measurement still names untested code. No step compares the reported

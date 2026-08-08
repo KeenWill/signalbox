@@ -231,11 +231,21 @@ def load_baseline(path: Path, *, label: str, sha: str, date: str) -> tuple["Base
     (docs/style.md principle 2, "position may carry meaning only where types
     do"). `path` keeps its position, being the one argument whose type states
     its role.
+
+    `OverflowError` joins the caught set for the same reason the others are
+    there. A counter of `1e999` is a valid JSON number that `json.loads` hands
+    back as infinity, and `int(inf)` raises it; an unbounded digit string
+    raises it one step later, converting the percentage to a float. Both
+    escaped this guard and ended the report step, which is precisely the
+    outcome the "return a reason" contract above exists to prevent — an
+    unreadable baseline must cost the delta, never the report. The workflow's
+    `jq` predicate rejects such counters before they reach here; this is the
+    second line, because the loader is what promises not to raise.
     """
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
         total = total_of([summary for _, summary in read_file_summaries(document)])
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError) as error:
         return None, f"the baseline summary could not be read ({error.__class__.__name__})"
     # An export with no instrumented line is not a measurement to compare
     # against; `Counter.percent` would report it as 100% covered and every

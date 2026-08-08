@@ -502,6 +502,33 @@ class BaselineLoadingTests(unittest.TestCase):
         self.assertIsNone(baseline)
         self.assertIn("could not be read", reason)
 
+    def test_a_baseline_counter_that_overflows_reports_a_reason(self) -> None:
+        """`1e999` is a valid JSON number, and `json.loads` returns it as
+        infinity — `int(inf)` then raises `OverflowError`. That escaped the
+        guard and ended the whole report step, when an unreadable baseline is
+        supposed to cost only the delta.
+
+        The document is otherwise exactly the healthy fixture, so nothing but
+        the counter's magnitude can be what makes it unreadable. The workflow's
+        `jq` predicate rejects such a counter before it reaches the loader;
+        this is the loader keeping its own promise not to raise.
+        """
+        document = export(coverage_file("/repo/crates/domain/src/a.rs", lines=200, covered=50))
+        document["data"][0]["files"][0]["summary"]["lines"]["count"] = "__OVERFLOW__"
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(
+                directory,
+                "summary.json",
+                json.dumps(document).replace('"__OVERFLOW__"', "1e999"),
+            )
+
+            baseline, reason = load_baseline(
+                path, label=BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
+            )
+
+        self.assertIsNone(baseline)
+        self.assertIn("could not be read", reason)
+
     def test_a_missing_baseline_file_reports_a_reason(self) -> None:
         """An extraction that produced nothing leaves no file, and reading
         one that is not there is an expected outcome here."""
