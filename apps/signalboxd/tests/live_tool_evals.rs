@@ -1823,7 +1823,12 @@ impl CaseOutcome {
         } else {
             &result
         };
-        if !exited_cleanly(execution) {
+        let expected_confinement = match target {
+            SANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME => "filesystem_confined",
+            UNSANDBOXED_EXEC_NAME => "unsandboxed",
+            _ => return false,
+        };
+        if execution["confinement"]["kind"] != expected_confinement || !exited_cleanly(execution) {
             return false;
         }
         match target {
@@ -2346,14 +2351,19 @@ fn forced_exec_outcome(target: &'static str, execution: serde_json::Value) -> Ca
     }
 }
 
-/// One serialized confined execution that exited zero with the given output.
-fn confined_exit(stdout: &str) -> serde_json::Value {
+/// One serialized execution with the selected confinement and zero exit.
+fn zero_exit_with_confinement(confinement: &str, stdout: &str) -> serde_json::Value {
     serde_json::json!({
-        "confinement": {"kind": "filesystem_confined"},
+        "confinement": {"kind": confinement},
         "outcome": {"kind": "exited", "code": 0},
         "stdout": {"text": stdout, "completeness": "complete", "encoding": "utf8"},
         "stderr": {"text": "", "completeness": "complete", "encoding": "utf8"},
     })
+}
+
+/// One serialized confined execution that exited zero with the given output.
+fn confined_exit(stdout: &str) -> serde_json::Value {
+    zero_exit_with_confinement("filesystem_confined", stdout)
 }
 
 #[test]
@@ -2378,6 +2388,39 @@ fn forced_exec_tier_rejects_the_other_case_s_output() {
     let outcome = forced_exec_outcome(
         SANDBOXED_EXEC_NAME,
         confined_exit(EXEC_FORCED_READ_ONLY_OUTPUT),
+    );
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_sandboxed_exec_rejects_an_unconfined_zero_exit() {
+    let outcome = forced_exec_outcome(
+        SANDBOXED_EXEC_NAME,
+        zero_exit_with_confinement("unsandboxed", EXEC_FORCED_SANDBOXED_OUTPUT),
+    );
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_unsandboxed_exec_rejects_a_confined_zero_exit() {
+    let outcome = forced_exec_outcome(
+        UNSANDBOXED_EXEC_NAME,
+        confined_exit(EXEC_FORCED_READ_ONLY_OUTPUT),
+    );
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_an_unconfined_zero_exit() {
+    let mut execution = zero_exit_with_confinement("unsandboxed", "");
+    execution["preparation_failure"] = serde_json::Value::Null;
+    execution["cargo_failure"] = serde_json::Value::Null;
+    let outcome = forced_exec_outcome(
+        CARGO_DIAGNOSTICS_NAME,
+        serde_json::json!({"execution": execution}),
     );
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
