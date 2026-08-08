@@ -854,6 +854,12 @@ enum ExecEvalCase {
     ForcedDiagnostics,
 }
 
+#[derive(Clone, Copy)]
+struct ExecFixtureCall {
+    name: &'static str,
+    expected_arguments: &'static str,
+}
+
 impl ExecEvalCase {
     fn for_forced_tool(tool: &str) -> EvalResult<Self> {
         match tool {
@@ -869,9 +875,12 @@ impl ExecEvalCase {
     /// A forced case reads the one `EXEC_CASES` fixture the report also
     /// compares the observed request against, so the dispatch allowlist cannot
     /// drift from the reported expectation and record a harness-induced miss.
-    fn admitted_call(self) -> (&'static str, &'static str) {
+    fn admitted_call(self) -> ExecFixtureCall {
         match self {
-            Self::Natural => (SANDBOXED_EXEC_NAME, EXEC_NATURAL_ARGUMENTS),
+            Self::Natural => ExecFixtureCall {
+                name: SANDBOXED_EXEC_NAME,
+                expected_arguments: EXEC_NATURAL_ARGUMENTS,
+            },
             Self::ForcedSandboxed => forced_exec_fixture(SANDBOXED_EXEC_NAME),
             Self::ForcedUnsandboxed => forced_exec_fixture(UNSANDBOXED_EXEC_NAME),
             Self::ForcedDiagnostics => forced_exec_fixture(CARGO_DIAGNOSTICS_NAME),
@@ -879,21 +888,25 @@ impl ExecEvalCase {
     }
 
     fn admits(self, name: &str, arguments: &NormalizedToolArguments) -> bool {
-        let (expected_name, expected_arguments) = self.admitted_call();
-        let expected =
-            NormalizedToolArguments::try_from_provider_text(expected_arguments.to_owned())
-                .expect("the static exec eval arguments normalize");
-        name == expected_name && arguments == &expected
+        let expected_call = self.admitted_call();
+        let expected = NormalizedToolArguments::try_from_provider_text(
+            expected_call.expected_arguments.to_owned(),
+        )
+        .expect("the static exec eval arguments normalize");
+        name == expected_call.name && arguments == &expected
     }
 }
 
 /// The one forced fixture an Exec case dispatches and reports against.
-fn forced_exec_fixture(name: &'static str) -> (&'static str, &'static str) {
+fn forced_exec_fixture(name: &'static str) -> ExecFixtureCall {
     let case = EXEC_CASES
         .iter()
         .find(|case| case.name == name)
         .expect("every Exec eval case names a forced fixture");
-    (case.name, case.expected_arguments)
+    ExecFixtureCall {
+        name: case.name,
+        expected_arguments: case.expected_arguments,
+    }
 }
 
 #[derive(Clone)]
@@ -1675,7 +1688,7 @@ impl SnapshotTurnDisposition {
                 Self::ProviderFailure(cause)
             }
             Some((ProcessFailedModelCallDisposition::Cancelled, _)) => Self::Infrastructure,
-            None => Self::Other,
+            None => Self::Infrastructure,
         }
     }
 
@@ -1980,7 +1993,7 @@ fn turn_snapshot_reports_ambiguous_model_recovery_as_infrastructure() {
 }
 
 #[test]
-fn turn_snapshot_reports_a_terminal_model_failure_as_a_miss() {
+fn turn_snapshot_reports_target_resolution_failure_as_infrastructure() {
     let state = ProcessTurnState::Failed {
         terminal_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(
             ARBITRARY_EVAL_FRONTIER_ID,
@@ -1991,7 +2004,7 @@ fn turn_snapshot_reports_a_terminal_model_failure_as_a_miss() {
 
     assert_eq!(
         SnapshotTurnDisposition::from_process_state(&state),
-        SnapshotTurnDisposition::Other
+        SnapshotTurnDisposition::Infrastructure
     );
 }
 
@@ -2003,6 +2016,14 @@ fn turn_snapshot_reports_a_terminal_provider_failure_distinctly() {
             None
         ))),
         SnapshotTurnDisposition::ProviderFailure(None)
+    );
+}
+
+#[test]
+fn turn_snapshot_reports_failed_without_a_model_call_as_infrastructure() {
+    assert_eq!(
+        SnapshotTurnDisposition::from_failed_model_call(None),
+        SnapshotTurnDisposition::Infrastructure
     );
 }
 
@@ -2333,30 +2354,9 @@ fn operation_tracker_records_each_cumulative_tool_result_once() {
 
 #[test]
 fn forced_exec_tier_rejects_a_nonzero_process_result() {
-    let target = SANDBOXED_EXEC_NAME;
-    let outcome = CaseOutcome {
-        target: Some(String::from(target)),
-        expected_arguments: Some(String::from(EXEC_FORCED_SANDBOXED_ARGUMENTS)),
-        execution_completed: true,
-        tool_results: vec![TrackedToolResult {
-            content: serde_json::json!({
-                "outcome": {"kind": "exited", "code": 1},
-            })
-            .to_string(),
-            is_error: false,
-        }],
-        snapshot: CaseSnapshot {
-            turn_disposition: SnapshotTurnDisposition::Completed,
-            requests: vec![RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
-                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
-                name: String::from(target),
-                arguments_text: String::from(EXEC_FORCED_SANDBOXED_ARGUMENTS),
-                attempt_succeeded: true,
-            }],
-            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
-        },
-    };
+    let mut execution = confined_exit(EXEC_FORCED_SANDBOXED_OUTPUT);
+    execution["outcome"]["code"] = serde_json::json!(1);
+    let outcome = forced_exec_outcome(SANDBOXED_EXEC_NAME, execution);
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
 }
@@ -2368,7 +2368,7 @@ fn unforced_exec_tier_rejects_an_additional_tool_call() {
         expected_arguments: None,
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
-            content: String::from("fixture result"),
+            content: confined_exit("").to_string(),
             is_error: false,
         }],
         snapshot: CaseSnapshot {
@@ -2401,10 +2401,10 @@ fn unforced_exec_tier_rejects_an_additional_tool_call() {
 
 /// One forced Exec outcome whose sole result carries the supplied execution.
 fn forced_exec_outcome(target: &'static str, execution: serde_json::Value) -> CaseOutcome {
-    let (name, arguments) = forced_exec_fixture(target);
+    let fixture = forced_exec_fixture(target);
     CaseOutcome {
-        target: Some(String::from(name)),
-        expected_arguments: Some(String::from(arguments)),
+        target: Some(String::from(fixture.name)),
+        expected_arguments: Some(String::from(fixture.expected_arguments)),
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
             content: execution.to_string(),
@@ -2415,8 +2415,8 @@ fn forced_exec_outcome(target: &'static str, execution: serde_json::Value) -> Ca
             requests: vec![RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
-                name: String::from(name),
-                arguments_text: String::from(arguments),
+                name: String::from(fixture.name),
+                arguments_text: String::from(fixture.expected_arguments),
                 attempt_succeeded: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
