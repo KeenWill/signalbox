@@ -3364,7 +3364,7 @@ mod tests {
             serde_json::to_writer(&mut *input, request).expect("MCP request serializes");
             input.write_all(b"\n").expect("MCP request is written");
             input.flush().expect("MCP request is flushed");
-            let response = match self.responses.recv_timeout(BRIDGE_RESPONSE_TIMEOUT) {
+            match self.responses.recv_timeout(BRIDGE_RESPONSE_TIMEOUT) {
                 Ok(Ok(response)) => response,
                 Ok(Err(error)) => panic!("MCP response read failed: {error}"),
                 Err(RecvTimeoutError::Disconnected) => {
@@ -3374,8 +3374,7 @@ mod tests {
                     terminate_child(&mut self.child);
                     panic!("MCP bridge response exceeded its timeout")
                 }
-            };
-            response
+            }
         }
 
         #[track_caller]
