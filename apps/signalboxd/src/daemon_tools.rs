@@ -3561,13 +3561,12 @@ mod tests {
         }
 
         #[track_caller]
-        fn assert_running(&mut self) {
+        fn assert_blocks_before_listing(&mut self) {
             assert!(
-                self.child
-                    .try_wait()
-                    .expect("bridge readiness waiter status is readable")
+                wait_for_child(&mut self.child, BRIDGE_CHILD_TEST_TIMEOUT)
+                    .expect("bridge readiness waiter remains observable")
                     .is_none(),
-                "bridge readiness waiter blocks before tools/list"
+                "bridge readiness waiter stays blocked before tools/list"
             );
         }
 
@@ -4443,7 +4442,7 @@ mod tests {
             workspace: fixture.workspace.path(),
         });
         assert!(!fixture.ready_path.exists());
-        waiter.assert_running();
+        waiter.assert_blocks_before_listing();
         fixture.list_tools();
         waiter.finish_success();
         assert!(fixture.ready_path.is_file());
