@@ -120,7 +120,9 @@ const DEFAULT_MODEL: &str = "gpt-5-nano";
 const MAX_OUTPUT_TOKENS: u32 = 16_384;
 const CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-const TURN_TIMEOUT: Duration = Duration::from_secs(3 * 2 * 60 + 60);
+/// Four exchanges cover the accepted premature fetch, search, later fetch,
+/// and final answer path, with one minute for local persistence and dispatch.
+const TURN_TIMEOUT: Duration = Duration::from_secs(4 * 2 * 60 + 60);
 const LIVE_EVAL_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 const GIT_AUTHOR_NAME: &str = "Signalbox Tool Eval";
 const GIT_AUTHOR_EMAIL: &str = "signalbox-tool-eval@example.test";
@@ -1633,13 +1635,39 @@ impl CaseSnapshot {
             }))
     }
 
-    fn exact_web_request_failed(&self) -> bool {
+    fn exact_natural_request_failed(&self, family: EvalFamily) -> bool {
         self.requests.iter().any(|request| {
             !request.attempt_succeeded
-                && ((request.name == WEB_SEARCH_NAME
-                    && request.arguments_text == r#"{"query":"Signalbox tool evaluation"}"#)
-                    || (request.name == WEB_FETCH_NAME
-                        && request.arguments_text == r#"{"url":"https://example.com/eval"}"#))
+                && match family {
+                    EvalFamily::Git => {
+                        (request.name == GIT_STAGE_NAME
+                            && request.arguments_text == r#"{"paths":["eval.txt"]}"#)
+                            || (request.name == GIT_CREATE_COMMIT_NAME
+                                && request.arguments_text == r#"{"message":"tool eval commit"}"#)
+                    }
+                    EvalFamily::Workspace => {
+                        (request.name == READ_FILE_NAME
+                            && request
+                                .arguments()
+                                .is_some_and(|arguments| workspace_read_covers_seed(&arguments)))
+                            || (request.name == WRITE_FILE_NAME
+                                && request.arguments().is_some_and(|arguments| {
+                                    arguments["path"] == WORKSPACE_ANSWER_PATH
+                                        && arguments["content"] == WORKSPACE_ANSWER
+                                }))
+                    }
+                    EvalFamily::Web => {
+                        (request.name == WEB_SEARCH_NAME
+                            && request.arguments_text == r#"{"query":"Signalbox tool evaluation"}"#)
+                            || (request.name == WEB_FETCH_NAME
+                                && request.arguments_text
+                                    == r#"{"url":"https://example.com/eval"}"#)
+                    }
+                    EvalFamily::Exec => {
+                        request.name == SANDBOXED_EXEC_NAME
+                            && request.arguments_text == EXEC_NATURAL_ARGUMENTS
+                    }
+                }
         })
     }
 }
@@ -1827,7 +1855,7 @@ impl CaseOutcome {
         if self.snapshot.turn_disposition.is_infrastructure() {
             return EvalDisposition::Infrastructure;
         }
-        if family == EvalFamily::Web && self.snapshot.exact_web_request_failed() {
+        if self.snapshot.exact_natural_request_failed(family) {
             return EvalDisposition::Infrastructure;
         }
         let required_names: &[&str] = match family {
@@ -2269,6 +2297,68 @@ fn unforced_web_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Web),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        tool_results: vec![TrackedToolResult {
+            content: String::from("fixture result"),
+            is_error: true,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(GIT_STAGE_NAME),
+                arguments_text: serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
+                attempt_succeeded: false,
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Git),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn unforced_workspace_tier_reports_infrastructure_for_an_exact_known_failed_attempt() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        tool_results: vec![TrackedToolResult {
+            content: String::from("fixture result"),
+            is_error: true,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(WRITE_FILE_NAME),
+                arguments_text: serde_json::json!({
+                    "path": WORKSPACE_ANSWER_PATH,
+                    "content": WORKSPACE_ANSWER,
+                })
+                .to_string(),
+                attempt_succeeded: false,
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Workspace),
         EvalDisposition::Infrastructure
     );
 }

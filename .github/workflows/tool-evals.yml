@@ -116,7 +116,6 @@ jobs:
     name: ${{ matrix.family }} tool eval (report only)
     needs: eligibility
     if: ${{ needs.eligibility.outputs.allowed == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    continue-on-error: true
     permissions:
       contents: read
     environment: openai-smoke
