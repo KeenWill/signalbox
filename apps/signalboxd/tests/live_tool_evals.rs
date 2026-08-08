@@ -153,7 +153,6 @@ const ARBITRARY_EVAL_ENTRY_ID: u128 = 0x9105;
 const ARBITRARY_EVAL_TURN_ATTEMPT_ID: u128 = 0x9106;
 const ARBITRARY_EVAL_SESSION_ID: u128 = 0x9107;
 const ARBITRARY_EVAL_MODEL_CALL_ID: u128 = 0x9108;
-const ARBITRARY_EVAL_APPROVAL_COMMAND_ID: u128 = 0x9109;
 const ARBITRARY_SECOND_EVAL_REQUEST_ID: u128 = 0x910a;
 const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x910b;
 const ARBITRARY_EVAL_FRONTIER_ID: u128 = 0x910c;
@@ -289,7 +288,7 @@ async fn run_case(
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
     if forced_tool == Some(UNSANDBOXED_EXEC_NAME)
         && database
-            .decide_pending_unsandboxed_request(session, turn)
+            .decide_pending_unsandboxed_requests(session, turn)
             .await?
     {
         timeout(TURN_TIMEOUT, execution.resume_active(session))
@@ -1374,42 +1373,45 @@ impl EvalDatabase {
         Ok((session, turn, *activated))
     }
 
-    async fn decide_pending_unsandboxed_request(
+    async fn decide_pending_unsandboxed_requests(
         &self,
         session: SessionId,
         turn: TurnId,
     ) -> EvalResult<bool> {
-        let repository = PostgresToolLoopRepository::new(self.pool.clone());
-        let Some(batch) = repository.load_active_batch(session, turn).await? else {
-            return Ok(false);
-        };
-        let ToolBatchPhase::AwaitingApproval { request } = batch.phase() else {
-            return Ok(false);
-        };
-        let pending = batch
-            .requests()
-            .iter()
-            .find(|candidate| candidate.id() == request)
-            .ok_or_else(|| io::Error::other("the pending approval request is absent"))?;
-        let decision =
-            forced_unsandboxed_approval_decision(pending.name().as_str(), pending.arguments());
-        let mut service = DecideToolRequestService::new(UuidV7ToolLoopIdGenerator, repository);
-        let prepared = service
-            .execute(
-                DecideToolRequest::try_new(
-                    DurableCommandId::from_uuid(Uuid::from_u128(
-                        ARBITRARY_EVAL_APPROVAL_COMMAND_ID,
-                    )),
-                    request,
-                    decision,
+        let mut decided_any = false;
+        loop {
+            let repository = PostgresToolLoopRepository::new(self.pool.clone());
+            let Some(batch) = repository.load_active_batch(session, turn).await? else {
+                return Ok(decided_any);
+            };
+            let ToolBatchPhase::AwaitingApproval { request } = batch.phase() else {
+                return Ok(decided_any);
+            };
+            let pending = batch
+                .requests()
+                .iter()
+                .find(|candidate| candidate.id() == request)
+                .ok_or_else(|| io::Error::other("the pending approval request is absent"))?;
+            let decision =
+                forced_unsandboxed_approval_decision(pending.name().as_str(), pending.arguments());
+            let mut service = DecideToolRequestService::new(UuidV7ToolLoopIdGenerator, repository);
+            let prepared = service
+                .execute(
+                    DecideToolRequest::try_new(
+                        DurableCommandId::from_uuid(Uuid::now_v7()),
+                        request,
+                        decision,
+                    )
+                    .map_err(|_| io::Error::other("the exec eval approval decision is invalid"))?,
                 )
-                .map_err(|_| io::Error::other("the exec eval approval decision is invalid"))?,
-            )
-            .await?;
-        if !matches!(prepared.result(), DecideToolRequestResult::Applied(_)) {
-            return Err(io::Error::other("the exec eval approval decision was rejected").into());
+                .await?;
+            if !matches!(prepared.result(), DecideToolRequestResult::Applied(_)) {
+                return Err(
+                    io::Error::other("the exec eval approval decision was rejected").into(),
+                );
+            }
+            decided_any = true;
         }
-        Ok(true)
     }
 }
 
