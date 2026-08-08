@@ -1042,8 +1042,9 @@ struct FixtureWebFetchTransport;
 impl WebFetchTransport for FixtureWebFetchTransport {
     async fn fetch(
         &mut self,
-        _request: WebFetchRequest,
+        request: WebFetchRequest,
     ) -> Result<WebFetchResponse, WebFetchTransportFailure> {
+        assert_eq!(request.url().as_str(), WEB_URL);
         WebFetchResponse::new(
             200,
             Some(String::from("text/plain")),
@@ -1072,9 +1073,10 @@ struct FixtureWebSearchTransport;
 impl WebSearchTransport for FixtureWebSearchTransport {
     async fn search(
         &mut self,
-        _request: WebSearchRequest,
+        request: WebSearchRequest,
         credential: &CredentialValue,
     ) -> WebSearchTransportOutcome {
+        assert_eq!(request.query(), "Signalbox tool evaluation");
         let result = WebSearchResult::try_new(WebSearchResultFields {
             title: String::from("Signalbox tool evaluation"),
             url: String::from(WEB_URL),
@@ -1582,17 +1584,19 @@ impl CaseSnapshot {
     fn web_natural_requests_passed(&self) -> EvalResult<bool> {
         let expected_query = normalized_arguments_text(r#"{"query":"Signalbox tool evaluation"}"#)?;
         let expected_url = normalized_arguments_text(r#"{"url":"https://example.com/eval"}"#)?;
-        let search = self.requests.iter().position(|request| {
-            request.name == WEB_SEARCH_NAME && request.arguments_text == expected_query
-        });
-        let fetch = self.requests.iter().position(|request| {
-            request.name == WEB_FETCH_NAME && request.arguments_text == expected_url
-        });
-        Ok(search.zip(fetch).is_some_and(|(search, fetch)| {
-            search < fetch
-                && self.requests[search].producing_model_call_id
-                    != self.requests[fetch].producing_model_call_id
-        }))
+        Ok(self
+            .requests
+            .iter()
+            .enumerate()
+            .any(|(search_index, search)| {
+                search.name == WEB_SEARCH_NAME
+                    && search.arguments_text == expected_query
+                    && self.requests.iter().skip(search_index + 1).any(|fetch| {
+                        fetch.name == WEB_FETCH_NAME
+                            && fetch.arguments_text == expected_url
+                            && search.producing_model_call_id != fetch.producing_model_call_id
+                    })
+            }))
     }
 }
 
@@ -2949,6 +2953,42 @@ fn web_natural_state_requires_the_exact_query() -> EvalResult {
     };
 
     assert!(!snapshot.web_natural_requests_passed()?);
+    Ok(())
+}
+
+#[test]
+fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResult {
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(WEB_FETCH_NAME),
+                arguments_text: normalized_arguments_text(r#"{"url":"https://example.com/eval"}"#)?,
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(WEB_SEARCH_NAME),
+                arguments_text: normalized_arguments_text(
+                    r#"{"query":"Signalbox tool evaluation"}"#,
+                )?,
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(WEB_FETCH_NAME),
+                arguments_text: normalized_arguments_text(r#"{"url":"https://example.com/eval"}"#)?,
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(snapshot.web_natural_requests_passed()?);
     Ok(())
 }
 
