@@ -1,13 +1,13 @@
 //! Table rendering for [`expect-test`] snapshots from any `Debug` value.
 //!
-//! Snapshot tables in this workspace follow
-//! `docs/agents/testing-style.md` rules 9–12: deterministic ordering,
-//! relevant fields only, right-trimmed lines that stay byte-stable under
-//! re-blessing. This crate renders such tables from plain `T: Debug` rows —
-//! no serde, no derive, no annotations: each row is formatted with `{:?}`
-//! and the derived-`Debug` grammar is parsed back into a value tree by a
-//! hand-written parser that never fails (an unrecognized region, such as a
-//! custom `Debug` impl's output, degrades to one verbatim atomic cell).
+//! A snapshot table orders its rows deterministically, carries only the
+//! fields relevant to what the test asserts, and right-trims every line so
+//! the rendering stays byte-stable under re-blessing. This crate renders
+//! such tables from plain `T: Debug` rows — no serde, no derive, no
+//! annotations: each row is formatted with `{:?}` and the derived-`Debug`
+//! grammar is parsed back into a value tree by a hand-written parser that
+//! never fails (an unrecognized region, such as a custom `Debug` impl's
+//! output, degrades to one verbatim atomic cell).
 //!
 //! Degradation is best-effort and asymmetric about bare commas, because
 //! only some contexts put a recognizable boundary after them. In a struct
@@ -20,8 +20,13 @@
 //! separator, or the map's closing brace — follows, so a comma-printing
 //! custom value keeps its key/value association, sibling entries keep
 //! parsing, and entry sorting still applies over intact entries. Inside
-//! tuples, lists, and sets no such signal exists, so every depth-zero
-//! comma separates items and a comma-printing custom leaf splits there.
+//! tuples, lists, sets, and map keys no such signal exists, so a
+//! depth-zero comma separates and a comma-printing custom leaf splits
+//! there — with one exception, and it is a hint rather than a boundary:
+//! angle brackets balance best-effort so a generic type name
+//! (`PhantomData<Result<u32, u32>>`) stays one atom, which also keeps a
+//! hostile leaf's unclosed `<` from splitting, so `{Foo<a,b: 1}` yields
+//! the single key `Foo<a,b`.
 //!
 //! A hostile leaf whose text itself mimics the boundary grammar may still
 //! split, and such splits are best-effort observed behavior, not promises:

@@ -24,11 +24,17 @@
 //!
 //! A depth-zero comma is context-sensitive. [`Context`] records which
 //! region an element sits in: in item lists — tuples, lists, and set
-//! entries — and in map keys such a comma always separates, while in
+//! entries — and in map keys such a comma separates on its own, while in
 //! struct bodies and map values it separates only at a recognized field
 //! or map-entry boundary ([`Parser::comma_separates_struct_fields`],
 //! [`Parser::comma_separates_map_entries`]); otherwise the comma came
-//! from a custom `Debug` leaf and belongs to the atom. The crate docs
+//! from a custom `Debug` leaf and belongs to the atom. Separating "on its
+//! own" is the ordinary parse, not an unconditional promise: while an atom
+//! is being scanned, the best-effort angle-bracket hint in
+//! [`Parser::consume_balanced_element`] keeps a comma inside an unclosed
+//! `<…>` run, so a degraded key or item can retain one — `{Foo<a,b: 1}`
+//! yields the single key `Foo<a,b`. Only struct bodies and map values have
+//! a boundary signal strong enough to override that hint. The crate docs
 //! own the best-effort asymmetry that follows, including which hostile
 //! custom `Debug` output still splits.
 
