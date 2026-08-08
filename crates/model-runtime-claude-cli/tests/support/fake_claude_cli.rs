@@ -100,6 +100,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
             success("end_turn", Some(fixtures::ANSWER))?;
         }
+        // The same semantic rejection, but as the stream's final line. Nothing
+        // follows it, so the reader holds no undelivered suffix when the failure
+        // is raised and the tool fact rests only on the rejected event's own
+        // examination.
+        "conflicting_message_id_at_end_of_stream" => {
+            assistant_text(fixtures::ANSWER)?;
+            assistant_text_with_id(fixtures::OTHER_MESSAGE_ID, fixtures::ANSWER)?;
+        }
         // An assistant event that both announces a tool call and contradicts
         // the established message id. The identity check rejects it, so the
         // tool fact must come from the pre-scan of its decoded content.
@@ -220,6 +228,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "partial_assistant_then_hang" => {
             emit(b"{\"type\":\"assistant\",\"parent_tool_use_id\":null,\"message\":{")?;
             std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+        // An undecodable event and a `tool_use` event delivered as one write, so
+        // both land in a single `fill_buf` batch. The runner delivers the first
+        // line, that line fails to decode, and the reader is still holding the
+        // second — the one that says a tool call opened — when the exchange ends.
+        "undecodable_event_then_buffered_tool_use" => {
+            let tool_use = serde_json::json!({
+                "type": "assistant", "parent_tool_use_id": null,
+                "message": {"model": fixtures::MODEL, "id": fixtures::MESSAGE_ID,
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": fixtures::TOOL_ID,
+                        "name": format!("mcp__signalbox_tools__{}", fixtures::TOOL_NAME),
+                        "input": {"subject": "synthetic"}, "caller": {"type": "direct"}}]}
+            });
+            let mut batch = Vec::from(&b"{\"type\":\"synthetic_unrecognized\"}\n"[..]);
+            batch.extend_from_slice(&serde_json::to_vec(&tool_use).map_err(std::io::Error::other)?);
+            batch.push(b'\n');
+            emit(&batch)?;
         }
         "generic_error_then_definitive_stderr_exit" => {
             generic_error_result()?;

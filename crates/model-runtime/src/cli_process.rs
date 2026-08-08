@@ -547,11 +547,19 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                     force_kill(&mut child).await;
                     abort_stderr_task(&mut stderr_task).await;
                     redacting_sink.finish();
+                    // The failing line is already unexamined material; a suffix
+                    // the same batch left buffered behind it is a second chunk
+                    // nothing read, and is abandoned here too.
+                    note_held_bytes(&mut decoder, line_progress);
                     return decoder.decode_failure(class, detail);
                 }
                 if !decoder.terminal_observed() && cancellation.is_cancelled() {
                     // Work-first: an already-exited leader's status is
                     // definitive and outranks a simultaneous cancellation.
+                    // Every exit from here leaves any buffered suffix unread,
+                    // whether it returns loss directly or breaks to exit
+                    // classification, so the fact is recorded before both.
+                    note_held_bytes(&mut decoder, line_progress);
                     if let Some((status, detail)) =
                         reap_exited_leader(&mut child, &mut stderr_task, labels).await
                     {
@@ -580,6 +588,9 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                     // exit classifies as a provider error, and a successful
                     // exit without a terminal marker stays typed exit
                     // evidence, rather than either becoming timeout loss.
+                    // As on the cancellation check above: the buffered suffix is
+                    // abandoned by both the break and the direct return.
+                    note_held_bytes(&mut decoder, line_progress);
                     if let Some((status, detail)) =
                         reap_exited_leader(&mut child, &mut stderr_task, labels).await
                     {
@@ -603,9 +614,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 });
             }
             ProcessStep::Cancelled => {
-                if line_progress == LineProgress::PartialLineHeld {
-                    decoder.note_undelivered_line();
-                }
+                note_held_bytes(&mut decoder, line_progress);
                 // Work-first: a leader that has already exited on its own is
                 // definitive evidence a simultaneous cancellation must not
                 // discard — even after a terminal marker, because a nonzero
@@ -645,9 +654,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             }
             ProcessStep::TimedOut => {
-                if line_progress == LineProgress::PartialLineHeld {
-                    decoder.note_undelivered_line();
-                }
+                note_held_bytes(&mut decoder, line_progress);
                 // An inherited stdout handle can outlive a leader that
                 // already exited on its own; that exit stays definitive —
                 // an observed terminal marker or the exit status — and only
@@ -1235,6 +1242,22 @@ enum LineProgress {
     /// not delivered, or a suffix left buffered behind a line it did deliver.
     /// Losing them here discards them unexamined.
     PartialLineHeld,
+}
+
+/// Propagates held bytes to the decoder when the read loop is being left.
+///
+/// [`LineProgress::PartialLineHeld`] covers both shapes of undelivered material:
+/// the prefix an interrupted read had consumed, and the suffix a batch left
+/// buffered behind a line the same call delivered. Neither has been examined by
+/// any decoder, so every exit that can build boundary-loss evidence must record
+/// the fact first — otherwise the evidence states a negative ("no tool call
+/// opened") about material nothing read. The marker is sticky, so it is applied
+/// only where the bytes are actually being abandoned; a loop iteration that goes
+/// on to deliver the held suffix must not pre-emptively poison later evidence.
+fn note_held_bytes<C, D: CliSession<C>>(decoder: &mut D, progress: LineProgress) {
+    if progress == LineProgress::PartialLineHeld {
+        decoder.note_undelivered_line();
+    }
 }
 
 async fn read_bounded_line<R: AsyncBufRead + Unpin>(

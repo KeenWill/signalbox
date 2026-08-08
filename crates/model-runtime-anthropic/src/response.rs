@@ -76,6 +76,32 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
     }
 }
 
+/// Whether a `tool_use` block had been reached in the content blocks the decode
+/// classified before it stopped.
+///
+/// Sticky across the block loop: once a call has opened, no later block can
+/// unopen it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolCallsOpened {
+    /// A `tool_use` block was reached.
+    Yes,
+    /// No `tool_use` block was reached in the blocks classified so far.
+    No,
+}
+
+/// Whether content blocks the loop never classified sit after the block that
+/// stopped the decode.
+///
+/// This is the axis that separates a withheld answer from a stated negative: a
+/// rejection on the final block leaves nothing unexamined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaterBlocks {
+    /// Blocks after the stopping one were never classified.
+    Unexamined,
+    /// The stopping block was the last, so every block was classified.
+    AllClassified,
+}
+
 /// The tool fact where the decode stopped on a block whose own content never
 /// parsed.
 ///
@@ -83,11 +109,10 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
 /// classifies one at a time, so a block that failed to parse could itself have
 /// been a `tool_use` — its own material is unexamined whatever its position in
 /// the list.
-fn unparsed_block_tool_calls(opened: bool) -> ToolCallsAtLoss {
-    if opened {
-        ToolCallsAtLoss::Opened
-    } else {
-        ToolCallsAtLoss::Unobserved
+fn unparsed_block_tool_calls(opened: ToolCallsOpened) -> ToolCallsAtLoss {
+    match opened {
+        ToolCallsOpened::Yes => ToolCallsAtLoss::Opened,
+        ToolCallsOpened::No => ToolCallsAtLoss::Unobserved,
     }
 }
 
@@ -98,19 +123,19 @@ fn unparsed_block_tool_calls(opened: bool) -> ToolCallsAtLoss {
 /// known not to be a tool call, so only the blocks the loop never reached can
 /// withhold the answer. When the rejected block is the last one, nothing is
 /// unexamined and the negative is a fact.
-fn examined_block_tool_calls(opened: bool, later_blocks_remain: bool) -> ToolCallsAtLoss {
-    if opened {
-        ToolCallsAtLoss::Opened
-    } else if later_blocks_remain {
-        ToolCallsAtLoss::Unobserved
-    } else {
-        ToolCallsAtLoss::NoneOpened
+fn examined_block_tool_calls(opened: ToolCallsOpened, later: LaterBlocks) -> ToolCallsAtLoss {
+    match (opened, later) {
+        (ToolCallsOpened::Yes, LaterBlocks::Unexamined | LaterBlocks::AllClassified) => {
+            ToolCallsAtLoss::Opened
+        }
+        (ToolCallsOpened::No, LaterBlocks::Unexamined) => ToolCallsAtLoss::Unobserved,
+        (ToolCallsOpened::No, LaterBlocks::AllClassified) => ToolCallsAtLoss::NoneOpened,
     }
 }
 
 /// The tool fact for a buffered decode that classified every content block.
-fn classified_tool_calls(opened: bool) -> ToolCallsAtLoss {
-    examined_block_tool_calls(opened, false)
+fn classified_tool_calls(opened: ToolCallsOpened) -> ToolCallsAtLoss {
+    examined_block_tool_calls(opened, LaterBlocks::AllClassified)
 }
 
 /// The tool fact where the envelope decoded but its content was never walked.
@@ -229,13 +254,17 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     // `tool_use` block with a non-object `input` after its identity and name are
     // already decoded. Reading the set would report "none opened" for exactly
     // the malformed proposals this fact exists to distinguish.
-    let mut opened_tool_calls = false;
+    let mut opened_tool_calls = ToolCallsOpened::No;
     let block_count = response.content.len();
     for (block_index, raw_block) in response.content.into_iter().enumerate() {
         // Whether the loop still has blocks it has not classified. A rejection
         // on the final block leaves nothing unexamined, so the negative is a
         // fact rather than a gap.
-        let later_blocks_remain = block_index + 1 < block_count;
+        let later_blocks = if block_index + 1 < block_count {
+            LaterBlocks::Unexamined
+        } else {
+            LaterBlocks::AllClassified
+        };
         let block = match parse_response_block(&raw_block) {
             Ok(block) => block,
             Err(error) => {
@@ -275,7 +304,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 exchange,
                 reported_model,
                 finish_reported: None,
-                tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks_remain),
+                tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks),
                 usage,
             });
         }
@@ -283,7 +312,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             // Set before the conversion below, which can reject this block for a
             // non-object `input` and return `None` indistinguishably from an
             // unrecognized block type. The call demonstrably opened either way.
-            opened_tool_calls = true;
+            opened_tool_calls = ToolCallsOpened::Yes;
         }
         match convert_block(block) {
             Some(part)
@@ -304,7 +333,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                     exchange,
                     reported_model,
                     finish_reported: None,
-                    tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks_remain),
+                    tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks),
                     usage,
                 });
             }
@@ -321,10 +350,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                             exchange,
                             reported_model,
                             finish_reported: None,
-                            tool_calls: examined_block_tool_calls(
-                                opened_tool_calls,
-                                later_blocks_remain,
-                            ),
+                            tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks),
                             usage,
                         });
                     }
@@ -344,7 +370,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                     exchange,
                     reported_model,
                     finish_reported: None,
-                    tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks_remain),
+                    tool_calls: examined_block_tool_calls(opened_tool_calls, later_blocks),
                     usage,
                 });
             }

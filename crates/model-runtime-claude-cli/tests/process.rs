@@ -495,9 +495,19 @@ async fn a_loss_from_a_decoded_prefix_without_tool_calls_reports_none_opened() {
 /// The rejection is a decode failure like the one below, so this is what makes
 /// the withholding a statement about unexamined material rather than about the
 /// failure class.
+///
+/// The rejected event ends the stream deliberately. A writer that continues past
+/// it can leave the next line buffered in the reader when the failure is raised,
+/// and that undelivered line withholds the fact on its own — which is the
+/// separate behavior pinned by the prefetched-line test below. Ending here keeps
+/// this test measuring only the rejected event's own examination.
 #[tokio::test]
 async fn a_decoded_event_rejected_on_semantics_reports_none_opened() {
-    let result = execute_scenario("conflicting_message_id", OperationShape::Text).await;
+    let result = execute_scenario(
+        "conflicting_message_id_at_end_of_stream",
+        OperationShape::Text,
+    )
+    .await;
     let loss = boundary_loss(&result.evidence);
 
     assert!(matches!(
@@ -707,6 +717,32 @@ async fn a_deadline_dropping_a_partial_line_withholds_the_tool_fact() {
     let TerminalEvidence::BoundaryLoss(loss) = report else {
         panic!("an exchange deadline is boundary loss");
     };
+    assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
+}
+
+/// A decode failure that leaves a prefetched line buffered withholds the tool
+/// fact, because that discarded line is exactly what would have answered it.
+///
+/// The undecodable event is one the adapter *did* examine — its `type`
+/// discriminator alone precludes content blocks — so the decode-failure path
+/// would otherwise state the negative from that event's own examination while a
+/// `tool_use` event sat unread in the reader's buffer. Both lines are written as
+/// one batch so the reader holds the second while the first is being decoded.
+#[tokio::test]
+async fn a_decode_failure_holding_a_prefetched_line_withholds_the_tool_fact() {
+    let result = execute_scenario(
+        "undecodable_event_then_buffered_tool_use",
+        OperationShape::Text,
+    )
+    .await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = result.evidence else {
+        panic!("an undecodable event is boundary loss");
+    };
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
     assert_eq!(loss.tool_calls, ToolCallsAtLoss::Unobserved);
 }
 

@@ -451,12 +451,14 @@ fn is_the_refusal_downgrade_kind(kind: ProviderErrorKind) -> bool {
 /// conflicting completion id — since those reach identical typed evidence and
 /// would pass this merge-gating check as a benign ceiling stop.
 ///
-/// The tool conjunct is `NoneOpened` rather than `!= Opened`: `Unobserved`
-/// means the adapter could not establish that no call opened, which is not a
-/// basis for passing a merge-gating check.
+/// Only `NoneOpened` admits: `Unobserved` means the adapter could not establish
+/// that no call opened, which is not a basis for passing a merge-gating check,
+/// and `Opened` contradicts a plain ceiling stop outright. The two are collapsed
+/// with an or-pattern rather than a wildcard, so they stay visibly rejected.
 ///
-/// `LossCause` is enumerated rather than matched loosely, so a new cause forces
-/// this decision to be reconsidered.
+/// Both enums are enumerated rather than compared loosely, so a new `LossCause`
+/// or a new `ToolCallsAtLoss` variant fails to compile here instead of silently
+/// inheriting a verdict this merge gate never considered.
 fn is_the_output_ceiling_violation(loss: &BoundaryLossEvidence) -> bool {
     let cause_admits = match &loss.cause {
         LossCause::StreamProtocolViolation { detail } => detail == OUTPUT_CEILING_VIOLATION_DETAIL,
@@ -468,7 +470,11 @@ fn is_the_output_ceiling_violation(loss: &BoundaryLossEvidence) -> bool {
         | LossCause::UnexpectedHttpStatus
         | LossCause::StreamEndedWithoutTerminalMarker { .. } => false,
     };
-    cause_admits && loss.tool_calls == ToolCallsAtLoss::NoneOpened
+    let tool_calls_admit = match loss.tool_calls {
+        ToolCallsAtLoss::NoneOpened => true,
+        ToolCallsAtLoss::Opened | ToolCallsAtLoss::Unobserved => false,
+    };
+    cause_admits && tool_calls_admit
 }
 
 /// Asserts a decoded response is well-formed under the compatibility-smoke
