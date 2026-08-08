@@ -49,8 +49,8 @@ through this PR (`agent/model-settings-persistence`); the defaults-replacement
 pointer-lock admission is verified through this PR
 (`agent/model-settings-execution`). The runner placement loss-source,
 lost-before-pin, pre-pin replacement, and abandonment records are verified
-through this PR (`agent/runner-placement-loss-persistence`). This page covers the
-Postgres representation in `crates/persistence` (source and migrations),
+through this PR (`agent/runner-placement-loss-persistence`). This page covers
+the Postgres representation in `crates/persistence` (source and migrations),
 migration discipline, durable command storage and replay equality, the
 fail-closed reconstitution boundary, the lock protocol, pending-steering durable
 state, the corruption taxonomy, commit-ambiguity handling, and the transactional
