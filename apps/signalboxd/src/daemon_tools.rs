@@ -3011,6 +3011,7 @@ mod tests {
             reader.join().expect("Cargo build output reader exits");
             panic!("bridge binary build exceeded its timeout");
         };
+        terminate_owned_process_group(&mut build);
         reader.join().expect("Cargo build output reader exits");
         assert!(status.success(), "bridge binary build succeeds");
         let executable = cargo_bridge_executable(messages);
