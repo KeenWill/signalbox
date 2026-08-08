@@ -627,21 +627,27 @@ Locks per transaction, in acquisition order:
   child. When it is, they lock the immutable parent/child session pair
   `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
   scheduler lock. This is the shared prefix for any path that can record a child
-  result. Credential-pool call preparation additionally locks every potentially
-  selected bounded profile's shared capacity row `FOR UPDATE`, in
-  profile-reference byte order, after the scheduler lock and before reading
+  result. Credential-pool call preparation additionally locks the action head of
+  every member of the pinned policy it may select `FOR SHARE`, in
+  profile-reference byte order, immediately after the scheduler lock and before
+  it reads any exclusion state. It then locks every potentially selected bounded
+  profile's shared capacity row `FOR UPDATE`, in the same order, before reading
   reservation counts. When `round_robin` decides among the first admitted
   priority's members, preparation next locks that immutable-policy-and-priority
   cursor row `FOR UPDATE` before reading the cursor, choosing a member, or
   advancing it with `Prepared`. It rereads the protected selection facts after
-  acquiring the lock. A transaction that mints, activates, or clears a
-  credential exclusion — a terminal observation applying a pool trigger, a
-  delivery-layer quarantine, or an operator clear — instead locks each affected
-  profile's action head `FOR UPDATE`, in profile-reference byte order,
-  immediately after the scheduler lock and before any capacity or cursor row. No
-  other path may take a scheduler lock while holding an action-head, capacity-,
-  or cursor-row lock; take an action-head lock while holding a capacity-row or
-  cursor-row lock; or take a capacity-row lock while holding a cursor-row lock.
+  acquiring each lock and holds all of them through the `Prepared` insert. A
+  transaction that mints, activates, or clears a credential exclusion — a
+  terminal observation applying a pool trigger, a delivery-layer quarantine, or
+  an operator clear — takes those same action heads `FOR UPDATE` at that same
+  ordering position. Share and exclusive modes conflict, so one of the two
+  transactions waits: a `Prepared` insert either precedes the exclusion commit
+  or reads the member as already excluded. This is what a selection needs when
+  it takes no other lock the writer takes — an unbounded `first_listed` member
+  acquires neither a capacity row nor a cursor row. No other path may take a
+  scheduler lock while holding an action-head, capacity-, or cursor-row lock;
+  take an action-head lock while holding a capacity-row or cursor-row lock; or
+  take a capacity-row lock while holding a cursor-row lock.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -1491,7 +1497,10 @@ generation. Every transaction that mints, activates, or clears an exclusion
 locks that head `FOR UPDATE` before reading it, so concurrent observations in
 different sessions cannot mint two active generations for one profile and a
 uniqueness conflict cannot prevent a terminal observation from committing with
-its required action record.
+its required action record. Call preparation locks the head of every member it
+may select `FOR SHARE` before reading exclusion state and holds it through the
+`Prepared` insert, so selection and exclusion mutation are serialized against
+each other rather than only against their own kind.
 
 Profile-quarantine, membership-exclusion, and session-displacement rows each
 carry a positive generation, active/cleared state, and their exact scope. A

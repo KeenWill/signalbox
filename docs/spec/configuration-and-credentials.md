@@ -1107,6 +1107,18 @@ uniqueness conflict block the terminal observation that requires it. An operator
 clear takes the same lock, which is what lets a clear and a concurrent
 re-observation agree on which generation is current.
 
+Preparation is the other side of that race and joins the same protocol. Before
+it reads any member's exclusion state, it locks the action head of every member
+of the policy it may select `FOR SHARE`, at the same ordering position and in
+the same byte order, and holds those locks through the `Prepared` insert. The
+share and exclusive modes conflict, so one of the two transactions waits: a call
+is either prepared before the exclusion commits or prepared against a member it
+has already observed as excluded. This is stated rather than left implied
+because selection otherwise takes no lock the exclusion writer takes — an
+unbounded `first_listed` member acquires neither a capacity row nor a cursor row
+— and a preparation that read a member as admissible could then dispatch a
+provider request on a credential quarantined in the interval.
+
 `switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
 `on_overloaded`, because only those causes carry proof that the request was not
 accepted. Selecting it for `on_credential_rejected` or `on_headroom_low` is a
@@ -1141,34 +1153,35 @@ filtered member list. The transaction that commits the selected call's
 `Prepared` record advances the cursor to the next declared member of that same
 priority after the selected member, wrapping even when that next member is
 currently excluded. Before reading a cursor or choosing by it, preparation locks
-that policy-and-priority cursor row `FOR UPDATE` after its session scheduler and
-any candidate bounded-profile capacity rows, then rereads the cursor and the
-admissibility facts protected by those locks. The same transaction selects,
-inserts `Prepared`, and advances the locked cursor; no path acquires a capacity
-row while holding a cursor row. A priority with no admitted member cannot
-select; selection continues according to the pool's contention and exhaustion
-rules. A failed preparation advances nothing; restart preserves the cursor.
-Stickiness and a sole admitted member require no tie-break and do not advance
-it. Stickiness needs no separate durable state: preparation prefers the member
-the session's most recent `Prepared` call on that pool pinned, including a call
-that later failed under `stay`, so a session stays on one account until a
-trigger displaces it. When the pool admits no member, `on_pool_exhausted`
-decides — `park` parks the turn in the durable wait carrying the earliest reset
-the pool's members reported. When no excluded member reports a reset, `park`
-records an indefinite durable wait with no deadline; only an operator clear, a
-zero-cost no-model availability probe, or another durable member-availability
-update wakes it. A restart alone does not. `fail` instead fails the turn as a
-known failure. Quarantine is durable and scoped to the profile rather than to
-the pool that observed it, because a rejected credential is a property of the
-account: a profile ranked in two pools is excluded from both. It is cleared only
-by an explicit operator command, or by a probe that costs nothing and calls no
-model where the adapter offers one — never by a timer, since a revoked
-credential does not heal on a schedule, and never by a restart. Why an operator
-command rather than rediscovery: for a `codex_home` or `oauth` profile the
-repair is an interactive re-authorization the operator performs, so the operator
-knows the moment it is fixed, and rediscovering it instead would spend a real
-model call to learn what they could have said. Reading a quarantine record is
-never on the recovery path for acknowledged work, so INV-034 is unaffected.
+that policy-and-priority cursor row `FOR UPDATE` after its session scheduler,
+the candidate members' action heads, and any candidate bounded-profile capacity
+rows, then rereads the cursor and the admissibility facts protected by those
+locks. The same transaction selects, inserts `Prepared`, and advances the locked
+cursor; no path acquires a capacity row while holding a cursor row. A priority
+with no admitted member cannot select; selection continues according to the
+pool's contention and exhaustion rules. A failed preparation advances nothing;
+restart preserves the cursor. Stickiness and a sole admitted member require no
+tie-break and do not advance it. Stickiness needs no separate durable state:
+preparation prefers the member the session's most recent `Prepared` call on that
+pool pinned, including a call that later failed under `stay`, so a session stays
+on one account until a trigger displaces it. When the pool admits no member,
+`on_pool_exhausted` decides — `park` parks the turn in the durable wait carrying
+the earliest reset the pool's members reported. When no excluded member reports
+a reset, `park` records an indefinite durable wait with no deadline; only an
+operator clear, a zero-cost no-model availability probe, or another durable
+member-availability update wakes it. A restart alone does not. `fail` instead
+fails the turn as a known failure. Quarantine is durable and scoped to the
+profile rather than to the pool that observed it, because a rejected credential
+is a property of the account: a profile ranked in two pools is excluded from
+both. It is cleared only by an explicit operator command, or by a probe that
+costs nothing and calls no model where the adapter offers one — never by a
+timer, since a revoked credential does not heal on a schedule, and never by a
+restart. Why an operator command rather than rediscovery: for a `codex_home` or
+`oauth` profile the repair is an interactive re-authorization the operator
+performs, so the operator knows the moment it is fixed, and rediscovering it
+instead would spend a real model call to learn what they could have said.
+Reading a quarantine record is never on the recovery path for acknowledged work,
+so INV-034 is unaffected.
 
 The exact future operator-clear request, target correlations, replay behavior,
 and receipt are owned by
