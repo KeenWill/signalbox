@@ -3862,7 +3862,9 @@ impl StoppedToolRoundModelCallIdentities {
     ) -> Self;
 }
 pub struct FailedModelCallTurnIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...)
+// constructor plus with_pending_steering_reclassifications(...),
+// failure_entry() and terminal_frontier() — the two components a collision
+// retry must both refresh, readable so a caller can check each one
 pub struct CancelledModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...) and into_ambiguous()
 pub struct PhysicalCancellationModelCallTurnIdentities { /* private */ }
@@ -7721,6 +7723,63 @@ impl InProcessToolDispatchGate {
 pub struct InProcessToolDispatchPermit { /* private */ }
 ```
 
+## application: tool_execution_test_support
+
+Compiled only under the `test-support` feature, which provider-adapter crates
+enable from their dev-dependencies. It is the one home for the machinery every
+adapter needs to reach its own executor — a prepared batch, a transaction that
+serves it, a recorder for the returned evidence — so a second adapter cannot
+grow a private copy that drifts from the first.
+
+```rust
+pub struct PreparedAttemptIdentities {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub producing_call: ModelCallId,
+    pub request: ToolRequestId,
+    pub attempt: ToolAttemptId,
+    pub issuing_turn_attempt: TurnAttemptId,
+    pub frontier: ContextFrontierId,
+}
+
+pub struct PreparedAttemptProposal {
+    pub name: ToolName,
+    pub arguments: NormalizedToolArguments,
+    pub effect_class: ToolEffectClass,
+}
+
+pub fn prepared_single_attempt_batch(
+    identities: PreparedAttemptIdentities,
+    proposal: PreparedAttemptProposal,
+) -> ToolBatch;
+
+pub struct FixtureTransactionFailures<Error> {
+    pub domain_rejection: Error,
+    pub declined_crash_classification: Error,
+}
+
+pub struct FixtureToolExecutionTransaction<Error> { /* private */ }
+impl<Error> FixtureToolExecutionTransaction<Error> {
+    pub const fn new(
+        batch: ToolBatch,
+        failures: FixtureTransactionFailures<Error>,
+    ) -> Self;
+    pub const fn batch(&self) -> &ToolBatch;
+}
+// impl ToolExecutionTransaction where Error: ClassifyOperatorFailure + Clone + Send
+
+pub struct RecordingToolExecutor<Executor> { /* private */ }
+impl<Executor> RecordingToolExecutor<Executor> {
+    pub fn new(inner: Executor) -> (Self, RecordedEvidence);
+}
+// impl ToolExecutor where Executor: ToolExecutor + Send
+
+pub struct RecordedEvidence { /* private */ }
+impl RecordedEvidence {
+    pub fn take(&self) -> Option<ToolExecutorEvidence>;
+}
+```
+
 ## application: tool_loop_ports
 
 ```rust
@@ -9837,5 +9896,6 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: startup_scan                          | 7 (incl. 2 traits)    |
 | application: submit_input                          | 7 (incl. 2 traits)    |
 | application: tool_dispatch_gate                    | 2                     |
+| application: tool_execution_test_support           | 6 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **242**               |
+| **signalbox-application total**                    | **249**               |

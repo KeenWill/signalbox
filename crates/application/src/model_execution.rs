@@ -4779,6 +4779,12 @@ mod tests {
     async fn committed_capability_failure_returns_the_recorded_terminal_turn() {
         let (request, _) = prepared_fixture();
         let session = request.session();
+        // Captured before the request moves into the fake. `ScriptedFailure`
+        // returns the scripted failed turn whatever call it is handed, so a
+        // commit addressed to a stale or unrelated call of the same session
+        // would satisfy both the outcome comparison and a session-only
+        // assertion while terminalizing the wrong call.
+        let prepared_call = request.call().id();
         let failed = failed_turn_fixture();
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
@@ -4807,9 +4813,11 @@ mod tests {
         let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
-        // The failure must belong to the saturated turn's own session. Counting
-        // the call alone would accept a terminal turn written against an
-        // unrelated fixture session.
+        // The failure must belong to the saturated turn's own session *and*
+        // name the call that was prepared. Counting the attempt alone would
+        // accept a terminal turn written against an unrelated fixture session,
+        // and checking the session alone would accept one written against
+        // another call of this session.
         let [committed] = failure.recorded.as_slice() else {
             panic!(
                 "expected exactly one failure-commit attempt, got {}",
@@ -4817,6 +4825,10 @@ mod tests {
             )
         };
         assert_eq!(committed.session, session);
+        assert_eq!(
+            committed.call, prepared_call,
+            "the committed failure must terminalize the prepared call"
+        );
         assert_eq!(provider.interaction_count(), 0);
         assert!(retained.is_none());
     }
@@ -4874,9 +4886,20 @@ mod tests {
         assert_eq!(second.session, session);
         assert_eq!(first.call, prepared_call);
         assert_eq!(second.call, prepared_call);
+        // Every component of the bundle has to be refreshed, not just one.
+        // Whole-bundle inequality passes when a retry mints a new failure
+        // entry but reuses the terminal frontier (or the reverse), and if the
+        // reused component is the one that collided the real transaction
+        // rejects every retry and the turn stays wedged forever.
         assert_ne!(
-            first.identities, second.identities,
-            "a retried identity collision must be retried with fresh identities"
+            first.identities.failure_entry(),
+            second.identities.failure_entry(),
+            "a retried identity collision must mint a fresh failure entry"
+        );
+        assert_ne!(
+            first.identities.terminal_frontier(),
+            second.identities.terminal_frontier(),
+            "a retried identity collision must mint a fresh terminal frontier"
         );
         assert_eq!(provider.capability_preparation_count(), 1);
         assert!(retained.is_none());

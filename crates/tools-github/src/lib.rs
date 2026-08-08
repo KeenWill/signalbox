@@ -2948,7 +2948,9 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use signalbox_application::ToolCatalog;
+    use signalbox_application::{
+        ToolCatalog, ToolExecutionServiceError, ToolExecutionServiceOutcome,
+    };
     use signalbox_domain::{
         SessionId, ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
         ToolDispatchGeneration, ToolName, ToolRequestId, TurnAttemptId, TurnId,
@@ -3511,8 +3513,13 @@ mod tests {
             })
         );
         assert!(
-            outcome.committed,
-            "definitive evidence commits rather than stalling the batch"
+            matches!(
+                outcome.result,
+                Ok(ToolExecutionServiceOutcome::ObservationCommitted(_))
+            ),
+            "definitive evidence commits an observation rather than stalling the batch, \
+             got {:?}",
+            outcome.result
         );
     }
 
@@ -3527,9 +3534,27 @@ mod tests {
         .await;
 
         assert_eq!(outcome.evidence, None);
-        assert!(
-            !outcome.committed,
-            "an ambiguous commit must not close the attempt definitively"
+        // Absence of evidence is not the claim. "No evidence, no commit" is
+        // equally true when `failure_evidence` returns a *definite* executor
+        // error, and when dispatch fails before that method is reached at all
+        // — in either case the server rejection stopped being classified as
+        // commit-ambiguous while these assertions stayed green. The
+        // classification lives on the executor error the service nests inside
+        // its own, so inspect that rather than the shape around it.
+        let Err(ToolExecutionServiceError::ExecutorCrashClassification { executor_error, .. }) =
+            outcome.result
+        else {
+            panic!(
+                "an unresolvable ambiguous effect must reach crash classification, got {:?}",
+                outcome.result
+            )
+        };
+        assert_eq!(
+            executor_error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            },
+            "a server-side rejection of a mutating call stays commit-ambiguous"
         );
     }
 
