@@ -9,16 +9,17 @@ use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState}
 use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
     CodexCliServiceTier, DangerousToolAutoApproval, DelegateApprovalRecommendation,
-    DelegationMessageDirection, DelegationOutcomeKind, DelegationOutcomeReason, DelegationWaitMode,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId, EffectiveModelSettings,
-    FastMode, FastModeOverlay, GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind,
-    GoalModelBlockedReasonKind, GoalUserAction, MergeableState, ModelChangeAdjustment,
-    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
-    ReactionChange, ReactionSubject, ReasoningLevel, RepoWatchEventKindNameV1, ReviewState,
-    ServiceTier, SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId,
-    SessionInputPosition, SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture,
-    ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
-    UpdateSessionPlacementRejectionKind, ValidatedModelSettings,
+    DelegationMessageDirection, DelegationOutcomeKind, DelegationOutcomeReason,
+    DelegationTransitionFailure, DelegationWaitMode, DescendantTerminationScope,
+    DirectModelSelection, DurableCommandId, EffectiveModelSettings, FastMode, FastModeOverlay,
+    GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind,
+    GoalUserAction, MergeableState, ModelChangeAdjustment, ModelSettingSource,
+    ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange,
+    ReactionSubject, ReasoningLevel, RepoWatchEventKindNameV1, ReviewState, ServiceTier,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
+    SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolAttemptId,
+    ToolPermissionDefault, ToolRequestId, TurnId, UpdateSessionPlacementRejectionKind,
+    ValidatedModelSettings,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
@@ -104,6 +105,79 @@ pub(crate) fn delegation_message_direction_from_str(
     match value {
         "parent_to_child" => Some(DelegationMessageDirection::ParentToChild),
         "child_to_parent" => Some(DelegationMessageDirection::ChildToParent),
+        _ => None,
+    }
+}
+
+/// Closed delegated-operation rejection discriminators stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DelegationRejectionStorageKind {
+    RelationshipNotFound,
+    MessageIdentityCollision,
+    DeliverySequenceExhausted,
+    Transition,
+}
+
+pub(crate) const fn delegation_rejection_kind_to_str(
+    value: DelegationRejectionStorageKind,
+) -> &'static str {
+    match value {
+        DelegationRejectionStorageKind::RelationshipNotFound => "relationship_not_found",
+        DelegationRejectionStorageKind::MessageIdentityCollision => "message_identity_collision",
+        DelegationRejectionStorageKind::DeliverySequenceExhausted => "delivery_sequence_exhausted",
+        DelegationRejectionStorageKind::Transition => "transition",
+    }
+}
+
+pub(crate) fn delegation_rejection_kind_from_str(
+    value: &str,
+) -> Option<DelegationRejectionStorageKind> {
+    match value {
+        "relationship_not_found" => Some(DelegationRejectionStorageKind::RelationshipNotFound),
+        "message_identity_collision" => {
+            Some(DelegationRejectionStorageKind::MessageIdentityCollision)
+        }
+        "delivery_sequence_exhausted" => {
+            Some(DelegationRejectionStorageKind::DeliverySequenceExhausted)
+        }
+        "transition" => Some(DelegationRejectionStorageKind::Transition),
+        _ => None,
+    }
+}
+
+pub(crate) const fn delegation_transition_failure_to_str(
+    failure: DelegationTransitionFailure,
+) -> &'static str {
+    match failure {
+        DelegationTransitionFailure::SameSession => "same_session",
+        DelegationTransitionFailure::AlreadyTerminal => "already_terminal",
+        DelegationTransitionFailure::MissingSpawnEvent => "missing_spawn_event",
+        DelegationTransitionFailure::InvalidProvenance => "invalid_provenance",
+        DelegationTransitionFailure::DescendantsNotSelected => "descendants_not_selected",
+        DelegationTransitionFailure::DuplicateMessageIdentity => "duplicate_message_identity",
+        DelegationTransitionFailure::ConflictingMessageReplay => "conflicting_message_replay",
+        DelegationTransitionFailure::DuplicateOutcomeAuthority => "duplicate_outcome_authority",
+        DelegationTransitionFailure::OutcomeReasonMismatch => "outcome_reason_mismatch",
+        DelegationTransitionFailure::EventOrdinalExhausted => "event_ordinal_exhausted",
+    }
+}
+
+pub(crate) fn delegation_transition_failure_from_str(
+    value: &str,
+) -> Option<DelegationTransitionFailure> {
+    match value {
+        "same_session" => Some(DelegationTransitionFailure::SameSession),
+        "already_terminal" => Some(DelegationTransitionFailure::AlreadyTerminal),
+        "missing_spawn_event" => Some(DelegationTransitionFailure::MissingSpawnEvent),
+        "invalid_provenance" => Some(DelegationTransitionFailure::InvalidProvenance),
+        "descendants_not_selected" => Some(DelegationTransitionFailure::DescendantsNotSelected),
+        "duplicate_message_identity" => Some(DelegationTransitionFailure::DuplicateMessageIdentity),
+        "conflicting_message_replay" => Some(DelegationTransitionFailure::ConflictingMessageReplay),
+        "duplicate_outcome_authority" => {
+            Some(DelegationTransitionFailure::DuplicateOutcomeAuthority)
+        }
+        "outcome_reason_mismatch" => Some(DelegationTransitionFailure::OutcomeReasonMismatch),
+        "event_ordinal_exhausted" => Some(DelegationTransitionFailure::EventOrdinalExhausted),
         _ => None,
     }
 }
@@ -1609,36 +1683,40 @@ mod tests {
     use signalbox_domain::{
         AcceptedInputId, BoundChildAction, CheckConclusion, ChecksOutcome,
         DelegateApprovalRecommendation, DelegationMessageDirection, DelegationOutcomeKind,
-        DelegationOutcomeReason, DelegationWaitMode, DescendantTerminationScope,
-        DirectModelSelection, DurableCommandId, FastMode, FastModeOverlay, FastModeSupport,
-        MergeableState, ModelCapabilities, ModelChangeAdjustment, ModelSettingsOverlay,
-        ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange, ReasoningLevel,
-        RepoWatchEventKindNameV1, ReviewState, ServiceTier, SessionConfigurationDefaultsVersion,
-        SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
-        SettingOverlay, ToolApprovalPosture, ToolPermissionDefault, TurnId,
+        DelegationOutcomeReason, DelegationTransitionFailure, DelegationWaitMode,
+        DescendantTerminationScope, DirectModelSelection, DurableCommandId, FastMode,
+        FastModeOverlay, FastModeSupport, MergeableState, ModelCapabilities, ModelChangeAdjustment,
+        ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange,
+        ReasoningLevel, RepoWatchEventKindNameV1, ReviewState, ServiceTier,
+        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
+        SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolPermissionDefault,
+        TurnId,
     };
     use sqlx::types::Uuid;
 
     use super::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
-        DelegationPolicyStorageKind, DurableCommandIdMappingError, DurableCommandKind,
-        PlanEventStorageKind, PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
-        SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
-        StoredModelSettingsError, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
-        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
-        approval_judge_state_from_str, approval_judge_state_to_str,
-        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
-        bound_child_action_from_str, bound_child_action_to_str, defaults_version_from_numeric,
-        defaults_version_to_numeric, delegation_message_direction_from_str,
-        delegation_message_direction_to_str, delegation_outcome_kind_from_str,
-        delegation_outcome_kind_to_str, delegation_outcome_reason_from_str,
-        delegation_outcome_reason_to_str, delegation_policy_kind_from_str,
-        delegation_policy_kind_to_str, delegation_wait_mode_from_str, delegation_wait_mode_to_str,
-        durable_command_id_from_uuid, durable_command_id_to_uuid, durable_command_kind_from_str,
-        durable_command_kind_to_str, input_position_from_numeric, input_position_to_numeric,
-        model_change_adjustments_from_json, model_change_adjustments_to_json,
-        model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
-        plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
+        DelegationPolicyStorageKind, DelegationRejectionStorageKind, DurableCommandIdMappingError,
+        DurableCommandKind, PlanEventStorageKind, PositiveOrdinalMappingError,
+        SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
+        SessionPlacementResultStorageKind, StoredModelSettingsError, accepted_input_id_from_uuid,
+        accepted_input_id_to_uuid, approval_judge_recommendation_from_str,
+        approval_judge_recommendation_to_str, approval_judge_state_from_str,
+        approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
+        approval_judge_terminal_disposition_to_str, bound_child_action_from_str,
+        bound_child_action_to_str, defaults_version_from_numeric, defaults_version_to_numeric,
+        delegation_message_direction_from_str, delegation_message_direction_to_str,
+        delegation_outcome_kind_from_str, delegation_outcome_kind_to_str,
+        delegation_outcome_reason_from_str, delegation_outcome_reason_to_str,
+        delegation_policy_kind_from_str, delegation_policy_kind_to_str,
+        delegation_rejection_kind_from_str, delegation_rejection_kind_to_str,
+        delegation_transition_failure_from_str, delegation_transition_failure_to_str,
+        delegation_wait_mode_from_str, delegation_wait_mode_to_str, durable_command_id_from_uuid,
+        durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
+        input_position_from_numeric, input_position_to_numeric, model_change_adjustments_from_json,
+        model_change_adjustments_to_json, model_settings_from_json,
+        model_settings_overlay_from_json, model_settings_to_json, plan_event_kind_from_str,
+        plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
         repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
         repo_watch_checks_outcome_to_str, repo_watch_event_kind_from_str,
         repo_watch_event_kind_to_str, repo_watch_mergeable_state_from_str,
@@ -1727,6 +1805,106 @@ mod tests {
         );
         assert_eq!(
             delegation_message_direction_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+    }
+
+    #[test]
+    fn delegation_rejection_kind_mapping_is_closed() {
+        assert_eq!(
+            delegation_rejection_kind_from_str(delegation_rejection_kind_to_str(
+                DelegationRejectionStorageKind::RelationshipNotFound,
+            )),
+            Some(DelegationRejectionStorageKind::RelationshipNotFound)
+        );
+        assert_eq!(
+            delegation_rejection_kind_from_str(delegation_rejection_kind_to_str(
+                DelegationRejectionStorageKind::MessageIdentityCollision,
+            )),
+            Some(DelegationRejectionStorageKind::MessageIdentityCollision)
+        );
+        assert_eq!(
+            delegation_rejection_kind_from_str(delegation_rejection_kind_to_str(
+                DelegationRejectionStorageKind::DeliverySequenceExhausted,
+            )),
+            Some(DelegationRejectionStorageKind::DeliverySequenceExhausted)
+        );
+        assert_eq!(
+            delegation_rejection_kind_from_str(delegation_rejection_kind_to_str(
+                DelegationRejectionStorageKind::Transition,
+            )),
+            Some(DelegationRejectionStorageKind::Transition)
+        );
+        assert_eq!(
+            delegation_rejection_kind_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+    }
+
+    #[test]
+    fn delegation_transition_failure_mapping_is_closed() {
+        assert_eq!(
+            delegation_transition_failure_from_str(delegation_transition_failure_to_str(
+                DelegationTransitionFailure::SameSession,
+            )),
+            Some(DelegationTransitionFailure::SameSession)
+        );
+        assert_eq!(
+            delegation_transition_failure_from_str(delegation_transition_failure_to_str(
+                DelegationTransitionFailure::AlreadyTerminal,
+            )),
+            Some(DelegationTransitionFailure::AlreadyTerminal)
+        );
+        assert_eq!(
+            delegation_transition_failure_from_str(delegation_transition_failure_to_str(
+                DelegationTransitionFailure::MissingSpawnEvent,
+            )),
+            Some(DelegationTransitionFailure::MissingSpawnEvent)
+        );
+        assert_eq!(
+            delegation_transition_failure_from_str(delegation_transition_failure_to_str(
+                DelegationTransitionFailure::InvalidProvenance,
+            )),
+            Some(DelegationTransitionFailure::InvalidProvenance)
+        );
+        assert_eq!(
+            delegation_transition_failure_from_str(delegation_transition_failure_to_str(
+                DelegationTransitionFailure::DescendantsNotSelected,
+            )),
+            Some(DelegationTransitionFailure::DescendantsNotSelected)
+        );
+        assert_eq!(
+            delegation_transition_failure_from_str(delegation_transition_failure_to_str(
+                DelegationTransitionFailure::DuplicateMessageIdentity,
+            )),
+            Some(DelegationTransitionFailure::DuplicateMessageIdentity)
+        );
+        assert_eq!(
+            delegation_transition_failure_from_str(delegation_transition_failure_to_str(
+                DelegationTransitionFailure::ConflictingMessageReplay,
+            )),
+            Some(DelegationTransitionFailure::ConflictingMessageReplay)
+        );
+        assert_eq!(
+            delegation_transition_failure_from_str(delegation_transition_failure_to_str(
+                DelegationTransitionFailure::DuplicateOutcomeAuthority,
+            )),
+            Some(DelegationTransitionFailure::DuplicateOutcomeAuthority)
+        );
+        assert_eq!(
+            delegation_transition_failure_from_str(delegation_transition_failure_to_str(
+                DelegationTransitionFailure::OutcomeReasonMismatch,
+            )),
+            Some(DelegationTransitionFailure::OutcomeReasonMismatch)
+        );
+        assert_eq!(
+            delegation_transition_failure_from_str(delegation_transition_failure_to_str(
+                DelegationTransitionFailure::EventOrdinalExhausted,
+            )),
+            Some(DelegationTransitionFailure::EventOrdinalExhausted)
+        );
+        assert_eq!(
+            delegation_transition_failure_from_str(UNKNOWN_DISCRIMINATOR),
             None
         );
     }

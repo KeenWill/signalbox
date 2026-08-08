@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fmt, io,
     path::{Path, PathBuf},
+    string::FromUtf8Error,
 };
 
 use signalbox_process_protocol::{
@@ -18,6 +19,14 @@ pub(crate) enum ClientError {
     GoalTextFile {
         path: PathBuf,
         source: io::Error,
+    },
+    DelegationContentFile {
+        path: PathBuf,
+        source: io::Error,
+    },
+    DelegationContentFileUtf8 {
+        path: PathBuf,
+        source: FromUtf8Error,
     },
     ReviewInputFile(io::Error),
     ReviewInputJson(serde_json::Error),
@@ -68,6 +77,20 @@ impl ClientError {
         }
     }
 
+    pub(crate) fn delegation_content_file(path: &Path, source: io::Error) -> Self {
+        Self::DelegationContentFile {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
+    pub(crate) fn delegation_content_file_utf8(path: &Path, source: FromUtf8Error) -> Self {
+        Self::DelegationContentFileUtf8 {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
     pub(crate) fn review_input_file(error: io::Error) -> Self {
         Self::ReviewInputFile(error)
     }
@@ -90,6 +113,8 @@ impl ClientError {
             | Self::SourceFile(_)
             | Self::SystemPromptFile(_)
             | Self::GoalTextFile { .. }
+            | Self::DelegationContentFile { .. }
+            | Self::DelegationContentFileUtf8 { .. }
             | Self::ReviewInputFile(_)
             | Self::ReviewInputJson(_)
             | Self::ReviewInputExceedsFrame
@@ -128,6 +153,16 @@ impl fmt::Display for ClientError {
             Self::GoalTextFile { path, source } => write!(
                 formatter,
                 "the goal text file '{}' could not be read: {source}",
+                path.display()
+            ),
+            Self::DelegationContentFile { path, source } => write!(
+                formatter,
+                "the delegation content file '{}' could not be read: {source}",
+                path.display()
+            ),
+            Self::DelegationContentFileUtf8 { path, source } => write!(
+                formatter,
+                "the delegation content file '{}' is not valid UTF-8: {source}",
                 path.display()
             ),
             Self::ReviewInputFile(_) => {
@@ -196,8 +231,10 @@ impl Error for ClientError {
             | Self::SourceFile(error)
             | Self::SystemPromptFile(error)
             | Self::GoalTextFile { source: error, .. }
+            | Self::DelegationContentFile { source: error, .. }
             | Self::ReviewInputFile(error)
             | Self::ScanDirectory(error) => Some(error),
+            Self::DelegationContentFileUtf8 { source, .. } => Some(source),
             Self::ReviewInputJson(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::Decode(error) => Some(error),
