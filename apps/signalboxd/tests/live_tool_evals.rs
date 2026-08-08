@@ -29,8 +29,8 @@ use signalbox_application::{
     InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
     OperatorFailureClass, StartEligibleTurnOutcome, StartEligibleTurnService, SubmitInputOutcome,
     SubmitInputRequest, SubmitInputService, ToolCatalog, ToolCatalogValidationFailure,
-    ToolDefinition, ToolExecutionInvocation, ToolExecutor, UuidV7SessionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
+    ToolDefinition, ToolExecutionInvocation, ToolExecutor, ToolExecutorEvidence,
+    UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     DangerousToolAutoApproval, DeliveryRequest, DirectModelSelection, DurableCommandId,
@@ -46,8 +46,9 @@ use signalbox_model_provider_runtime::{
 };
 use signalbox_model_runtime::{
     CancellationSignal, CredentialAccess, CredentialAccessError, CredentialAccessFailure,
-    CredentialReference, CredentialValue, MessagePart, ModelOperation, ModelRuntime,
-    ObservationSink, PreparationOutcome, TerminalReport, ToolChoice, ToolName as RuntimeToolName,
+    CredentialReference, CredentialValue, MessagePart, ModelOperation, ModelRuntime, Observation,
+    ObservationFact, ObservationSink, PreparationOutcome, TerminalReport, ToolChoice,
+    ToolName as RuntimeToolName,
 };
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiPreparedRequest, OpenAiRuntime};
 use signalbox_persistence::{
@@ -143,6 +144,10 @@ const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x9109;
 const ARBITRARY_SECOND_EVAL_REQUEST_ID: u128 = 0x910a;
 const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
 const SYNTHETIC_EXECUTOR_FAILURE: &str = "synthetic executor failure";
+const SYNTHETIC_EVAL_RECEIPT: &str = "01988c5f-89c4-7000-8000-000000000001";
+const EVAL_RECEIPT_FIELD: &str = "eval_receipt";
+const RESULT_RECEIPT_INSTRUCTION: &str =
+    "In your final answer, include every exact eval_receipt value returned by the tools.";
 
 type EvalResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -250,7 +255,8 @@ async fn run_case(
     prompt: &str,
 ) -> EvalResult<CaseOutcome> {
     let forced_tool = forced_case.map(|case| case.name);
-    let (session, turn, activated) = database.start_turn(prompt).await?;
+    let prompt = format!("{prompt} {RESULT_RECEIPT_INSTRUCTION}");
+    let (session, turn, activated) = database.start_turn(&prompt).await?;
     let tracker = OperationTracker::default();
     let runtime = EvalOpenAiRuntime::new(forced_tool, tracker.clone())?;
     let provider = RuntimeModelCallProvider::new(runtime, database.runtime_models.clone());
@@ -802,8 +808,9 @@ impl ToolExecutor for SharedFamilyExecutor {
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
         let name = invocation.request().name().as_str().to_owned();
+        let receipt_binding = invocation.clone();
         let mut inner = self.inner.lock().await;
-        match &mut *inner {
+        let evidence = match &mut *inner {
             FamilyExecutor::Git(executor) => executor
                 .execute(invocation)
                 .await
@@ -830,8 +837,38 @@ impl ToolExecutor for SharedFamilyExecutor {
                 .execute(invocation)
                 .await
                 .map_err(FamilyExecutorError::new),
+        }?;
+        if evidence.correlation() != receipt_binding.correlation() {
+            return Err(FamilyExecutorError::new(io::Error::other(
+                "the eval executor returned mismatched correlation",
+            )));
         }
+        let receipt = Uuid::now_v7().to_string();
+        let evidence = add_eval_receipt(evidence.evidence().clone(), &receipt)
+            .map_err(FamilyExecutorError::new)?;
+        Ok(receipt_binding.bind(evidence))
     }
+}
+
+fn add_eval_receipt(
+    evidence: ToolExecutorEvidence,
+    receipt: &str,
+) -> io::Result<ToolExecutorEvidence> {
+    let ToolExecutorEvidence::CompletedText(content) = evidence else {
+        return Ok(evidence);
+    };
+    let mut result: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|_| io::Error::other("the eval tool returned non-JSON success content"))?;
+    let fields = result
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("the eval tool returned non-object success content"))?;
+    fields.insert(
+        String::from(EVAL_RECEIPT_FIELD),
+        serde_json::Value::String(receipt.to_owned()),
+    );
+    serde_json::to_string(&result)
+        .map(ToolExecutorEvidence::CompletedText)
+        .map_err(|_| io::Error::other("the eval receipt could not be encoded"))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -990,7 +1027,37 @@ impl ModelRuntime<ModelCallId> for EvalOpenAiRuntime {
         sink: &mut (dyn ObservationSink<ModelCallId> + Send),
         cancellation: CancellationSignal,
     ) -> TerminalReport<ModelCallId> {
-        self.inner.execute(prepared, sink, cancellation).await
+        let mut tracking_sink = ReceiptTrackingSink::new(sink);
+        let report = self
+            .inner
+            .execute(prepared, &mut tracking_sink, cancellation)
+            .await;
+        self.tracker
+            .observe_response_text(&tracking_sink.response_text);
+        report
+    }
+}
+
+struct ReceiptTrackingSink<'a> {
+    inner: &'a mut (dyn ObservationSink<ModelCallId> + Send),
+    response_text: String,
+}
+
+impl<'a> ReceiptTrackingSink<'a> {
+    fn new(inner: &'a mut (dyn ObservationSink<ModelCallId> + Send)) -> Self {
+        Self {
+            inner,
+            response_text: String::new(),
+        }
+    }
+}
+
+impl ObservationSink<ModelCallId> for ReceiptTrackingSink<'_> {
+    fn observe(&mut self, observation: Observation<ModelCallId>) {
+        if let ObservationFact::TextDelta { text, .. } = &observation.fact {
+            self.response_text.push_str(text);
+        }
+        self.inner.observe(observation);
     }
 }
 
@@ -1003,40 +1070,58 @@ struct OperationTracker {
 struct OperationTrackerState {
     result_round_trips: usize,
     round_tripped_request_ids: BTreeSet<Uuid>,
+    pending_result_receipts: BTreeMap<Uuid, String>,
 }
 
 impl OperationTracker {
     fn observe(&self, operation: &ModelOperation<ModelCallId>) {
-        let carries_result = operation.messages.iter().any(|message| {
-            message.parts.iter().any(|part| match part {
-                MessagePart::ToolResult(_) => true,
+        for result in operation
+            .messages
+            .iter()
+            .flat_map(|message| message.parts.iter())
+            .filter_map(|part| match part {
+                MessagePart::ToolResult(result) => Some(result),
                 MessagePart::Text(_)
                 | MessagePart::ToolCall(_)
                 | MessagePart::Thinking { .. }
-                | MessagePart::RedactedThinking { .. } => false,
+                | MessagePart::RedactedThinking { .. } => None,
             })
-        });
-        if carries_result {
-            let mut state = self
-                .state
-                .lock()
-                .expect("operation-tracker lock is available");
-            state.result_round_trips += 1;
-            state.round_tripped_request_ids.extend(
-                operation
-                    .messages
-                    .iter()
-                    .flat_map(|message| message.parts.iter())
-                    .filter_map(|part| match part {
-                        MessagePart::ToolResult(result) => {
-                            Uuid::parse_str(result.tool_call_id.as_str()).ok()
-                        }
-                        MessagePart::Text(_)
-                        | MessagePart::ToolCall(_)
-                        | MessagePart::Thinking { .. }
-                        | MessagePart::RedactedThinking { .. } => None,
-                    }),
-            );
+        {
+            let Some(request_id) = Uuid::parse_str(result.tool_call_id.as_str()).ok() else {
+                continue;
+            };
+            self.observe_result(request_id, &result.content);
+        }
+    }
+
+    fn observe_result(&self, request_id: Uuid, content: &str) {
+        let Some(receipt) = eval_receipt(content) else {
+            return;
+        };
+        self.state
+            .lock()
+            .expect("operation-tracker lock is available")
+            .pending_result_receipts
+            .insert(request_id, receipt);
+    }
+
+    fn observe_response_text(&self, text: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("operation-tracker lock is available");
+        let reported = state
+            .pending_result_receipts
+            .iter()
+            .filter_map(|(request, receipt)| text.contains(receipt).then_some(*request))
+            .collect::<Vec<_>>();
+        if reported.is_empty() {
+            return;
+        }
+        state.result_round_trips += 1;
+        for request in reported {
+            state.pending_result_receipts.remove(&request);
+            state.round_tripped_request_ids.insert(request);
         }
     }
 
@@ -1054,6 +1139,60 @@ impl OperationTracker {
             .round_tripped_request_ids
             .clone()
     }
+}
+
+fn eval_receipt(content: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()?
+        .as_object()?
+        .get(EVAL_RECEIPT_FIELD)?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn synthetic_result_with_receipt() -> String {
+    serde_json::json!({EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT}).to_string()
+}
+
+#[test]
+fn observing_an_untranslated_result_does_not_count_a_round_trip() {
+    let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &synthetic_result_with_receipt(),
+    );
+
+    assert_eq!(tracker.result_round_trips(), 0);
+    assert!(tracker.round_tripped_request_ids().is_empty());
+}
+
+#[test]
+fn unrelated_model_text_does_not_count_a_result_round_trip() {
+    let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &synthetic_result_with_receipt(),
+    );
+    tracker.observe_response_text("no tool receipt reported");
+
+    assert_eq!(tracker.result_round_trips(), 0);
+    assert!(tracker.round_tripped_request_ids().is_empty());
+}
+
+#[test]
+fn model_text_echoing_the_tool_only_receipt_counts_the_exact_request() {
+    let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &synthetic_result_with_receipt(),
+    );
+    tracker.observe_response_text(SYNTHETIC_EVAL_RECEIPT);
+
+    assert_eq!(tracker.result_round_trips(), 1);
+    assert_eq!(
+        tracker.round_tripped_request_ids(),
+        BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)])
+    );
 }
 
 struct EvalDatabase {
@@ -1375,9 +1514,9 @@ impl CaseSnapshot {
                     EvalFamily::Git => self.exact_git_natural_request_failed(index, request),
                     EvalFamily::Workspace => {
                         (request.name == READ_FILE_NAME
-                            && request
-                                .arguments()
-                                .is_some_and(|arguments| workspace_read_covers_seed(&arguments))
+                            && request.arguments().is_some_and(|arguments| {
+                                arguments == serde_json::json!({"path": WORKSPACE_SEED_PATH})
+                            })
                             && !self.requests[..index].iter().any(|earlier| {
                                 earlier.attempt_succeeded
                                     && matches!(
@@ -1387,19 +1526,22 @@ impl CaseSnapshot {
                             }))
                             || (request.name == WRITE_FILE_NAME
                                 && request.arguments().is_some_and(|arguments| {
-                                    arguments["path"] == WORKSPACE_ANSWER_PATH
-                                        && arguments["content"] == WORKSPACE_ANSWER
+                                    arguments
+                                        == serde_json::json!({
+                                            "path": WORKSPACE_ANSWER_PATH,
+                                            "content": WORKSPACE_ANSWER,
+                                        })
                                 }))
                     }
                     EvalFamily::Web => {
                         (request.name == WEB_SEARCH_NAME
-                            && request
-                                .arguments()
-                                .is_some_and(|arguments| arguments["query"] == WEB_QUERY))
+                            && request.arguments().is_some_and(|arguments| {
+                                arguments == serde_json::json!({"query": WEB_QUERY})
+                            }))
                             || (request.name == WEB_FETCH_NAME
-                                && request
-                                    .arguments()
-                                    .is_some_and(|arguments| arguments["url"] == WEB_URL))
+                                && request.arguments().is_some_and(|arguments| {
+                                    arguments == serde_json::json!({"url": WEB_URL})
+                                }))
                     }
                 }
         })
@@ -1414,9 +1556,9 @@ impl CaseSnapshot {
             return true;
         }
         request.name == GIT_CREATE_COMMIT_NAME
-            && request
-                .arguments()
-                .is_some_and(|arguments| arguments["message"] == GIT_NATURAL_MESSAGE)
+            && request.arguments().is_some_and(|arguments| {
+                arguments == serde_json::json!({"message": GIT_NATURAL_MESSAGE})
+            })
             && self.requests[..request_index].iter().any(|stage| {
                 stage.attempt_succeeded
                     && stage.name == GIT_STAGE_NAME
@@ -1429,7 +1571,7 @@ impl CaseSnapshot {
 fn exact_git_natural_stage_arguments(request: &RequestSnapshot) -> bool {
     request
         .arguments()
-        .is_some_and(|arguments| arguments["paths"] == serde_json::json!([GIT_NATURAL_PATH]))
+        .is_some_and(|arguments| arguments == serde_json::json!({"paths": [GIT_NATURAL_PATH]}))
 }
 
 fn workspace_read_covers_seed(arguments: &serde_json::Value) -> bool {
@@ -2057,6 +2199,50 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
         outcome.natural_loop_disposition(EvalFamily::Workspace),
         EvalDisposition::Miss
     );
+}
+
+fn failed_request_snapshot(name: &str, arguments: serde_json::Value) -> CaseSnapshot {
+    CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![RequestSnapshot {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+            name: name.to_owned(),
+            arguments_text: arguments.to_string(),
+            attempt_succeeded: false,
+        }],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    }
+}
+
+#[test]
+fn unforced_git_tier_keeps_a_schema_invalid_extra_field_as_a_miss() {
+    let snapshot = failed_request_snapshot(
+        GIT_STAGE_NAME,
+        serde_json::json!({"paths": [GIT_NATURAL_PATH], "unexpected": true}),
+    );
+
+    assert!(!snapshot.exact_natural_request_failed(EvalFamily::Git));
+}
+
+#[test]
+fn unforced_workspace_tier_keeps_an_out_of_range_read_as_a_miss() {
+    let snapshot = failed_request_snapshot(
+        READ_FILE_NAME,
+        serde_json::json!({"path": WORKSPACE_SEED_PATH, "max_bytes": 0}),
+    );
+
+    assert!(!snapshot.exact_natural_request_failed(EvalFamily::Workspace));
+}
+
+#[test]
+fn unforced_web_tier_keeps_a_schema_invalid_extra_field_as_a_miss() {
+    let snapshot = failed_request_snapshot(
+        WEB_FETCH_NAME,
+        serde_json::json!({"url": WEB_URL, "unexpected": true}),
+    );
+
+    assert!(!snapshot.exact_natural_request_failed(EvalFamily::Web));
 }
 
 #[test]
