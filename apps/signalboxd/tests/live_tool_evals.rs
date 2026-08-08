@@ -71,7 +71,7 @@ use signalbox_tools_web::{
     WebFetchExecutor, WebFetchRequest, WebFetchResponse, WebFetchTool, WebFetchTransport,
     WebFetchTransportFailure, WebSearchConfiguration, WebSearchExecutor, WebSearchPageCompleteness,
     WebSearchProvider, WebSearchRequest, WebSearchResponse, WebSearchResult, WebSearchResultFields,
-    WebSearchTool, WebSearchTransport, WebSearchTransportOutcome,
+    WebSearchTool, WebSearchTransport, WebSearchTransportFailure, WebSearchTransportOutcome,
 };
 use signalbox_tools_workspace::{
     APPLY_PATCH_NAME, EDIT_FILE_NAME, GLOB_FILES_NAME, LIST_DIRECTORY_NAME,
@@ -836,7 +836,9 @@ impl WebFetchTransport for FixtureWebFetchTransport {
         &mut self,
         request: WebFetchRequest,
     ) -> Result<WebFetchResponse, WebFetchTransportFailure> {
-        assert_eq!(request.url().as_str(), WEB_URL);
+        if request.url().as_str() != WEB_URL {
+            return Err(WebFetchTransportFailure::DispatchUnknown);
+        }
         WebFetchResponse::new(
             200,
             Some(String::from("text/plain")),
@@ -868,7 +870,12 @@ impl WebSearchTransport for FixtureWebSearchTransport {
         request: WebSearchRequest,
         credential: &CredentialValue,
     ) -> WebSearchTransportOutcome {
-        assert_eq!(request.query(), "Signalbox tool evaluation");
+        if request.query() != "Signalbox tool evaluation" {
+            return WebSearchTransportOutcome::failed(
+                WebSearchTransportFailure::DispatchUnknown,
+                credential,
+            );
+        }
         let result = WebSearchResult::try_new(WebSearchResultFields {
             title: String::from("Signalbox tool evaluation"),
             url: String::from(WEB_URL),
