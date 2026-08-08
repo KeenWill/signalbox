@@ -98,6 +98,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 from check_docs_consistency import (
     REFERENCE_DEFINITION,
@@ -165,12 +166,34 @@ WRAPPED_GAP = rf"(?:{MARKUP}(?:[ \t]+|[ \t]*\r?\n[ \t]*(?:>[ \t]*)*){MARKUP})"
 # is skipped rather than misreported as a different number.
 NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 
+# The same boundary on the other side of the digits, as the reader sees it.
+# `NUMBER_BEFORE_NOUN`'s lookbehind refuses a digit glued to a preceding word or
+# separator, but it reads raw characters: in "12,**037**" the character before
+# `037` is `*`, so the guard passed and the scan restarted after the comma to
+# report 37 — a number that agrees with a 37-scenario catalog and so passes in
+# silence, which is the same defect the unformatted "12,037" case already
+# closed. The delimiters render as nothing, so the boundary has to be judged
+# through them.
+NUMBER_BOUNDARY = re.compile(r"[0-9A-Za-z.,]")
+MARKUP_CHARACTERS = frozenset("*_~`[]")
+
 # The whitespace a range terminus may be separated from either of its bounds
 # by, including the hard wrap the required mdformat pass can leave between them
 # and the block-quote markers such a wrap carries. At most one newline, for the
 # same reason `WRAPPED_GAP` stops there: a blank line ends the paragraph, and a
 # number in one paragraph bounds nothing in the next.
-RANGE_GAP = r"[ \t]*(?:\r?\n[ \t]*(?:>[ \t]*)*)?[ \t]*"
+# Inline markup may sit between a terminus and either bound, exactly as it may
+# between a number and its noun: "5\u2013**37**", "**5** to 37" and
+# "scenario count: **37**\u201350" are the same statements as their unformatted
+# forms. Reading the range through raw characters while the patterns read the
+# statement through markup was the mismatch — the scan recognised the formatted
+# count, then failed to see the terminus beside it and reported a bound as a
+# total, which agrees with the catalog and passes in silence.
+#
+# `MARKUP` is bounded, so admitting it on both sides of the whitespace keeps the
+# partition count constant rather than reopening the backtracking this file
+# already had to close.
+RANGE_GAP = rf"{MARKUP}[ \t]*(?:\r?\n[ \t]*(?:>[ \t]*)*)?[ \t]*{MARKUP}"
 
 # A number that is only one bound of a range states no total, so the text on
 # both sides of a candidate is examined. `and` is deliberately absent from both
@@ -286,6 +309,22 @@ COUNT_OF_NOUN_PHRASE = re.compile(
     rf"{WRAPPED_GAP}?(?:is|of|:|=)?{WRAPPED_GAP}?(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
     re.IGNORECASE,
 )
+
+
+class MatchedCount(NamedTuple):
+    """One recognised statement, with the span of text it occupies.
+
+    Labeled rather than a bare tuple because `start` and `end` are adjacent
+    integers with no type to tell them apart: transposing them stays valid
+    Python and silently inverts the overlap test that collapses two readings of
+    one statement, which is the kind of run docs/style.md principle 2 refuses.
+    """
+
+    start: int
+    end: int
+    noun: str
+    number: int
+    phrase: str
 
 
 class CountCheckError(RuntimeError):
@@ -452,6 +491,28 @@ def opens_a_list_item(text: str, offset: int) -> bool:
     return LIST_BULLET_LEAD.fullmatch(text[line_start:offset]) is not None
 
 
+def opens_mid_number(text: str, number_start: int) -> bool:
+    """Whether the digits at `number_start` continue a token the reader sees.
+
+    The delimiters between a separator and the digits render as nothing, so
+    "12,**037**" and "12.**37**" read as one grouped or decimal number just as
+    "12,037" and "12.37" do. Walking back through them puts the same boundary
+    the pattern's lookbehind applies onto the character a reader would actually
+    see there.
+
+    Only the single-character delimiters are stepped over. A reference link's
+    `][label]` run ends in ordinary letters, which stops the walk and refuses
+    the match — the conservative direction this file already takes everywhere,
+    and one that costs a statement rather than inventing a total.
+    """
+    position = number_start - 1
+    while position >= 0 and text[position] in MARKUP_CHARACTERS:
+        position -= 1
+    if position < 0:
+        return False
+    return NUMBER_BOUNDARY.match(text[position]) is not None
+
+
 def bounds_a_range(text: str, match: re.Match[str]) -> bool:
     """Whether the captured number is one bound of a range rather than a total.
 
@@ -471,9 +532,7 @@ def bounds_a_range(text: str, match: re.Match[str]) -> bool:
     return after is not None and not opens_a_list_item(text, after.start("terminus"))
 
 
-def one_per_statement(
-    matched: list[tuple[int, int, str, int, str]],
-) -> list[tuple[int, int, str, int, str]]:
+def one_per_statement(matched: list[MatchedCount]) -> list[MatchedCount]:
     """Drop matches that overlap a match already kept.
 
     The three patterns describe overlapping grammars, so one sentence can
@@ -493,14 +552,13 @@ def one_per_statement(
     quoting most of what the document actually wrote — `scenario count: 9`
     rather than the `9 scenarios` inside it.
     """
-    kept: list[tuple[int, int, str, int, str]] = []
+    kept: list[MatchedCount] = []
     covered = 0
-    for entry in sorted(matched, key=lambda entry: (entry[0], -entry[1])):
-        start, end = entry[0], entry[1]
-        if kept and start < covered:
+    for entry in sorted(matched, key=lambda entry: (entry.start, -entry.end)):
+        if kept and entry.start < covered:
             continue
         kept.append(entry)
-        covered = max(covered, end)
+        covered = max(covered, entry.end)
     return kept
 
 
@@ -531,7 +589,7 @@ def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
     if has_non_authoritative_planning_banner(raw):
         return []
     text = mask_link_metadata(mask_inline_code(mask_block_content(raw)))
-    matched: list[tuple[int, int, str, int, str]] = []
+    matched: list[MatchedCount] = []
     # Every pattern names its two captures `noun` and `number`, so the three
     # can be read the same way regardless of which order the words fall in.
     for pattern in (NUMBER_BEFORE_NOUN, NOUN_COUNT_PHRASE, COUNT_OF_NOUN_PHRASE):
@@ -540,23 +598,27 @@ def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
             # however the range was spelled or wrapped.
             if bounds_a_range(text, match):
                 continue
+            # A number that continues a larger one states no total either, and
+            # the separator that makes it one may be behind markup.
+            if opens_mid_number(text, match.start("number")):
+                continue
             noun = (
                 "invariant"
                 if match.group("noun").lower().startswith("invariant")
                 else "scenario"
             )
             matched.append(
-                (
-                    match.start(),
-                    match.end(),
-                    noun,
-                    int(match.group("number")),
-                    as_one_phrase(match.group(0)),
+                MatchedCount(
+                    start=match.start(),
+                    end=match.end(),
+                    noun=noun,
+                    number=int(match.group("number")),
+                    phrase=as_one_phrase(match.group(0)),
                 )
             )
     return [
-        (line_number_at(text, start), noun, number, phrase)
-        for start, _, noun, number, phrase in one_per_statement(matched)
+        (line_number_at(text, entry.start), entry.noun, entry.number, entry.phrase)
+        for entry in one_per_statement(matched)
     ]
 
 

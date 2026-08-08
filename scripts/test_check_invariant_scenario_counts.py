@@ -16,10 +16,12 @@ checkouts) is never scanned. Every case runs the checker as a subprocess
 against a synthetic Git working tree, and every expected total is derived
 from the fixture rosters rather than restated.
 
-The range cases state a *stale* bound deliberately. A range whose bound
-agrees with the catalog passes whether or not the checker rejects it, so it
-proves nothing; only a stale bound makes reading it at all visible as a
-failure.
+Every case that must read *nothing* states a stale number deliberately, and
+this is load-bearing rather than incidental. A bound or prefix that agrees
+with the catalog passes whether or not the checker rejects it, so accidental
+extraction is observationally identical to extracting nothing and the test
+classifies neither way. Only a stale value makes reading it at all visible
+as a failure.
 
 Two cases are about the report rather than the reading: one statement that
 satisfies two patterns is reported once, and two statements of the same
@@ -590,7 +592,7 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
     def test_a_decimal_is_not_read_as_its_integer_prefix(self) -> None:
         """`<N>.5` must not be read as N, which would silently *agree* with an
         N-scenario catalog — the one failure mode nothing ever surfaces."""
-        self.assert_no_count_read_from(f"scenario count: {SCENARIO_COUNT}.5")
+        self.assert_no_count_read_from(f"scenario count: {STALE_SCENARIO_COUNT}.5")
 
     def test_a_grouped_number_is_not_read_as_its_first_digit(self) -> None:
         self.assert_no_count_read_from("scenario count: 1,000")
@@ -602,7 +604,7 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
         other side of the capture: 37 *matches* a 37-scenario catalog, so the
         stale total passes and nothing ever surfaces it.
         """
-        self.assert_no_count_read_from(f"There are 12,0{SCENARIO_COUNT} scenarios")
+        self.assert_no_count_read_from(f"There are 12,0{STALE_SCENARIO_COUNT} scenarios")
 
     def test_a_stale_count_with_a_formatted_count_keyword_fails(self) -> None:
         """`scenario **count**: N` puts the closing `**` between the keyword
@@ -691,18 +693,18 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
         """This repository writes ranges with an en dash, so a range would
         otherwise start matching after the dash and report its upper bound —
         which can *agree* with the catalog and pass silently."""
-        self.assert_no_count_read_from(f"There are 5\u2013{SCENARIO_COUNT} scenarios")
+        self.assert_no_count_read_from(f"There are 5\u2013{STALE_SCENARIO_COUNT} scenarios")
 
     def test_an_em_dash_range_is_not_read_as_its_upper_bound(self) -> None:
-        self.assert_no_count_read_from(f"There are 5\u2014{SCENARIO_COUNT} scenarios")
+        self.assert_no_count_read_from(f"There are 5\u2014{STALE_SCENARIO_COUNT} scenarios")
 
     def test_a_textual_range_is_not_read_as_its_upper_bound(self) -> None:
         """"5 to 37 scenarios" states a range, not a total — and 37 *agrees*
         with the catalog, so reading it would pass in silence."""
-        self.assert_no_count_read_from(f"There are 5 to {SCENARIO_COUNT} scenarios")
+        self.assert_no_count_read_from(f"There are 5 to {STALE_SCENARIO_COUNT} scenarios")
 
     def test_a_through_range_is_not_read_as_its_upper_bound(self) -> None:
-        self.assert_no_count_read_from(f"There are 5 through {SCENARIO_COUNT} scenarios")
+        self.assert_no_count_read_from(f"There are 5 through {STALE_SCENARIO_COUNT} scenarios")
 
     def test_a_conjunction_is_still_read_as_a_total(self) -> None:
         """`and` is ordinary conjunction far more often than a range terminus,
@@ -726,14 +728,14 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
         """The required mdformat pass can wrap a range before its upper bound,
         which put the terminus out of a fixed-width lookbehind's reach."""
         self.assert_no_count_read_from(
-            f"There are 5 to\n{SCENARIO_COUNT} scenarios"
+            f"There are 5 to\n{STALE_SCENARIO_COUNT} scenarios"
         )
 
     def test_a_spaced_dash_range_is_not_read_as_its_upper_bound(self) -> None:
-        self.assert_no_count_read_from(f"There are 5 \u2013 {SCENARIO_COUNT} scenarios")
+        self.assert_no_count_read_from(f"There are 5 \u2013 {STALE_SCENARIO_COUNT} scenarios")
 
     def test_a_spaced_hyphen_range_is_not_read_as_its_upper_bound(self) -> None:
-        self.assert_no_count_read_from(f"There are 5 - {SCENARIO_COUNT} scenarios")
+        self.assert_no_count_read_from(f"There are 5 - {STALE_SCENARIO_COUNT} scenarios")
 
     def test_a_range_after_an_explicit_count_is_not_read_as_its_lower_bound(
         self,
@@ -814,14 +816,6 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
             f"The catalog is enforced through {STALE_SCENARIO_COUNT} scenarios"
         )
 
-    def test_a_textual_range_with_a_lower_bound_is_still_refused(self) -> None:
-        """The guard on the case above: a textual terminus with a number in
-        front of it is a range, and stating a stale upper bound proves the
-        rejection rather than merely agreeing with the catalog."""
-        self.assert_no_count_read_from(
-            f"There are 5 to {STALE_SCENARIO_COUNT} scenarios"
-        )
-
     def test_an_identifier_dash_still_needs_no_lower_bound(self) -> None:
         """A dash is never a preposition, so it keeps refusing without one —
         which is what stops `INV-NNN` citations reading as stated totals."""
@@ -895,6 +889,47 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
             result = run_checker(root, timeout=10)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_range_with_a_formatted_upper_bound_is_not_read(self) -> None:
+        """The scan reads a statement through markup, so the range test has to
+        as well. While it read raw characters, the delimiters between the dash
+        and the bound hid the terminus and the bound was reported as a total."""
+        self.assert_no_count_read_from(
+            f"There are 5\u2013**{STALE_SCENARIO_COUNT}** scenarios"
+        )
+
+    def test_a_range_with_a_formatted_lower_bound_is_not_read(self) -> None:
+        """The same mismatch from the other bound: markup around the lower
+        bound put the number out of the textual terminus's reach."""
+        self.assert_no_count_read_from(
+            f"There are **5** to {STALE_SCENARIO_COUNT} scenarios"
+        )
+
+    def test_a_formatted_count_opening_a_range_is_not_read(self) -> None:
+        """And on the suffix side, where the terminus follows the number."""
+        self.assert_no_count_read_from(
+            f"scenario count: **{STALE_SCENARIO_COUNT}**\u2013{STALE_SCENARIO_COUNT + 5}"
+        )
+
+    def test_a_grouped_number_with_a_formatted_suffix_is_not_read(self) -> None:
+        """"12,**037**" renders as one grouped number, so its suffix states no
+        total — but the boundary guard read the raw `*` rather than the comma
+        the reader sees, and restarted at the formatted digits."""
+        self.assert_no_count_read_from(
+            f"There are 12,0**{STALE_SCENARIO_COUNT}** scenarios"
+        )
+
+    def test_a_decimal_with_a_formatted_suffix_is_not_read(self) -> None:
+        self.assert_no_count_read_from(
+            f"There are 12.**{STALE_SCENARIO_COUNT}** scenarios"
+        )
+
+    def test_a_formatted_number_is_still_read_as_a_total(self) -> None:
+        """The guard on all five: stepping back through delimiters must not
+        start refusing the formatted counts the scan exists to catch."""
+        self.assert_stale_scenario_count_caught(
+            f"There are **{STALE_SCENARIO_COUNT}** scenarios."
+        )
 
     def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
         """A tracked path can vanish between `git ls-files` and the read.
