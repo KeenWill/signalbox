@@ -1,4 +1,26 @@
 //! Stateful decoding of one Codex exec JSONL event stream.
+//!
+//! **Dropped-content rule.** Provider-controlled text this adapter drops
+//! without interpreting still governs the output that follows it: a credential
+//! marker the dropped bytes end in (`api_`) marks a value that opens the next
+//! emitted text (`key=value`) as a secret. Every uninterpreted dropped field
+//! therefore reaches the redactor's match-only lookbehind — match state, never
+//! itself emitted — before that following text is emitted or retained, so the
+//! value is suppressed wherever it next surfaces, in a streamed delta or in
+//! the buffered final text alike. Text the adapter models and then drops goes
+//! in whole through `extend_dropped_context`; fields it does not model go
+//! through `fold_uninterpreted`, which weighs them as independent units.
+//!
+//! Interpreted fields are outside the rule even where they are also dropped.
+//! `validate_item_identity` reads `item.id` and `item.type` on every item
+//! event, so every item arm excludes both from the fold; where the arm drops
+//! the item as well — an unsupported item, a bare lifecycle event — nothing
+//! carries their bytes to the lookbehind, and a marker one of them ends in
+//! arms nothing. Widening the fold to the identity, not a broader claim here,
+//! is what would close that.
+//!
+//! Each arm of `EventDecoder::push` cites this rule and adds only what is
+//! local to it.
 
 use std::collections::HashSet;
 
@@ -234,24 +256,15 @@ impl<C: Clone> EventDecoder<C> {
                                 fact: ObservationFact::ThinkingDelta { index, text },
                             });
                         } else {
-                            // Buffered delivery drops reasoning from the
-                            // output, but a credential marker inside it still
-                            // marks the value that follows in the final text
-                            // as a secret; feed the dropped bytes into the
-                            // match-only lookbehind so that value is
-                            // suppressed exactly as the streamed path
-                            // suppresses it.
+                            // Dropped from the buffered output; the bytes feed
+                            // the lookbehind instead (dropped-content rule).
                             sink.extend_dropped_context(&text);
                         }
                     }
                     ItemDetails::Error { message } => {
-                        // An error item is dropped from the output in both
-                        // delivery modes, but a credential marker inside it
-                        // still marks the value that follows (in streamed
-                        // deltas or the buffered final text) as a secret;
-                        // feed the dropped bytes into the match-only
-                        // lookbehind exactly as buffered reasoning is. Additive
-                        // siblings are dropped content and fold first.
+                        // An error item is dropped in both delivery modes:
+                        // additive siblings fold, then the modeled message
+                        // extends the lookbehind (dropped-content rule).
                         fold_uninterpreted(
                             sink,
                             &value,
@@ -261,12 +274,11 @@ impl<C: Clone> EventDecoder<C> {
                         sink.extend_dropped_context(&message);
                     }
                     ItemDetails::Other => {
-                        // An unsupported item is dropped from the output, but
-                        // any credential-bearing text it carries still marks
-                        // following output as a secret. Its shape is unmodeled —
-                        // provider text can live in any field or nested within
-                        // one — so its independent credential units fold into
-                        // the lookbehind.
+                        // An unsupported item is dropped from the output. Its
+                        // shape is unmodeled — provider text can live in any
+                        // field or nested within one — so every field outside
+                        // the validated item identity folds as an independent
+                        // unit (dropped-content rule).
                         fold_uninterpreted(
                             sink,
                             &value,
@@ -287,9 +299,9 @@ impl<C: Clone> EventDecoder<C> {
                     ));
                 }
                 let event: TurnCompleted = decode(value.clone())?;
-                // Only the usage counters are interpreted; an additive sibling
-                // is dropped uninterpreted and folds before the completion the
-                // terminal marker unlocks emits the final text.
+                // Only the usage counters are interpreted; every other member
+                // folds before the completion this terminal marker unlocks
+                // emits the final text (dropped-content rule).
                 fold_uninterpreted(sink, &value, &["type"], None);
                 self.usage = usage(event.usage)?;
                 self.terminal = Some(CliTerminal::Completed);
@@ -300,9 +312,8 @@ impl<C: Clone> EventDecoder<C> {
                 // fold it so a marker it ends in still governs the failure
                 // message that supersedes it, as agent-message supersession does.
                 self.fold_retained_agent_message(sink);
-                // Additive failure fields are dropped uninterpreted; fold them
-                // before the interpreted message is retained, so a marker one of
-                // them ends in still governs that message.
+                // Additive failure fields fold before the interpreted message
+                // is retained (dropped-content rule).
                 fold_uninterpreted(sink, &value, &["type"], Some(("error", &["message"])));
                 self.terminal = Some(CliTerminal::Failed(event.error.message));
             }
@@ -313,13 +324,10 @@ impl<C: Clone> EventDecoder<C> {
                 self.terminal = Some(CliTerminal::Unrecoverable(event.message));
             }
             _ => {
-                // An additively-tolerated unknown top-level event is dropped,
-                // but a credential marker in its provider-controlled strings
-                // still marks the following final text as a secret; fold its
-                // uninterpreted content into the lookbehind, as for an
-                // unsupported item. Nothing here is interpreted — the `type`
-                // discriminator matched no known event, so its value is
-                // provider-chosen text like every other field.
+                // Nothing in an additively-tolerated unknown top-level event
+                // is interpreted — its `type` discriminator matched no known
+                // event, so that value is provider-chosen text like every
+                // other field — and all of it folds (dropped-content rule).
                 fold_uninterpreted(sink, &value, &[], None);
             }
         }
