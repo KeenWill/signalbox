@@ -1907,7 +1907,9 @@ mod tests {
         let actual = fs::canonicalize(actual).ok()?;
         let workspace = fs::canonicalize(workspace).ok()?;
         let package = fs::canonicalize(package).ok()?;
-        (reported == workspace && (actual == workspace || actual == package)).then_some(reported)
+        ((reported == workspace && (actual == workspace || actual == package))
+            || (reported == package && actual == package))
+            .then_some(reported)
     }
 
     fn rustc_command_for(
@@ -2704,7 +2706,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_compiler_invocation_accepts_only_a_workspace_root_report() {
+    fn bridge_compiler_invocation_rejects_an_unrelated_report() {
         let fixture = tempfile::tempdir().expect("fixture root exists");
         let workspace = fixture.path().join("workspace");
         let stale = fixture.path().join("stale");
@@ -2737,6 +2739,20 @@ mod tests {
         assert_eq!(
             verified_compiler_invocation_directory_for(&workspace, &package, &workspace, &package,),
             Some(expected_workspace)
+        );
+    }
+
+    #[test]
+    fn bridge_compiler_invocation_preserves_package_root_for_package_invocation() {
+        let fixture = tempfile::tempdir().expect("fixture root exists");
+        let workspace = fixture.path().join("workspace");
+        let package = workspace.join("package");
+        fs::create_dir_all(&package).expect("package fixture exists");
+        let expected_package = fs::canonicalize(&package).expect("package canonicalizes");
+
+        assert_eq!(
+            verified_compiler_invocation_directory_for(&package, &package, &workspace, &package,),
+            Some(expected_package)
         );
     }
 
