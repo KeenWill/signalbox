@@ -65,9 +65,12 @@ use signalbox_persistence::{
     tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_tools_exec::{
-    CARGO_DIAGNOSTICS_NAME, CargoDiagnosticsExecutor, CargoDiagnosticsTool, ExecExecutor,
-    SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner,
-    UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
+    CARGO_DIAGNOSTICS_NAME, CaptureCompleteness, CargoDiagnosticRecords, CargoDiagnosticsCommand,
+    CargoDiagnosticsExecution, CargoDiagnosticsExecutor, CargoDiagnosticsResult,
+    CargoDiagnosticsStream, CargoDiagnosticsTool, CargoEvidenceProvenance, CargoTestRecords,
+    ExecExecutor, ExecutionConfinement, OutputEncoding, ProcessOutcome, SANDBOXED_EXEC_NAME,
+    SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME,
+    UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
 use signalbox_tools_git::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
@@ -2468,29 +2471,36 @@ fn confined_exit(stdout: &str) -> serde_json::Value {
 
 /// One complete, successful Cargo check result in the eval workspace.
 fn successful_cargo_diagnostics_result() -> serde_json::Value {
-    serde_json::json!({
-        "command": "check",
-        "execution": {
-            "confinement": {"kind": "filesystem_confined"},
-            "outcome": {"kind": "exited", "code": 0},
-            "stdout": {"completeness": "complete", "encoding": "utf8"},
-            "stderr": {"completeness": "complete", "encoding": "utf8"},
-            "cargo_failure": null,
-            "preparation_failure": null,
+    let stream = CargoDiagnosticsStream {
+        completeness: CaptureCompleteness::Complete,
+        encoding: OutputEncoding::Utf8,
+    };
+    let records = CargoDiagnosticRecords {
+        values: Vec::new(),
+        limit_reached: false,
+        provenance: CargoEvidenceProvenance::WorkspaceInfluenced,
+        known_truncated: false,
+    };
+    let tests = CargoTestRecords {
+        values: Vec::new(),
+        limit_reached: false,
+        provenance: CargoEvidenceProvenance::WorkspaceInfluenced,
+        known_truncated: false,
+    };
+    serde_json::to_value(CargoDiagnosticsResult {
+        command: CargoDiagnosticsCommand::Check,
+        execution: CargoDiagnosticsExecution {
+            confinement: ExecutionConfinement::FilesystemConfined,
+            outcome: ProcessOutcome::Exited { code: Some(0) },
+            stdout: stream,
+            stderr: stream,
+            cargo_failure: None,
+            preparation_failure: None,
         },
-        "diagnostics": {
-            "values": [],
-            "limit_reached": false,
-            "provenance": "workspace_influenced",
-            "known_truncated": false,
-        },
-        "tests": {
-            "values": [],
-            "limit_reached": false,
-            "provenance": "workspace_influenced",
-            "known_truncated": false,
-        },
+        diagnostics: records,
+        tests,
     })
+    .expect("producer Cargo diagnostics result serializes")
 }
 
 #[test]
