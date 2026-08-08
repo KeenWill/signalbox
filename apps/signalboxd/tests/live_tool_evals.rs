@@ -279,6 +279,7 @@ async fn run_case(
             .transpose()?,
         execution_completed: true,
         result_round_trips: tracker.result_round_trips(),
+        round_tripped_request_ids: tracker.round_tripped_request_ids(),
         snapshot,
     })
 }
@@ -1001,6 +1002,7 @@ struct OperationTracker {
 #[derive(Default)]
 struct OperationTrackerState {
     result_round_trips: usize,
+    round_tripped_request_ids: BTreeSet<Uuid>,
 }
 
 impl OperationTracker {
@@ -1015,10 +1017,26 @@ impl OperationTracker {
             })
         });
         if carries_result {
-            self.state
+            let mut state = self
+                .state
                 .lock()
-                .expect("operation-tracker lock is available")
-                .result_round_trips += 1;
+                .expect("operation-tracker lock is available");
+            state.result_round_trips += 1;
+            state.round_tripped_request_ids.extend(
+                operation
+                    .messages
+                    .iter()
+                    .flat_map(|message| message.parts.iter())
+                    .filter_map(|part| match part {
+                        MessagePart::ToolResult(result) => {
+                            Uuid::parse_str(result.tool_call_id.as_str()).ok()
+                        }
+                        MessagePart::Text(_)
+                        | MessagePart::ToolCall(_)
+                        | MessagePart::Thinking { .. }
+                        | MessagePart::RedactedThinking { .. } => None,
+                    }),
+            );
         }
     }
 
@@ -1027,6 +1045,14 @@ impl OperationTracker {
             .lock()
             .expect("operation-tracker lock is available")
             .result_round_trips
+    }
+
+    fn round_tripped_request_ids(&self) -> BTreeSet<Uuid> {
+        self.state
+            .lock()
+            .expect("operation-tracker lock is available")
+            .round_tripped_request_ids
+            .clone()
     }
 }
 
@@ -1165,10 +1191,6 @@ struct CaseSnapshot {
 }
 
 struct RequestSnapshot {
-    #[expect(
-        dead_code,
-        reason = "the typed request identity records the proposal/result join in snapshots"
-    )]
     request_id: Uuid,
     producing_model_call_id: Uuid,
     name: String,
@@ -1355,7 +1377,14 @@ impl CaseSnapshot {
                         (request.name == READ_FILE_NAME
                             && request
                                 .arguments()
-                                .is_some_and(|arguments| workspace_read_covers_seed(&arguments)))
+                                .is_some_and(|arguments| workspace_read_covers_seed(&arguments))
+                            && !self.requests[..index].iter().any(|earlier| {
+                                earlier.attempt_succeeded
+                                    && matches!(
+                                        earlier.name.as_str(),
+                                        WRITE_FILE_NAME | EDIT_FILE_NAME | APPLY_PATCH_NAME
+                                    )
+                            }))
                             || (request.name == WRITE_FILE_NAME
                                 && request.arguments().is_some_and(|arguments| {
                                     arguments["path"] == WORKSPACE_ANSWER_PATH
@@ -1549,6 +1578,7 @@ struct CaseOutcome {
     expected_arguments: Option<String>,
     execution_completed: bool,
     result_round_trips: usize,
+    round_tripped_request_ids: BTreeSet<Uuid>,
     snapshot: CaseSnapshot,
 }
 
@@ -1575,6 +1605,9 @@ impl CaseOutcome {
                 && self.snapshot.turn_disposition.is_completed()
                 && self.snapshot.model_calls >= MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP
                 && self.result_round_trips >= 1
+                && self
+                    .round_tripped_request_ids
+                    .contains(&self.snapshot.requests[0].request_id)
                 && self.snapshot.requests.len() == 1
                 && self.snapshot.requests[0].name == target
                 && self.snapshot.requests[0].arguments_text == expected_arguments
@@ -1598,6 +1631,11 @@ impl CaseOutcome {
             self.execution_completed
                 && self.snapshot.turn_disposition.is_completed()
                 && self.result_round_trips >= 1
+                && self
+                    .snapshot
+                    .requests
+                    .iter()
+                    .all(|request| self.round_tripped_request_ids.contains(&request.request_id))
                 && required_names.iter().all(|required| {
                     self.snapshot
                         .requests
@@ -1739,6 +1777,7 @@ fn provider_failure_is_reported_as_infrastructure_not_a_model_miss() {
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
         result_round_trips: 0,
+        round_tripped_request_ids: BTreeSet::new(),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::ProviderFailure(Some(
                 ProcessProviderModelCallFailureCause::TargetNotFound,
@@ -1766,6 +1805,7 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
         result_round_trips: 1,
+        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -1790,6 +1830,7 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
         result_round_trips: 0,
+        round_tripped_request_ids: BTreeSet::new(),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -1814,6 +1855,7 @@ fn forced_tier_reports_infrastructure_for_an_exact_known_failed_attempt() {
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
         result_round_trips: 1,
+        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -1840,6 +1882,7 @@ fn unforced_web_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
         expected_arguments: None,
         execution_completed: true,
         result_round_trips: 1,
+        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -1866,6 +1909,7 @@ fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
         expected_arguments: None,
         execution_completed: true,
         result_round_trips: 1,
+        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -1892,6 +1936,7 @@ fn unforced_git_tier_reports_a_premature_commit_failure_as_a_miss() {
         expected_arguments: None,
         execution_completed: true,
         result_round_trips: 1,
+        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -1918,6 +1963,7 @@ fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
         expected_arguments: None,
         execution_completed: true,
         result_round_trips: 1,
+        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![
@@ -1953,6 +1999,7 @@ fn unforced_workspace_tier_reports_infrastructure_for_an_exact_known_failed_atte
         expected_arguments: None,
         execution_completed: true,
         result_round_trips: 1,
+        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -1977,12 +2024,89 @@ fn unforced_workspace_tier_reports_infrastructure_for_an_exact_known_failed_atte
 }
 
 #[test]
+fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        result_round_trips: 1,
+        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(APPLY_PATCH_NAME),
+                    arguments_text: String::from("{}"),
+                    attempt_succeeded: true,
+                },
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                    name: String::from(READ_FILE_NAME),
+                    arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                    attempt_succeeded: false,
+                },
+            ],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Workspace),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
+fn unforced_workspace_tier_requires_each_request_result_to_round_trip() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        result_round_trips: 1,
+        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(READ_FILE_NAME),
+                    arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                    attempt_succeeded: true,
+                },
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                    name: String::from(WRITE_FILE_NAME),
+                    arguments_text: serde_json::json!({
+                        "path": WORKSPACE_ANSWER_PATH,
+                        "content": WORKSPACE_ANSWER,
+                    })
+                    .to_string(),
+                    attempt_succeeded: true,
+                },
+            ],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Workspace),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
 fn unforced_git_tier_requires_both_task_tools() {
     let outcome = CaseOutcome {
         target: None,
         expected_arguments: None,
         execution_completed: true,
         result_round_trips: 1,
+        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -2094,6 +2218,7 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
         result_round_trips: 1,
+        round_tripped_request_ids: BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)]),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
