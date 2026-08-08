@@ -2955,6 +2955,13 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
     let provider =
         RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());
     let targets = model_configuration.target_catalog();
+    // Captured before the configuration moves into the process runtime.
+    // Production composition attaches this catalog so every call resolves the
+    // credential its session pinned for the *serving* family; under fast mode
+    // that is the alternate target's family, not the selected one. Without it
+    // the repository falls back to one reference for every call and the smoke
+    // would authenticate a fast call with the base family's account.
+    let credential_families = model_configuration.credential_family_catalog();
 
     let (container, pool) = postgres().await?;
     let socket_directory = SocketDirectory::create()?;
@@ -2970,7 +2977,8 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
     );
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(pool.clone(), targets, credential_reference),
+            PostgresModelCallRepository::new(pool.clone(), targets, credential_reference)
+                .with_session_credentials(credential_families),
             InProcessAttemptDispatchGate::default(),
             provider,
         ));
