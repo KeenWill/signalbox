@@ -35,6 +35,18 @@ pub(crate) struct CatalogTool {
     pub(crate) input_schema: Box<RawValue>,
 }
 
+#[derive(Serialize)]
+struct ListToolsResponse<'a> {
+    jsonrpc: &'static str,
+    id: serde_json::Value,
+    result: ListToolsResult<'a>,
+}
+
+#[derive(Serialize)]
+struct ListToolsResult<'a> {
+    tools: &'a [CatalogTool],
+}
+
 #[derive(Deserialize)]
 struct Request {
     #[serde(default)]
@@ -109,7 +121,7 @@ fn serve(catalog_path: PathBuf, ready_path: PathBuf) -> ExitCode {
     let Ok(catalog_bytes) = std::fs::read(catalog_path) else {
         return ExitCode::FAILURE;
     };
-    let Ok(catalog) = serde_json::from_slice::<Catalog>(&catalog_bytes) else {
+    let Ok(catalog) = decode_catalog(&catalog_bytes) else {
         return ExitCode::FAILURE;
     };
     if !catalog_is_valid(&catalog) {
@@ -136,12 +148,13 @@ fn serve(catalog_path: PathBuf, ready_path: PathBuf) -> ExitCode {
         let response = match request.method.as_str() {
             "initialize" => initialize_response(request.id, &request.params),
             "tools/list" => {
-                let response = result_response(
-                    request.id,
-                    serde_json::json!({
-                        "tools": &catalog.tools,
-                    }),
-                );
+                let response = ListToolsResponse {
+                    jsonrpc: "2.0",
+                    id: request.id.unwrap_or(serde_json::Value::Null),
+                    result: ListToolsResult {
+                        tools: &catalog.tools,
+                    },
+                };
                 if write_response(&mut output, &response).is_err() {
                     return ExitCode::FAILURE;
                 }
@@ -160,15 +173,27 @@ fn serve(catalog_path: PathBuf, ready_path: PathBuf) -> ExitCode {
     }
 }
 
+fn decode_catalog(bytes: &[u8]) -> Result<Catalog, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    deserializer.disable_recursion_limit();
+    let catalog = Catalog::deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
+    deserializer.end()?;
+    Ok(catalog)
+}
+
 fn catalog_is_valid(catalog: &Catalog) -> bool {
     let mut names = std::collections::HashSet::with_capacity(catalog.tools.len());
     catalog.tools.iter().all(|tool| {
         valid_mcp_tool_name(&tool.name)
             && names.insert(tool.name.as_str())
-            && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
-                tool.input_schema.get(),
-            )
-            .is_ok()
+            // `RawValue` deserialization already proved complete JSON syntax;
+            // inspect only its root token so supported deep schemas stay raw.
+            && tool
+                .input_schema
+                .get()
+                .bytes()
+                .find(|byte| !byte.is_ascii_whitespace())
+                == Some(b'{')
     })
 }
 
@@ -243,7 +268,10 @@ fn error_response(id: Option<serde_json::Value>, code: i64, message: &str) -> se
     })
 }
 
-fn write_response(output: &mut impl Write, response: &serde_json::Value) -> std::io::Result<()> {
+fn write_response(
+    output: &mut impl Write,
+    response: &(impl Serialize + ?Sized),
+) -> std::io::Result<()> {
     serde_json::to_writer(&mut *output, response).map_err(std::io::Error::other)?;
     output.write_all(b"\n")?;
     output.flush()

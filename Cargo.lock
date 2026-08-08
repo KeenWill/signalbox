@@ -3300,6 +3300,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "serde_stacker",
  "signalbox-model-runtime",
  "signalbox-test-bin",
  "tempfile",

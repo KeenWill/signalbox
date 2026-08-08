@@ -1611,15 +1611,16 @@ mod tests {
     }
 
     #[test]
-    fn bridge_catalog_preserves_a_deep_schema_without_building_a_value_tree() {
+    fn claude_mcp_bridge_lists_a_deep_schema_without_building_a_value_tree() {
         let definition = deeply_nested_bridge_tool_definition();
-        let expected_schema = definition.input_schema().as_str().to_owned();
-        let projected = String::from_utf8(bridge_catalog(std::slice::from_ref(&definition)))
-            .expect("bridge catalog is valid UTF-8");
-        let expected_tools = expected_bridge_tools(&[definition]);
+        let definitions = std::slice::from_ref(&definition);
+        let expected = expected_bridge_tools(definitions);
+        let mut fixture = McpBridgeFixture::start_with_definitions(definitions);
+        fixture.initialize();
+        let listed = fixture.list_tools();
+        fixture.finish();
 
-        assert!(projected.contains(&expected_schema));
-        assert_eq!(expected_tools[0].input_schema, expected_schema);
+        assert_eq!(listed, expected);
     }
 
     struct BridgeArtifactSelection {
@@ -4190,8 +4191,22 @@ mod tests {
             let workspace = tempfile::tempdir().expect("workspace root exists");
             let catalog = mapped_daemon_catalog(workspace.path());
             let definitions = catalog.definitions();
-            let projected_catalog = bridge_catalog(&definitions);
-            let expected_tools = expected_bridge_tools(&definitions);
+            Self::start_with_workspace_and_definitions(workspace, &definitions)
+        }
+
+        #[track_caller]
+        fn start_with_definitions(definitions: &[ToolDefinition]) -> Self {
+            let workspace = tempfile::tempdir().expect("workspace root exists");
+            Self::start_with_workspace_and_definitions(workspace, definitions)
+        }
+
+        #[track_caller]
+        fn start_with_workspace_and_definitions(
+            workspace: tempfile::TempDir,
+            definitions: &[ToolDefinition],
+        ) -> Self {
+            let projected_catalog = bridge_catalog(definitions);
+            let expected_tools = expected_bridge_tools(definitions);
             let support = tempfile::tempdir().expect("bridge support directory exists");
             let catalog_path = support.path().join("tools.json");
             let ready_path = support.path().join("ready");
