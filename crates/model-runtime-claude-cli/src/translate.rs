@@ -1,5 +1,7 @@
 //! Stateless rendering of one model operation into Claude Code input and MCP.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 use serde_json::value::RawValue;
 use signalbox_model_runtime::{
@@ -100,14 +102,29 @@ pub(crate) fn translate<C>(
         .iter()
         .map(render_message)
         .collect::<Result<Vec<_>, _>>()?;
-    let mut catalog = translated_tool_catalog(&operation.tools)?;
+    let mut catalog_tools = operation
+        .tools
+        .iter()
+        .map(|tool| {
+            validate_tool_name(tool.name.as_str())?;
+            parse_object_schema(
+                &tool.input_schema,
+                &format!("tool `{}` input schema", tool.name.as_str()),
+            )?;
+            Ok(CatalogTool {
+                name: tool.name.as_str().to_string(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, TranslationError>>()?;
     if let Some(contract) = &operation.output_contract {
         validate_tool_name(contract.name.as_str())?;
         parse_object_schema(
             &contract.schema,
             &format!("structured output `{}` schema", contract.name.as_str()),
         )?;
-        catalog.tools.push(CatalogTool {
+        catalog_tools.push(CatalogTool {
             name: contract.name.as_str().to_string(),
             description: contract.description.clone(),
             input_schema: contract.schema.clone(),
@@ -175,49 +192,11 @@ pub(crate) fn translate<C>(
 
     Ok(TranslatedOperation {
         prompt,
-        catalog,
+        catalog: Catalog {
+            tools: catalog_tools,
+        },
         tool_requirement,
     })
-}
-
-fn translated_tool_catalog(
-    tools: &[signalbox_model_runtime::ToolDefinition],
-) -> Result<Catalog, TranslationError> {
-    let tools = tools
-        .iter()
-        .map(|tool| {
-            validate_tool_name(tool.name.as_str())?;
-            parse_object_schema(
-                &tool.input_schema,
-                &format!("tool `{}` input schema", tool.name.as_str()),
-            )?;
-            Ok(CatalogTool {
-                name: tool.name.as_str().to_string(),
-                description: tool.description.clone(),
-                input_schema: tool.input_schema.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, TranslationError>>()?;
-    Ok(Catalog { tools })
-}
-
-pub(crate) fn serialize_mcp_catalog(catalog: &Catalog) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(catalog)
-}
-
-/// Serializes runtime tool definitions through the Claude MCP adapter's
-/// production catalog translation.
-///
-/// This narrow conformance surface lets integration tests start the bridge
-/// with the same mapping and serialization used for a live Claude request.
-pub fn serialize_mcp_tool_catalog(
-    tools: &[signalbox_model_runtime::ToolDefinition],
-) -> Result<Vec<u8>, String> {
-    let catalog = translated_tool_catalog(tools).map_err(|error| {
-        format!("tool catalog is not representable by the Claude MCP adapter: {error:?}")
-    })?;
-    serialize_mcp_catalog(&catalog)
-        .map_err(|error| format!("Claude MCP catalog serialization failed: {error}"))
 }
 
 pub(crate) fn qualified_tool_name(name: &str) -> String {
@@ -324,22 +303,14 @@ fn parse_object_schema<'a>(
 }
 
 fn schema_describes_object(raw: &RawValue) -> bool {
-    let Ok(schema) = serde_json::from_str::<serde_json::Value>(raw.get()) else {
+    let Ok(members) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(raw.get()) else {
         return false;
     };
-    schema_value_describes_object(&schema)
-}
-
-fn schema_value_describes_object(schema: &serde_json::Value) -> bool {
-    if schema.get("type").and_then(serde_json::Value::as_str) == Some("object") {
-        return true;
-    }
-    schema
-        .get("oneOf")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|variants| {
-            !variants.is_empty() && variants.iter().all(schema_value_describes_object)
-        })
+    members
+        .get("type")
+        .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
+        .as_deref()
+        == Some("object")
 }
 
 fn validate_settings<C>(operation: &ModelOperation<C>) -> Result<(), TranslationError> {
@@ -375,38 +346,4 @@ fn validate_settings<C>(operation: &ModelOperation<C>) -> Result<(), Translation
 pub(crate) enum TranslationError {
     Failure(PreparationFailure),
     Defect(PreparationDefect),
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::value::RawValue;
-
-    use super::schema_describes_object;
-
-    const OBJECT_UNION_SCHEMA: &str = r#"{
-        "oneOf": [
-            {"type": "object", "properties": {"kind": {"const": "left"}}},
-            {"type": "object", "properties": {"kind": {"const": "right"}}}
-        ]
-    }"#;
-    const MIXED_UNION_SCHEMA: &str = r#"{
-        "oneOf": [
-            {"type": "object", "properties": {"kind": {"const": "left"}}},
-            {"type": "string"}
-        ]
-    }"#;
-
-    fn raw_schema(schema: &str) -> Box<RawValue> {
-        RawValue::from_string(schema.to_string()).expect("fixture schema is valid JSON")
-    }
-
-    #[test]
-    fn object_only_union_describes_object_arguments() {
-        assert!(schema_describes_object(&raw_schema(OBJECT_UNION_SCHEMA)));
-    }
-
-    #[test]
-    fn mixed_union_does_not_describe_object_arguments() {
-        assert!(!schema_describes_object(&raw_schema(MIXED_UNION_SCHEMA)));
-    }
 }
