@@ -1,9 +1,13 @@
 //! Table rendering for [`expect-test`] snapshots from any `Debug` value.
 //!
-//! A snapshot table orders its rows deterministically, carries only the
-//! fields relevant to what the test asserts, and right-trims every line so
-//! the rendering stays byte-stable under re-blessing. This crate renders
-//! such tables from plain `T: Debug` rows — no serde, no derive, no
+//! A snapshot table stays byte-stable under re-blessing, and that is a
+//! split responsibility. The caller supplies rows already in a
+//! deterministic order and carrying only the fields relevant to what the
+//! test asserts: [`Table`] parses and renders rows in the order its
+//! iterator yields them, so rows drawn from a `HashSet` can vary between
+//! processes. The renderer owns the rest — it right-trims every line, and
+//! normalizes entry order within `HashMap` and `HashSet` cells. This crate
+//! renders such tables from plain `T: Debug` rows — no serde, no derive, no
 //! annotations: each row is formatted with `{:?}` and the derived-`Debug`
 //! grammar is parsed back into a value tree by a hand-written parser that
 //! never fails (an unrecognized region, such as a custom `Debug` impl's
