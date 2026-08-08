@@ -2242,7 +2242,10 @@ fn unforced_web_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
+        tool_results: vec![TrackedToolResult {
+            content: String::from("fixture result"),
+            is_error: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
