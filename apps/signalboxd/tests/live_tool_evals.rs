@@ -289,7 +289,7 @@ async fn run_case(
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
     if forced_tool == Some(UNSANDBOXED_EXEC_NAME)
         && database
-            .approve_exact_read_only_unsandboxed_request(session, turn)
+            .decide_pending_unsandboxed_request(session, turn)
             .await?
     {
         timeout(TURN_TIMEOUT, execution.resume_active(session))
@@ -1374,7 +1374,7 @@ impl EvalDatabase {
         Ok((session, turn, *activated))
     }
 
-    async fn approve_exact_read_only_unsandboxed_request(
+    async fn decide_pending_unsandboxed_request(
         &self,
         session: SessionId,
         turn: TurnId,
@@ -1391,9 +1391,8 @@ impl EvalDatabase {
             .iter()
             .find(|candidate| candidate.id() == request)
             .ok_or_else(|| io::Error::other("the pending approval request is absent"))?;
-        if !ExecEvalCase::ForcedUnsandboxed.admits(pending.name().as_str(), pending.arguments()) {
-            return Ok(false);
-        }
+        let decision =
+            forced_unsandboxed_approval_decision(pending.name().as_str(), pending.arguments());
         let mut service = DecideToolRequestService::new(UuidV7ToolLoopIdGenerator, repository);
         let prepared = service
             .execute(
@@ -1402,15 +1401,26 @@ impl EvalDatabase {
                         ARBITRARY_EVAL_APPROVAL_COMMAND_ID,
                     )),
                     request,
-                    ToolApprovalDecision::Approve,
+                    decision,
                 )
-                .map_err(|_| io::Error::other("the exact read-only exec approval is invalid"))?,
+                .map_err(|_| io::Error::other("the exec eval approval decision is invalid"))?,
             )
             .await?;
         if !matches!(prepared.result(), DecideToolRequestResult::Applied(_)) {
-            return Err(io::Error::other("the exact read-only exec approval was rejected").into());
+            return Err(io::Error::other("the exec eval approval decision was rejected").into());
         }
         Ok(true)
+    }
+}
+
+fn forced_unsandboxed_approval_decision(
+    name: &str,
+    arguments: &NormalizedToolArguments,
+) -> ToolApprovalDecision {
+    if ExecEvalCase::ForcedUnsandboxed.admits(name, arguments) {
+        ToolApprovalDecision::Approve
+    } else {
+        ToolApprovalDecision::Deny { reason: None }
     }
 }
 
@@ -2366,6 +2376,25 @@ fn exec_eval_rejects_model_argument_drift_before_dispatch() {
     .expect("drifted fixture arguments normalize");
 
     assert!(!ExecEvalCase::ForcedSandboxed.admits(SANDBOXED_EXEC_NAME, &drifted));
+}
+
+#[test]
+fn forced_unsandboxed_eval_denies_model_argument_drift() {
+    let drifted = NormalizedToolArguments::try_from_provider_text(
+        serde_json::json!({
+            "program": "/usr/bin/printf",
+            "arguments": ["different output\n"],
+            "working_directory": ".",
+            "timeout_seconds": 30,
+        })
+        .to_string(),
+    )
+    .expect("drifted unsandboxed fixture arguments normalize");
+
+    assert_eq!(
+        forced_unsandboxed_approval_decision(UNSANDBOXED_EXEC_NAME, &drifted),
+        ToolApprovalDecision::Deny { reason: None }
+    );
 }
 
 #[test]
