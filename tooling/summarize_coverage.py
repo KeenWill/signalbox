@@ -214,7 +214,7 @@ def delta(current: Counter, baseline: Counter) -> str:
     return f"{current.percent - baseline.percent:+.2f} pp"
 
 
-def load_baseline(path: Path, label: str, sha: str, date: str) -> tuple["Baseline | None", str]:
+def load_baseline(path: Path, *, label: str, sha: str, date: str) -> tuple["Baseline | None", str]:
     """Read a baseline export, or say why it cannot be read.
 
     Every failure here returns a reason rather than raising: a baseline is an
@@ -223,6 +223,14 @@ def load_baseline(path: Path, label: str, sha: str, date: str) -> tuple["Baselin
     report. The reasons are distinguished because "the artifact was never
     written" and "the artifact is not the document it claims to be" call for
     different fixes.
+
+    The provenance is keyword-only. `label`, `sha` and `date` are three
+    consecutive strings, so a positional run lets a transposition read as a
+    valid call and print a timestamp where the measured commit belongs — a
+    report that is wrong about what it compared, with nothing to catch it
+    (docs/style.md principle 2, "position may carry meaning only where types
+    do"). `path` keeps its position, being the one argument whose type states
+    its role.
     """
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -509,9 +517,9 @@ def main(argv: list[str]) -> int:
     if arguments.baseline is not None:
         baseline, reason = load_baseline(
             arguments.baseline,
-            arguments.baseline_label,
-            arguments.baseline_sha,
-            arguments.baseline_date,
+            label=arguments.baseline_label,
+            sha=arguments.baseline_sha,
+            date=arguments.baseline_date,
         )
         # A baseline that was fetched and then turned out to be unreadable
         # reports the reading failure, not whatever the fetcher had to say.

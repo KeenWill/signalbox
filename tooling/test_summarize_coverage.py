@@ -473,7 +473,7 @@ class BaselineLoadingTests(unittest.TestCase):
             entry = coverage_file("/repo/crates/domain/src/a.rs", lines=200, covered=50)
             path = written(directory, "summary.json", json.dumps(export(entry)))
 
-            baseline, reason = load_baseline(path, BASE, "abc1234", "2026-08-01T09:00:00Z")
+            baseline, reason = load_baseline(path, label=BASE, sha="abc1234", date="2026-08-01T09:00:00Z")
 
         self.assertEqual(reason, "")
         assert baseline is not None
@@ -486,7 +486,7 @@ class BaselineLoadingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = written(directory, "summary.json", '{"type": "llvm.coverage.json.expo')
 
-            baseline, reason = load_baseline(path, BASE, "abc1234", "2026-08-01T09:00:00Z")
+            baseline, reason = load_baseline(path, label=BASE, sha="abc1234", date="2026-08-01T09:00:00Z")
 
         self.assertIsNone(baseline)
         self.assertIn("could not be read", reason)
@@ -497,7 +497,7 @@ class BaselineLoadingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = written(directory, "summary.json", json.dumps({"type": "cargo.metadata", "data": []}))
 
-            baseline, reason = load_baseline(path, BASE, "abc1234", "2026-08-01T09:00:00Z")
+            baseline, reason = load_baseline(path, label=BASE, sha="abc1234", date="2026-08-01T09:00:00Z")
 
         self.assertIsNone(baseline)
         self.assertIn("could not be read", reason)
@@ -507,7 +507,7 @@ class BaselineLoadingTests(unittest.TestCase):
         one that is not there is an expected outcome here."""
         with tempfile.TemporaryDirectory() as directory:
             baseline, reason = load_baseline(
-                Path(directory) / "absent.json", BASE, "abc1234", "2026-08-01T09:00:00Z"
+                Path(directory) / "absent.json", label=BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
             )
 
         self.assertIsNone(baseline)
@@ -520,7 +520,7 @@ class BaselineLoadingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = written(directory, "summary.json", json.dumps(export()))
 
-            baseline, reason = load_baseline(path, BASE, "abc1234", "2026-08-01T09:00:00Z")
+            baseline, reason = load_baseline(path, label=BASE, sha="abc1234", date="2026-08-01T09:00:00Z")
 
         self.assertIsNone(baseline)
         self.assertEqual(reason, "the baseline summary measured no lines")

@@ -406,7 +406,7 @@ class BaselineLoadingTests(unittest.TestCase):
             path = written(directory, "coverage.json", json.dumps(document))
 
             baseline, reason = summarize_coverage.load_baseline(
-                path, summarize_coverage.BASE, "abc1234", "2026-08-01T09:00:00Z"
+                path, label=summarize_coverage.BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
             )
 
         self.assertEqual(reason, "")
@@ -425,7 +425,7 @@ class BaselineLoadingTests(unittest.TestCase):
             path = written(directory, "coverage.json", '{"targets": [')
 
             baseline, reason = summarize_coverage.load_baseline(
-                path, summarize_coverage.BASE, "abc1234", "2026-08-01T09:00:00Z"
+                path, label=summarize_coverage.BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
             )
 
         self.assertIsNone(baseline)
@@ -438,7 +438,7 @@ class BaselineLoadingTests(unittest.TestCase):
             path = written(directory, "coverage.json", json.dumps({"targets": [{"name": "App.app"}]}))
 
             baseline, reason = summarize_coverage.load_baseline(
-                path, summarize_coverage.BASE, "abc1234", "2026-08-01T09:00:00Z"
+                path, label=summarize_coverage.BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
             )
 
         self.assertIsNone(baseline)
@@ -450,9 +450,9 @@ class BaselineLoadingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             baseline, reason = summarize_coverage.load_baseline(
                 Path(directory) / "absent.json",
-                summarize_coverage.BASE,
-                "abc1234",
-                "2026-08-01T09:00:00Z",
+                label=summarize_coverage.BASE,
+                sha="abc1234",
+                date="2026-08-01T09:00:00Z",
             )
 
         self.assertIsNone(baseline)
@@ -467,7 +467,7 @@ class BaselineLoadingTests(unittest.TestCase):
             path = written(directory, "coverage.json", json.dumps(document))
 
             baseline, reason = summarize_coverage.load_baseline(
-                path, summarize_coverage.BASE, "abc1234", "2026-08-01T09:00:00Z"
+                path, label=summarize_coverage.BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
             )
 
         self.assertIsNone(baseline)
