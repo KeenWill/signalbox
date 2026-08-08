@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 
-use git2::{IndexAddOption, Oid, Repository, Signature, Status};
+use git2::{BranchType, IndexAddOption, Oid, Repository, Signature, Status};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
@@ -129,6 +129,8 @@ const WORKSPACE_ANSWER: &str = "model loop observed\n";
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
 const WEB_QUERY: &str = "Signalbox tool evaluation";
+const WEB_FETCH_BODY: &str = "Signalbox tool evaluation fixture";
+const WEB_SEARCH_SNIPPET: &str = "Synthetic result for model-in-the-loop evaluation.";
 const EXPECTED_OPENAI_CREDENTIAL_REFERENCE: &str = "openai-tool-eval";
 const EXPECTED_WEB_CREDENTIAL_REFERENCE: &str = "brave-search-primary";
 const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
@@ -278,12 +280,20 @@ async fn run_case(
         .await
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
     let snapshot = CaseSnapshot::read(&database.pool, session, turn).await?;
+    let execution_completed = match (forced_case, snapshot.requests.as_slice()) {
+        (None, _) => true,
+        (Some(case), [request]) => match tracker.result_content(request.request_id) {
+            Some(content) => suite.forced_case_result_passed(case, &content)?,
+            None => false,
+        },
+        (Some(_), _) => false,
+    };
     Ok(CaseOutcome {
         target: forced_tool.map(str::to_owned),
         expected_arguments: forced_case
             .map(|case| normalized_arguments_text(case.expected_arguments))
             .transpose()?,
-        execution_completed: true,
+        execution_completed,
         result_round_trips: tracker.result_round_trips(),
         round_tripped_request_ids: tracker.round_tripped_request_ids(),
         snapshot,
@@ -518,7 +528,12 @@ impl FamilySuite {
             .iter()
             .map(|case| case.name.to_owned())
             .collect::<BTreeSet<_>>();
-        if catalog_names != case_names || case_names.len() != cases.len() {
+        if catalog_names != case_names
+            || case_names.len() != cases.len()
+            || cases
+                .iter()
+                .any(|case| !self.has_forced_case_verifier(case.name))
+        {
             return Err(
                 io::Error::other("the forced eval inventory differs from its catalog").into(),
             );
@@ -562,6 +577,51 @@ impl FamilySuite {
         Ok(())
     }
 
+    fn has_forced_case_verifier(&self, name: &str) -> bool {
+        match self.family {
+            EvalFamily::Git => matches!(
+                name,
+                GIT_BRANCH_CREATE_NAME
+                    | GIT_BRANCH_SWITCH_NAME
+                    | GIT_CREATE_COMMIT_NAME
+                    | GIT_DIFF_NAME
+                    | GIT_LOG_NAME
+                    | GIT_STAGE_NAME
+                    | GIT_STATUS_NAME
+            ),
+            EvalFamily::Workspace => matches!(
+                name,
+                APPLY_PATCH_NAME
+                    | EDIT_FILE_NAME
+                    | WRITE_FILE_NAME
+                    | READ_FILE_NAME
+                    | LIST_DIRECTORY_NAME
+                    | GLOB_FILES_NAME
+                    | SEARCH_FILES_NAME
+            ),
+            EvalFamily::Web => matches!(name, WEB_FETCH_NAME | WEB_SEARCH_NAME),
+        }
+    }
+
+    fn forced_case_result_passed(&self, case: &ForcedCase, content: &str) -> EvalResult<bool> {
+        let Ok(arguments) = serde_json::from_str::<serde_json::Value>(case.expected_arguments)
+        else {
+            return Ok(false);
+        };
+        let Ok(result) = serde_json::from_str::<serde_json::Value>(content) else {
+            return Ok(false);
+        };
+        match self.family {
+            EvalFamily::Git => {
+                git_forced_case_passed(self.workspace.path(), case.name, &arguments, &result)
+            }
+            EvalFamily::Workspace => {
+                workspace_forced_case_passed(self.workspace.path(), case.name, &arguments, &result)
+            }
+            EvalFamily::Web => Ok(web_forced_case_passed(case.name, &arguments, &result)),
+        }
+    }
+
     fn natural_state_passed(&self, snapshot: &CaseSnapshot) -> EvalResult<bool> {
         match self.family {
             EvalFamily::Git => {
@@ -585,6 +645,173 @@ impl FamilySuite {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error.into()),
         }
+    }
+}
+
+fn git_forced_case_passed(
+    root: &Path,
+    name: &str,
+    arguments: &serde_json::Value,
+    result: &serde_json::Value,
+) -> EvalResult<bool> {
+    let repository = Repository::open(root)?;
+    let head = repository.head()?.peel_to_commit()?;
+    let passed = match name {
+        GIT_BRANCH_CREATE_NAME => {
+            let Some(branch_name) = arguments["name"].as_str() else {
+                return Ok(false);
+            };
+            let branch = repository.find_branch(branch_name, BranchType::Local)?;
+            let branch_target = branch.get().target().map(|target| target.to_string());
+            result["branch"] == branch_name && result["head"].as_str() == branch_target.as_deref()
+        }
+        GIT_BRANCH_SWITCH_NAME => {
+            let Some(branch_name) = arguments["name"].as_str() else {
+                return Ok(false);
+            };
+            result["branch"] == branch_name
+                && result["head"] == head.id().to_string()
+                && repository.head()?.shorthand().ok() == Some(branch_name)
+        }
+        GIT_CREATE_COMMIT_NAME => {
+            result["commit"] == head.id().to_string()
+                && result["state_cleaned"] == true
+                && head.message().ok() == arguments["message"].as_str()
+        }
+        GIT_DIFF_NAME => result["patch"] == "" && result["truncated"] == false,
+        GIT_LOG_NAME => {
+            result["commits"]
+                .as_array()
+                .and_then(|commits| commits.first())
+                .is_some_and(|commit| commit["commit"] == head.id().to_string())
+                && result["truncated"] == false
+        }
+        GIT_STAGE_NAME => {
+            let Some(paths) = arguments["paths"].as_array() else {
+                return Ok(false);
+            };
+            result["staged_paths"] == paths.len()
+                && paths.iter().all(|path| {
+                    path.as_str().is_some_and(|path| {
+                        repository.status_file(Path::new(path)).ok() == Some(Status::INDEX_NEW)
+                    })
+                })
+        }
+        GIT_STATUS_NAME => {
+            let entries = result["entries"].as_array();
+            let paths = entries
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry["path"].as_str())
+                .collect::<BTreeSet<_>>();
+            result["head"] == head.id().to_string()
+                && entries.is_some_and(|entries| entries.len() == 3)
+                && paths == BTreeSet::from([GIT_STAGE_PATH, GIT_COMMIT_PATH, GIT_NATURAL_PATH])
+                && result["truncated"] == false
+        }
+        _ => false,
+    };
+    Ok(passed)
+}
+
+fn workspace_forced_case_passed(
+    root: &Path,
+    name: &str,
+    arguments: &serde_json::Value,
+    result: &serde_json::Value,
+) -> EvalResult<bool> {
+    let passed = match name {
+        APPLY_PATCH_NAME => {
+            result["operations_applied"] == 1
+                && fs::read_to_string(root.join("patched.txt"))? == "patched by eval\n"
+        }
+        EDIT_FILE_NAME => {
+            let Some(path) = arguments["path"].as_str() else {
+                return Ok(false);
+            };
+            let expected = WORKSPACE_SEED.replace(
+                arguments["old_string"].as_str().unwrap_or_default(),
+                arguments["new_string"].as_str().unwrap_or_default(),
+            );
+            result["path"] == path
+                && result["replacements"] == 1
+                && result["bytes_written"] == expected.len()
+                && fs::read_to_string(root.join(path))? == expected
+        }
+        WRITE_FILE_NAME => {
+            let Some(path) = arguments["path"].as_str() else {
+                return Ok(false);
+            };
+            let Some(expected) = arguments["content"].as_str() else {
+                return Ok(false);
+            };
+            result["path"] == path
+                && result["bytes_written"] == expected.len()
+                && result["created"] == true
+                && fs::read_to_string(root.join(path))? == expected
+        }
+        READ_FILE_NAME => {
+            let Some(path) = arguments["path"].as_str() else {
+                return Ok(false);
+            };
+            let expected = fs::read_to_string(root.join(path))?;
+            result["path"] == path
+                && result["content"] == expected
+                && result["bytes_read"] == expected.len()
+                && result["total_bytes"] == expected.len()
+                && result["truncated"] == false
+        }
+        LIST_DIRECTORY_NAME => {
+            result_paths_equal(&result["entries"], [WORKSPACE_SEED_PATH])
+                && result["truncated"] == false
+        }
+        GLOB_FILES_NAME => {
+            result_paths_equal(&result["matches"], [WORKSPACE_SEED_PATH])
+                && result["truncated"] == false
+        }
+        SEARCH_FILES_NAME => {
+            result["matches"].as_array().is_some_and(Vec::is_empty) && result["truncated"] == false
+        }
+        _ => false,
+    };
+    Ok(passed)
+}
+
+fn result_paths_equal<const N: usize>(value: &serde_json::Value, expected: [&str; N]) -> bool {
+    value.as_array().is_some_and(|entries| {
+        entries.len() == N
+            && entries
+                .iter()
+                .filter_map(|entry| entry["path"].as_str())
+                .eq(expected)
+    })
+}
+
+fn web_forced_case_passed(
+    name: &str,
+    arguments: &serde_json::Value,
+    result: &serde_json::Value,
+) -> bool {
+    match name {
+        WEB_FETCH_NAME => {
+            result["url"] == arguments["url"]
+                && result["status"] == 200
+                && result["content_type"] == "text/plain"
+                && result["body"] == WEB_FETCH_BODY
+                && result["truncated"] == false
+        }
+        WEB_SEARCH_NAME => {
+            result["results"]
+                .as_array()
+                .and_then(|results| results.first())
+                .is_some_and(|first| {
+                    first["title"] == arguments["query"]
+                        && first["url"] == WEB_URL
+                        && first["snippet"] == WEB_SEARCH_SNIPPET
+                })
+                && result["truncated"] == false
+        }
+        _ => false,
     }
 }
 
@@ -885,7 +1112,7 @@ impl WebFetchTransport for FixtureWebFetchTransport {
         WebFetchResponse::new(
             200,
             Some(String::from("text/plain")),
-            b"Signalbox tool evaluation fixture".to_vec(),
+            WEB_FETCH_BODY.as_bytes().to_vec(),
             WebFetchBodyCompleteness::Complete,
         )
         .ok_or(WebFetchTransportFailure::DispatchUnknown)
@@ -923,7 +1150,7 @@ impl WebSearchTransport for FixtureWebSearchTransport {
         let result = WebSearchResult::try_new(WebSearchResultFields {
             title: String::from(WEB_QUERY),
             url: String::from(WEB_URL),
-            snippet: String::from("Synthetic result for model-in-the-loop evaluation."),
+            snippet: String::from(WEB_SEARCH_SNIPPET),
         })
         .expect("the synthetic web result is valid");
         let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
@@ -1032,8 +1259,10 @@ impl ModelRuntime<ModelCallId> for EvalOpenAiRuntime {
             .inner
             .execute(prepared, &mut tracking_sink, cancellation)
             .await;
-        self.tracker
-            .observe_response_text(&tracking_sink.response_text);
+        self.tracker.observe_response_text(
+            &tracking_sink.response_text,
+            tracking_sink.proposed_tool_call,
+        );
         report
     }
 }
@@ -1041,6 +1270,7 @@ impl ModelRuntime<ModelCallId> for EvalOpenAiRuntime {
 struct ReceiptTrackingSink<'a> {
     inner: &'a mut (dyn ObservationSink<ModelCallId> + Send),
     response_text: String,
+    proposed_tool_call: bool,
 }
 
 impl<'a> ReceiptTrackingSink<'a> {
@@ -1048,6 +1278,7 @@ impl<'a> ReceiptTrackingSink<'a> {
         Self {
             inner,
             response_text: String::new(),
+            proposed_tool_call: false,
         }
     }
 }
@@ -1056,6 +1287,9 @@ impl ObservationSink<ModelCallId> for ReceiptTrackingSink<'_> {
     fn observe(&mut self, observation: Observation<ModelCallId>) {
         if let ObservationFact::TextDelta { text, .. } = &observation.fact {
             self.response_text.push_str(text);
+        }
+        if matches!(&observation.fact, ObservationFact::ToolCallProposed(_)) {
+            self.proposed_tool_call = true;
         }
         self.inner.observe(observation);
     }
@@ -1071,6 +1305,7 @@ struct OperationTrackerState {
     result_round_trips: usize,
     round_tripped_request_ids: BTreeSet<Uuid>,
     pending_result_receipts: BTreeMap<Uuid, String>,
+    result_contents: BTreeMap<Uuid, String>,
 }
 
 impl OperationTracker {
@@ -1101,11 +1336,13 @@ impl OperationTracker {
         self.state
             .lock()
             .expect("operation-tracker lock is available")
-            .pending_result_receipts
-            .insert(request_id, receipt);
+            .record_result(request_id, receipt, content);
     }
 
-    fn observe_response_text(&self, text: &str) {
+    fn observe_response_text(&self, text: &str, proposed_tool_call: bool) {
+        if proposed_tool_call {
+            return;
+        }
         let mut state = self
             .state
             .lock()
@@ -1138,6 +1375,22 @@ impl OperationTracker {
             .expect("operation-tracker lock is available")
             .round_tripped_request_ids
             .clone()
+    }
+
+    fn result_content(&self, request_id: Uuid) -> Option<String> {
+        self.state
+            .lock()
+            .expect("operation-tracker lock is available")
+            .result_contents
+            .get(&request_id)
+            .cloned()
+    }
+}
+
+impl OperationTrackerState {
+    fn record_result(&mut self, request_id: Uuid, receipt: String, content: &str) {
+        self.pending_result_receipts.insert(request_id, receipt);
+        self.result_contents.insert(request_id, content.to_owned());
     }
 }
 
@@ -1173,7 +1426,7 @@ fn unrelated_model_text_does_not_count_a_result_round_trip() {
         Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
         &synthetic_result_with_receipt(),
     );
-    tracker.observe_response_text("no tool receipt reported");
+    tracker.observe_response_text("no tool receipt reported", false);
 
     assert_eq!(tracker.result_round_trips(), 0);
     assert!(tracker.round_tripped_request_ids().is_empty());
@@ -1186,13 +1439,26 @@ fn model_text_echoing_the_tool_only_receipt_counts_the_exact_request() {
         Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
         &synthetic_result_with_receipt(),
     );
-    tracker.observe_response_text(SYNTHETIC_EVAL_RECEIPT);
+    tracker.observe_response_text(SYNTHETIC_EVAL_RECEIPT, false);
 
     assert_eq!(tracker.result_round_trips(), 1);
     assert_eq!(
         tracker.round_tripped_request_ids(),
         BTreeSet::from([Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)])
     );
+}
+
+#[test]
+fn intermediate_text_with_a_tool_call_does_not_count_a_result_round_trip() {
+    let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &synthetic_result_with_receipt(),
+    );
+    tracker.observe_response_text(SYNTHETIC_EVAL_RECEIPT, true);
+
+    assert_eq!(tracker.result_round_trips(), 0);
+    assert!(tracker.round_tripped_request_ids().is_empty());
 }
 
 struct EvalDatabase {
@@ -1565,6 +1831,9 @@ impl CaseSnapshot {
                     && exact_git_natural_stage_arguments(stage)
                     && stage.producing_model_call_id != request.producing_model_call_id
             })
+            && !self.requests[..request_index]
+                .iter()
+                .any(|commit| commit.attempt_succeeded && commit.name == GIT_CREATE_COMMIT_NAME)
     }
 }
 
@@ -2135,6 +2404,39 @@ fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
 }
 
 #[test]
+fn unforced_git_tier_keeps_a_duplicate_commit_failure_as_a_miss() {
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(GIT_STAGE_NAME),
+                arguments_text: serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(GIT_CREATE_COMMIT_NAME),
+                arguments_text: serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_ATTEMPT_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(GIT_CREATE_COMMIT_NAME),
+                arguments_text: serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
+                attempt_succeeded: false,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!snapshot.exact_natural_request_failed(EvalFamily::Git));
+}
+
+#[test]
 fn unforced_workspace_tier_reports_infrastructure_for_an_exact_known_failed_attempt() {
     let outcome = CaseOutcome {
         target: None,
@@ -2393,6 +2695,23 @@ fn forced_case_inventory_matches_every_family_catalog() -> EvalResult {
     git.validate_forced_inventory()?;
     workspace.validate_forced_inventory()?;
     web.validate_forced_inventory()?;
+    Ok(())
+}
+
+#[test]
+fn forced_git_stage_verifier_rejects_success_without_the_postcondition() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STAGE_NAME)
+        .expect("the Git stage fixture exists");
+    let result = serde_json::json!({
+        "staged_paths": 1,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
