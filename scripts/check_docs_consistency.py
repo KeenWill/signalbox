@@ -2753,6 +2753,46 @@ def cargo_test_roots(package: Path) -> list[Path]:
     return roots
 
 
+def cargo_test_target_names(package: Path) -> dict[Path, str]:
+    """Map each test root to the target name Cargo exposes to nextest."""
+    declared = declared_package(package)
+    package_table = declared.get("package")
+    package_name = (
+        package_table.get("name") if isinstance(package_table, dict) else None
+    )
+    names: dict[Path, str] = {}
+    for target in cargo_test_roots(package):
+        relative = target.relative_to(package)
+        if relative == Path("src/lib.rs") and isinstance(package_name, str):
+            names[target] = package_name.replace("-", "_")
+        elif relative == Path("src/main.rs") and isinstance(package_name, str):
+            names[target] = package_name
+        elif relative.parts[0] in ("src", "tests"):
+            names[target] = (
+                relative.parent.name if relative.name == "main.rs" else target.stem
+            )
+    library = declared.get("lib")
+    if isinstance(library, dict):
+        root = declared_target_root(package, library, "src")
+        if root is None and (package / "src/lib.rs").is_file():
+            root = package / "src/lib.rs"
+        name = library.get("name")
+        if root is not None and isinstance(name, str):
+            names[root] = name
+    for table, directory in (("bin", "src/bin"), ("test", "tests")):
+        entries = declared.get(table)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            root = declared_target_root(package, entry, directory)
+            name = entry.get("name")
+            if root is not None and isinstance(name, str):
+                names[root] = name
+    return names
+
+
 def ignored_test_selections_by_target(
     root: Path,
 ) -> dict[Path, tuple[IgnoredTestSelection, ...]]:
@@ -2765,10 +2805,13 @@ def ignored_test_selections_by_target(
             continue
         enabled = enabled_package_features(package, run.features)
         required = target_required_features(package)
+        target_names = cargo_test_target_names(package)
         for target in cargo_test_roots(package):
             if not set(required.get(target, ())) <= enabled:
                 continue
-            target_name = target.stem
+            target_name = target_names.get(target)
+            if target_name is None:
+                continue
             if run.selection.includes and target_name not in run.selection.includes:
                 continue
             if target_name in run.selection.excludes:
