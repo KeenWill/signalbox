@@ -1663,6 +1663,10 @@ impl CaseSnapshot {
                                 && request.arguments_text
                                     == r#"{"url":"https://example.com/eval"}"#)
                     }
+                    EvalFamily::Exec => {
+                        request.name == SANDBOXED_EXEC_NAME
+                            && request.arguments_text == EXEC_NATURAL_ARGUMENTS
+                    }
                 }
         })
     }
@@ -2303,7 +2307,10 @@ fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
+        tool_results: vec![TrackedToolResult {
+            content: String::from("fixture result"),
+            is_error: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -2329,7 +2336,10 @@ fn unforced_workspace_tier_reports_infrastructure_for_an_exact_known_failed_atte
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
+        tool_results: vec![TrackedToolResult {
+            content: String::from("fixture result"),
+            is_error: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
