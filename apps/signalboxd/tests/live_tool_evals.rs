@@ -126,7 +126,7 @@ const GIT_COMMIT_PATH: &str = "commit-me.txt";
 const GIT_NATURAL_PATH: &str = "eval.txt";
 const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
-const WORKSPACE_SEED: &str = "alpha\n";
+const WORKSPACE_SEED: &str = "alpha\nbeta fixture\n";
 const WORKSPACE_ANSWER_PATH: &str = "answer.txt";
 const WORKSPACE_ANSWER: &str = "model loop observed\n";
 const WEB_ORIGIN: &str = "https://example.com";
@@ -373,8 +373,8 @@ const GIT_CASES: &[ForcedCase] = &[
     },
     ForcedCase {
         name: GIT_LOG_NAME,
-        expected_arguments: r#"{"revision":"HEAD","max_entries":5}"#,
-        prompt: "Call git_log with exactly {\"revision\":\"HEAD\",\"max_entries\":5}. After its result, answer done without another tool call.",
+        expected_arguments: r#"{"revision":"refs/heads/log-target","max_entries":1}"#,
+        prompt: "Call git_log with exactly {\"revision\":\"refs/heads/log-target\",\"max_entries\":1}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: GIT_STAGE_NAME,
@@ -686,11 +686,19 @@ fn git_forced_case_passed(
                 && result["truncated"] == false
         }
         GIT_LOG_NAME => {
-            result["commits"]
-                .as_array()
-                .and_then(|commits| commits.first())
-                .is_some_and(|commit| commit["commit"] == head.id().to_string())
-                && result["truncated"] == false
+            let Some(revision) = arguments["revision"].as_str() else {
+                return Ok(false);
+            };
+            let Some(max_entries) = arguments["max_entries"].as_u64() else {
+                return Ok(false);
+            };
+            let expected = repository.revparse_single(revision)?.peel_to_commit()?;
+            result["commits"].as_array().is_some_and(|commits| {
+                u64::try_from(commits.len()).ok() == Some(max_entries)
+                    && commits
+                        .first()
+                        .is_some_and(|commit| commit["commit"] == expected.id().to_string())
+            }) && result["truncated"] == false
         }
         GIT_STAGE_NAME => {
             let Some(paths) = arguments["paths"].as_array() else {
@@ -808,7 +816,30 @@ fn workspace_forced_case_passed(
                 && result["truncated"] == false
         }
         SEARCH_FILES_NAME => {
-            result["matches"].as_array().is_some_and(Vec::is_empty) && result["truncated"] == false
+            let Some(pattern) = arguments["pattern"].as_str() else {
+                return Ok(false);
+            };
+            let Some((line_index, line)) = WORKSPACE_SEED
+                .lines()
+                .enumerate()
+                .find(|(_, line)| line.contains(pattern))
+            else {
+                return Ok(false);
+            };
+            let Some(column) = line.find(pattern).map(|column| column + 1) else {
+                return Ok(false);
+            };
+            result["matches"].as_array().is_some_and(|matches| {
+                matches.as_slice().first().is_some_and(|matched| {
+                    matches.len() == 1
+                        && matched["path"] == WORKSPACE_SEED_PATH
+                        && matched["line"] == line_index + 1
+                        && matched["column"] == column
+                        && matched["text_start_column"] == 1
+                        && matched["text"] == line
+                        && matched["line_truncated"] == false
+                })
+            }) && result["truncated"] == false
         }
         _ => false,
     };
@@ -880,8 +911,38 @@ fn seed_git_repository(root: &Path) -> EvalResult<Oid> {
         &[],
     )?;
     let commit = repository.find_commit(commit)?;
-    repository.branch("switch-target", &commit, false)?;
-    Ok(commit.id())
+    let second = commit_git_seed_revision(&repository, &commit, "seed two\n", "second seed")?;
+    repository.branch("log-target", &second, false)?;
+    let third = commit_git_seed_revision(&repository, &second, "seed three\n", "third seed")?;
+    repository.branch("switch-target", &third, false)?;
+    Ok(third.id())
+}
+
+fn commit_git_seed_revision<'repository>(
+    repository: &'repository Repository,
+    parent: &git2::Commit<'repository>,
+    content: &str,
+    message: &str,
+) -> EvalResult<git2::Commit<'repository>> {
+    let root = repository
+        .workdir()
+        .ok_or_else(|| io::Error::other("the Git eval repository has no worktree"))?;
+    fs::write(root.join(GIT_SEED_PATH), content)?;
+    let mut index = repository.index()?;
+    index.add_path(Path::new(GIT_SEED_PATH))?;
+    index.write()?;
+    let tree_id = index.write_tree()?;
+    let tree = repository.find_tree(tree_id)?;
+    let signature = Signature::now(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL)?;
+    let commit = repository.commit(
+        Some("HEAD"),
+        &signature,
+        &signature,
+        message,
+        &tree,
+        &[parent],
+    )?;
+    repository.find_commit(commit).map_err(Into::into)
 }
 
 fn stage_path(root: &Path, path: &str) -> EvalResult {
@@ -2888,6 +2949,74 @@ fn forced_git_diff_verifier_rejects_an_empty_patch() -> EvalResult {
         .expect("the Git diff fixture exists");
     let result = serde_json::json!({
         "patch": "",
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_the_default_head() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let head = Repository::open(suite.workspace.path())?
+        .head()?
+        .peel_to_commit()?
+        .id()
+        .to_string();
+    let result = serde_json::json!({
+        "commits": [{"commit": head}],
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_more_than_the_requested_limit() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    let parent = target.parent(0)?;
+    let result = serde_json::json!({
+        "commits": [
+            {"commit": target.id().to_string()},
+            {"commit": parent.id().to_string()},
+        ],
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_search_verifier_rejects_an_empty_success() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == SEARCH_FILES_NAME)
+        .expect("the workspace search fixture exists");
+    let result = serde_json::json!({
+        "matches": [],
         "truncated": false,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
