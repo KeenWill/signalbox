@@ -617,6 +617,7 @@ pub(crate) fn parse_credential_pools(
             headroom_low: parse_trigger_action(pool, CredentialPoolTrigger::HeadroomLow)?,
         };
         reject_unobserved_capacity_policy(&parsed)?;
+        reject_unprovable_substitution(&parsed)?;
         if pools.insert(Arc::clone(&name), parsed).is_some() {
             return Err(HubModelConfigurationError::DuplicateCredentialPool {
                 credential_pool: name,
@@ -780,6 +781,28 @@ fn parse_pool_headroom_reserve_percent(
 /// does not have, so it is a startup failure instead. The grammar still admits
 /// the keys, so an adapter that later supplies the observation needs no
 /// configuration contract change.
+/// Rejects `switch_now` where the adapter can never authorize a successor.
+///
+/// An availability successor needs typed proof that the provider did not accept
+/// the request, and only a decoded native error envelope supplies it. A pool's
+/// members already agree on one adapter, so the check is exact per pool. Left
+/// admitted, the action would read as failover the deployment does not have
+/// while every matching response terminalized exactly as `stay`.
+fn reject_unprovable_substitution(pool: &CredentialPool) -> Result<(), HubModelConfigurationError> {
+    if pool.adapter.proves_non_acceptance() {
+        return Ok(());
+    }
+    let substitutes = [pool.quota_exhausted, pool.rate_limited, pool.overloaded]
+        .into_iter()
+        .any(|action| action == CredentialPoolAction::SwitchNow);
+    if substitutes {
+        return Err(HubModelConfigurationError::UnprovableSubstitutionPolicy {
+            credential_pool: Arc::clone(&pool.name),
+        });
+    }
+    Ok(())
+}
+
 fn reject_unobserved_capacity_policy(
     pool: &CredentialPool,
 ) -> Result<(), HubModelConfigurationError> {

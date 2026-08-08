@@ -144,6 +144,23 @@ impl ModelAdapter {
         }
     }
 
+    /// Reports whether this adapter can supply the typed proof that a provider
+    /// rejected a request before accepting it, which is what authorizes an
+    /// availability successor.
+    ///
+    /// Only a decoded native error envelope carries that proof. Both CLI
+    /// adapters classify from rendered failure prose, which
+    /// `docs/spec/runtime-substrate.md` refuses as a derivation, so neither can
+    /// ever admit `switch_now` until its CLI exposes a stable machine-readable
+    /// discriminator. Listing the variants rather than matching on a group
+    /// makes a later adapter state its own answer.
+    pub(crate) const fn proves_non_acceptance(self) -> bool {
+        match self {
+            Self::Anthropic | Self::OpenAi => true,
+            Self::ClaudeCli | Self::CodexCli => false,
+        }
+    }
+
     /// Reports whether this adapter's provider-stated input token count
     /// already contains the separately reported cache axes.
     ///
@@ -2930,6 +2947,13 @@ pub enum HubModelConfigurationError {
         /// Exact pool name carrying the unobservable setting.
         credential_pool: Arc<str>,
     },
+    /// A pool configures `switch_now` for an adapter that cannot prove a
+    /// provider did not accept the request, so the substitution could never
+    /// take effect.
+    UnprovableSubstitutionPolicy {
+        /// Exact pool name carrying the unusable action.
+        credential_pool: Arc<str>,
+    },
     /// The daemon tool mapping registry was incomplete or malformed.
     InvalidToolMappings,
     /// Mapped daemon tools were configured without the required Git identity.
@@ -3112,6 +3136,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidHeadroomReserve => {
                 "model configuration contains an invalid headroom reserve"
+            }
+            Self::UnprovableSubstitutionPolicy { .. } => {
+                "model configuration gives a credential pool a substitution its adapter cannot prove"
             }
             Self::UnobservedCapacityPolicy { .. } => {
                 "model configuration depends on provider capacity no adapter reports"
@@ -5557,6 +5584,31 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
                 credential_pool: Arc::from("anthropic-main"),
             })
         );
+    }
+
+    #[test]
+    fn configuration_rejects_switch_now_no_cli_adapter_can_prove() {
+        let substituting = CONFIGURATION.replace(
+            CODEX_POOL,
+            &format!("{CODEX_POOL}\non_rate_limited = \"switch_now\""),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&substituting).err(),
+            Some(HubModelConfigurationError::UnprovableSubstitutionPolicy {
+                credential_pool: Arc::from("codex-main"),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_admits_switch_now_where_the_adapter_proves_non_acceptance() {
+        let substituting = configuration_with_anthropic_pool(&format!(
+            "{ANTHROPIC_POOL}\non_rate_limited = \"switch_now\""
+        ));
+
+        HubModelConfiguration::parse(&substituting)
+            .expect("a decoded native envelope authorizes the successor for this adapter");
     }
 
     #[test]
