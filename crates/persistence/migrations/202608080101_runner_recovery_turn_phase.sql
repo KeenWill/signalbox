@@ -229,6 +229,7 @@ BEGIN
           FROM turn_lifecycle
          WHERE session_id = checked_session_id
            AND active_phase_kind = 'awaiting_runner_recovery'
+           AND NOT delegation_runtime_terminal
     LOOP
         PERFORM assert_turn_runner_recovery_complete(
             checked_session_id,
@@ -244,6 +245,582 @@ AFTER INSERT OR UPDATE OR DELETE ON runner_current_session_placement
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION recheck_session_turn_runner_recovery();
+
+CREATE TABLE turn_runner_recovery_interrupt_effect (
+    command_id uuid PRIMARY KEY,
+    session_id uuid NOT NULL,
+    turn_id uuid NOT NULL,
+    placement_event_ordinal numeric(20, 0) NOT NULL CHECK (
+        placement_event_ordinal BETWEEN 1 AND 18446744073709551615
+    ),
+    runner_id uuid NOT NULL,
+    placement_revision numeric(20, 0) NOT NULL CHECK (
+        placement_revision BETWEEN 1 AND 18446744073709551615
+    ),
+    yielded_turn_attempt_id uuid NOT NULL,
+    interrupted_tool_attempt_id uuid,
+    source_frontier_id uuid NOT NULL,
+    UNIQUE (session_id, turn_id),
+    FOREIGN KEY (command_id) REFERENCES submit_input_command(command_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (turn_id, session_id) REFERENCES turn_lifecycle(turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (yielded_turn_attempt_id, turn_id, session_id)
+        REFERENCES turn_attempt(turn_attempt_id, turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (session_id, placement_event_ordinal)
+        REFERENCES runner_session_placement_record(session_id, event_ordinal)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (session_id, source_frontier_id)
+        REFERENCES context_frontier(owning_session_id, context_frontier_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (interrupted_tool_attempt_id, session_id)
+        REFERENCES tool_attempt(attempt_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE FUNCTION guard_turn_runner_recovery_interrupt_effect()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM submit_input_command AS command
+          JOIN turn_lifecycle AS lifecycle
+            ON lifecycle.session_id = command.session_id
+           AND lifecycle.turn_id = command.expected_active_turn_id
+          JOIN runner_current_session_placement AS head
+            ON head.session_id = lifecycle.session_id
+          JOIN runner_session_placement_record AS placement
+            ON placement.session_id = head.session_id
+           AND placement.event_ordinal = head.event_ordinal
+         WHERE command.command_id = NEW.command_id
+           AND command.delivery_kind = 'interrupt'
+           AND command.result_kind = 'applied'
+           AND command.session_id = NEW.session_id
+           AND command.expected_active_turn_id = NEW.turn_id
+           AND lifecycle.state_kind = 'active'
+           AND lifecycle.active_phase_kind = 'awaiting_runner_recovery'
+           AND lifecycle.runner_recovery_runner_id = NEW.runner_id
+           AND lifecycle.runner_recovery_placement_revision =
+                NEW.placement_revision
+           AND lifecycle.runner_recovery_tool_attempt_id IS NOT DISTINCT FROM
+                NEW.interrupted_tool_attempt_id
+           AND EXISTS (
+                SELECT 1
+                  FROM turn_attempt AS yielded_attempt
+                 WHERE yielded_attempt.turn_attempt_id =
+                        NEW.yielded_turn_attempt_id
+                   AND yielded_attempt.turn_id = lifecycle.turn_id
+                   AND yielded_attempt.session_id = lifecycle.session_id
+                   AND yielded_attempt.state_kind = 'ended'
+                   AND yielded_attempt.end_variant = 'without_stop'
+                   AND yielded_attempt.end_disposition =
+                        'yielded_to_durable_wait'
+                   AND yielded_attempt.interrupt_command_id IS NULL
+                   AND yielded_attempt.interrupt_predecessor_turn_id IS NULL
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM turn_attempt AS continuation
+                         WHERE continuation.continued_from_attempt_id =
+                                yielded_attempt.turn_attempt_id
+                   )
+           )
+           AND head.event_ordinal = NEW.placement_event_ordinal
+           AND placement.state_kind IN ('runner_lost', 'runner_lost_before_pin')
+           AND placement.lost_runner_id = NEW.runner_id
+           AND placement.placement_revision = NEW.placement_revision
+           AND placement.interrupted_tool_attempt_id IS NOT DISTINCT FROM
+                NEW.interrupted_tool_attempt_id
+    ) THEN
+        RAISE EXCEPTION
+            'runner recovery interrupt effect lacks exact active loss authority'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER turn_runner_recovery_interrupt_effect_is_authorized
+BEFORE INSERT ON turn_runner_recovery_interrupt_effect
+FOR EACH ROW
+EXECUTE FUNCTION guard_turn_runner_recovery_interrupt_effect();
+
+CREATE TRIGGER turn_runner_recovery_interrupt_effect_is_immutable
+AFTER UPDATE OR DELETE ON turn_runner_recovery_interrupt_effect
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE OR REPLACE FUNCTION require_interrupt_submit_input_effect_correlation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    matching_records bigint;
+BEGIN
+    IF NEW.result_kind = 'applied'
+       AND EXISTS (
+            SELECT 1
+              FROM turn_runner_recovery_interrupt_effect
+             WHERE command_id = NEW.command_id
+       )
+    THEN
+        SELECT count(*)
+          INTO matching_records
+          FROM turn_runner_recovery_interrupt_effect AS effect
+          JOIN accepted_input AS accepted
+            ON accepted.accepting_command_id = effect.command_id
+           AND accepted.session_id = effect.session_id
+          JOIN queued_input_origin AS successor
+            ON successor.accepted_input_id = accepted.accepted_input_id
+           AND successor.turn_id = accepted.origin_turn_id
+           AND successor.session_id = accepted.session_id
+           AND successor.acceptance_position = accepted.acceptance_position
+          JOIN turn_lifecycle AS cancelled
+            ON cancelled.session_id = effect.session_id
+           AND cancelled.turn_id = effect.turn_id
+          JOIN turn_attempt AS yielded_attempt
+            ON yielded_attempt.turn_attempt_id = effect.yielded_turn_attempt_id
+           AND yielded_attempt.turn_id = effect.turn_id
+           AND yielded_attempt.session_id = effect.session_id
+         WHERE effect.command_id = NEW.command_id
+           AND effect.session_id = NEW.session_id
+           AND effect.turn_id = NEW.expected_active_turn_id
+           AND accepted.accepted_input_id = NEW.result_accepted_input_id
+           AND accepted.session_id = NEW.result_session_id
+           AND accepted.content_kind = NEW.content_kind
+           AND accepted.content_text = NEW.content_text
+           AND accepted.delivery_kind = 'interrupt'
+           AND accepted.expected_active_turn_id = NEW.expected_active_turn_id
+           AND accepted.expected_defaults_version = NEW.expected_defaults_version
+           AND accepted.model_override_kind = NEW.model_override_kind
+           AND accepted.replacement_model_kind
+               IS NOT DISTINCT FROM NEW.replacement_model_kind
+           AND accepted.replacement_direct_model_selection_id
+               IS NOT DISTINCT FROM NEW.replacement_direct_model_selection_id
+           AND accepted.replacement_model_alias_id
+               IS NOT DISTINCT FROM NEW.replacement_model_alias_id
+           AND accepted.disposition_kind = 'origin_of'
+           AND accepted.origin_turn_id = NEW.result_turn_id
+           AND successor.priority_kind = 'interrupt_immediately_after'
+           AND successor.interrupt_predecessor_turn_id = effect.turn_id
+           AND successor.defaults_version = NEW.expected_defaults_version
+           AND cancelled.state_kind = 'terminal'
+           AND cancelled.terminal_disposition_kind = 'cancelled'
+           AND cancelled.terminal_attempt_id = effect.yielded_turn_attempt_id
+           AND cancelled.terminal_model_call_id IS NULL
+           AND yielded_attempt.state_kind = 'ended'
+           AND yielded_attempt.end_variant = 'without_stop'
+           AND yielded_attempt.end_disposition = 'yielded_to_durable_wait'
+           AND yielded_attempt.interrupt_command_id IS NULL
+           AND yielded_attempt.interrupt_predecessor_turn_id IS NULL;
+    ELSIF NEW.result_kind = 'applied' THEN
+        SELECT count(*)
+          INTO matching_records
+          FROM accepted_input AS accepted
+          JOIN queued_input_origin AS successor
+            ON successor.accepted_input_id = accepted.accepted_input_id
+           AND successor.turn_id = accepted.origin_turn_id
+           AND successor.session_id = accepted.session_id
+           AND successor.acceptance_position = accepted.acceptance_position
+          JOIN turn_attempt AS stopped_attempt
+            ON stopped_attempt.turn_id = NEW.expected_active_turn_id
+           AND stopped_attempt.session_id = NEW.session_id
+           AND (
+                (
+                    stopped_attempt.interrupt_command_id = NEW.command_id
+                    AND stopped_attempt.interrupt_predecessor_turn_id
+                        = NEW.expected_active_turn_id
+                    AND (
+                        stopped_attempt.state_kind = 'stop_requested'
+                        OR (
+                            stopped_attempt.state_kind = 'ended'
+                            AND stopped_attempt.end_variant = 'after_cancellation'
+                        )
+                    )
+                )
+                OR (
+                    stopped_attempt.state_kind = 'ended'
+                    AND stopped_attempt.end_variant = 'without_stop'
+                    AND stopped_attempt.end_disposition IN ('ambiguous', 'lost')
+                    AND stopped_attempt.interrupt_command_id IS NULL
+                    AND stopped_attempt.interrupt_predecessor_turn_id IS NULL
+                    AND EXISTS (
+                        SELECT 1
+                          FROM turn_lifecycle AS reconciled
+                         WHERE reconciled.turn_id = stopped_attempt.turn_id
+                           AND reconciled.session_id = stopped_attempt.session_id
+                           AND reconciled.state_kind = 'terminal'
+                           AND reconciled.terminal_disposition_kind
+                               = 'reconciliation_required'
+                           AND reconciled.terminal_attempt_id
+                               = stopped_attempt.turn_attempt_id
+                    )
+                )
+                OR (
+                    stopped_attempt.state_kind = 'ended'
+                    AND stopped_attempt.end_variant = 'without_stop'
+                    AND stopped_attempt.end_disposition = 'yielded_to_durable_wait'
+                    AND stopped_attempt.interrupt_command_id IS NULL
+                    AND stopped_attempt.interrupt_predecessor_turn_id IS NULL
+                    AND EXISTS (
+                        SELECT 1
+                          FROM session_delegation_wait AS waiting
+                          JOIN tool_request AS awaiting
+                            ON awaiting.request_id = waiting.awaiting_tool_request_id
+                           AND awaiting.turn_id = waiting.parent_turn_id
+                           AND awaiting.session_id = waiting.parent_session_id
+                          JOIN model_call AS producing_call
+                            ON producing_call.model_call_id
+                                = awaiting.producing_model_call_id
+                           AND producing_call.turn_id = awaiting.turn_id
+                           AND producing_call.session_id = awaiting.session_id
+                          JOIN turn_lifecycle AS cancelled
+                            ON cancelled.turn_id = waiting.parent_turn_id
+                           AND cancelled.session_id = waiting.parent_session_id
+                         WHERE waiting.parent_turn_id = NEW.expected_active_turn_id
+                           AND waiting.parent_session_id = NEW.session_id
+                           AND waiting.wait_mode = 'foreground'
+                           AND producing_call.turn_attempt_id
+                               = stopped_attempt.turn_attempt_id
+                           AND cancelled.state_kind = 'terminal'
+                           AND cancelled.terminal_disposition_kind = 'cancelled'
+                           AND cancelled.terminal_attempt_id IS NULL
+                           AND cancelled.terminal_model_call_id IS NULL
+                    )
+                )
+                OR (
+                    stopped_attempt.state_kind = 'ended'
+                    AND stopped_attempt.end_variant = 'without_stop'
+                    AND stopped_attempt.end_disposition = 'yielded_to_durable_wait'
+                    AND stopped_attempt.interrupt_command_id IS NULL
+                    AND stopped_attempt.interrupt_predecessor_turn_id IS NULL
+                    AND EXISTS (
+                        SELECT 1
+                          FROM turn_runner_recovery_interrupt_effect AS effect
+                          JOIN turn_lifecycle AS cancelled
+                            ON cancelled.turn_id = effect.turn_id
+                           AND cancelled.session_id = effect.session_id
+                         WHERE effect.command_id = NEW.command_id
+                           AND effect.turn_id = NEW.expected_active_turn_id
+                           AND effect.session_id = NEW.session_id
+                           AND effect.yielded_turn_attempt_id =
+                                stopped_attempt.turn_attempt_id
+                           AND cancelled.state_kind = 'terminal'
+                           AND cancelled.terminal_disposition_kind = 'cancelled'
+                           AND cancelled.terminal_attempt_id IS NULL
+                           AND cancelled.terminal_model_call_id IS NULL
+                    )
+                )
+           )
+         WHERE accepted.accepting_command_id = NEW.command_id
+           AND accepted.accepted_input_id = NEW.result_accepted_input_id
+           AND accepted.session_id = NEW.result_session_id
+           AND accepted.content_kind = NEW.content_kind
+           AND accepted.content_text = NEW.content_text
+           AND accepted.delivery_kind = 'interrupt'
+           AND accepted.expected_active_turn_id = NEW.expected_active_turn_id
+           AND accepted.expected_defaults_version = NEW.expected_defaults_version
+           AND accepted.model_override_kind = NEW.model_override_kind
+           AND accepted.replacement_model_kind
+               IS NOT DISTINCT FROM NEW.replacement_model_kind
+           AND accepted.replacement_direct_model_selection_id
+               IS NOT DISTINCT FROM NEW.replacement_direct_model_selection_id
+           AND accepted.replacement_model_alias_id
+               IS NOT DISTINCT FROM NEW.replacement_model_alias_id
+           AND accepted.disposition_kind = 'origin_of'
+           AND accepted.origin_turn_id = NEW.result_turn_id
+           AND successor.priority_kind = 'interrupt_immediately_after'
+           AND successor.interrupt_predecessor_turn_id
+               = NEW.expected_active_turn_id
+           AND successor.defaults_version = NEW.expected_defaults_version;
+    ELSIF NEW.rejection_kind
+        = 'interrupt_unavailable_while_awaiting_approval'
+    THEN
+        SELECT count(*)
+          INTO matching_records
+          FROM turn_lifecycle AS parked
+         WHERE parked.turn_id = NEW.result_actual_active_turn_id
+           AND parked.session_id = NEW.result_session_id
+           AND parked.state_kind = 'active'
+           AND parked.active_phase_kind = 'awaiting_tool_approval'
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM accepted_input
+                 WHERE accepting_command_id = NEW.command_id
+           );
+    ELSE
+        SELECT count(*)
+          INTO matching_records
+          FROM submit_input_command AS existing
+          JOIN accepted_input AS accepted
+            ON accepted.accepting_command_id = existing.command_id
+           AND accepted.accepted_input_id = existing.result_accepted_input_id
+           AND accepted.session_id = existing.result_session_id
+           AND accepted.origin_turn_id = existing.result_turn_id
+          JOIN queued_input_origin AS successor
+            ON successor.accepted_input_id = accepted.accepted_input_id
+           AND successor.turn_id = accepted.origin_turn_id
+           AND successor.session_id = accepted.session_id
+           AND successor.priority_kind = 'interrupt_immediately_after'
+           AND successor.interrupt_predecessor_turn_id
+               = NEW.result_actual_active_turn_id
+          JOIN turn_lifecycle AS active
+            ON active.turn_id = NEW.result_actual_active_turn_id
+           AND active.session_id = NEW.result_session_id
+           AND active.state_kind = 'active'
+          JOIN turn_attempt AS stopped_attempt
+            ON stopped_attempt.turn_attempt_id = active.current_attempt_id
+           AND stopped_attempt.turn_id = active.turn_id
+           AND stopped_attempt.session_id = active.session_id
+           AND stopped_attempt.interrupt_command_id = existing.command_id
+           AND stopped_attempt.interrupt_predecessor_turn_id = active.turn_id
+           AND (
+                (
+                    active.active_phase_kind = 'running'
+                    AND stopped_attempt.state_kind = 'stop_requested'
+                )
+                OR (
+                    active.active_phase_kind = 'awaiting_model_call_recovery'
+                    AND stopped_attempt.state_kind = 'ended'
+                    AND stopped_attempt.end_variant = 'after_cancellation'
+                    AND stopped_attempt.end_disposition IN ('ambiguous', 'lost')
+                )
+           )
+         WHERE existing.command_id = NEW.result_existing_interrupt_command_id
+           AND existing.result_kind = 'applied'
+           AND existing.rejection_kind IS NULL
+           AND existing.delivery_kind = 'interrupt'
+           AND existing.expected_active_turn_id
+               = NEW.result_actual_active_turn_id
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM accepted_input
+                 WHERE accepting_command_id = NEW.command_id
+           );
+    END IF;
+
+    IF matching_records <> 1 THEN
+        RAISE EXCEPTION
+            'interrupt submit-input command % has an incomplete or cross-wired effect',
+            NEW.command_id
+            USING ERRCODE = '23503';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION assert_cancelled_turn_final_state(
+    checked_turn_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    checked_session uuid;
+    checked_starting_frontier uuid;
+    checked_terminal_frontier uuid;
+    checked_terminal_attempt uuid;
+    checked_terminal_call uuid;
+    runner_recovery_effect turn_runner_recovery_interrupt_effect%ROWTYPE;
+    base_frontier uuid;
+    base_member_count numeric(20, 0);
+    terminal_member_count numeric(20, 0);
+    prefix_mismatch_count bigint;
+    checked_cancellation_entry uuid;
+    cancellation_entry_count bigint;
+    contradictory_entry_count bigint;
+    call_count bigint;
+    outbox_count bigint;
+BEGIN
+    SELECT
+        session_id,
+        starting_frontier_id,
+        terminal_frontier_id,
+        terminal_attempt_id,
+        terminal_model_call_id
+      INTO
+        checked_session,
+        checked_starting_frontier,
+        checked_terminal_frontier,
+        checked_terminal_attempt,
+        checked_terminal_call
+      FROM turn_lifecycle
+     WHERE turn_id = checked_turn_id
+       AND state_kind = 'terminal'
+       AND terminal_disposition_kind = 'cancelled';
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    PERFORM assert_terminal_started_turn_common_final_state(checked_turn_id);
+
+    SELECT * INTO runner_recovery_effect
+      FROM turn_runner_recovery_interrupt_effect
+     WHERE session_id = checked_session
+       AND turn_id = checked_turn_id;
+    IF FOUND THEN
+        IF checked_terminal_attempt IS DISTINCT FROM
+                runner_recovery_effect.yielded_turn_attempt_id
+           OR checked_terminal_call IS NOT NULL
+           OR NOT EXISTS (
+                SELECT 1
+                  FROM turn_attempt
+                 WHERE turn_attempt_id = checked_terminal_attempt
+                   AND turn_id = checked_turn_id
+                   AND session_id = checked_session
+                   AND state_kind = 'ended'
+                   AND end_variant = 'without_stop'
+                   AND end_disposition = 'yielded_to_durable_wait'
+                   AND interrupt_command_id IS NULL
+                   AND interrupt_predecessor_turn_id IS NULL
+           )
+        THEN
+            RAISE EXCEPTION
+                'runner recovery cancellation lacks its yielded attempt'
+                USING ERRCODE = '23514';
+        END IF;
+        base_frontier := runner_recovery_effect.source_frontier_id;
+    ELSE
+        IF NOT EXISTS (
+            SELECT 1
+              FROM turn_attempt
+             WHERE turn_attempt_id = checked_terminal_attempt
+               AND turn_id = checked_turn_id
+               AND session_id = checked_session
+               AND state_kind = 'ended'
+               AND end_variant = 'after_cancellation'
+               AND end_disposition = 'cancelled'
+        ) THEN
+            RAISE EXCEPTION 'cancelled turn lacks its exact ended attempt'
+                USING ERRCODE = '23514';
+        END IF;
+        PERFORM assert_interrupt_attempt_proof(checked_terminal_attempt);
+    END IF;
+
+    SELECT count(*)
+      INTO call_count
+      FROM model_call
+     WHERE turn_id = checked_turn_id
+       AND session_id = checked_session;
+
+    IF runner_recovery_effect.command_id IS NOT NULL THEN
+        NULL;
+    ELSIF checked_terminal_call IS NULL THEN
+        IF call_count <> 0 THEN
+            RAISE EXCEPTION 'directly cancelled turn names no call but stores one'
+                USING ERRCODE = '23514';
+        END IF;
+        base_frontier := checked_starting_frontier;
+    ELSE
+        IF call_count <> 1
+           OR NOT EXISTS (
+                SELECT 1
+                  FROM model_call
+                 WHERE model_call_id = checked_terminal_call
+                   AND turn_attempt_id = checked_terminal_attempt
+                   AND turn_id = checked_turn_id
+                   AND session_id = checked_session
+                   AND state_kind = 'terminal'
+                   AND terminal_disposition_kind = 'cancelled'
+           )
+        THEN
+            RAISE EXCEPTION 'cancelled turn lacks its exact cancelled call'
+                USING ERRCODE = '23514';
+        END IF;
+        SELECT context_frontier_id
+          INTO base_frontier
+          FROM model_call
+         WHERE model_call_id = checked_terminal_call;
+        PERFORM assert_model_call_final_state(checked_terminal_call);
+    END IF;
+
+    SELECT count(*)
+      INTO cancellation_entry_count
+      FROM semantic_transcript_entry
+     WHERE source_session_id = checked_session
+       AND payload_kind = 'turn_cancelled'
+       AND cancelled_turn_id = checked_turn_id;
+    SELECT semantic_entry_id
+      INTO checked_cancellation_entry
+      FROM semantic_transcript_entry
+     WHERE source_session_id = checked_session
+       AND payload_kind = 'turn_cancelled'
+       AND cancelled_turn_id = checked_turn_id
+     ORDER BY semantic_entry_id
+     LIMIT 1;
+
+    SELECT count(*)
+      INTO contradictory_entry_count
+      FROM semantic_transcript_entry
+     WHERE source_session_id = checked_session
+       AND (
+            failed_turn_id = checked_turn_id
+            OR completed_turn_id = checked_turn_id
+            OR producing_model_call_id = checked_terminal_call
+       )
+       AND payload_kind IN (
+            'turn_failed',
+            'turn_completed',
+            'assistant_text'
+       );
+
+    SELECT member_count
+      INTO base_member_count
+      FROM context_frontier
+     WHERE owning_session_id = checked_session
+       AND context_frontier_id = base_frontier;
+    SELECT member_count
+      INTO terminal_member_count
+      FROM context_frontier
+     WHERE owning_session_id = checked_session
+       AND context_frontier_id = checked_terminal_frontier;
+
+    SELECT count(*)
+      INTO prefix_mismatch_count
+      FROM context_frontier_member AS base_member
+      LEFT JOIN context_frontier_member AS terminal_member
+        ON terminal_member.owning_session_id = base_member.owning_session_id
+       AND terminal_member.context_frontier_id = checked_terminal_frontier
+       AND terminal_member.member_position = base_member.member_position
+       AND terminal_member.source_session_id = base_member.source_session_id
+       AND terminal_member.semantic_entry_id = base_member.semantic_entry_id
+     WHERE base_member.owning_session_id = checked_session
+       AND base_member.context_frontier_id = base_frontier
+       AND terminal_member.member_position IS NULL;
+
+    SELECT count(*)
+      INTO outbox_count
+      FROM turn_cancelled_outbox_event
+     WHERE session_id = checked_session
+       AND turn_id = checked_turn_id
+       AND cancellation_entry_id = checked_cancellation_entry
+       AND terminal_frontier_id = checked_terminal_frontier;
+
+    IF cancellation_entry_count <> 1
+       OR contradictory_entry_count <> 0
+       OR base_member_count IS NULL
+       OR terminal_member_count IS DISTINCT FROM base_member_count + 1
+       OR prefix_mismatch_count <> 0
+       OR NOT EXISTS (
+            SELECT 1
+              FROM context_frontier_member
+             WHERE owning_session_id = checked_session
+               AND context_frontier_id = checked_terminal_frontier
+               AND member_position = terminal_member_count
+               AND source_session_id = checked_session
+               AND semantic_entry_id = checked_cancellation_entry
+       )
+       OR outbox_count <> 1
+    THEN
+        RAISE EXCEPTION
+            'cancelled turn lacks its exact semantic, frontier, or outbox boundary'
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$$;
 
 CREATE FUNCTION reject_runner_recovery_reopen()
 RETURNS trigger

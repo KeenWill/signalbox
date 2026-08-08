@@ -2435,6 +2435,32 @@ impl AcceptedInputSchedulingProjection {
         )
     }
 
+    /// Cancels a turn parked on runner loss without claiming that any retained
+    /// runner effect failed. The supplied source is the latest already-durable
+    /// semantic boundary; runner-loss evidence remains on the placement.
+    pub fn apply_interrupt_to_runner_recovery(
+        self,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::CancelledModelCallTurnIdentities,
+    ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        let starting_snapshot = self
+            .snapshots
+            .get(&active_turn.start().frontier().snapshot())
+            .cloned()
+            .ok_or(crate::ModelCallClosureError::FrontierDerivationFailed)?;
+        crate::model_execution::apply_interrupt_to_runner_recovery_wait(
+            active_turn.into(),
+            starting_snapshot,
+            source_snapshot,
+            interrupt,
+            identities,
+        )
+    }
+
     /// Closes one executing tool batch under a newly applied interrupt.
     ///
     /// The checked scheduling projection supplies the current active phase;

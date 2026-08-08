@@ -4193,6 +4193,46 @@ pub(crate) fn apply_interrupt_to_recovery_wait(
     })
 }
 
+pub(crate) fn apply_interrupt_to_runner_recovery_wait(
+    active_turn: ActivatedTurn,
+    starting_snapshot: ResolvedContextFrontierSnapshot,
+    source_snapshot: ResolvedContextFrontierSnapshot,
+    interrupt: AppliedInterruptCommandResult,
+    identities: CancelledModelCallTurnIdentities,
+) -> Result<CancelledModelCallTurn, ModelCallClosureError> {
+    let proof = interrupt.proof();
+    if !matches!(
+        active_turn.phase(),
+        ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+    ) || interrupt.session() != active_turn.session()
+        || proof.predecessor() != active_turn.turn()
+        || interrupt.successor() == active_turn.turn()
+        || interrupt.successor_order().priority()
+            != (crate::AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: active_turn.turn(),
+            })
+        || starting_snapshot.frontier() != active_turn.start().frontier()
+        || source_snapshot.frontier().owning_session() != active_turn.session()
+        || !starting_snapshot.is_semantic_prefix_of(&source_snapshot)
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    close_cancelled_turn(
+        ModelCallTurnScope {
+            session: active_turn.session(),
+            turn: active_turn.turn(),
+        },
+        None,
+        None,
+        CancellationFrontierSource::new(source_snapshot, &[]),
+        proof,
+        identities,
+        reclassified_pending_steering,
+    )
+}
+
 pub(crate) fn apply_interrupt_to_tool_recovery_wait(
     active_turn: ActivatedTurn,
     wait: AwaitingToolRecovery,

@@ -1702,6 +1702,7 @@ impl RunnerProtocolStore {
                  ON attempt.attempt_id = turn.runner_recovery_tool_attempt_id
               WHERE turn.session_id = $1
                 AND turn.state_kind = 'active'
+                AND NOT turn.delegation_runtime_terminal
                 AND turn.active_phase_kind = 'awaiting_runner_recovery'",
         )
         .bind(session.into_uuid())

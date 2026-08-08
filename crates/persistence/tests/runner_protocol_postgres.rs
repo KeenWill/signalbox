@@ -14,22 +14,23 @@ use signalbox_domain::{
     CancelledModelCallTurnIdentities, CanonicalCloneUrlDigest, ContextFrontierId, CreateSession,
     CredentialProfileGrant, CredentialProfileGrantReconstitutionInput, CredentialProfileName,
     CredentialProfilePolicy, CredentialToolApproval, DecideToolRequest, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, EndedToolAttempt, ModelCallId, ModelSelectionOverride,
-    ModelSelectionRequest, NormalizedToolArguments, PerInputConfigurationChoices,
-    ProvisionedWorkspace, ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement,
-    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError,
-    RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId, RunnerLease,
-    RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
-    RunnerLeaseRetryPreparation, RunnerPlacementReconstitutionHistory, RunnerRepositoryEntry,
-    RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration,
-    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
-    RunnerToolPermissionOverrides, RunnerWorkingDirectory, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest, SubmitInput,
-    ToolAdmissibleLoci, ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId, EndedToolAttempt,
+    ModelCallId, ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
+    PerInputConfigurationChoices, ProvisionedWorkspace, ResolvedContextFrontierReconstitutionInput,
+    RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
+    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId,
+    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
+    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation,
+    RunnerPlacementReconstitutionHistory, RunnerRepositoryEntry, RunnerSandboxProfile,
+    RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
+    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
+    RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
@@ -4751,6 +4752,127 @@ async fn s32_inv009_inv044_running_turn_enters_runner_recovery_with_all_triggers
     Ok(())
 }
 
+/// INV-029 / INV-044: an accepted-input interrupt terminalizes a runner-loss
+/// wait and leaves the placement's runner-effect evidence untouched.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv029_inv044_stop_terminalizes_runner_recovery_wait() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let mut recovery = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $1,
+                runner_recovery_placement_revision = $2
+          WHERE turn_id = $3 AND session_id = $4",
+    )
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    recovery.commit().await?;
+    let interrupt = SubmitInput::new(
+        DurableCommandId::from_uuid(uuid(0xa120)),
+        session,
+        UserContent::try_text(String::from("stop runner recovery"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            interrupt,
+            AcceptedInputId::from_uuid(uuid(0xa121)),
+            Some(TurnId::from_uuid(uuid(0xa122))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa123)),
+                ContextFrontierId::from_uuid(uuid(0xa124)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xa125)),
+            |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xa126))),
+        )
+        .await?;
+    let terminal: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind,
+                runner_recovery_runner_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let retained_loss: String = sqlx::query_scalar(
+        "SELECT record.state_kind
+           FROM runner_current_session_placement AS head
+           JOIN runner_session_placement_record AS record
+             ON record.session_id = head.session_id
+            AND record.event_ordinal = head.event_ordinal
+          WHERE head.session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let persisted_effect: (Uuid, Uuid, Decimal, Uuid) = sqlx::query_as(
+        "SELECT turn_id, runner_id, placement_revision,
+                yielded_turn_attempt_id
+           FROM turn_runner_recovery_interrupt_effect
+          WHERE command_id = $1",
+    )
+    .bind(uuid(0xa120))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        terminal,
+        (
+            String::from("terminal"),
+            Some(String::from("cancelled")),
+            None
+        )
+    );
+    assert_eq!(retained_loss, "runner_lost_before_pin");
+    assert_eq!(
+        persisted_effect,
+        (
+            turn.into_uuid(),
+            runner.into_uuid(),
+            Decimal::from(placement.revision().get()),
+            turn_attempt.into_uuid(),
+        )
+    );
+    assert_eq!(store.load_runner_recovery_wait(session).await?, None);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-009 / INV-044: placement advance and runner-recovery parking rendezvous
 /// on the scheduler row, so the stale placement transaction cannot commit.
 #[tokio::test(flavor = "multi_thread")]
@@ -4893,7 +5015,7 @@ async fn s32_inv009_inv044_queued_turn_cannot_enter_runner_recovery() -> Result<
 /// without mutating the retained physical lifecycle.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv009_inv033_delegated_runner_recovery_releases_runtime_slot()
+async fn s32_inv009_inv033_delegated_runner_recovery_releases_runtime_slot_and_wait()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
@@ -4915,6 +5037,9 @@ async fn s32_inv009_inv033_delegated_runner_recovery_releases_runtime_slot()
         None,
     )
     .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
     let mut released = pool.begin().await?;
     let updated = sqlx::query(
         "UPDATE turn_lifecycle
@@ -4927,7 +5052,32 @@ async fn s32_inv009_inv033_delegated_runner_recovery_releases_runtime_slot()
     .await?;
 
     assert_eq!(updated.rows_affected(), 1);
-    released.rollback().await?;
+    released.commit().await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let loaded_wait = store.load_runner_recovery_wait(session).await?;
+    append_pre_pin_replacement_projection(
+        &pool,
+        session,
+        RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER)),
+    )
+    .await?;
+    let current_event: String = sqlx::query_scalar(
+        "SELECT record.event_kind
+           FROM runner_current_session_placement AS head
+           JOIN runner_session_placement_record AS record
+             ON record.session_id = head.session_id
+            AND record.event_ordinal = head.event_ordinal
+          WHERE head.session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(loaded_wait, None);
+    assert_eq!(current_event, "pre_pin_replaced");
     drop(pool);
     Ok(())
 }

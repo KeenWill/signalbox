@@ -863,14 +863,14 @@ where
         .execute(&mut *connection)
         .await?;
     let interrupt_outcome = if let Some(interrupt) = interrupt {
-        let executing_tool_batch = load_active_batch_from_connection(
+        let active_tool_batch = load_active_batch_from_connection(
             connection,
             interrupt.session(),
             interrupt.proof().predecessor(),
         )
         .await
-        .map_err(map_tool_loop_error)?
-        .filter(|batch| {
+        .map_err(map_tool_loop_error)?;
+        let executing_tool_batch = active_tool_batch.clone().filter(|batch| {
             matches!(
                 batch.phase(),
                 signalbox_domain::ToolBatchPhase::Executing { .. }
@@ -1123,6 +1123,61 @@ where
                             )
                         })?,
                 ))
+            } else if scheduling
+                .as_ref()
+                .and_then(AcceptedInputSchedulingProjection::active_turn_execution)
+                .is_some_and(|active| {
+                    matches!(
+                        active.phase(),
+                        signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+                    )
+                })
+            {
+                let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(
+                    "applied interrupt lacks runner recovery scheduling state",
+                ))?;
+                let active_turn = scheduling.active_turn_execution().ok_or(
+                    SubmitInputCorruption::Inconsistent(
+                        "applied interrupt lacks runner recovery active turn",
+                    ),
+                )?;
+                let source_snapshot = match active_tool_batch {
+                    Some(batch) => batch.yielded_snapshot().clone(),
+                    None => scheduling
+                        .resolved_snapshot(active_turn.start().frontier().snapshot())
+                        .cloned()
+                        .ok_or(SubmitInputCorruption::Missing(
+                            "runner recovery source frontier",
+                        ))?,
+                };
+                let identities = attach_interrupt_reclassification_candidates_for_active(
+                    cancellation_identities,
+                    &active_turn,
+                    &mut next_reclassified_turn,
+                )
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent(
+                        "runner recovery interrupt reclassification candidates",
+                    )
+                })?;
+                let source_frontier = source_snapshot.frontier().snapshot();
+                let command = interrupt.proof().command();
+                let cancelled = scheduling
+                    .apply_interrupt_to_runner_recovery(source_snapshot, interrupt, identities)
+                    .map_err(|_| {
+                        SubmitInputCorruption::Inconsistent(
+                            "applied interrupt does not match runner recovery wait",
+                        )
+                    })?;
+                persist_runner_recovery_interrupt_effect(
+                    connection,
+                    command,
+                    cancelled.session(),
+                    cancelled.turn(),
+                    source_frontier,
+                )
+                .await?;
+                Some(ModelCallInterruptOutcome::Cancelled(cancelled))
             } else {
                 let execution =
                     require_live_execution_for_restart(connection, interrupt.session()).await?;
@@ -1169,6 +1224,67 @@ where
     Ok(TransactionDecision::Commit(
         SubmitInputHandlingOutcome::Recorded(recorded),
     ))
+}
+
+async fn persist_runner_recovery_interrupt_effect(
+    connection: &mut PgConnection,
+    command: DurableCommandId,
+    session: SessionId,
+    turn: TurnId,
+    source_frontier: ContextFrontierId,
+) -> Result<(), SubmitInputRepositoryError> {
+    let rows = sqlx::query(
+        "INSERT INTO turn_runner_recovery_interrupt_effect
+            (command_id, session_id, turn_id, placement_event_ordinal,
+             runner_id, placement_revision, yielded_turn_attempt_id,
+             interrupted_tool_attempt_id, source_frontier_id)
+         SELECT $1, lifecycle.session_id, lifecycle.turn_id,
+                head.event_ordinal, lifecycle.runner_recovery_runner_id,
+                lifecycle.runner_recovery_placement_revision,
+                yielded_attempt.turn_attempt_id,
+                lifecycle.runner_recovery_tool_attempt_id, $4
+           FROM turn_lifecycle AS lifecycle
+           JOIN runner_current_session_placement AS head
+             ON head.session_id = lifecycle.session_id
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = head.session_id
+            AND placement.event_ordinal = head.event_ordinal
+           JOIN turn_attempt AS yielded_attempt
+             ON yielded_attempt.turn_id = lifecycle.turn_id
+            AND yielded_attempt.session_id = lifecycle.session_id
+            AND yielded_attempt.state_kind = 'ended'
+            AND yielded_attempt.end_variant = 'without_stop'
+            AND yielded_attempt.end_disposition = 'yielded_to_durable_wait'
+            AND yielded_attempt.interrupt_command_id IS NULL
+            AND yielded_attempt.interrupt_predecessor_turn_id IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM turn_attempt AS continuation
+                 WHERE continuation.continued_from_attempt_id =
+                        yielded_attempt.turn_attempt_id
+            )
+          WHERE lifecycle.session_id = $2
+            AND lifecycle.turn_id = $3
+            AND lifecycle.state_kind = 'active'
+            AND lifecycle.active_phase_kind = 'awaiting_runner_recovery'
+            AND placement.state_kind IN ('runner_lost', 'runner_lost_before_pin')
+            AND placement.lost_runner_id = lifecycle.runner_recovery_runner_id
+            AND placement.placement_revision =
+                lifecycle.runner_recovery_placement_revision
+            AND placement.interrupted_tool_attempt_id IS NOT DISTINCT FROM
+                lifecycle.runner_recovery_tool_attempt_id",
+    )
+    .bind(durable_command_id_to_uuid(command))
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(source_frontier.into_uuid())
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    if rows != 1 {
+        return Err(SubmitInputCorruption::Inconsistent("runner recovery interrupt effect").into());
+    }
+    Ok(())
 }
 
 /// Persists the initial input for a freshly inserted session in the caller's

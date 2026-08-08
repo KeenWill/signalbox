@@ -6483,6 +6483,18 @@ async fn terminalize_lifecycle(
     terminal_attempt: Option<signalbox_domain::TurnAttemptId>,
     terminal_call: Option<ModelCallId>,
 ) -> Result<(), ModelCallRepositoryError> {
+    let runner_recovery_terminal_attempt: Option<Uuid> = sqlx::query_scalar(
+        "SELECT yielded_turn_attempt_id
+           FROM turn_runner_recovery_interrupt_effect
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let terminal_attempt = terminal_attempt
+        .map(signalbox_domain::TurnAttemptId::into_uuid)
+        .or(runner_recovery_terminal_attempt);
     let rows = sqlx::query(
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal',
@@ -6494,6 +6506,9 @@ async fn terminalize_lifecycle(
                 approval_tool_request_id = NULL,
                 child_wait_request_id = NULL,
                 recovery_tool_attempt_id = NULL,
+                runner_recovery_runner_id = NULL,
+                runner_recovery_placement_revision = NULL,
+                runner_recovery_tool_attempt_id = NULL,
                 terminal_attempt_id = $2,
                 terminal_model_call_id = $3,
                 terminal_tool_attempt_id = NULL,
@@ -6518,10 +6533,24 @@ async fn terminalize_lifecycle(
                     AND active_phase_kind = 'awaiting_child'
                     AND child_wait_request_id IS NOT NULL
                 )
+                OR (
+                    $4 = 'cancelled'
+                    AND $3::uuid IS NULL
+                    AND active_phase_kind = 'awaiting_runner_recovery'
+                    AND runner_recovery_runner_id IS NOT NULL
+                    AND runner_recovery_placement_revision IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1
+                          FROM turn_runner_recovery_interrupt_effect AS effect
+                         WHERE effect.session_id = turn_lifecycle.session_id
+                           AND effect.turn_id = turn_lifecycle.turn_id
+                           AND effect.yielded_turn_attempt_id = $2
+                    )
+                )
             )",
     )
     .bind(terminal_frontier.into_uuid())
-    .bind(terminal_attempt.map(signalbox_domain::TurnAttemptId::into_uuid))
+    .bind(terminal_attempt)
     .bind(terminal_call.map(ModelCallId::into_uuid))
     .bind(disposition)
     .bind(turn_id_to_uuid(turn))
