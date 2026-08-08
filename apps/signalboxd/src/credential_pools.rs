@@ -19,8 +19,8 @@ use toml_edit::{InlineTable, Item, Table};
 use url::Url;
 
 use crate::configuration::{
-    BillingKind, HubModelConfigurationError, ModelAdapter, reject_unknown_fields, required_string,
-    validated_name,
+    AvailabilityCause, BillingKind, HubModelConfigurationError, ModelAdapter,
+    reject_unknown_fields, required_string, validated_name,
 };
 
 /// Maximum admitted headroom reserve, leaving at least one percent usable.
@@ -774,28 +774,25 @@ fn parse_pool_headroom_reserve_percent(
     }
 }
 
-/// Refuses configuration whose effect depends on remaining provider capacity
-/// this build's adapters do not report.
+/// Rejects `switch_now` for any trigger whose cause this pool's adapter cannot
+/// prove the provider refused before accepting.
 ///
-/// A reserve that silently never fires would read as protection the deployment
-/// does not have, so it is a startup failure instead. The grammar still admits
-/// the keys, so an adapter that later supplies the observation needs no
-/// configuration contract change.
-/// Rejects `switch_now` where the adapter can never authorize a successor.
-///
-/// An availability successor needs typed proof that the provider did not accept
-/// the request, and only a decoded native error envelope supplies it. A pool's
-/// members already agree on one adapter, so the check is exact per pool. Left
-/// admitted, the action would read as failover the deployment does not have
-/// while every matching response terminalized exactly as `stay`.
+/// Only a decoded native error envelope supplies that proof, and each adapter
+/// names native tokens for only some causes, so the check is per adapter *and*
+/// per trigger. A pool's members already agree on one adapter, so it is exact
+/// per pool. Left admitted, the action would read as failover the deployment
+/// does not have while every matching response terminalized exactly as `stay`.
 fn reject_unprovable_substitution(pool: &CredentialPool) -> Result<(), HubModelConfigurationError> {
-    if pool.adapter.proves_non_acceptance() {
-        return Ok(());
-    }
-    let substitutes = [pool.quota_exhausted, pool.rate_limited, pool.overloaded]
-        .into_iter()
-        .any(|action| action == CredentialPoolAction::SwitchNow);
-    if substitutes {
+    let unprovable = [
+        (pool.quota_exhausted, AvailabilityCause::QuotaExhausted),
+        (pool.rate_limited, AvailabilityCause::RateLimited),
+        (pool.overloaded, AvailabilityCause::Overloaded),
+    ]
+    .into_iter()
+    .any(|(action, cause)| {
+        action == CredentialPoolAction::SwitchNow && !pool.adapter.proves_non_acceptance(cause)
+    });
+    if unprovable {
         return Err(HubModelConfigurationError::UnprovableSubstitutionPolicy {
             credential_pool: Arc::clone(&pool.name),
         });
@@ -803,6 +800,13 @@ fn reject_unprovable_substitution(pool: &CredentialPool) -> Result<(), HubModelC
     Ok(())
 }
 
+/// Refuses configuration whose effect depends on remaining provider capacity
+/// this build's adapters do not report.
+///
+/// A reserve that silently never fires would read as protection the deployment
+/// does not have, so it is a startup failure instead. The grammar still admits
+/// the keys, so an adapter that later supplies the observation needs no
+/// configuration contract change.
 fn reject_unobserved_capacity_policy(
     pool: &CredentialPool,
 ) -> Result<(), HubModelConfigurationError> {

@@ -168,7 +168,7 @@ not survive to the log: `run_hub` collapses every catalog-parse and
 adapter-construction variant (and likewise connection and migration errors) into
 a generic `Infrastructure` class carrying only its phase, so an operator cannot
 distinguish an unreadable catalog from an unknown field, bad version, or invalid
-limit (see Open edges). The eight deployment paths are accepted without I/O at
+limit (see Open edges). The six deployment paths are accepted without I/O at
 environment parsing time; both catalogs and every template prompt file are read
 during startup. No credential file is read at startup (see credential lifecycle
 below).
@@ -849,23 +849,32 @@ filesystem root rejects a symlink in any component and requires the final
 component to be a directory, then records its device and inode as the profile's
 credential-home identity; failure blocks scheduling but cannot block recovery of
 acknowledged work. Two `codex_home` profiles may not resolve to the same
-identity even when their lexically normalized paths differ. Before every
-preparation, the daemon repeats that no-symlink walk and requires the same
-identity before it reserves capacity or starts a child; replacement or aliasing
-is a typed pre-send credential-configuration failure. It exists so a deployment
-can point the daemon at a login an operator already established interactively,
-provisioning nothing. Concurrent invocations against one such profile are
-admitted by default, matching how the CLI is ordinarily used. The store has no
-cross-process file locking, but the CLI re-reads it immediately before
-refreshing and adopts a token another process wrote rather than refreshing
-again, so the residual race is two processes crossing the refresh threshold
-within one token-exchange round trip — narrow, because a process refreshes about
-once per access-token lifetime. When it does fire the authorization is
-invalidated and the profile quarantines; recovery is the ordinary
-re-provisioning an operator already performs, and the pool fails over meanwhile.
-A deployment preferring not to carry that risk sets the optional bound, which is
-unbounded when absent. The knob exists because the tradeoff is a deployment's to
-make and code cannot observe which side of it a given operator is on.
+identity even when their lexically normalized paths differ. The daemon repeats
+that no-symlink walk before every invocation and requires the same identity;
+replacement or aliasing is a typed pre-send credential-configuration failure and
+starts no child. That walk runs in off-transaction capability preparation, after
+the reservation and the call's `Prepared` record have committed — not before
+them. Why that order: the member and its reservation are chosen atomically under
+the capacity locks, so doing the walk first would decide against exclusion and
+capacity facts that the selecting transaction may then contradict, while doing
+it inside that transaction would hold a database transaction across filesystem
+I/O, which [staged execution](model-call-execution.md#staged-execution) forbids.
+A mismatch therefore fails the call in preparation and releases its reservation
+through the ordinary guarded pre-send closure, exactly as a spawn failure does.
+It exists so a deployment can point the daemon at a login an operator already
+established interactively, provisioning nothing. Concurrent invocations against
+one such profile are admitted by default, matching how the CLI is ordinarily
+used. The store has no cross-process file locking, but the CLI re-reads it
+immediately before refreshing and adopts a token another process wrote rather
+than refreshing again, so the residual race is two processes crossing the
+refresh threshold within one token-exchange round trip — narrow, because a
+process refreshes about once per access-token lifetime. When it does fire the
+authorization is invalidated and the profile quarantines; recovery is the
+ordinary re-provisioning an operator already performs, and the pool fails over
+meanwhile. A deployment preferring not to carry that risk sets the optional
+bound, which is unbounded when absent. The knob exists because the tradeoff is a
+deployment's to make and code cannot observe which side of it a given operator
+is on.
 
 Two profiles whose validated credential-home identities differ are independent
 token families with nothing shared, so a pool holds as many as a deployment has
@@ -898,11 +907,18 @@ The wait records which case it represents. An exhausted wait carries the
 complete policy-member exclusion snapshot described below. A contended wait
 carries that same frozen policy identity, every durable exclusion that removed a
 member, and the complete nonempty set of otherwise-admissible bounded members
-with their exact invocation-reservation identities and generations. A member's
-admission first locks the shared capacity rows for every bounded profile the
-preparation may select, in profile-reference byte order. The rows are
-profile-scoped rather than session- or pool-scoped, so concurrent sessions and
-distinct pools serialize against the same bound without a lock-order cycle.
+with their exact invocation-reservation identities and generations. A contended
+wait also carries the earliest unelapsed reset among those durable exclusions as
+its deadline, exactly as an exhausted wait does, and the scheduler makes it
+eligible when that deadline passes. Without it a turn contending on a bounded
+member would stay parked past the moment an excluded member became admissible
+again — visibly so for a chain-local reset, whose passage produces no separate
+durable availability update. A contended wait whose exclusions report no reset
+has no deadline, and its bounded members' completions remain its wake. A
+member's admission first locks the shared capacity rows for every bounded
+profile the preparation may select, in profile-reference byte order. The rows
+are profile-scoped rather than session- or pool-scoped, so concurrent sessions
+and distinct pools serialize against the same bound without a lock-order cycle.
 Under those locks the transaction counts live reservations, chooses the member,
 and acquires its `pending_spawn` reservation together with the call's `Prepared`
 record; a database constraint rejects a live count above the configured bound.
@@ -915,13 +931,16 @@ the next admission without revoking a reservation already committed — a live
 count above a freshly lowered bound drains as those invocations complete rather
 than terminating them. A turn already parked in a contended wait is not left
 behind by a raise: a configuration edit produces neither a reservation release
-nor an availability update, so startup re-evaluates every retained contended
-wait against the current registrations and makes eligible each one now under its
-profile's bound, including a profile whose bound was removed
+nor an availability update, so startup re-evaluates the retained contended waits
+themselves against the current registrations
 ([turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot)).
-Otherwise a raise would admit nothing until some unrelated older invocation
-happened to finish. Spawn failure or another pre-send closure releases that
-pending reservation.
+A wait whose profile is now unbounded becomes eligible outright; one whose
+profile is still bounded becomes eligible when that profile's surviving
+reservation count is below the current bound. Iterating waits rather than
+bounded profiles is what lets a removed bound be seen at all, since the profile
+it names is no longer in any bounded set. Otherwise a raise would admit nothing
+until some unrelated older invocation happened to finish. Spawn failure or
+another pre-send closure releases that pending reservation.
 
 Every `codex_home` invocation acquires a reservation, whether or not the profile
 currently declares a bound. The bound decides only whether preparation takes the
@@ -943,16 +962,24 @@ successful spawn, the daemon replaces `pending_spawn` with
 `spawned { process_group_identity }`, carrying the process group's reuse-safe
 host identity; terminal observation atomically releases that reservation and
 emits the durable availability update that makes the waiter eligible. Startup
-retains a `spawned` reservation owned by the live fenced process. It may close
-an earlier-process `spawned` reservation as lost and make its waiters eligible
-only after it proves that exact group absent, or terminates that exact group and
-then proves it absent; the daemon fence generation alone is not process-death
-evidence. An earlier-process `pending_spawn` record is deliberately ambiguous:
-the prior daemon may have crashed immediately after the child started but before
-attaching its identity, so startup fails before scheduling rather than releasing
-capacity without proof. No provider request is repeated because a contended
-waiter has not issued one. Partial, foreign, or stale reservation evidence
-likewise fails reconstitution closed.
+retains a `spawned` reservation owned by the live fenced process, because this
+daemon still owns that child's observation path and will release the reservation
+when the invocation ends. An earlier-process `spawned` reservation has no such
+observer, because the daemon that would have watched its child is gone. Startup
+therefore must resolve every one of them before scheduling — it proves that
+exact process group absent, or terminates that exact group and then proves it
+absent, and only then closes the reservation as lost and makes its waiters
+eligible. Retaining a prior-process reservation and hoping to notice the exit
+later is not admitted, because nothing would ever release it: the terminal
+observation that would have done so died with its daemon, so the bound would be
+permanently consumed by a child no one is watching. The daemon fence generation
+alone is not process-death evidence, and failure to establish absence fails
+startup before scheduling. An earlier-process `pending_spawn` record is
+deliberately ambiguous: the prior daemon may have crashed immediately after the
+child started but before attaching its identity, so startup fails before
+scheduling rather than releasing capacity without proof. No provider request is
+repeated because a contended waiter has not issued one. Partial, foreign, or
+stale reservation evidence likewise fails reconstitution closed.
 
 **`oauth`** is spelled `delivery = "oauth"` with exactly four required fields:
 TOML strings `client_id`, `token_url`, and `device_authorization_url`, plus TOML
@@ -1187,6 +1214,17 @@ uniqueness conflict block the terminal observation that requires it. An operator
 clear takes the same lock, which is what lets a clear and a concurrent
 re-observation agree on which generation is current.
 
+Attaching a correlation also accumulates its reset evidence, because a
+reset-aware exclusion clears itself when its reported reset passes and a
+generation carrying a stale deadline would re-admit a member the provider is
+still refusing. The generation's effective reset is the latest reset any
+correlation attached to it reported, and an observation reporting no reset makes
+the generation indefinite. Indefinite is absorbing: once any correlation
+reported no reset, a later correlation carrying one does not restore a deadline,
+since the observation that reported none is evidence the provider named no
+recovery time. Only an operator clear, an availability probe, or another durable
+availability update ends an indefinite generation.
+
 Preparation is the other side of that race and joins the same protocol. Before
 it reads any member's exclusion state, it locks the action head of every member
 of the policy it may select `FOR SHARE`, at the same ordering position and in
@@ -1209,20 +1247,27 @@ request. A `codex_home` refresh race or rejected daemon-owned OAuth refresh
 occurs in the delivery layer before such a request and bypasses pool trigger
 policy: either one quarantines the profile unconditionally as specified above.
 
-`switch_now` is further admitted only for a pool whose adapter can supply the
-typed non-acceptance proof that authorizes a successor. Every pool's members
+`switch_now` is further admitted only where the pool's adapter can supply the
+typed non-acceptance proof for that exact trigger's cause. Every pool's members
 already agree on one adapter, and
 [runtime-substrate](runtime-substrate.md#terminal-evidence) admits that proof
-only from a decoded native error envelope. Neither `claude_cli` nor `codex_cli`
-exposes one — both classify from rendered failure prose — so `switch_now` on a
-CLI-adapter pool is a typed startup failure in this build, whichever of the
-three availability triggers names it. Why reject rather than accept and ignore:
-a configured `switch_now` that can never fire reads as failover the deployment
-does not have, and every such response would terminalize exactly as `stay` does
-while the document claims otherwise. This is the same fail-closed admission rule
-that rejects `headroom_reserve_percent` and `least_used` below, for the same
-reason. The key stays in the grammar so that an adapter gaining a stable
-machine-readable discriminator admits it with no configuration change.
+only from a decoded native error envelope naming a cause in that adapter's own
+exhaustive mapping — so the check is per adapter *and* per trigger, not once per
+adapter. In this build that admits exactly `on_rate_limited` and `on_overloaded`
+for an `anthropic` pool, and `on_rate_limited` and `on_quota_exhausted` for an
+`openai` pool. `on_quota_exhausted` under `anthropic` and `on_overloaded` under
+`openai` are typed startup failures because those adapters' mappings carry no
+native token for those causes and can reach them only by status-derived
+fallback, which carries no proof. Neither `claude_cli` nor `codex_cli` exposes a
+native envelope at all — both classify from rendered failure prose — so
+`switch_now` on a CLI-adapter pool is rejected for all three triggers. Why
+reject rather than accept and ignore: a configured `switch_now` that can never
+fire reads as failover the deployment does not have, and every such response
+would terminalize exactly as `stay` does while the document claims otherwise.
+This is the same fail-closed admission rule that rejects
+`headroom_reserve_percent` and `least_used` below, for the same reason. The keys
+stay in the grammar so that an adapter gaining a native token for a cause admits
+that pair with no configuration change.
 
 Selection happens at model-call preparation, never at session creation. For the
 resolved target's family, preparation reads the session's current immutable
@@ -1326,15 +1371,17 @@ range 1 through 4,294,967,295, an unknown tie-break or exhaustion value, an
 unknown action, an action on a trigger that does not admit it, and any unknown
 field. It also rejects `headroom_reserve_percent`, `tie_break = "least_used"`,
 and any `on_headroom_low` action other than `stay` in this build, because no
-composed runtime observes remaining capacity, and `switch_now` on a `claude_cli`
-or `codex_cli` pool, because neither adapter can supply the non-acceptance proof
-a successor requires. Reporting capacity alone does not admit `least_used`: a
-later accepted adapter contract must first define the normalized quantity,
-observation lifetime, and deterministic secondary tie-break it uses. Why: a
-configured reserve or selection rule that silently never fires — or whose metric
-varies by implementation — would read as protection the deployment does not
-have. The keys are admitted by the grammar so that supplying that later contract
-needs no configuration grammar change; the observation itself is routed through
+composed runtime observes remaining capacity, and `switch_now` on any
+adapter-and-trigger pair whose adapter supplies no native token for that cause —
+every trigger under `claude_cli` and `codex_cli`, `on_quota_exhausted` under
+`anthropic`, and `on_overloaded` under `openai`. Reporting capacity alone does
+not admit `least_used`: a later accepted adapter contract must first define the
+normalized quantity, observation lifetime, and deterministic secondary tie-break
+it uses. Why: a configured reserve or selection rule that silently never fires —
+or whose metric varies by implementation — would read as protection the
+deployment does not have. The keys are admitted by the grammar so that supplying
+that later contract needs no configuration grammar change; the observation
+itself is routed through
 [model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 
 A one-member pool is the ordinary single-account deployment and requires no

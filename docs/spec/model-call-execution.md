@@ -557,12 +557,15 @@ provider-acceptance boundary. Storage backstops single-call-ness independently
 of the aggregate: `model_call_attempt_once UNIQUE (turn_attempt_id)` admits at
 most one call row per attempt against any buggy or racing writer. There is no
 automatic retry after a known failure and no automatic retry of an ambiguous
-outcome (INV-025, INV-026); a known failure fails the attempt and turn, and
-ambiguity parks the turn for recovery. A later scheduler pass never treats an
-issued unclassified call as fresh authorization. Why: a lost acknowledgement
-cannot prove the provider did not act, so repetition risks undisclosed duplicate
-provider effects and spend; honest ambiguity is preferred to an invented
-exactly-once claim.
+outcome (INV-025, INV-026); a known failure fails the attempt and turn unless
+its pool authorizes an availability successor against a *different* eligible
+profile ([availability successor calls](#availability-successor-calls)), and
+ambiguity parks the turn for recovery. That exception is substitution, never
+repetition: no path re-issues a call against the profile that failed. A later
+scheduler pass never treats an issued unclassified call as fresh authorization.
+Why: a lost acknowledgement cannot prove the provider did not act, so repetition
+risks undisclosed duplicate provider effects and spend; honest ambiguity is
+preferred to an invented exactly-once claim.
 
 ### Availability successor calls
 
@@ -615,12 +618,25 @@ excluded from the current availability-successor chain, so at most one call per
 member exists per chain and the longest possible chain is the pool's member
 count. A successful call ends that chain before any tool-round continuation is
 prepared. Releasing a parked wait also ends the exhausted chain; the resumed
-turn starts a fresh chain and recomputes admission. It drops a chain-local
-member exclusion only when that member's reported reset has passed or a durable
-availability update invalidates it; every later or absent reset remains initial
-exclusion evidence in the fresh chain. An explicit clear of its exact
-predecessor correlation is such an update. Every durable membership exclusion
-and profile quarantine is retained as well.
+turn starts a fresh chain and recomputes admission. Every durable membership
+exclusion and profile quarantine is retained as well.
+
+A member that produced a qualifying failure stays excluded for the rest of the
+turn, not merely for the chain that observed it. A release therefore never
+re-admits a profile whose own failure parked the turn, and the turn's total
+provider calls stay bounded by the pool's member count however many times it
+parks and resumes. Why this is stated rather than left to the chain rule: a
+one-member pool configured `switch_now` with `park` would otherwise park on a
+reset-bearing failure, wake at the deadline, drop the sole member's exclusion,
+call the same profile again, and repeat without bound — an automatic
+same-profile retry loop, which INV-014 and INV-018 forbid and which
+[model fallback and provenance](../open-questions.md#model-fallback-and-provenance)
+explicitly leaves outside accepted policy under its future same-profile retry
+question. Only an operator clear of the exact predecessor correlation, or a
+durable availability update that invalidates it, readmits such a member within
+the same turn; a reset passing releases the wait without readmitting the member
+that failed. When no member remains, the turn takes the exhaustion path below
+rather than calling a failed member again.
 
 When no member remains admissible, the pool's `on_pool_exhausted` decides. If
 the chain observed a qualifying provider failure, `fail` fails the turn as a
@@ -951,10 +967,16 @@ prints the semantic transcript; it is deliberately not the client protocol.
   `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
   implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,
   but no later reconciliation workflow is implemented.
-- An [availability successor call](#availability-successor-calls) is durable
-  evidence but not yet a transient one: no client surface renders that a
-  successor is being selected, so a chain is visible only after the fact. The
-  visibility surface is routed through
+- **Committed unimplemented functionality.** An
+  [availability successor call](#availability-successor-calls) is designed as
+  durable evidence, but no present migration, repository operation, or
+  reconstitution path stores or recovers one, as
+  [persistence protocol](persistence-protocol.md) states under its
+  availability-successor storage contract, so predecessor lineage is not
+  presently recoverable. Once its implementing child lands that storage, the
+  chain will still be visible only after the fact: no client surface renders
+  that a successor is being selected. That transient visibility surface is
+  routed through
   [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 - Streaming deltas are collected but never delivered as transient drafts, and
   the designed early-observation pause/commit/resume path is unimplemented.

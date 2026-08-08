@@ -336,9 +336,20 @@ for generations. `credential_exclusion_page { exclusions, next_after }` returns
 no more than the requested count and uses null `next_after` only at the end.
 Clearing or creating an exclusion between page requests may change a traversal,
 so an operator needing one fresh inventory restarts from null. The read exposes
-only non-secret references and correlations. Ordinary credential-administration
-authorization governs both operations and fails as
-`credential_administration_forbidden` before existence is disclosed.
+only non-secret references and correlations.
+
+Both operations are authorized exactly as every other request on this transport
+is: reaching the owner-private socket is the authority. The process protocol has
+no authentication or authorization exchange, and socket filesystem access is the
+deployment boundary, so a connected client may enumerate and clear credential
+exclusions. Saying so explicitly is the point — an implementer must not read
+these operations as gated by an authority no contract defines, and a deployment
+must not read them as safer than the socket.
+`credential_administration_forbidden` is nonetheless part of the closed response
+inventory, reserved for the provisional authorization exchange this protocol
+still lacks; the wire shape is fixed now so that adding that authority later
+needs no protocol change. Whenever it does deny a request, it is returned before
+existence is disclosed.
 
 Every identity is a nonempty bounded configuration or durable identity already
 owned by the credential contract. `pool_policy_id` is the canonical lowercase,
@@ -2613,12 +2624,14 @@ producer may terminalize a turn for this pre-call cause.
 **Committed unimplemented functionality — credential-availability projection.**
 No present request, event, transcript message, or closed turn-state object
 exposes an availability-successor chain or credential-availability wait. The
-durable predecessor, authorizing cause, selected profile, and wait evidence
-remain storage-only until an implementing wire slice adds a version-one shape
-for them together with its daemon and client consumers. That future slice must
-project a wait as an active state retaining the same turn and session slot, and
-must expose a completed successor chain without requiring a client to infer it
-from usage-row order. The runtime-and-storage child that first makes either wait
+predecessor, authorizing cause, selected profile, and wait evidence are
+themselves committed future storage — no present migration, repository
+operation, or reconstitution path supplies them — so a wire slice cannot project
+them until that storage child lands, and must then add a version-one shape
+together with its daemon and client consumers. That future slice must project a
+wait as an active state retaining the same turn and session slot, and must
+expose a completed successor chain without requiring a client to infer it from
+usage-row order. The runtime-and-storage child that first makes either wait
 reachable must include this coordinated wire slice; admitting `park` in static
 configuration alone does not make the state reachable. Until then, transcript
 snapshots continue to expose the existing per-call usage rows and final turn

@@ -114,23 +114,51 @@ either wait form atomically ends the call-free current attempt as
 attempt. A reservation is `pending_spawn` from its atomic acquisition with the
 `Prepared` call until successful spawn durably attaches the child process
 group's reuse-safe host identity as `spawned { process_group_identity }`.
-Startup retains live-process `spawned` reservations and closes a fenced
-prior-process reservation as lost only after proving that exact process group
-absent, or terminating it and then proving absence. A prior-process
-`pending_spawn` reservation is ambiguous and fails startup before scheduling.
-The scheduler makes a reached deadline, an exact reservation release, or a
-durable member-availability update eligible. Because a capacity bound is a live
-configuration value rather than a frozen one, startup additionally re-evaluates
-every retained `contended` wait against the current registrations before
-enabling scheduling and makes eligible each one whose live reservation count is
-now below its profile's bound — including a profile whose bound was removed
-entirely. Without that pass a raised bound would not admit work until an
-unrelated old invocation happened to finish, since a configuration edit produces
-neither a release nor an availability update. Release atomically consumes the
-wait, creates a fresh `Prepared` successor attempt, and returns the same turn to
-`Running` with a fresh availability chain while carrying forward member evidence
-whose reset has not passed, every durable membership exclusion, and every
-profile quarantine.
+Startup retains live-process `spawned` reservations, whose observation path this
+daemon still owns, and must resolve every fenced prior-process reservation
+before scheduling — proving that exact process group absent, or terminating it
+and then proving absence — before closing it as lost. It is never retained for a
+later death notice, since the observation that would release it died with its
+daemon. A prior-process `pending_spawn` reservation is ambiguous and fails
+startup before scheduling. The scheduler makes a reached deadline, an exact
+reservation release, or a durable member-availability update eligible. Because a
+capacity bound is a live configuration value rather than a frozen one, startup
+additionally re-evaluates every retained `contended` wait against the current
+registrations before enabling scheduling. Each wait names a complete nonempty
+bounded-member set, so every member is evaluated and any one of them suffices: a
+member the current registration leaves unbounded makes the wait eligible
+outright, and a member still bounded makes it eligible when that profile's
+surviving reservation count is below the current bound. Without that pass a
+raised or removed bound would not admit work until an unrelated old invocation
+happened to finish, since a configuration edit produces neither a release nor an
+availability update. Release atomically consumes the wait, creates a fresh
+`Prepared` successor attempt, and returns the same turn to `Running` with a
+fresh availability chain. It carries forward every exclusion that qualified a
+member out: every durable membership exclusion, every profile quarantine, and
+every predecessor exclusion earned by a qualifying failure in this turn. A reset
+passing releases the wait but never readmits the member whose failure earned
+that exclusion — only an operator clear of its exact predecessor correlation or
+a durable availability update does
+([model-call execution](model-call-execution.md#availability-successor-calls)).
+Without that, waking a one-member `switch_now` pool on its own reported reset
+would call the same profile again without bound.
+
+Eligibility is permission to retry selection, not a guarantee of a slot. One
+release can make several contended waits eligible while admitting only one, so
+each release transaction reruns admission under the same capacity locks
+preparation takes. The transaction that acquires the freed reservation performs
+the release above. A transaction that finds no admissible member does not fail
+and does not leave its wait pointing at a reservation that no longer exists:
+under those locks it atomically replaces the wait's evidence with the current
+snapshot — the live reservation identities and generations now holding the
+bound, or the complete exclusion snapshot if the pool has meanwhile become
+exhausted — and the turn stays parked in the corresponding wait form. Releasing
+a bounded reservation holds that profile's capacity row across the atomic
+release-and-wake commit, and a rewrite holds the capacity rows of every bounded
+member its evidence names, so a completion cannot slip between a loser's read
+and its commit. A reservation identity therefore never outlives the wait that
+names it, and losing a race costs a re-park rather than a failed turn, a missed
+wake, or an admission above the bound.
 
 The wait has an exact occupied-slot control matrix. `steer` is accepted as
 ordinary pending steering bound to this source turn and remains pending until a
@@ -812,7 +840,16 @@ fences the prior pool incarnation, migrates and resolves the one-time imported
 display-title backfill
 ([conversation-import](conversation-import.md#derived-display-titles)),
 completes the generic recovery scan, marks every prior-process nonterminal
-runner connection lost, binds the runner socket, binds the process socket, then
+runner connection lost, and — once the credential-pool child is composed —
+establishes each `codex_home` profile's credential-home identity, resolves every
+prior-process capacity reservation, and runs the legacy family-to-policy
+backfill
+([configuration and credentials](configuration-and-credentials.md#credential-deliveries)).
+Those three gates sit after the recovery scan so a failure cannot block recovery
+of acknowledged work, and before any socket binding or scheduling so no request
+reaches a historical session whose policy is not yet rewritten and no CLI call
+runs against an unestablished credential home. No present composition performs
+them. It then binds the runner socket, binds the process socket, then
 concurrently admits runner enrollment and protocol requests, dispatches the
 outbox, and schedules eligible work. On a database without the fence migration,
 the guarded first migration creates the fence row before the daemon initializes

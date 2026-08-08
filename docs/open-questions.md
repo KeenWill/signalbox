@@ -227,8 +227,9 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   the pool grammar, per-membership ranking, and closed action vocabulary by
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
   What remains open is the client projection: snapshots expose each call's usage
-  and the final turn state, but the predecessor, cause, and successor relation
-  remains storage-only. Blocks fallback UI, not fallback. (S22)
+  and the final turn state, while the predecessor, cause, and successor relation
+  is committed future storage that no present migration or repository operation
+  supplies. Blocks fallback UI, not fallback. (S22)
 - **Whether an automatic successor may cross adapter kinds.** Decided for the
   first slice by
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).

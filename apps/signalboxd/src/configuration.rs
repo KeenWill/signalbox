@@ -83,6 +83,21 @@ const MAX_REPOSITORY_WATCH_RULES: usize = 128;
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
 
 /// Adapter implementations this daemon build can construct.
+
+/// One provider-availability cause a pool trigger can react to.
+///
+/// Only these three carry proof that the request was not accepted, so only they
+/// can authorize an availability successor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AvailabilityCause {
+    /// The account's quota for the period is spent.
+    QuotaExhausted,
+    /// The provider rate limited this request.
+    RateLimited,
+    /// The provider reported itself overloaded.
+    Overloaded,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ModelAdapter {
     /// Anthropic's HTTP API adapter.
@@ -145,19 +160,31 @@ impl ModelAdapter {
     }
 
     /// Reports whether this adapter can supply the typed proof that a provider
-    /// rejected a request before accepting it, which is what authorizes an
-    /// availability successor.
+    /// rejected a request before accepting it for one exact availability cause,
+    /// which is what authorizes an availability successor.
     ///
-    /// Only a decoded native error envelope carries that proof. Both CLI
-    /// adapters classify from rendered failure prose, which
-    /// `docs/spec/runtime-substrate.md` refuses as a derivation, so neither can
-    /// ever admit `switch_now` until its CLI exposes a stable machine-readable
-    /// discriminator. Listing the variants rather than matching on a group
-    /// makes a later adapter state its own answer.
-    pub(crate) const fn proves_non_acceptance(self) -> bool {
-        match self {
-            Self::Anthropic | Self::OpenAi => true,
-            Self::ClaudeCli | Self::CodexCli => false,
+    /// Only a decoded native error envelope carries that proof, and each adapter
+    /// names native tokens for only some causes
+    /// (`docs/spec/runtime-substrate.md`); a status-derived fallback carries
+    /// none. Anthropic maps `rate_limit_error` and `overloaded_error` but has no
+    /// quota token, and OpenAI maps `rate_limit_exceeded`/`rate_limit_error` and
+    /// `insufficient_quota` but reaches overload only by status. Both CLI
+    /// adapters classify from rendered failure prose, which the same contract
+    /// refuses as a derivation, so neither admits any cause until its CLI
+    /// exposes a stable machine-readable discriminator. Listing every pair
+    /// rather than matching on a group makes a later adapter state its own
+    /// answer.
+    pub(crate) const fn proves_non_acceptance(self, cause: AvailabilityCause) -> bool {
+        match (self, cause) {
+            (Self::Anthropic, AvailabilityCause::RateLimited | AvailabilityCause::Overloaded) => {
+                true
+            }
+            (Self::Anthropic, AvailabilityCause::QuotaExhausted) => false,
+            (Self::OpenAi, AvailabilityCause::RateLimited | AvailabilityCause::QuotaExhausted) => {
+                true
+            }
+            (Self::OpenAi, AvailabilityCause::Overloaded) => false,
+            (Self::ClaudeCli | Self::CodexCli, _) => false,
         }
     }
 
@@ -5609,6 +5636,22 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
 
         HubModelConfiguration::parse(&substituting)
             .expect("a decoded native envelope authorizes the successor for this adapter");
+    }
+
+    #[test]
+    fn configuration_rejects_switch_now_for_a_cause_the_adapter_cannot_prove() {
+        // Anthropic's mapping has no quota token, so this pair could reach
+        // `switch_now` only through a status-derived fallback carrying no proof.
+        let substituting = configuration_with_anthropic_pool(&format!(
+            "{ANTHROPIC_POOL}\non_quota_exhausted = \"switch_now\""
+        ));
+
+        assert_eq!(
+            HubModelConfiguration::parse(&substituting).err(),
+            Some(HubModelConfigurationError::UnprovableSubstitutionPolicy {
+                credential_pool: Arc::from("anthropic-main"),
+            })
+        );
     }
 
     #[test]

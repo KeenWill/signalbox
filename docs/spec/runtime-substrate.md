@@ -266,16 +266,27 @@ Every status-derived fallback carries no proof: a response whose body is absent,
 undecodable, or names a token the mapping does not cover keeps its
 status-classified kind and stays an ordinary terminal known failure. A native
 token that contradicts its status carries none either, and the existing
-credential-rejection precedence over a contradictory body is unchanged. Neither
-CLI adapter can supply the proof at all: each classifies from the rendered
-failure message by substring, which is exactly the native prose this contract
-already refuses as a derivation, and neither surfaces a structured native code
-its mapping could name. Admitting one under a CLI would need that CLI to expose
-a stable machine-readable discriminator first. The asymmetry is deliberate. An
-under-decoded rejection loses a substitution the deployment had configured,
-which costs one turn; a status-only or prose-derived inference that the provider
-did not act would authorize a second paid call on evidence the provider never
-gave.
+credential-rejection precedence over a contradictory body is unchanged.
+
+The proof is further restricted to an error *response* — an error-status
+exchange whose body is that documented envelope, decoded before any stream
+began. An SSE error record never carries it, whatever native token it holds.
+Mid-stream and post-finish error records remain definitive `ProviderError`
+evidence exactly as specified below, but by the time one arrives the provider
+has demonstrably accepted the request and begun processing it: `message_start`,
+content, reported usage, or a finish token is already observed. Non-acceptance
+is precisely what such an exchange disproves, so attaching the proof there would
+authorize a second paid call for work the provider already did. An availability
+failure that arrives mid-stream therefore terminalizes the turn as any other
+known failure does, with no successor. Neither CLI adapter can supply the proof
+at all: each classifies from the rendered failure message by substring, which is
+exactly the native prose this contract already refuses as a derivation, and
+neither surfaces a structured native code its mapping could name. Admitting one
+under a CLI would need that CLI to expose a stable machine-readable
+discriminator first. The asymmetry is deliberate. An under-decoded rejection
+loses a substitution the deployment had configured, which costs one turn; a
+status-only or prose-derived inference that the provider did not act would
+authorize a second paid call on evidence the provider never gave.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss

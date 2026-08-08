@@ -723,9 +723,10 @@ INV-tagged test names and attached doc comments.
   ends that chain before later continuation
   ([availability successor calls](spec/model-call-execution.md#availability-successor-calls)).
 - **Transient updates:** No current client update announces that a successor is
-  being considered or selected. The predecessor, cause, and successor remain
-  durable storage evidence afterward; no current process-protocol snapshot or
-  history message projects that chain to a client.
+  being considered or selected. The predecessor, cause, and successor are
+  committed future durable evidence that no present migration or repository
+  operation stores; no current process-protocol snapshot or history message
+  projects that chain to a client either.
 - **Owning component:** Daemon pool policy authorizes and selects the profile;
   provider adapters supply the typed classification and separate evidence that
   the request was not accepted. Adapters do not select successors.
