@@ -66,10 +66,11 @@ use signalbox_persistence::{
     tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_tools_exec::{
-    CARGO_DIAGNOSTICS_NAME, CaptureCompleteness, CargoDiagnosticRecords, CargoDiagnosticsCommand,
-    CargoDiagnosticsExecution, CargoDiagnosticsExecutor, CargoDiagnosticsResult,
-    CargoDiagnosticsStream, CargoDiagnosticsTool, CargoEvidenceProvenance, CargoTestRecords,
-    ExecExecutor, ExecutionConfinement, OutputEncoding, ProcessOutcome, ProcessSpawnFailure,
+    BwrapAvailability, CARGO_DIAGNOSTICS_NAME, CaptureCompleteness, CargoDiagnosticRecords,
+    CargoDiagnosticsCommand, CargoDiagnosticsExecution, CargoDiagnosticsExecutor,
+    CargoDiagnosticsResult, CargoDiagnosticsStream, CargoDiagnosticsTool, CargoEvidenceProvenance,
+    CargoTestRecords, ExecExecutor, ExecResult, ExecutionConfinement, OutputCapture,
+    OutputEncoding, ProcessOutcome, ProcessSpawnFailure, ProcessSupervisionFailure,
     SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner,
     UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
@@ -3559,28 +3560,47 @@ fn forced_exec_outcome(target: &'static str, execution: serde_json::Value) -> Ca
 }
 
 struct ZeroExitEvidence<'a> {
-    confinement_kind: &'a str,
+    confinement: ExecutionConfinement,
     stdout: &'a str,
 }
 
 /// One serialized execution with the selected confinement and zero exit.
 fn zero_exit_with_confinement(evidence: ZeroExitEvidence<'_>) -> serde_json::Value {
-    serde_json::json!({
-        "confinement": {"kind": evidence.confinement_kind},
-        "outcome": {"kind": "exited", "code": 0},
-        "stdout": {
-            "text": evidence.stdout,
-            "completeness": "complete",
-            "encoding": "utf8",
+    direct_exec_result(
+        evidence.confinement,
+        ProcessOutcome::Exited { code: Some(0) },
+        evidence.stdout,
+        CaptureCompleteness::Complete,
+    )
+}
+
+fn direct_exec_result(
+    confinement: ExecutionConfinement,
+    outcome: ProcessOutcome,
+    stdout: &str,
+    completeness: CaptureCompleteness,
+) -> serde_json::Value {
+    serde_json::to_value(ExecResult {
+        confinement,
+        outcome,
+        stdout: OutputCapture {
+            text: stdout.to_owned(),
+            completeness,
+            encoding: OutputEncoding::Utf8,
         },
-        "stderr": {"text": "", "completeness": "complete", "encoding": "utf8"},
+        stderr: OutputCapture {
+            text: String::new(),
+            completeness: CaptureCompleteness::Complete,
+            encoding: OutputEncoding::Utf8,
+        },
     })
+    .expect("producer direct-exec result serializes")
 }
 
 /// One serialized confined execution that exited zero with the given output.
 fn confined_exit(stdout: &str) -> serde_json::Value {
     zero_exit_with_confinement(ZeroExitEvidence {
-        confinement_kind: "filesystem_confined",
+        confinement: ExecutionConfinement::FilesystemConfined,
         stdout,
     })
 }
@@ -3656,7 +3676,7 @@ fn forced_sandboxed_exec_rejects_an_unconfined_zero_exit() {
     let outcome = forced_exec_outcome(
         SANDBOXED_EXEC_NAME,
         zero_exit_with_confinement(ZeroExitEvidence {
-            confinement_kind: "unsandboxed",
+            confinement: ExecutionConfinement::Unsandboxed,
             stdout: EXEC_FORCED_SANDBOXED_OUTPUT,
         }),
     );
@@ -3733,15 +3753,12 @@ fn forced_cargo_diagnostics_rejects_an_incomplete_result_shape() {
 fn forced_exec_tier_rejects_a_truncated_output_capture() {
     let outcome = forced_exec_outcome(
         UNSANDBOXED_EXEC_NAME,
-        serde_json::json!({
-            "confinement": {"kind": "unsandboxed"},
-            "outcome": {"kind": "exited", "code": 0},
-            "stdout": {
-                "text": EXEC_FORCED_READ_ONLY_OUTPUT,
-                "completeness": "truncated",
-                "encoding": "utf8",
-            },
-        }),
+        direct_exec_result(
+            ExecutionConfinement::Unsandboxed,
+            ProcessOutcome::Exited { code: Some(0) },
+            EXEC_FORCED_READ_ONLY_OUTPUT,
+            CaptureCompleteness::Truncated,
+        ),
     );
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
@@ -3785,11 +3802,12 @@ fn unforced_exec_tier_passes_a_confined_zero_exit() {
 
 #[test]
 fn unforced_exec_tier_rejects_a_timed_out_process() {
-    let outcome = natural_exec_outcome(serde_json::json!({
-        "confinement": {"kind": "filesystem_confined"},
-        "outcome": {"kind": "timed_out"},
-        "stdout": {"text": "", "completeness": "complete", "encoding": "utf8"},
-    }));
+    let outcome = natural_exec_outcome(direct_exec_result(
+        ExecutionConfinement::FilesystemConfined,
+        ProcessOutcome::TimedOut,
+        "",
+        CaptureCompleteness::Complete,
+    ));
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
@@ -3799,11 +3817,12 @@ fn unforced_exec_tier_rejects_a_timed_out_process() {
 
 #[test]
 fn unforced_exec_tier_rejects_a_nonzero_exit() {
-    let outcome = natural_exec_outcome(serde_json::json!({
-        "confinement": {"kind": "filesystem_confined"},
-        "outcome": {"kind": "exited", "code": 1},
-        "stdout": {"text": "", "completeness": "complete", "encoding": "utf8"},
-    }));
+    let outcome = natural_exec_outcome(direct_exec_result(
+        ExecutionConfinement::FilesystemConfined,
+        ProcessOutcome::Exited { code: Some(1) },
+        "",
+        CaptureCompleteness::Complete,
+    ));
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
@@ -3813,11 +3832,14 @@ fn unforced_exec_tier_rejects_a_nonzero_exit() {
 
 #[test]
 fn unforced_exec_tier_reports_a_supervision_failure_as_infrastructure() {
-    let outcome = natural_exec_outcome(serde_json::json!({
-        "confinement": {"kind": "filesystem_confined"},
-        "outcome": {"kind": "supervision_failed", "reason": "wait"},
-        "stdout": {"text": "", "completeness": "complete", "encoding": "utf8"},
-    }));
+    let outcome = natural_exec_outcome(direct_exec_result(
+        ExecutionConfinement::FilesystemConfined,
+        ProcessOutcome::SupervisionFailed {
+            reason: ProcessSupervisionFailure::Wait,
+        },
+        "",
+        CaptureCompleteness::Complete,
+    ));
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
@@ -3827,11 +3849,16 @@ fn unforced_exec_tier_reports_a_supervision_failure_as_infrastructure() {
 
 #[test]
 fn unforced_exec_tier_reports_sandbox_refusal_as_infrastructure() {
-    let outcome = natural_exec_outcome(serde_json::json!({
-        "confinement": {"kind": "sandbox_refused", "availability": "unusable"},
-        "outcome": {"kind": "spawn_failed", "reason": "sandbox_unavailable"},
-        "stdout": {"text": "", "completeness": "complete", "encoding": "utf8"},
-    }));
+    let outcome = natural_exec_outcome(direct_exec_result(
+        ExecutionConfinement::SandboxRefused {
+            availability: BwrapAvailability::Unusable,
+        },
+        ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::SandboxUnavailable,
+        },
+        "",
+        CaptureCompleteness::Complete,
+    ));
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
@@ -3843,11 +3870,14 @@ fn unforced_exec_tier_reports_sandbox_refusal_as_infrastructure() {
 fn forced_sandboxed_exec_tier_reports_setup_failure_as_infrastructure() {
     let outcome = forced_exec_outcome(
         SANDBOXED_EXEC_NAME,
-        serde_json::json!({
-            "confinement": {"kind": "sandbox_setup_failed"},
-            "outcome": {"kind": "spawn_failed", "reason": "sandbox_setup"},
-            "stdout": {"text": "", "completeness": "complete", "encoding": "utf8"},
-        }),
+        direct_exec_result(
+            ExecutionConfinement::SandboxSetupFailed,
+            ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::SandboxSetup,
+            },
+            "",
+            CaptureCompleteness::Complete,
+        ),
     );
 
     assert_eq!(
@@ -3858,10 +3888,9 @@ fn forced_sandboxed_exec_tier_reports_setup_failure_as_infrastructure() {
 
 #[test]
 fn unforced_exec_tier_rejects_an_unconfined_execution() {
-    let outcome = natural_exec_outcome(serde_json::json!({
-        "confinement": {"kind": "unsandboxed"},
-        "outcome": {"kind": "exited", "code": 0},
-        "stdout": {"text": "", "completeness": "complete", "encoding": "utf8"},
+    let outcome = natural_exec_outcome(zero_exit_with_confinement(ZeroExitEvidence {
+        confinement: ExecutionConfinement::Unsandboxed,
+        stdout: "",
     }));
 
     assert_eq!(
