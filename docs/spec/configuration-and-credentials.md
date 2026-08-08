@@ -922,16 +922,24 @@ successful spawn, the daemon replaces `pending_spawn` with
 `spawned { process_group_identity }`, carrying the process group's reuse-safe
 host identity; terminal observation atomically releases that reservation and
 emits the durable availability update that makes the waiter eligible. Startup
-retains a `spawned` reservation owned by the live fenced process. It may close
-an earlier-process `spawned` reservation as lost and make its waiters eligible
-only after it proves that exact group absent, or terminates that exact group and
-then proves it absent; the daemon fence generation alone is not process-death
-evidence. An earlier-process `pending_spawn` record is deliberately ambiguous:
-the prior daemon may have crashed immediately after the child started but before
-attaching its identity, so startup fails before scheduling rather than releasing
-capacity without proof. No provider request is repeated because a contended
-waiter has not issued one. Partial, foreign, or stale reservation evidence
-likewise fails reconstitution closed.
+retains a `spawned` reservation owned by the live fenced process, because this
+daemon still owns that child's observation path and will release the reservation
+when the invocation ends. An earlier-process `spawned` reservation has no such
+observer, because the daemon that would have watched its child is gone. Startup
+therefore must resolve every one of them before scheduling — it proves that
+exact process group absent, or terminates that exact group and then proves it
+absent, and only then closes the reservation as lost and makes its waiters
+eligible. Retaining a prior-process reservation and hoping to notice the exit
+later is not admitted, because nothing would ever release it: the terminal
+observation that would have done so died with its daemon, so the bound would be
+permanently consumed by a child no one is watching. The daemon fence generation
+alone is not process-death evidence, and failure to establish absence fails
+startup before scheduling. An earlier-process `pending_spawn` record is
+deliberately ambiguous: the prior daemon may have crashed immediately after the
+child started but before attaching its identity, so startup fails before
+scheduling rather than releasing capacity without proof. No provider request is
+repeated because a contended waiter has not issued one. Partial, foreign, or
+stale reservation evidence likewise fails reconstitution closed.
 
 **`oauth`** is spelled `delivery = "oauth"` with exactly four required fields:
 TOML strings `client_id`, `token_url`, and `device_authorization_url`, plus TOML

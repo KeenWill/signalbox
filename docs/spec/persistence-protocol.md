@@ -1592,25 +1592,27 @@ immediate-successor attempt, applies the interrupt proof, ends that attempt
 a closed `pending_spawn` state with no process identity and a
 `spawned { process_group_identity }` state carrying the child process group's
 reuse-safe host identity. Successful spawn replaces `pending_spawn` with
-`spawned` immediately. Startup closes a prior-process `spawned` reservation as
-lost only after proving that exact group absent or terminating it and then
-proving absence; failure to establish absence fails startup before scheduling.
-It retains a `spawned` reservation owned by the live fenced process. A
-prior-process `pending_spawn` reservation is ambiguous because its child may
-have started before the identity update, so startup fails before scheduling
-rather than releasing it without process-death proof. After that reconciliation
-and before scheduling is enabled, startup iterates the retained `contended`
-waits themselves rather than the currently bounded profiles, so a profile whose
-bound was removed still has an entry to evaluate. Each wait stores a complete
-nonempty bounded-member set, so startup evaluates every member in that set
-rather than one profile: a member the current registration leaves unbounded
-makes the wait eligible outright with no count to compare against, and a member
-still bounded makes it eligible when that profile's surviving live reservation
-count, taken under its capacity lock, is below the current bound. Any one such
-member suffices, since one admissible member is all preparation needs. A bound
-raised, lowered, or removed across a restart is therefore evaluated the same way
-for every member of every wait, without waiting for an unrelated release. These
-are the shapes required by
+`spawned` immediately. Startup must resolve every prior-process `spawned`
+reservation before scheduling — proving that exact group absent, or terminating
+it and then proving absence — and only then closes it as lost; failure to
+establish absence fails startup. Retaining one for a later death notice is not
+admitted, because the terminal observation that would release it died with its
+daemon. It retains a `spawned` reservation owned by the live fenced process,
+whose observation path this daemon still owns. A prior-process `pending_spawn`
+reservation is ambiguous because its child may have started before the identity
+update, so startup fails before scheduling rather than releasing it without
+process-death proof. After that reconciliation and before scheduling is enabled,
+startup iterates the retained `contended` waits themselves rather than the
+currently bounded profiles, so a profile whose bound was removed still has an
+entry to evaluate. Each wait stores a complete nonempty bounded-member set, so
+startup evaluates every member in that set rather than one profile: a member the
+current registration leaves unbounded makes the wait eligible outright with no
+count to compare against, and a member still bounded makes it eligible when that
+profile's surviving live reservation count, taken under its capacity lock, is
+below the current bound. Any one such member suffices, since one admissible
+member is all preparation needs. A bound raised, lowered, or removed across a
+restart is therefore evaluated the same way for every member of every wait,
+without waiting for an unrelated release. These are the shapes required by
 [turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
 Reconstitution and wake must fail closed on partial, stale, or mismatched
 evidence. This paragraph constrains that future schema; no present storage

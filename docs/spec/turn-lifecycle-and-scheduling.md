@@ -114,23 +114,27 @@ either wait form atomically ends the call-free current attempt as
 attempt. A reservation is `pending_spawn` from its atomic acquisition with the
 `Prepared` call until successful spawn durably attaches the child process
 group's reuse-safe host identity as `spawned { process_group_identity }`.
-Startup retains live-process `spawned` reservations and closes a fenced
-prior-process reservation as lost only after proving that exact process group
-absent, or terminating it and then proving absence. A prior-process
-`pending_spawn` reservation is ambiguous and fails startup before scheduling.
-The scheduler makes a reached deadline, an exact reservation release, or a
-durable member-availability update eligible. Because a capacity bound is a live
-configuration value rather than a frozen one, startup additionally re-evaluates
-every retained `contended` wait against the current registrations before
-enabling scheduling and makes eligible each one whose live reservation count is
-now below its profile's bound — including a profile whose bound was removed
-entirely. Without that pass a raised bound would not admit work until an
-unrelated old invocation happened to finish, since a configuration edit produces
-neither a release nor an availability update. Release atomically consumes the
-wait, creates a fresh `Prepared` successor attempt, and returns the same turn to
-`Running` with a fresh availability chain while carrying forward member evidence
-whose reset has not passed, every durable membership exclusion, and every
-profile quarantine.
+Startup retains live-process `spawned` reservations, whose observation path this
+daemon still owns, and must resolve every fenced prior-process reservation
+before scheduling — proving that exact process group absent, or terminating it
+and then proving absence — before closing it as lost. It is never retained for a
+later death notice, since the observation that would release it died with its
+daemon. A prior-process `pending_spawn` reservation is ambiguous and fails
+startup before scheduling. The scheduler makes a reached deadline, an exact
+reservation release, or a durable member-availability update eligible. Because a
+capacity bound is a live configuration value rather than a frozen one, startup
+additionally re-evaluates every retained `contended` wait against the current
+registrations before enabling scheduling. Each wait names a complete nonempty
+bounded-member set, so every member is evaluated and any one of them suffices: a
+member the current registration leaves unbounded makes the wait eligible
+outright, and a member still bounded makes it eligible when that profile's
+surviving reservation count is below the current bound. Without that pass a
+raised or removed bound would not admit work until an unrelated old invocation
+happened to finish, since a configuration edit produces neither a release nor an
+availability update. Release atomically consumes the wait, creates a fresh
+`Prepared` successor attempt, and returns the same turn to `Running` with a
+fresh availability chain while carrying forward member evidence whose reset has
+not passed, every durable membership exclusion, and every profile quarantine.
 
 Eligibility is permission to retry selection, not a guarantee of a slot. One
 release can make several contended waits eligible while admitting only one, so
