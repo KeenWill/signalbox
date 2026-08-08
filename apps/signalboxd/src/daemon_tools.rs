@@ -1521,8 +1521,10 @@ mod tests {
     }
 
     struct RelativeConfiguredTargetDirInput<'a> {
+        current_executable: &'a Path,
         configured: &'a Path,
         invocation_directory: &'a Path,
+        known_targets: &'a BTreeSet<OsString>,
     }
 
     struct DefaultTargetRecognition<'a> {
@@ -1580,8 +1582,10 @@ mod tests {
             std::env::var_os("PWD")
                 .and_then(|directory| {
                     resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
+                        current_executable: current,
                         configured: &configured,
                         invocation_directory: Path::new(&directory),
+                        known_targets,
                     })
                 })
                 .unwrap_or(configured)
@@ -1600,6 +1604,31 @@ mod tests {
         (!input.configured.is_absolute())
             .then(|| input.invocation_directory.join(input.configured))
             .and_then(|candidate| fs::canonicalize(candidate).ok())
+            .filter(|candidate| {
+                configured_target_matches_executable(
+                    input.current_executable,
+                    candidate,
+                    input.known_targets,
+                )
+            })
+    }
+
+    fn configured_target_matches_executable(
+        current_executable: &Path,
+        candidate: &Path,
+        known_targets: &BTreeSet<OsString>,
+    ) -> bool {
+        let artifact_parent = current_executable
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent);
+        artifact_parent.is_some_and(|artifact_parent| {
+            artifact_parent == candidate
+                || artifact_parent.parent() == Some(candidate)
+                    && artifact_parent
+                        .file_name()
+                        .is_some_and(|name| known_targets.contains(name))
+        })
     }
 
     #[track_caller]
@@ -2120,8 +2149,10 @@ mod tests {
             .join(SYNTHETIC_CARGO_TARGET)
             .join("debug/deps/daemon-tools-test");
         let resolved = resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
+            current_executable: &executable,
             configured: Path::new("target-link"),
             invocation_directory: invocation.path(),
+            known_targets: &synthetic_known_targets(),
         })
         .expect("relative target symlink resolves from the invocation root");
         let configured_target_dir =
@@ -2337,8 +2368,10 @@ mod tests {
         fs::create_dir(&target_dir).expect("fixture target directory exists");
         let executable = target_dir.join("debug/deps/daemon-tools-test");
         let resolved = resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
+            current_executable: &executable,
             configured: Path::new("."),
             invocation_directory: &target_dir,
+            known_targets: &synthetic_known_targets(),
         })
         .expect("dot-relative target root resolves from the invocation directory");
         let configured_target_dir =
@@ -2358,6 +2391,36 @@ mod tests {
             expected_target: None,
             recognized_target: Some(SYNTHETIC_CARGO_TARGET),
         });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_rejects_a_stale_pwd_target_and_recovers_from_the_executable() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let actual_invocation = parent.path().join("actual-invocation");
+        let stale_invocation = parent.path().join("stale-invocation");
+        let configured = Path::new("target");
+        let actual_target = actual_invocation.join(configured);
+        let stale_target = stale_invocation.join(configured);
+        fs::create_dir_all(&actual_target).expect("actual target directory exists");
+        fs::create_dir_all(&stale_target).expect("stale target directory exists");
+        let executable = actual_target.join("debug/deps/daemon-tools-test");
+
+        let target_dir =
+            resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
+                current_executable: &executable,
+                configured,
+                invocation_directory: &stale_invocation,
+                known_targets: &BTreeSet::new(),
+            })
+            .unwrap_or_else(|| {
+                configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                    current_executable: &executable,
+                    configured,
+                    known_targets: &BTreeSet::new(),
+                })
+            });
+
+        assert_eq!(target_dir, actual_target);
     }
 
     #[test]
