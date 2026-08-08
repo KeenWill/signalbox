@@ -3863,8 +3863,7 @@ impl StoppedToolRoundModelCallIdentities {
 }
 pub struct FailedModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...),
-// failure_entry() and terminal_frontier() — the two components a collision
-// retry must both refresh, readable so a caller can check each one
+// failure_entry() and terminal_frontier()
 pub struct CancelledModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...) and into_ambiguous()
 pub struct PhysicalCancellationModelCallTurnIdentities { /* private */ }
@@ -7725,13 +7724,8 @@ pub struct InProcessToolDispatchPermit { /* private */ }
 
 ## application: tool_execution_test_support
 
-Compiled only under the `test-support` feature, which provider-adapter crates
-enable from their dev-dependencies. It is the one home for the machinery every
-adapter needs to reach its own executor — a prepared batch, a transaction that
-serves it, a recorder for the returned evidence — so a second adapter cannot
-grow a private copy that drifts from the first.
-
 ```rust
+// Compiled only under the `test-support` feature.
 pub struct PreparedAttemptIdentities {
     pub session: SessionId,
     pub turn: TurnId,

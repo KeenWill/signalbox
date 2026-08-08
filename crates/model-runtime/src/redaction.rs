@@ -1747,12 +1747,12 @@ mod tests {
         sink.flush();
         drop(sink);
 
+        // Checked against every emitted fragment first: a leak forwarded on
+        // another correlation or tool index never reaches the projection below.
+        assert_no_observation_carries(&observed, "fixture/secret");
+        assert_no_observation_carries(&observed, "secret");
         let arguments = joined_arguments(&observed, "call-1", 0);
         assert_eq!(arguments, r#"{"path":"[redacted]"}"#);
-        assert!(
-            !arguments.contains("secret"),
-            "the credential must not survive reassembly: {arguments}"
-        );
     }
 
     /// The reconstructed arguments for one tool index, as a reader of the
@@ -1763,6 +1763,39 @@ mod tests {
     /// deltas. Asserting exact fragment boundaries would fail a
     /// behaviour-preserving change that buffered the safe prefix or coalesced
     /// it with the replacement, while producing identical secure output.
+    /// Asserts `secret` appears in nothing the sink emitted, on any stream.
+    ///
+    /// [`joined_arguments`] deliberately projects one correlation and one tool
+    /// index, so a credential forwarded on a *different* correlation or index
+    /// is invisible to it: the reconstruction would still equal the redacted
+    /// expectation and its absence check would still pass. INV-035 is a claim
+    /// about everything the scrubber emits, so it is checked against
+    /// everything the scrubber emits. Exhaustive over `ObservationFact` so a
+    /// new text-bearing fact cannot be added without deciding whether the
+    /// credential could ride out on it.
+    fn assert_no_observation_carries(observed: &[Observation<String>], secret: &str) {
+        for observation in observed {
+            let carried = match &observation.fact {
+                ObservationFact::TextDelta { text, .. }
+                | ObservationFact::ThinkingDelta { text, .. } => text.as_str(),
+                ObservationFact::ToolArgumentsDelta { fragment, .. } => fragment.as_str(),
+                ObservationFact::ToolCallProposed(proposal) => proposal.arguments_json.as_str(),
+                ObservationFact::SendCommenced
+                | ObservationFact::ExchangeEstablished(_)
+                | ObservationFact::ProviderModelReported(_)
+                | ObservationFact::UsageReported(_)
+                | ObservationFact::FinishReported(_) => "",
+            };
+            assert!(
+                !carried.contains(secret),
+                "the credential must not be emitted on any stream; \
+                 found it on correlation {}: {:?}",
+                observation.correlation,
+                observation.fact
+            );
+        }
+    }
+
     fn joined_arguments(observed: &[Observation<String>], correlation: &str, index: u32) -> String {
         observed
             .iter()
@@ -1802,12 +1835,10 @@ mod tests {
         sink.flush();
         drop(sink);
 
+        assert_no_observation_carries(&observed, "key\u{1f600}loop");
+        assert_no_observation_carries(&observed, "loop");
         let arguments = joined_arguments(&observed, "call-1", 0);
         assert_eq!(arguments, r#"{"emoji":"[redacted]"}"#);
-        assert!(
-            !arguments.contains("loop"),
-            "the credential must not survive reassembly: {arguments}"
-        );
     }
 
     /// INV-035: a held credential prefix ending inside an escape is replaced
@@ -1835,12 +1866,11 @@ mod tests {
         sink.flush();
         drop(sink);
 
+        // The held prefix must be replaced rather than forwarded — on this
+        // index, on the index that displaced it, or on any other stream.
+        assert_no_observation_carries(&observed, "fixture");
         let held = joined_arguments(&observed, "call-1", 0);
         assert_eq!(held, r#"{"path":"[redacted]"#);
-        assert!(
-            !held.contains("fixture"),
-            "the held prefix must be replaced, not forwarded: {held}"
-        );
         // The other index is untouched, and — the point of this case — no
         // later observation can reassemble the credential across the boundary.
         assert_eq!(joined_arguments(&observed, "call-1", 1), r#"{"other":1}"#);

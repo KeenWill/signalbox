@@ -2911,16 +2911,54 @@ mod tests {
                 }),
         )
         .collect::<Vec<_>>();
+        // Only the first round is prepared from the turn's starting frontier.
+        // Every continuation call is prepared from the preceding round's
+        // *result* frontier, which already contains that round's proposal and
+        // its paired result — so round `n` sees the origin plus `n` pairs.
+        // Giving all `rounds` calls the starting snapshot would describe a
+        // history the implemented tool loop cannot produce, letting the
+        // saturation bound be exercised against an impossible turn.
+        let round_frontiers = (0_u128..)
+            .take(rounds)
+            .map(|round| {
+                if round == 0 {
+                    starting_frontier
+                } else {
+                    identity(7_000 + round, ContextFrontierId::from_uuid)
+                }
+            })
+            .collect::<Vec<_>>();
+        let round_snapshots = round_frontiers
+            .iter()
+            .enumerate()
+            .map(|(preceding_rounds, frontier)| {
+                ResolvedContextFrontierReconstitutionInput::new(
+                    session_id,
+                    *frontier,
+                    [origin_entry]
+                        .into_iter()
+                        .chain(
+                            tool_use_entries
+                                .iter()
+                                .zip(&denial_entries)
+                                .take(preceding_rounds)
+                                .flat_map(|(proposal, result)| [*proposal, *result]),
+                        )
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
         let producing_calls = (0_u128..)
             .zip(&requests)
-            .map(|(round, request)| {
+            .zip(&round_frontiers)
+            .map(|((round, request), frontier)| {
                 ModelCallReconstitutionInput::new(
                     request.producing_call(),
                     turn_id,
                     identity(4_000 + round, TurnAttemptId::from_uuid),
                     selection,
                     target,
-                    starting_frontier,
+                    *frontier,
                     ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
                 )
             })
@@ -2947,11 +2985,7 @@ mod tests {
                 },
             )],
             semantic_entries,
-            vec![ResolvedContextFrontierReconstitutionInput::new(
-                session_id,
-                starting_frontier,
-                vec![origin_entry],
-            )],
+            round_snapshots,
             Some(SessionAcceptanceTailReconstitutionInput::new(
                 session_id,
                 accepted_input,
