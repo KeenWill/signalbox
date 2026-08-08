@@ -90,9 +90,21 @@ DECLARE
     lifecycle turn_lifecycle%ROWTYPE;
     placement runner_session_placement_record%ROWTYPE;
 BEGIN
+    SELECT * INTO lifecycle
+      FROM turn_lifecycle
+     WHERE session_id = checked_session_id
+       AND turn_id = checked_turn_id;
+    IF NOT FOUND OR lifecycle.active_phase_kind IS DISTINCT FROM
+        'awaiting_runner_recovery'
+    THEN
+        RETURN;
+    END IF;
+
     -- Both the lifecycle-side and placement-side deferred checks rendezvous on
-    -- the scheduler row.  A waiter that lost the race then evaluates the
-    -- relationship from a fresh READ COMMITTED statement snapshot.
+    -- the scheduler row.  Ordinary lifecycle checks return before adding a
+    -- reverse lifecycle-to-scheduler lock edge.  A recovery waiter that lost
+    -- the race then evaluates the relationship from a fresh READ COMMITTED
+    -- statement snapshot.
     PERFORM 1
       FROM session_scheduler
      WHERE session_id = checked_session_id
