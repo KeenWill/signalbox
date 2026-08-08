@@ -286,10 +286,13 @@ async fn run_case(
     timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
         .await
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
-    if forced_tool == Some(UNSANDBOXED_EXEC_NAME)
-        && database
-            .decide_pending_unsandboxed_requests(session, turn)
-            .await?
+    if database
+        .decide_pending_unsandboxed_requests(
+            session,
+            turn,
+            forced_tool == Some(UNSANDBOXED_EXEC_NAME),
+        )
+        .await?
     {
         timeout(TURN_TIMEOUT, execution.resume_active(session))
             .await
@@ -1377,6 +1380,7 @@ impl EvalDatabase {
         &self,
         session: SessionId,
         turn: TurnId,
+        approve_exact_forced_request: bool,
     ) -> EvalResult<bool> {
         let mut decided_any = false;
         loop {
@@ -1392,8 +1396,11 @@ impl EvalDatabase {
                 .iter()
                 .find(|candidate| candidate.id() == request)
                 .ok_or_else(|| io::Error::other("the pending approval request is absent"))?;
-            let decision =
-                forced_unsandboxed_approval_decision(pending.name().as_str(), pending.arguments());
+            let decision = exec_eval_approval_decision(
+                approve_exact_forced_request,
+                pending.name().as_str(),
+                pending.arguments(),
+            );
             let mut service = DecideToolRequestService::new(UuidV7ToolLoopIdGenerator, repository);
             let prepared = service
                 .execute(
@@ -1415,11 +1422,12 @@ impl EvalDatabase {
     }
 }
 
-fn forced_unsandboxed_approval_decision(
+fn exec_eval_approval_decision(
+    approve_exact_forced_request: bool,
     name: &str,
     arguments: &NormalizedToolArguments,
 ) -> ToolApprovalDecision {
-    if ExecEvalCase::ForcedUnsandboxed.admits(name, arguments) {
+    if approve_exact_forced_request && ExecEvalCase::ForcedUnsandboxed.admits(name, arguments) {
         ToolApprovalDecision::Approve
     } else {
         ToolApprovalDecision::Deny { reason: None }
@@ -2446,7 +2454,21 @@ fn forced_unsandboxed_eval_denies_model_argument_drift() {
     .expect("drifted unsandboxed fixture arguments normalize");
 
     assert_eq!(
-        forced_unsandboxed_approval_decision(UNSANDBOXED_EXEC_NAME, &drifted),
+        exec_eval_approval_decision(true, UNSANDBOXED_EXEC_NAME, &drifted),
+        ToolApprovalDecision::Deny { reason: None }
+    );
+}
+
+#[test]
+fn unforced_exec_eval_denies_the_exact_forced_unsandboxed_fixture() {
+    let [_, unsandboxed, _] = EXEC_CASES;
+    let exact_forced = NormalizedToolArguments::try_from_provider_text(String::from(
+        unsandboxed.expected_arguments,
+    ))
+    .expect("the exact forced unsandboxed fixture arguments normalize");
+
+    assert_eq!(
+        exec_eval_approval_decision(false, UNSANDBOXED_EXEC_NAME, &exact_forced),
         ToolApprovalDecision::Deny { reason: None }
     );
 }
