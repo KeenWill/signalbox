@@ -1879,6 +1879,10 @@ mod tests {
         let Some(configured) = std::env::var_os(variable) else {
             return;
         };
+        if configured.is_empty() {
+            command.env_remove(variable);
+            return;
+        }
         let invocation_directory = verified_compiler_invocation_directory();
         let wrapper = compiler_wrapper_command_for(&configured, invocation_directory.as_deref())
             .unwrap_or_else(|| {
@@ -1892,6 +1896,9 @@ mod tests {
         invocation_directory: Option<&Path>,
     ) -> Option<PathBuf> {
         let configured = Path::new(configured);
+        if configured.as_os_str().is_empty() {
+            return None;
+        }
         if configured.is_absolute() || is_bare_program_name(configured) {
             return Some(configured.to_path_buf());
         }
@@ -2580,6 +2587,14 @@ mod tests {
     }
 
     #[test]
+    fn bridge_compiler_wrapper_removes_an_empty_cache_bypass_override() {
+        assert_eq!(
+            compiler_wrapper_command_for(OsStr::new(""), Some(Path::new("synthetic-workspace"))),
+            None
+        );
+    }
+
+    #[test]
     fn bridge_rustc_command_preserves_a_bare_program_name_for_path_lookup() {
         assert_eq!(
             rustc_command_for(
@@ -2686,6 +2701,8 @@ mod tests {
     const BRIDGE_CHILD_TEST_TIMEOUT: Duration = Duration::from_millis(25);
     const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
     const BRIDGE_WAIT_CHILD_FIXTURE_LIFETIME: Duration = Duration::from_secs(2);
+    #[cfg(unix)]
+    const BRIDGE_STDOUT_DESCENDANT_CLEANUP_LIMIT: Duration = Duration::from_secs(1);
     const BRIDGE_WAIT_DESCENDANT_FIXTURE_LIFETIME: Duration = Duration::from_secs(30);
     #[cfg(target_os = "linux")]
     const SYNTHETIC_BLOCKING_DESCRIPTION_FRAGMENT: &str = "synthetic-padding";
@@ -2730,6 +2747,7 @@ mod tests {
                 return Err(error);
             }
         };
+        terminate_owned_process_group(&mut child);
         let stdout = join_bounded_stdout(reader)?;
         Ok(Some(BoundedCommandOutput { status, stdout }))
     }
@@ -2806,6 +2824,22 @@ mod tests {
             .expect("bounded-wait descendant is observed");
     }
 
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess fixture that exits after leaving a stdout descendant"]
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the parent must exit without waiting so the bounded caller proves group cleanup"
+    )]
+    fn bridge_wait_child_leaving_stdout_descendant_fixture() {
+        let current = std::env::current_exe().expect("test executable path is available");
+        Command::new(current)
+            .arg("daemon_tools::tests::bridge_wait_child_fixture")
+            .args(["--exact", "--ignored"])
+            .spawn()
+            .expect("stdout descendant starts");
+    }
+
     #[test]
     fn wait_for_child_returns_none_at_its_deadline_and_cleanup_reaps() {
         let current = std::env::current_exe().expect("test executable path is available");
@@ -2846,6 +2880,24 @@ mod tests {
                 .expect("bounded inventory command is observed")
                 .is_none()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_command_output_cleans_up_stdout_descendants_after_parent_exit() {
+        let current = std::env::current_exe().expect("test executable path is available");
+        let mut command = Command::new(current);
+        command
+            .arg("daemon_tools::tests::bridge_wait_child_leaving_stdout_descendant_fixture")
+            .args(["--exact", "--ignored"]);
+        let started = Instant::now();
+
+        assert!(
+            bounded_command_output(&mut command, BRIDGE_EXIT_TIMEOUT)
+                .expect("bounded command observes the exited parent")
+                .is_some()
+        );
+        assert!(started.elapsed() < BRIDGE_STDOUT_DESCENDANT_CLEANUP_LIMIT);
     }
 
     #[cfg(unix)]
