@@ -443,7 +443,7 @@ const WEB_CASES: &[ForcedCase] = &[
     },
 ];
 
-const EXEC_CASES: &[ForcedCase] = &[
+const EXEC_CASES: &[ForcedCase; 3] = &[
     ForcedCase {
         name: SANDBOXED_EXEC_NAME,
         expected_arguments: EXEC_FORCED_SANDBOXED_ARGUMENTS,
@@ -2493,17 +2493,25 @@ fn unforced_exec_tier_rejects_an_unconfined_execution() {
 
 #[test]
 fn every_forced_exec_fixture_is_admitted_by_its_own_dispatch_case() -> EvalResult {
-    for case in EXEC_CASES {
-        let arguments =
-            NormalizedToolArguments::try_from_provider_text(case.expected_arguments.to_owned())
-                .map_err(|_| io::Error::other("a forced exec fixture does not normalize"))?;
+    let [sandboxed, unsandboxed, diagnostics] = EXEC_CASES;
 
-        assert!(
-            ExecEvalCase::for_forced_tool(case.name)?.admits(case.name, &arguments),
-            "the dispatch allowlist rejects the reported fixture for {}",
-            case.name
-        );
-    }
+    assert_forced_exec_fixture_is_admitted(sandboxed)?;
+    assert_forced_exec_fixture_is_admitted(unsandboxed)?;
+    assert_forced_exec_fixture_is_admitted(diagnostics)?;
+    Ok(())
+}
+
+#[track_caller]
+fn assert_forced_exec_fixture_is_admitted(case: &ForcedCase) -> EvalResult {
+    let arguments =
+        NormalizedToolArguments::try_from_provider_text(case.expected_arguments.to_owned())
+            .map_err(|_| io::Error::other("a forced exec fixture does not normalize"))?;
+
+    assert!(
+        ExecEvalCase::for_forced_tool(case.name)?.admits(case.name, &arguments),
+        "the dispatch allowlist rejects the reported fixture for {}",
+        case.name
+    );
     Ok(())
 }
 
