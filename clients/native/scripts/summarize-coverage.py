@@ -393,6 +393,23 @@ def main(argv: list[str]) -> int:
     # workflow builds both flags in one place.
     if arguments.baseline is not None and arguments.baseline_label is None:
         parser.error("--baseline requires --baseline-label")
+    # Provenance is not decoration: the label says *which* baseline this is and
+    # the SHA and date say which measurement it was, which is the whole of what
+    # makes a delta checkable by the reader it is shown to. Defaulting them to
+    # empty strings let a direct call render "``, measured ." beside a
+    # confidently attributed delta — a report that looks authoritative and
+    # states nothing. The workflows always pass all three; this is the CLI
+    # keeping the same contract for anyone invoking it by hand.
+    absent = [
+        flag
+        for flag, value in (
+            ("--baseline-sha", arguments.baseline_sha),
+            ("--baseline-date", arguments.baseline_date),
+        )
+        if not value.strip()
+    ]
+    if arguments.baseline is not None and absent:
+        parser.error(f"--baseline requires {' and '.join(absent)}")
 
     document = json.loads(arguments.json.read_text(encoding="utf-8"))
     baseline: Baseline | None = None

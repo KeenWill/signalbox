@@ -395,17 +395,41 @@ jobs:
             # failed request produced an empty `step_ok`, which then read as
             # "this run did not finish its tests" — false, and it made the
             # could-not-be-read branch unreachable.
+            # `filter=all`, because the endpoint defaults to `filter=latest`
+            # and that is the wrong set here. Re-running only the failed jobs of
+            # a run creates a new attempt containing just those jobs, so a
+            # `swift-validate` that succeeded first time is absent from the
+            # latest attempt — and its steps with it. The default read that
+            # absence as `missing` and discarded a run whose native coverage was
+            # complete, falling back to an older baseline for no reason.
+            #
+            # This is the same re-run case the artifact-dating comment above
+            # already accounts for; the two now agree about what a re-run means.
             if ! jobs_json="$(gh api \
-              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100")"; then
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=all&per_page=100")"; then
               [ -n "$reason" ] || reason="the jobs of run $run_id could not be read"
               continue
             fi
+            # Judged on the most recent attempt that actually contains the step,
+            # not on every attempt at once: with all attempts in hand, an early
+            # failure that was subsequently re-run and fixed would otherwise
+            # still read as "did not finish its tests". Attempts that never ran
+            # the step say nothing about it and are skipped rather than counted
+            # as a missing step.
+            #
+            # `run_attempt` is defaulted for a job record that predates the
+            # field, which lands it in attempt 1 alongside its peers.
             step_ok="$(printf '%s' "$jobs_json" \
               | jq -r --arg step "$TEST_STEP_NAME" '
-                  [.jobs[]?.steps[]? | select(.name == $step)] as $steps
-                  | if ($steps | length) == 0 then "missing"
-                    elif all($steps[]; .conclusion == "success") then "yes"
-                    else "no"
+                  [.jobs[]? | select(any(.steps[]?; .name == $step))] as $ran
+                  | if ($ran | length) == 0 then "missing"
+                    else ([$ran[] | .run_attempt // 1] | max) as $attempt
+                      | [$ran[]
+                         | select((.run_attempt // 1) == $attempt)
+                         | .steps[]? | select(.name == $step)] as $steps
+                      | if all($steps[]; .conclusion == "success") then "yes"
+                        else "no"
+                        end
                     end')"
             # A run predating the step's current name reports `missing`, which
             # is a name mismatch and not a statement about its tests.

@@ -9,6 +9,8 @@ simulator.
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -23,6 +25,12 @@ sys.modules["summarize_coverage"] = summarize_coverage
 _specification.loader.exec_module(summarize_coverage)
 
 REPOSITORY_ROOT = Path("/repo")
+
+
+# The line total every case in this file measures against. It is a constant
+# rather than a knob: no test varies the denominator, and a percentage over
+# 100 lines is the one a reader can check in their head.
+CANONICAL_TOTAL = 100
 
 
 def source_file(path: str, *, executable: int, covered: int) -> dict:
@@ -54,8 +62,15 @@ def report(*targets: dict) -> dict:
     return {"targets": list(targets)}
 
 
-def baseline_of(*, executable: int, covered: int, label: str | None = None) -> object:
-    """One baseline whose only knob is the line percentage it carries."""
+def baseline_of(*, covered: int, executable: int = CANONICAL_TOTAL, label: str | None = None) -> object:
+    """One baseline whose only knob is the covered count it carries.
+
+    The denominator is defaulted because no test varies it: every case fixes it
+    at the canonical total and moves `covered` alone, so repeating it at each
+    call made the sites look denominator-sensitive when they are not. `covered`
+    stays explicit — the delta each test asserts is derived from it, so it is a
+    value the test genuinely cares about (testing-style rules 4 and 5).
+    """
     return summarize_coverage.Baseline(
         covered=covered,
         executable=executable,
@@ -172,8 +187,12 @@ class ReportOnlyTests(unittest.TestCase):
 TITLE = "Native client coverage (report only)"
 
 
-def one_target_report(*, executable: int, covered: int) -> dict:
-    """One product target at a chosen coverage, which is all a delta needs."""
+def one_target_report(*, covered: int, executable: int = CANONICAL_TOTAL) -> dict:
+    """One product target at a chosen coverage, which is all a delta needs.
+
+    Same split as `baseline_of`: `covered` is the axis tests move, and the
+    denominator is the constant they all share.
+    """
     return report(
         target("SignalboxNative.app", source_file("/repo/App.swift", executable=executable, covered=covered))
     )
@@ -184,11 +203,11 @@ class BaselineDeltaTests(unittest.TestCase):
         """A delta is only readable with its sign, and the direction is the
         whole reason it is rendered at all."""
         rendered = summarize_coverage.render(
-            one_target_report(executable=100, covered=60),
+            one_target_report(covered=60),
             REPOSITORY_ROOT,
             0,
             TITLE,
-            baseline=baseline_of(executable=100, covered=50),
+            baseline=baseline_of(covered=50),
         )
 
         self.assertIn("+10.00 pp", rendered)
@@ -197,11 +216,11 @@ class BaselineDeltaTests(unittest.TestCase):
         """A drop reads as a drop. Nothing acts on it — this measurement
         gates nothing — but a reader must be able to see it."""
         rendered = summarize_coverage.render(
-            one_target_report(executable=100, covered=40),
+            one_target_report(covered=40),
             REPOSITORY_ROOT,
             0,
             TITLE,
-            baseline=baseline_of(executable=100, covered=50),
+            baseline=baseline_of(covered=50),
         )
 
         self.assertIn("-10.00 pp", rendered)
@@ -210,11 +229,11 @@ class BaselineDeltaTests(unittest.TestCase):
         """An unchanged percentage is a measurement, not a missing one, and
         `+0.00 pp` says so where a silent headline would not."""
         rendered = summarize_coverage.render(
-            one_target_report(executable=100, covered=50),
+            one_target_report(covered=50),
             REPOSITORY_ROOT,
             0,
             TITLE,
-            baseline=baseline_of(executable=100, covered=50),
+            baseline=baseline_of(covered=50),
         )
 
         self.assertIn("+0.00 pp", rendered)
@@ -223,11 +242,11 @@ class BaselineDeltaTests(unittest.TestCase):
         """The difference between two percentages is a percentage-point
         difference; writing it as a percentage would misstate it."""
         rendered = summarize_coverage.render(
-            one_target_report(executable=100, covered=60),
+            one_target_report(covered=60),
             REPOSITORY_ROOT,
             0,
             TITLE,
-            baseline=baseline_of(executable=100, covered=50),
+            baseline=baseline_of(covered=50),
         )
 
         self.assertNotIn("+10.00%", rendered)
@@ -245,20 +264,23 @@ class BaselineDeltaTests(unittest.TestCase):
             REPOSITORY_ROOT,
             0,
             TITLE,
-            baseline=baseline_of(executable=100, covered=50),
+            baseline=baseline_of(covered=50),
         )
 
-        # Read back off the product target the fixture built, so a
-        # behaviour-preserving change to those numbers moves the expectation
-        # with them instead of reading as a regression. Naming the product
-        # target here also states that the `.xctest` target is the excluded
-        # one, which is the property this test exists for.
+        # The counters are read back off the product target the fixture built,
+        # so a behaviour-preserving change to those numbers moves the
+        # expectation with them. Naming the product target here also states
+        # that the `.xctest` target is the excluded one, which is the property
+        # this test exists for.
+        #
+        # The percentage stays a literal. Recomputing it as
+        # `100.0 * covered / executable` is the body of `percent_value`, so the
+        # assertion would agree with the summarizer by construction and pass
+        # however wrong that shared arithmetic became.
         product = document["targets"][0]
-        covered = product["coveredLines"]
-        executable = product["executableLines"]
-        share = 100.0 * covered / executable
         self.assertIn(
-            f"**{share:.2f}%** of product lines covered ({covered}/{executable})",
+            f"**60.00%** of product lines covered "
+            f"({product['coveredLines']}/{product['executableLines']})",
             rendered,
         )
         self.assertIn("+10.00 pp", rendered)
@@ -268,11 +290,11 @@ class BaselineDeltaTests(unittest.TestCase):
         delta against that same base is the branch's own doing, and the
         report says exactly that."""
         rendered = summarize_coverage.render(
-            one_target_report(executable=100, covered=60),
+            one_target_report(covered=60),
             REPOSITORY_ROOT,
             0,
             TITLE,
-            baseline=baseline_of(executable=100, covered=50, label=summarize_coverage.BASE),
+            baseline=baseline_of(covered=50, label=summarize_coverage.BASE),
         )
 
         self.assertIn("the base this pull request is open against", rendered)
@@ -284,11 +306,11 @@ class BaselineDeltaTests(unittest.TestCase):
         a complete baseline that reads as a large negative delta, which is
         indistinguishable from a real regression unless the report says so."""
         rendered = summarize_coverage.render(
-            one_target_report(executable=100, covered=60),
+            one_target_report(covered=60),
             REPOSITORY_ROOT,
             0,
             TITLE,
-            baseline=baseline_of(executable=100, covered=50, label=summarize_coverage.BASE),
+            baseline=baseline_of(covered=50, label=summarize_coverage.BASE),
             measurement_incomplete=True,
         )
 
@@ -306,11 +328,11 @@ class BaselineDeltaTests(unittest.TestCase):
         """Negative control for the case above: the withdrawal is driven by
         the flag, not present unconditionally."""
         rendered = summarize_coverage.render(
-            one_target_report(executable=100, covered=60),
+            one_target_report(covered=60),
             REPOSITORY_ROOT,
             0,
             TITLE,
-            baseline=baseline_of(executable=100, covered=50, label=summarize_coverage.BASE),
+            baseline=baseline_of(covered=50, label=summarize_coverage.BASE),
             measurement_incomplete=False,
         )
 
@@ -322,11 +344,11 @@ class BaselineDeltaTests(unittest.TestCase):
         is not attributable to this branch alone. Rendering both the same way
         would make an unattributable number read as an attributable one."""
         rendered = summarize_coverage.render(
-            one_target_report(executable=100, covered=60),
+            one_target_report(covered=60),
             REPOSITORY_ROOT,
             0,
             TITLE,
-            baseline=baseline_of(executable=100, covered=50, label=summarize_coverage.LATEST_MAIN),
+            baseline=baseline_of(covered=50, label=summarize_coverage.LATEST_MAIN),
         )
 
         self.assertIn("**not** the base this pull request is open against", rendered)
@@ -343,10 +365,10 @@ class BaselineDeltaTests(unittest.TestCase):
         """Native coverage is measured on a main push only when that push
         touched the native client, so a baseline can be far behind `main`.
         The date is the only thing that tells a reader how far."""
-        baseline = baseline_of(executable=100, covered=50)
+        baseline = baseline_of(covered=50)
 
         rendered = summarize_coverage.render(
-            one_target_report(executable=100, covered=60),
+            one_target_report(covered=60),
             REPOSITORY_ROOT,
             0,
             TITLE,
@@ -365,7 +387,7 @@ class BaselineAbsenceTests(unittest.TestCase):
         reason = "run 42 measured no native coverage"
 
         rendered = summarize_coverage.render(
-            one_target_report(executable=100, covered=60),
+            one_target_report(covered=60),
             REPOSITORY_ROOT,
             0,
             TITLE,
@@ -379,17 +401,16 @@ class BaselineAbsenceTests(unittest.TestCase):
         """A push to main measures the tree that becomes the next baseline
         and compares against nothing, so its report must be unchanged from
         what it was before deltas existed."""
-        document = one_target_report(executable=100, covered=60)
+        document = one_target_report(covered=60)
 
         rendered = summarize_coverage.render(document, REPOSITORY_ROOT, 0, TITLE)
 
         self.assertNotIn("baseline", rendered.lower())
+        # A literal percentage, for the reason given in the delta test above.
         product = document["targets"][0]
-        covered = product["coveredLines"]
-        executable = product["executableLines"]
-        share = 100.0 * covered / executable
         self.assertIn(
-            f"**{share:.2f}%** of product lines covered ({covered}/{executable}).",
+            f"**60.00%** of product lines covered "
+            f"({product['coveredLines']}/{product['executableLines']}).",
             rendered,
         )
 
@@ -499,6 +520,66 @@ class BaselineLoadingTests(unittest.TestCase):
 
         self.assertIsNone(baseline)
         self.assertEqual(reason, "the baseline report measured no product lines")
+
+
+class BaselineProvenanceContractTests(unittest.TestCase):
+    """The CLI refuses a baseline it cannot attribute.
+
+    Mirrors the rust summarizer's contract tests, because the two scripts
+    mirror each other's argument surface: every provenance value defaulted to
+    an empty string, so a caller supplying only `--baseline-label` produced a
+    confidently attributed delta above a provenance line reading
+    "``, measured .".
+    """
+
+    def arguments_for(self, *baseline: str) -> list[str]:
+        return [str(self.report), "--title", TITLE, *baseline]
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        payload = json.dumps(one_target_report(covered=50))
+        self.report = written(self.directory.name, "coverage.json", payload)
+        self.baseline = written(self.directory.name, "baseline.json", payload)
+
+    def test_a_baseline_without_a_sha_is_refused(self) -> None:
+        with self.assertRaises(SystemExit) as refusal, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            summarize_coverage.main(self.arguments_for(
+                "--baseline", str(self.baseline),
+                "--baseline-label", summarize_coverage.BASE,
+                "--baseline-date", "2026-08-01T09:00:00Z",
+            ))
+
+        self.assertNotEqual(refusal.exception.code, 0)
+        self.assertIn("--baseline-sha", stderr.getvalue())
+
+    def test_a_baseline_without_a_date_is_refused(self) -> None:
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            summarize_coverage.main(self.arguments_for(
+                "--baseline", str(self.baseline),
+                "--baseline-label", summarize_coverage.BASE,
+                "--baseline-sha", "abc1234",
+            ))
+
+        self.assertIn("--baseline-date", stderr.getvalue())
+
+    def test_complete_provenance_is_accepted(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()) as rendered:
+            exit_code = summarize_coverage.main(self.arguments_for(
+                "--baseline", str(self.baseline),
+                "--baseline-label", summarize_coverage.BASE,
+                "--baseline-sha", "abc1234",
+                "--baseline-date", "2026-08-01T09:00:00Z",
+            ))
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("abc1234", rendered.getvalue())
+
+    def test_no_baseline_needs_no_provenance(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            exit_code = summarize_coverage.main(self.arguments_for())
+
+        self.assertEqual(exit_code, 0)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ isolation and deterministically, without a compile or an instrumented test run.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -28,12 +30,19 @@ from summarize_coverage import (  # noqa: E402
     crate_of,
     least_covered_files,
     load_baseline,
+    main,
     read_file_summaries,
     render,
     total_of,
 )
 
 REPO_ROOT = Path("/repo")
+
+
+# The line total every baseline in this file measures against. A constant
+# rather than a knob: no test varies the denominator, and a percentage over
+# 100 lines is the one a reader can check in their head.
+CANONICAL_TOTAL = 100
 
 
 def coverage_file(filename: str, *, lines: int, covered: int) -> dict:
@@ -59,8 +68,15 @@ def export(*files: dict) -> dict:
     return {"type": EXPORT_TYPE, "version": "2.0.1", "data": [{"files": list(files)}]}
 
 
-def baseline_of(*, lines: int, covered: int, label: str = BASE) -> Baseline:
-    """One baseline whose only knob is the line percentage it carries."""
+def baseline_of(*, covered: int, lines: int = CANONICAL_TOTAL, label: str = BASE) -> Baseline:
+    """One baseline whose only knob is the covered count it carries.
+
+    The denominator is defaulted because no test varies it: every case fixes it
+    at the canonical total and moves `covered` alone, so repeating it at each
+    call made the sites look denominator-sensitive when they are not. `covered`
+    stays explicit — the delta each test asserts is derived from it, so it is a
+    value the test genuinely cares about (testing-style rules 4 and 5).
+    """
     counter = Counter(count=lines, covered=covered)
     return Baseline(
         total=Summary(lines=counter, functions=counter, regions=counter),
@@ -238,7 +254,7 @@ class BaselineDeltaTests(unittest.TestCase):
             REPO_ROOT,
             0,
             "Rust coverage (report only)",
-            baseline=baseline_of(lines=100, covered=50),
+            baseline=baseline_of(covered=50),
         )
 
         self.assertIn("+10.00 pp", report)
@@ -253,7 +269,7 @@ class BaselineDeltaTests(unittest.TestCase):
             REPO_ROOT,
             0,
             "Rust coverage (report only)",
-            baseline=baseline_of(lines=100, covered=50),
+            baseline=baseline_of(covered=50),
         )
 
         self.assertIn("-10.00 pp", report)
@@ -268,7 +284,7 @@ class BaselineDeltaTests(unittest.TestCase):
             REPO_ROOT,
             0,
             "Rust coverage (report only)",
-            baseline=baseline_of(lines=100, covered=50),
+            baseline=baseline_of(covered=50),
         )
 
         self.assertIn("+0.00 pp", report)
@@ -283,7 +299,7 @@ class BaselineDeltaTests(unittest.TestCase):
             REPO_ROOT,
             0,
             "Rust coverage (report only)",
-            baseline=baseline_of(lines=100, covered=50),
+            baseline=baseline_of(covered=50),
         )
 
         self.assertNotIn("+10.00%", report)
@@ -299,7 +315,7 @@ class BaselineDeltaTests(unittest.TestCase):
             REPO_ROOT,
             0,
             "Rust coverage (report only)",
-            baseline=baseline_of(lines=100, covered=50, label=BASE),
+            baseline=baseline_of(covered=50, label=BASE),
         )
 
         self.assertIn("the base this pull request is open against", report)
@@ -316,7 +332,7 @@ class BaselineDeltaTests(unittest.TestCase):
             REPO_ROOT,
             0,
             "Rust coverage (report only)",
-            baseline=baseline_of(lines=100, covered=50, label=LATEST_MAIN),
+            baseline=baseline_of(covered=50, label=LATEST_MAIN),
         )
 
         # Whitespace-normalized: this prose is hard-wrapped, so a contiguous
@@ -360,7 +376,7 @@ class BaselineDeltaTests(unittest.TestCase):
         """A baseline is only judgeable with its provenance: which commit it
         measured, and how long ago it did."""
         document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
-        baseline = baseline_of(lines=100, covered=50)
+        baseline = baseline_of(covered=50)
 
         report = render(
             document,
@@ -386,7 +402,7 @@ class BaselineDeltaTests(unittest.TestCase):
             REPO_ROOT,
             0,
             "Rust coverage (report only)",
-            baseline=baseline_of(lines=100, covered=50),
+            baseline=baseline_of(covered=50),
         )
 
         self.assertIn("still counts as", report)
@@ -408,7 +424,7 @@ class BaselineDeltaTests(unittest.TestCase):
             REPO_ROOT,
             0,
             "Rust coverage (report only)",
-            baseline=baseline_of(lines=100, covered=50),
+            baseline=baseline_of(covered=50),
         )
 
         self.assertIn("this branch's own doing", report)
@@ -458,7 +474,7 @@ class BaselineAbsenceTests(unittest.TestCase):
             REPO_ROOT,
             0,
             "Rust coverage (report only)",
-            baseline=baseline_of(lines=100, covered=50),
+            baseline=baseline_of(covered=50),
         )
 
         self.assertNotIn("Δ vs baseline", without)
@@ -551,6 +567,82 @@ class BaselineLoadingTests(unittest.TestCase):
 
         self.assertIsNone(baseline)
         self.assertEqual(reason, "the baseline summary measured no lines")
+
+
+class BaselineProvenanceContractTests(unittest.TestCase):
+    """The CLI refuses a baseline it cannot attribute.
+
+    The first tests in this suite to drive `main` rather than a function it
+    calls, because the defect they cover is in the argument contract: every
+    provenance value defaulted to an empty string, so a caller supplying only
+    `--baseline-label` produced a confidently attributed delta above a
+    provenance line reading "``, measured .". The workflows always pass all
+    three, which is exactly why nothing downstream would have caught this.
+    """
+
+    def arguments_for(self, *baseline: str) -> list[str]:
+        return [str(self.export), "--title", "T", *baseline]
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        payload = json.dumps(export(coverage_file("/repo/a.rs", lines=100, covered=50)))
+        self.export = written(self.directory.name, "summary.json", payload)
+        self.baseline = written(self.directory.name, "baseline.json", payload)
+
+    def test_a_baseline_without_a_sha_is_refused(self) -> None:
+        with self.assertRaises(SystemExit) as refusal, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            main(self.arguments_for(
+                "--baseline", str(self.baseline),
+                "--baseline-label", BASE,
+                "--baseline-date", "2026-08-01T09:00:00Z",
+            ))
+
+        self.assertNotEqual(refusal.exception.code, 0)
+        self.assertIn("--baseline-sha", stderr.getvalue())
+
+    def test_a_baseline_without_a_date_is_refused(self) -> None:
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            main(self.arguments_for(
+                "--baseline", str(self.baseline),
+                "--baseline-label", BASE,
+                "--baseline-sha", "abc1234",
+            ))
+
+        self.assertIn("--baseline-date", stderr.getvalue())
+
+    def test_a_blank_sha_is_refused_like_an_absent_one(self) -> None:
+        """An empty flag is what the workflow would pass if its own lookup came
+        back empty, and it renders exactly as badly as omitting it."""
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            main(self.arguments_for(
+                "--baseline", str(self.baseline),
+                "--baseline-label", BASE,
+                "--baseline-sha", "   ",
+                "--baseline-date", "2026-08-01T09:00:00Z",
+            ))
+
+        self.assertIn("--baseline-sha", stderr.getvalue())
+
+    def test_complete_provenance_is_accepted(self) -> None:
+        """The guard on all three: the contract must still admit the call the
+        workflows actually make."""
+        with contextlib.redirect_stdout(io.StringIO()) as rendered:
+            exit_code = main(self.arguments_for(
+                "--baseline", str(self.baseline),
+                "--baseline-label", BASE,
+                "--baseline-sha", "abc1234",
+                "--baseline-date", "2026-08-01T09:00:00Z",
+            ))
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("abc1234", rendered.getvalue())
+
+    def test_no_baseline_needs_no_provenance(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            exit_code = main(self.arguments_for())
+
+        self.assertEqual(exit_code, 0)
 
 
 if __name__ == "__main__":
