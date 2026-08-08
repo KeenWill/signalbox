@@ -811,6 +811,8 @@ fn lossy_truncated(body: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use crate::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
         CompletionFinish, CredentialValue, ExchangeFacts, FinishReason, LossCause,
@@ -1749,8 +1751,8 @@ mod tests {
 
         // Checked against every emitted fragment first: a leak forwarded on
         // another correlation or tool index never reaches the projection below.
-        assert_no_observation_carries(&observed, "fixture/secret");
-        assert_no_observation_carries(&observed, "secret");
+        assert_no_stream_carries(&observed, "fixture/secret");
+        assert_no_stream_carries(&observed, "secret");
         let arguments = joined_arguments(&observed, "call-1", 0);
         assert_eq!(arguments, r#"{"path":"[redacted]"}"#);
     }
@@ -1763,37 +1765,123 @@ mod tests {
     /// deltas. Asserting exact fragment boundaries would fail a
     /// behaviour-preserving change that buffered the safe prefix or coalesced
     /// it with the replacement, while producing identical secure output.
-    /// Asserts `secret` appears in nothing the sink emitted, on any stream.
+    /// Which of a correlation's parallel delta streams a fragment extends.
+    ///
+    /// Part of the reassembly key: two facts may share a correlation and an
+    /// index yet belong to streams no consumer ever concatenates together.
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    enum EmittedStream {
+        Text,
+        Thinking,
+        ToolArguments,
+    }
+
+    /// Asserts `secret` is unrecoverable from every stream the sink emitted.
     ///
     /// [`joined_arguments`] deliberately projects one correlation and one tool
     /// index, so a credential forwarded on a *different* correlation or index
-    /// is invisible to it: the reconstruction would still equal the redacted
-    /// expectation and its absence check would still pass. INV-035 is a claim
-    /// about everything the scrubber emits, so it is checked against
-    /// everything the scrubber emits. Exhaustive over `ObservationFact` so a
-    /// new text-bearing fact cannot be added without deciding whether the
-    /// credential could ride out on it.
-    fn assert_no_observation_carries(observed: &[Observation<String>], secret: &str) {
+    /// is invisible to it. Checking each observation on its own is not enough
+    /// either: a leak split across two deltas — `fixture/sec` then `ret` — is
+    /// recoverable by any consumer that concatenates the stream while no
+    /// single fragment contains the credential. So every emitted fragment is
+    /// grouped by the stream it extends and the absence check runs on each
+    /// reconstruction, which is what a consumer actually sees.
+    ///
+    /// Exhaustive over `ObservationFact` so a new text-bearing fact cannot be
+    /// added without deciding whether the credential could ride out on it.
+    #[track_caller]
+    fn assert_no_stream_carries(observed: &[Observation<String>], secret: &str) {
+        let mut streams: BTreeMap<(&str, EmittedStream, u32), String> = BTreeMap::new();
         for observation in observed {
-            let carried = match &observation.fact {
-                ObservationFact::TextDelta { text, .. }
-                | ObservationFact::ThinkingDelta { text, .. } => text.as_str(),
-                ObservationFact::ToolArgumentsDelta { fragment, .. } => fragment.as_str(),
-                ObservationFact::ToolCallProposed(proposal) => proposal.arguments_json.as_str(),
+            let correlation = observation.correlation.as_str();
+            match &observation.fact {
+                ObservationFact::TextDelta { index, text } => streams
+                    .entry((correlation, EmittedStream::Text, *index))
+                    .or_default()
+                    .push_str(text),
+                ObservationFact::ThinkingDelta { index, text } => streams
+                    .entry((correlation, EmittedStream::Thinking, *index))
+                    .or_default()
+                    .push_str(text),
+                ObservationFact::ToolArgumentsDelta { index, fragment } => streams
+                    .entry((correlation, EmittedStream::ToolArguments, *index))
+                    .or_default()
+                    .push_str(fragment),
+                // A decoded proposal is one complete value, not a fragment
+                // stream, so it is checked as it stands.
+                ObservationFact::ToolCallProposed(proposal) => assert!(
+                    !proposal.arguments_json.contains(secret),
+                    "the credential must not be emitted; found it in a proposal on \
+                     correlation {correlation}: {}",
+                    proposal.arguments_json
+                ),
                 ObservationFact::SendCommenced
                 | ObservationFact::ExchangeEstablished(_)
                 | ObservationFact::ProviderModelReported(_)
                 | ObservationFact::UsageReported(_)
-                | ObservationFact::FinishReported(_) => "",
-            };
+                | ObservationFact::FinishReported(_) => {}
+            }
+        }
+        for ((correlation, stream, index), reconstructed) in &streams {
             assert!(
-                !carried.contains(secret),
-                "the credential must not be emitted on any stream; \
-                 found it on correlation {}: {:?}",
-                observation.correlation,
-                observation.fact
+                !reconstructed.contains(secret),
+                "the credential must not be recoverable from any emitted stream; \
+                 found it on correlation {correlation} {stream:?} index {index}: {reconstructed}"
             );
         }
+    }
+
+    /// The reassembly is the only reason the check is stronger than a
+    /// per-observation scan, and a helper carrying logic the INV-035 cases
+    /// depend on is verified rather than assumed: a credential split across
+    /// two deltas leaks recoverably even though neither fragment contains it,
+    /// and the projection those cases use never reconstructs that stream.
+    #[test]
+    #[should_panic(expected = "must not be recoverable from any emitted stream")]
+    fn split_credential_on_an_uninspected_stream_is_caught() {
+        let observed = vec![
+            Observation {
+                correlation: "call-9".to_string(),
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 7,
+                    fragment: "fixture/sec".to_string(),
+                },
+            },
+            Observation {
+                correlation: "call-9".to_string(),
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 7,
+                    fragment: "ret".to_string(),
+                },
+            },
+        ];
+
+        assert_no_stream_carries(&observed, "fixture/secret");
+    }
+
+    /// Grouping is per stream, not one buffer: fragments that would spell the
+    /// credential only if separate streams were concatenated are not a leak,
+    /// because no consumer reassembles across them.
+    #[test]
+    fn fragments_spanning_separate_streams_are_not_a_leak() {
+        let observed = vec![
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 7,
+                    fragment: "fixture/sec".to_string(),
+                },
+            },
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 8,
+                    fragment: "ret".to_string(),
+                },
+            },
+        ];
+
+        assert_no_stream_carries(&observed, "fixture/secret");
     }
 
     fn joined_arguments(observed: &[Observation<String>], correlation: &str, index: u32) -> String {
@@ -1835,8 +1923,8 @@ mod tests {
         sink.flush();
         drop(sink);
 
-        assert_no_observation_carries(&observed, "key\u{1f600}loop");
-        assert_no_observation_carries(&observed, "loop");
+        assert_no_stream_carries(&observed, "key\u{1f600}loop");
+        assert_no_stream_carries(&observed, "loop");
         let arguments = joined_arguments(&observed, "call-1", 0);
         assert_eq!(arguments, r#"{"emoji":"[redacted]"}"#);
     }
@@ -1868,7 +1956,7 @@ mod tests {
 
         // The held prefix must be replaced rather than forwarded — on this
         // index, on the index that displaced it, or on any other stream.
-        assert_no_observation_carries(&observed, "fixture");
+        assert_no_stream_carries(&observed, "fixture");
         let held = joined_arguments(&observed, "call-1", 0);
         assert_eq!(held, r#"{"path":"[redacted]"#);
         // The other index is untouched, and — the point of this case — no
