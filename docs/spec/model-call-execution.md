@@ -557,12 +557,15 @@ provider-acceptance boundary. Storage backstops single-call-ness independently
 of the aggregate: `model_call_attempt_once UNIQUE (turn_attempt_id)` admits at
 most one call row per attempt against any buggy or racing writer. There is no
 automatic retry after a known failure and no automatic retry of an ambiguous
-outcome (INV-025, INV-026); a known failure fails the attempt and turn, and
-ambiguity parks the turn for recovery. A later scheduler pass never treats an
-issued unclassified call as fresh authorization. Why: a lost acknowledgement
-cannot prove the provider did not act, so repetition risks undisclosed duplicate
-provider effects and spend; honest ambiguity is preferred to an invented
-exactly-once claim.
+outcome (INV-025, INV-026); a known failure fails the attempt and turn unless
+its pool authorizes an availability successor against a *different* eligible
+profile ([availability successor calls](#availability-successor-calls)), and
+ambiguity parks the turn for recovery. That exception is substitution, never
+repetition: no path re-issues a call against the profile that failed. A later
+scheduler pass never treats an issued unclassified call as fresh authorization.
+Why: a lost acknowledgement cannot prove the provider did not act, so repetition
+risks undisclosed duplicate provider effects and spend; honest ambiguity is
+preferred to an invented exactly-once claim.
 
 ### Availability successor calls
 

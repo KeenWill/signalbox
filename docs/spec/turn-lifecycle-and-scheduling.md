@@ -133,8 +133,15 @@ raised or removed bound would not admit work until an unrelated old invocation
 happened to finish, since a configuration edit produces neither a release nor an
 availability update. Release atomically consumes the wait, creates a fresh
 `Prepared` successor attempt, and returns the same turn to `Running` with a
-fresh availability chain while carrying forward member evidence whose reset has
-not passed, every durable membership exclusion, and every profile quarantine.
+fresh availability chain. It carries forward every exclusion that qualified a
+member out: every durable membership exclusion, every profile quarantine, and
+every predecessor exclusion earned by a qualifying failure in this turn. A reset
+passing releases the wait but never readmits the member whose failure earned
+that exclusion — only an operator clear of its exact predecessor correlation or
+a durable availability update does
+([model-call execution](model-call-execution.md#availability-successor-calls)).
+Without that, waking a one-member `switch_now` pool on its own reported reset
+would call the same profile again without bound.
 
 Eligibility is permission to retry selection, not a guarantee of a slot. One
 release can make several contended waits eligible while admitting only one, so
@@ -835,7 +842,16 @@ prior pool incarnation, migrates and resolves the one-time imported
 display-title backfill
 ([conversation-import](conversation-import.md#derived-display-titles)),
 completes the generic recovery scan, marks every prior-process nonterminal
-runner connection lost, binds the runner socket, binds the process socket, then
+runner connection lost, and — once the credential-pool child is composed —
+establishes each `codex_home` profile's credential-home identity, resolves every
+prior-process capacity reservation, and runs the legacy family-to-policy
+backfill
+([configuration and credentials](configuration-and-credentials.md#credential-deliveries)).
+Those three gates sit after the recovery scan so a failure cannot block recovery
+of acknowledged work, and before any socket binding or scheduling so no request
+reaches a historical session whose policy is not yet rewritten and no CLI call
+runs against an unestablished credential home. No present composition performs
+them. It then binds the runner socket, binds the process socket, then
 concurrently admits runner enrollment and protocol requests, dispatches the
 outbox, and schedules eligible work. On a database without the fence migration,
 the guarded first migration creates the fence row before the daemon initializes

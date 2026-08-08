@@ -157,7 +157,7 @@ not survive to the log: `run_hub` collapses every catalog-parse and
 adapter-construction variant (and likewise connection and migration errors) into
 a generic `Infrastructure` class carrying only its phase, so an operator cannot
 distinguish an unreadable catalog from an unknown field, bad version, or invalid
-limit (see Open edges). The eight deployment paths are accepted without I/O at
+limit (see Open edges). The six deployment paths are accepted without I/O at
 environment parsing time; both catalogs and every template prompt file are read
 during startup. No credential file is read at startup (see credential lifecycle
 below).

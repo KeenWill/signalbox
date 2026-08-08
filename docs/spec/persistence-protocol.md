@@ -627,8 +627,12 @@ Locks per transaction, in acquisition order:
   child. When it is, they lock the immutable parent/child session pair
   `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
   scheduler lock. This is the shared prefix for any path that can record a child
-  result. Credential-pool call preparation additionally locks the action head of
-  every member of the pinned policy it may select `FOR SHARE`, in
+  result. **Committed unimplemented functionality.** No present migration or
+  repository operation stores pool state, capacity reservations, or availability
+  waits, so the credential-pool locks described in the rest of this bullet are
+  the protocol its implementing child must follow, not a guarantee this build
+  provides. Credential-pool call preparation additionally locks the action head
+  of every member of the pinned policy it may select `FOR SHARE`, in
   profile-reference byte order, immediately after the scheduler lock and before
   it reads any exclusion state. It then locks every potentially selected bounded
   profile's shared capacity row `FOR UPDATE`, in the same order, before reading
@@ -1557,25 +1561,33 @@ availability successor or credential-availability wait. Its implementing child
 must give a predecessor-linked attempt a closed origin distinct from the
 tool-loop continuation origin and atomically persist its predecessor model call,
 the qualifying availability cause, and the typed non-acceptance evidence that
-authorized substitution. The successor's call remains subject to
-`model_call_attempt_once`, pins the same target and a different profile, and
-cannot exist without that complete predecessor proof. A credential-availability
-wait must atomically retain the active turn slot and store a closed
-`exhausted`/`contended` discriminator plus the immutable pool-policy identity.
-The exhausted form stores every policy member's exclusion evidence and optional
-reset plus the optional earliest-reset deadline. The contended form stores every
-durable exclusion in the selection snapshot, the complete nonempty set of
-otherwise-admissible bounded members with their exact invocation-reservation
-identities and generations, and the same optional earliest-reset deadline over
-those durable exclusions. One shared capacity row per bounded profile serializes
-reservation admission across sessions and pools. Preparation locks all candidate
-capacity rows in profile-reference byte order, counts their live reservation
-rows under those locks, and inserts the selected reservation with the `Prepared`
-call. Every `codex_home` invocation inserts a reservation regardless of whether
-its profile currently declares a bound; the bound decides only whether
-preparation takes that capacity lock and counts, so an unbounded profile records
-the same supervision evidence without serializing. A deferred constraint rejects
-a committed live count above the bound the profile's current registration
+authorized substitution. That origin covers only a substitution authorized by a
+predecessor call. A wait entered before any call was issued — because a bounded
+member was full, or because every member was already excluded — has no such
+predecessor, so releasing it needs a second closed origin: a wait-release origin
+carrying the exact consumed wait and the call-free attempt that ended
+`WithoutStop(YieldedToDurableWait)`, and no predecessor call, cause, or proof.
+It is distinct from both the tool-loop and successor origins, so every
+continuation still names exactly one origin and the unique continuation chain
+stays total. The successor's call remains subject to `model_call_attempt_once`,
+pins the same target and a different profile, and cannot exist without that
+complete predecessor proof. A credential-availability wait must atomically
+retain the active turn slot and store a closed `exhausted`/`contended`
+discriminator plus the immutable pool-policy identity. The exhausted form stores
+every policy member's exclusion evidence and optional reset plus the optional
+earliest-reset deadline. The contended form stores every durable exclusion in
+the selection snapshot, the complete nonempty set of otherwise-admissible
+bounded members with their exact invocation-reservation identities and
+generations, and the same optional earliest-reset deadline over those durable
+exclusions. One shared capacity row per bounded profile serializes reservation
+admission across sessions and pools. Preparation locks all candidate capacity
+rows in profile-reference byte order, counts their live reservation rows under
+those locks, and inserts the selected reservation with the `Prepared` call.
+Every `codex_home` invocation inserts a reservation regardless of whether its
+profile currently declares a bound; the bound decides only whether preparation
+takes that capacity lock and counts, so an unbounded profile records the same
+supervision evidence without serializing. A deferred constraint rejects a
+committed live count above the bound the profile's current registration
 declares; the bound is a live profile property rather than a frozen policy
 field, so it governs the next admission and never retroactively invalidates a
 committed reservation. Because every invocation is recorded, a bound newly
