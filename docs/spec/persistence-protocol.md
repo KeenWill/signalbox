@@ -1578,8 +1578,12 @@ proving absence; failure to establish absence fails startup before scheduling.
 It retains a `spawned` reservation owned by the live fenced process. A
 prior-process `pending_spawn` reservation is ambiguous because its child may
 have started before the identity update, so startup fails before scheduling
-rather than releasing it without process-death proof. These are the shapes
-required by
+rather than releasing it without process-death proof. After that reconciliation
+and before scheduling is enabled, startup counts each bounded profile's
+surviving live reservations under its capacity lock and makes eligible every
+retained `contended` wait now under that profile's current bound, so a bound
+raised or removed across a restart admits work without waiting for an unrelated
+release. These are the shapes required by
 [turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
 Reconstitution and wake must fail closed on partial, stale, or mismatched
 evidence. This paragraph constrains that future schema; no present storage

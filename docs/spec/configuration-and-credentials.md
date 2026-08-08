@@ -873,7 +873,14 @@ keep running against a limit the operator has since tightened. A raised bound
 therefore admits more work at the next preparation, and a lowered one restricts
 the next admission without revoking a reservation already committed — a live
 count above a freshly lowered bound drains as those invocations complete rather
-than terminating them. Spawn failure or another pre-send closure releases that
+than terminating them. A turn already parked in a contended wait is not left
+behind by a raise: a configuration edit produces neither a reservation release
+nor an availability update, so startup re-evaluates every retained contended
+wait against the current registrations and makes eligible each one now under its
+profile's bound, including a profile whose bound was removed
+([turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot)).
+Otherwise a raise would admit nothing until some unrelated older invocation
+happened to finish. Spawn failure or another pre-send closure releases that
 pending reservation.
 
 Every `codex_home` invocation acquires a reservation, whether or not the profile
