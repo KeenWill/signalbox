@@ -1623,8 +1623,22 @@ fn decode_checked_raw_json(
 }
 
 /// One application tool definition carried a schema that is not valid JSON.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InvalidRuntimeToolSchema;
+#[derive(Debug)]
+pub struct InvalidRuntimeToolSchema {
+    source: serde_json::Error,
+}
+
+impl fmt::Display for InvalidRuntimeToolSchema {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("application tool schema is invalid at the runtime bridge")
+    }
+}
+
+impl Error for InvalidRuntimeToolSchema {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
+    }
+}
 
 /// Projects one application tool catalog into the runtime tool definitions
 /// every adapter receives.
@@ -1640,7 +1654,7 @@ pub fn runtime_tool_definitions(
         .iter()
         .map(|definition| {
             let schema = decode_checked_raw_json(definition.input_schema().as_str())
-                .map_err(|_| InvalidRuntimeToolSchema)?;
+                .map_err(|source| InvalidRuntimeToolSchema { source })?;
             Ok(ToolDefinition::with_raw_schema(
                 definition.name().as_str(),
                 definition.description(),
@@ -2063,12 +2077,12 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AcceptanceObservations, ModelCallTelemetry, ProviderTextDelta, ProviderTextDeltaContext,
-        ProviderTextDeltaSink, RuntimeInputTokenCountError, RuntimeModelCallProviderError,
-        RuntimeModelCatalog, RuntimeModelCatalogError, RuntimeModelDefinition,
-        RuntimeModelDefinitionError, classify_terminal, decode_checked_raw_json,
-        provider_reported_token_usage, render_runtime_messages, runtime_delivery_definitions,
-        runtime_model_settings,
+        AcceptanceObservations, InvalidRuntimeToolSchema, ModelCallTelemetry, ProviderTextDelta,
+        ProviderTextDeltaContext, ProviderTextDeltaSink, RuntimeInputTokenCountError,
+        RuntimeModelCallProviderError, RuntimeModelCatalog, RuntimeModelCatalogError,
+        RuntimeModelDefinition, RuntimeModelDefinitionError, classify_terminal,
+        decode_checked_raw_json, provider_reported_token_usage, render_runtime_messages,
+        runtime_delivery_definitions, runtime_model_settings,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -3378,6 +3392,23 @@ mod tests {
         assert_eq!(
             RuntimeInputTokenCountError::CountFailed.operator_failure_cause_code(),
             "model_input_count_provider_failure"
+        );
+    }
+
+    #[test]
+    fn invalid_runtime_tool_schema_retains_its_json_source() {
+        let source = serde_json::from_str::<serde_json::Value>("{")
+            .expect_err("synthetic schema is invalid JSON");
+        let expected_source = source.to_string();
+        let error = InvalidRuntimeToolSchema { source };
+
+        assert_eq!(
+            error.to_string(),
+            "application tool schema is invalid at the runtime bridge"
+        );
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some(expected_source)
         );
     }
 
