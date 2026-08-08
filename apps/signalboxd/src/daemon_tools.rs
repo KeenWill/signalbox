@@ -1518,7 +1518,8 @@ mod tests {
     struct ListedBridgeResponse {
         jsonrpc: String,
         id: u64,
-        result: ListedBridgeResult,
+        result: Option<ListedBridgeResult>,
+        error: Option<Box<RawValue>>,
     }
 
     #[derive(Deserialize)]
@@ -1532,6 +1533,20 @@ mod tests {
         description: String,
         #[serde(rename = "inputSchema")]
         input_schema: Box<RawValue>,
+    }
+
+    impl ListedBridgeResponse {
+        fn into_tools(self, request_id: u64) -> Option<Vec<ComparableBridgeTool>> {
+            (self.jsonrpc == "2.0" && self.id == request_id && self.error.is_none())
+                .then_some(self.result?)
+                .map(|result| {
+                    result
+                        .tools
+                        .into_iter()
+                        .map(ListedBridgeTool::into_comparable)
+                        .collect()
+                })
+        }
     }
 
     impl ListedBridgeTool {
@@ -1907,21 +1922,22 @@ mod tests {
     fn verified_compiler_invocation_directory() -> Option<PathBuf> {
         let reported = PathBuf::from(std::env::var_os("PWD")?);
         let actual = std::env::current_dir().ok()?;
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)?;
-        verified_compiler_invocation_directory_for(&reported, &actual, workspace)
+        let package = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = package.parent().and_then(Path::parent)?;
+        verified_compiler_invocation_directory_for(&reported, &actual, workspace, package)
     }
 
     fn verified_compiler_invocation_directory_for(
         reported: &Path,
         actual: &Path,
         workspace: &Path,
+        package: &Path,
     ) -> Option<PathBuf> {
         let reported = fs::canonicalize(reported).ok()?;
         let actual = fs::canonicalize(actual).ok()?;
         let workspace = fs::canonicalize(workspace).ok()?;
-        (reported == workspace && actual == workspace).then_some(reported)
+        let package = fs::canonicalize(package).ok()?;
+        (reported == workspace && (actual == workspace || actual == package)).then_some(reported)
     }
 
     fn rustc_command_for(
@@ -2718,21 +2734,39 @@ mod tests {
     }
 
     #[test]
-    fn bridge_compiler_invocation_accepts_only_the_workspace_root() {
+    fn bridge_compiler_invocation_accepts_only_a_workspace_root_report() {
         let fixture = tempfile::tempdir().expect("fixture root exists");
         let workspace = fixture.path().join("workspace");
         let stale = fixture.path().join("stale");
+        let package = workspace.join("package");
         fs::create_dir(&workspace).expect("workspace fixture exists");
         fs::create_dir(&stale).expect("stale fixture exists");
+        fs::create_dir(&package).expect("package fixture exists");
         let expected_workspace = fs::canonicalize(&workspace).expect("workspace canonicalizes");
 
         assert_eq!(
-            verified_compiler_invocation_directory_for(&workspace, &workspace, &workspace),
+            verified_compiler_invocation_directory_for(
+                &workspace, &workspace, &workspace, &package,
+            ),
             Some(expected_workspace)
         );
         assert_eq!(
-            verified_compiler_invocation_directory_for(&stale, &stale, &workspace),
+            verified_compiler_invocation_directory_for(&stale, &stale, &workspace, &package),
             None
+        );
+    }
+
+    #[test]
+    fn bridge_compiler_invocation_preserves_workspace_root_for_cargo_package_cwd() {
+        let fixture = tempfile::tempdir().expect("fixture root exists");
+        let workspace = fixture.path().join("workspace");
+        let package = workspace.join("package");
+        fs::create_dir_all(&package).expect("package fixture exists");
+        let expected_workspace = fs::canonicalize(&workspace).expect("workspace canonicalizes");
+
+        assert_eq!(
+            verified_compiler_invocation_directory_for(&workspace, &package, &workspace, &package,),
+            Some(expected_workspace)
         );
     }
 
@@ -2741,11 +2775,13 @@ mod tests {
         let fixture = tempfile::tempdir().expect("fixture root exists");
         let workspace = fixture.path().join("workspace");
         let actual = fixture.path().join("actual-invocation");
+        let package = workspace.join("package");
         fs::create_dir(&workspace).expect("workspace fixture exists");
         fs::create_dir(&actual).expect("actual invocation fixture exists");
+        fs::create_dir(&package).expect("package fixture exists");
 
         assert_eq!(
-            verified_compiler_invocation_directory_for(&workspace, &actual, &workspace),
+            verified_compiler_invocation_directory_for(&workspace, &actual, &workspace, &package,),
             None
         );
     }
@@ -3479,6 +3515,17 @@ mod tests {
             response: &response,
             request_id: &request_id,
         }));
+    }
+
+    #[test]
+    fn raw_list_response_rejects_result_and_error_together() {
+        let response = format!(
+            r#"{{"jsonrpc":"2.0","id":{MCP_LIST_TOOLS_REQUEST_ID},"result":{{"tools":[]}},"error":{{"code":-32603,"message":"synthetic error"}}}}"#
+        );
+        let response: ListedBridgeResponse =
+            serde_json::from_str(&response).expect("synthetic list response is valid JSON");
+
+        assert_eq!(response.into_tools(MCP_LIST_TOOLS_REQUEST_ID), None);
     }
 
     #[test]
@@ -4275,14 +4322,9 @@ mod tests {
                 }));
             let response: ListedBridgeResponse = serde_json::from_str(&response)
                 .expect("MCP list response preserves raw tool schemas");
-            assert_eq!(response.jsonrpc, "2.0");
-            assert_eq!(response.id, MCP_LIST_TOOLS_REQUEST_ID);
             response
-                .result
-                .tools
-                .into_iter()
-                .map(ListedBridgeTool::into_comparable)
-                .collect()
+                .into_tools(MCP_LIST_TOOLS_REQUEST_ID)
+                .expect("MCP list response is an exclusive matching result")
         }
 
         #[track_caller]
