@@ -1391,7 +1391,7 @@ enum SnapshotTurnDisposition {
     /// The exchange did not reach a model-behavior outcome and cannot be
     /// scored as a model miss.
     Infrastructure,
-    Other,
+    Refused,
 }
 
 impl SnapshotTurnDisposition {
@@ -1411,13 +1411,13 @@ impl SnapshotTurnDisposition {
             | ProcessTurnState::QueuedDelegationWake { .. }
             | ProcessTurnState::DelegationTerminated { .. }
             | ProcessTurnState::ActiveRunning { .. }
-            | ProcessTurnState::Refused { .. }
             | ProcessTurnState::ActiveAwaitingToolApproval { .. }
-            | ProcessTurnState::ActiveAwaitingChild { .. } => Self::Other,
-            ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
+            | ProcessTurnState::ActiveAwaitingChild { .. }
+            | ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
             | ProcessTurnState::ActiveAwaitingToolRecovery { .. }
             | ProcessTurnState::Cancelled { .. }
             | ProcessTurnState::ReconciliationRequired { .. } => Self::Infrastructure,
+            ProcessTurnState::Refused { .. } => Self::Refused,
         }
     }
 
@@ -1439,14 +1439,14 @@ impl SnapshotTurnDisposition {
     const fn is_completed(self) -> bool {
         match self {
             Self::Completed => true,
-            Self::ProviderFailure(_) | Self::Infrastructure | Self::Other => false,
+            Self::ProviderFailure(_) | Self::Infrastructure | Self::Refused => false,
         }
     }
 
     const fn is_infrastructure(self) -> bool {
         match self {
             Self::ProviderFailure(_) | Self::Infrastructure => true,
-            Self::Completed | Self::Other => false,
+            Self::Completed | Self::Refused => false,
         }
     }
 
@@ -1460,7 +1460,7 @@ impl SnapshotTurnDisposition {
                 format!("provider failure: {}", provider_failure_cause_label(cause))
             }
             Self::Infrastructure => String::from("infrastructure recovery"),
-            Self::Other => String::from("not completed"),
+            Self::Refused => String::from("refused"),
         }
     }
 }
@@ -1580,6 +1580,18 @@ fn turn_snapshot_reports_ambiguous_model_recovery_as_infrastructure() {
     let state = ProcessTurnState::ActiveAwaitingModelCallRecovery {
         ended_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_TURN_ATTEMPT_ID)),
         recovery_call: ModelCallId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID)),
+    };
+
+    assert_eq!(
+        SnapshotTurnDisposition::from_process_state(&state),
+        SnapshotTurnDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn turn_snapshot_reports_parked_tool_approval_as_infrastructure() {
+    let state = ProcessTurnState::ActiveAwaitingToolApproval {
+        request: ToolRequestId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)),
     };
 
     assert_eq!(
