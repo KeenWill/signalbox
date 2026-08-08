@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 
-use git2::{BranchType, IndexAddOption, Oid, Repository, Signature, Status};
+use git2::{BranchType, DiffOptions, IndexAddOption, Oid, Patch, Repository, Signature, Status};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
@@ -678,7 +678,10 @@ fn git_forced_case_passed(
                 && result["state_cleaned"] == true
                 && head.message().ok() == arguments["message"].as_str()
         }
-        GIT_DIFF_NAME => result["patch"] == "" && result["truncated"] == false,
+        GIT_DIFF_NAME => {
+            result["patch"].as_str() == Some(expected_git_worktree_patch(root)?.as_str())
+                && result["truncated"] == false
+        }
         GIT_LOG_NAME => {
             result["commits"]
                 .as_array()
@@ -712,6 +715,38 @@ fn git_forced_case_passed(
         _ => false,
     };
     Ok(passed)
+}
+
+fn expected_git_worktree_patch(root: &Path) -> EvalResult<String> {
+    let mut expected = Vec::new();
+    for path in [GIT_COMMIT_PATH, GIT_NATURAL_PATH, GIT_STAGE_PATH] {
+        let content = fs::read(root.join(path))?;
+        let mut options = DiffOptions::new();
+        options.force_text(true);
+        let patch = Patch::from_buffers(
+            b"",
+            None,
+            &content,
+            Some(Path::new(path)),
+            Some(&mut options),
+        )?
+        .to_buf()?;
+        let first_line = patch
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|position| position + 1)
+            .ok_or_else(|| io::Error::other("fixture patch has no header"))?;
+        let existing_mode_end = patch[first_line..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|position| first_line + position + 1)
+            .filter(|end| patch[first_line..*end].starts_with(b"new file mode "))
+            .unwrap_or(first_line);
+        expected.extend_from_slice(&patch[..first_line]);
+        expected.extend_from_slice(b"new file mode 100644\n");
+        expected.extend_from_slice(&patch[existing_mode_end..]);
+    }
+    String::from_utf8(expected).map_err(Into::into)
 }
 
 fn workspace_forced_case_passed(
@@ -2707,6 +2742,42 @@ fn forced_git_stage_verifier_rejects_success_without_the_postcondition() -> Eval
         .expect("the Git stage fixture exists");
     let result = serde_json::json!({
         "staged_paths": 1,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_diff_verifier_accepts_the_seeded_worktree_patch() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_DIFF_NAME)
+        .expect("the Git diff fixture exists");
+    let result = serde_json::json!({
+        "patch": expected_git_worktree_patch(suite.workspace.path())?,
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_diff_verifier_rejects_an_empty_patch() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_DIFF_NAME)
+        .expect("the Git diff fixture exists");
+    let result = serde_json::json!({
+        "patch": "",
+        "truncated": false,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
