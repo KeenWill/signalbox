@@ -1141,6 +1141,7 @@ async fn append_runner_lost_without_advancing_head(
     session: SessionId,
     loss_source: Option<&str>,
     lost_runner: Option<RunnerId>,
+    interrupted_tool_attempt: Option<ToolAttemptId>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO runner_session_placement_record
@@ -1151,6 +1152,7 @@ async fn append_runner_lost_without_advancing_head(
              requested_repository_key, requested_sandbox_profile,
              permission_override_count, state_kind, lost_runner_id,
              loss_source_kind, pinned_runner_id,
+             interrupted_tool_attempt_id,
              pinned_working_directory, pinned_credential_profile_name,
              registration_enrollment_id, registration_revision,
              pinned_tool_count, workspace_repository_key,
@@ -1171,6 +1173,7 @@ async fn append_runner_lost_without_advancing_head(
                 requested_sandbox_profile, permission_override_count,
                 'runner_lost', COALESCE($3, pinned_runner_id), $2,
                 pinned_runner_id,
+                $4,
                 pinned_working_directory, pinned_credential_profile_name,
                 registration_enrollment_id, registration_revision,
                 pinned_tool_count, workspace_repository_key,
@@ -1193,6 +1196,7 @@ async fn append_runner_lost_without_advancing_head(
     .bind(session.into_uuid())
     .bind(loss_source)
     .bind(lost_runner.map(RunnerId::into_uuid))
+    .bind(interrupted_tool_attempt.map(ToolAttemptId::into_uuid))
     .execute(&mut **transaction)
     .await?;
     sqlx::query(
@@ -1231,8 +1235,14 @@ async fn append_runner_lost_projection(
     session: SessionId,
 ) -> Result<(), sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    append_runner_lost_without_advancing_head(&mut transaction, session, Some("connection"), None)
-        .await?;
+    append_runner_lost_without_advancing_head(
+        &mut transaction,
+        session,
+        Some("connection"),
+        None,
+        None,
+    )
+    .await?;
     sqlx::query(
         "UPDATE runner_current_session_placement
             SET event_ordinal = event_ordinal + 1
@@ -1244,6 +1254,90 @@ async fn append_runner_lost_projection(
     transaction.commit().await
 }
 
+async fn append_runner_lost_with_interrupted_attempt_projection(
+    pool: &PgPool,
+    session: SessionId,
+    interrupted_tool_attempt: ToolAttemptId,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    append_runner_lost_without_advancing_head(
+        &mut transaction,
+        session,
+        Some("connection"),
+        None,
+        Some(interrupted_tool_attempt),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
+async fn insert_runner_recovery_turn(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    runner: RunnerId,
+    placement_revision: RunnerGeneration,
+    interrupted_tool_attempt: Option<ToolAttemptId>,
+    active_tool_round_call: Option<ModelCallId>,
+) -> Result<(), sqlx::Error> {
+    let starting_frontier =
+        ContextFrontierId::from_uuid(uuid(turn.into_uuid().as_u128() + RELATED_IDENTITY_OFFSET));
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(session.into_uuid())
+    .bind(starting_frontier.into_uuid())
+    .execute(pool)
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+         ENABLE TRIGGER turn_lifecycle_runner_recovery_is_complete",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    let inserted = sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_kind, origin_accepted_input_id,
+             acceptance_position, state_kind, start_lineage_kind,
+             starting_frontier_id, active_phase_kind,
+             active_tool_round_call_id, runner_recovery_runner_id,
+             runner_recovery_placement_revision,
+             runner_recovery_tool_attempt_id)
+         VALUES ($1, $2, 'delegation', NULL, 1, 'active',
+                 'first_in_session', $3, 'awaiting_runner_recovery',
+                 $4, $5, $6, $7)",
+    )
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(starting_frontier.into_uuid())
+    .bind(active_tool_round_call.map(ModelCallId::into_uuid))
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement_revision.get()))
+    .bind(interrupted_tool_attempt.map(ToolAttemptId::into_uuid))
+    .execute(&mut *transaction)
+    .await;
+    inserted?;
+    transaction.commit().await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 async fn append_runner_registration_loss_projection(
     pool: &PgPool,
     session: SessionId,
@@ -1253,6 +1347,7 @@ async fn append_runner_registration_loss_projection(
         &mut transaction,
         session,
         Some("registration"),
+        None,
         None,
     )
     .await?;
@@ -4339,6 +4434,7 @@ async fn s32_inv044_runner_loss_requires_a_closed_source() -> Result<(), Box<dyn
         pin.placement.session(),
         None,
         None,
+        None,
     )
     .await
     .expect_err("runner loss requires its exact closed source");
@@ -4360,6 +4456,7 @@ async fn s32_inv044_runner_loss_requires_the_exact_pinned_runner() -> Result<(),
         pin.placement.session(),
         Some("connection"),
         Some(RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER))),
+        None,
     )
     .await
     .expect_err("runner loss cannot name a runner other than the pin");
@@ -4505,6 +4602,227 @@ async fn s32_inv044_generic_store_rejects_pinned_loss_without_transactional_auth
         .expect_err("the generic writer cannot invent connection-loss authority");
 
     assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a runner-loss wait reads back only from the exact
+/// current lost placement and retains the interrupted physical attempt.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_pinned_runner_recovery_wait_round_trips_exact_loss()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    append_runner_lost_with_interrupted_attempt_projection(&pool, session, interrupted_attempt)
+        .await?;
+    insert_runner_recovery_turn(
+        &pool,
+        session,
+        turn,
+        expected_enrollment.runner(),
+        pin.placement.revision(),
+        Some(interrupted_attempt),
+        Some(ModelCallId::from_uuid(uuid(
+            INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+        ))),
+    )
+    .await?;
+    let loaded_placement = store
+        .load_placement(session)
+        .await?
+        .expect("the lost placement is present");
+    let loaded_wait = store
+        .load_runner_recovery_wait(session)
+        .await?
+        .expect("the exact runner recovery wait is present");
+
+    assert_eq!(
+        loaded_placement.interrupted_tool_attempt(),
+        Some(interrupted_attempt)
+    );
+    assert_eq!(loaded_wait.turn(), turn);
+    assert_eq!(loaded_wait.runner(), expected_enrollment.runner());
+    assert_eq!(loaded_wait.placement_revision(), pin.placement.revision());
+    assert_eq!(
+        loaded_wait.interrupted_tool_attempt(),
+        Some(interrupted_attempt)
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a pre-pin loss may park the turn without fabricating a
+/// physical attempt, and that nullable arm reads back distinctly.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_pre_pin_runner_recovery_wait_round_trips_without_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    insert_runner_recovery_turn(
+        &pool,
+        session,
+        turn,
+        runner,
+        placement.revision(),
+        None,
+        None,
+    )
+    .await?;
+    let loaded = store
+        .load_runner_recovery_wait(session)
+        .await?
+        .expect("the pre-pin runner recovery wait is present");
+
+    assert_eq!(loaded.turn(), turn);
+    assert_eq!(loaded.runner(), runner);
+    assert_eq!(loaded.placement_revision(), placement.revision());
+    assert_eq!(loaded.interrupted_tool_attempt(), None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: the discriminator alone cannot authenticate a runner
+/// recovery wait against another runner's loss.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_wait_rejects_cross_wired_runner()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let lost_runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(lost_runner));
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let rejected = insert_runner_recovery_turn(
+        &pool,
+        session,
+        TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
+        RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER)),
+        placement.revision(),
+        None,
+        None,
+    )
+    .await
+    .expect_err("runner recovery must name the current placement's exact lost runner");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a runner wait cannot name a placement revision other
+/// than the exact current loss revision.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_wait_rejects_cross_wired_revision()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let unrelated_revision =
+        RunnerGeneration::try_from_u64(2).expect("the unrelated placement revision is positive");
+    let rejected = insert_runner_recovery_turn(
+        &pool,
+        session,
+        TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
+        runner,
+        unrelated_revision,
+        None,
+        None,
+    )
+    .await
+    .expect_err("runner recovery must name the current placement's exact revision");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a runner wait cannot omit the physical attempt retained
+/// by the exact placement-loss record.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_wait_requires_loss_recorded_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    append_runner_lost_with_interrupted_attempt_projection(&pool, session, interrupted_attempt)
+        .await?;
+    let rejected = insert_runner_recovery_turn(
+        &pool,
+        session,
+        TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
+        expected_enrollment.runner(),
+        pin.placement.revision(),
+        None,
+        None,
+    )
+    .await
+    .expect_err("runner recovery must retain the loss-recorded tool attempt");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009: generic active-phase mutation cannot reopen a runner-recovery
+/// wait without the future checked replacement transaction.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_runner_recovery_wait_rejects_generic_active_reopen()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    insert_runner_recovery_turn(
+        &pool,
+        session,
+        turn,
+        runner,
+        placement.revision(),
+        None,
+        None,
+    )
+    .await?;
+    let rejected = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET runner_recovery_runner_id = runner_recovery_runner_id
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("generic mutation cannot reopen a runner recovery wait");
+
+    assert_check_violation(rejected);
     drop(pool);
     Ok(())
 }
@@ -4777,6 +5095,7 @@ async fn s32_inv044_direct_lease_admission_serializes_runner_loss() -> Result<()
         pin.placement.session(),
         Some("connection"),
         None,
+        None,
     )
     .await?;
     sqlx::query(
@@ -4851,6 +5170,7 @@ async fn s32_inv044_appended_placement_must_advance_current_head() -> Result<(),
         &mut malformed,
         pin.placement.session(),
         Some("connection"),
+        None,
         None,
     )
     .await?;

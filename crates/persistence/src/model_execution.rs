@@ -5307,7 +5307,8 @@ async fn persist_tool_round(
             require_single(rows, "auto-approved tool execution phase")?;
         }
         ActiveTurnPhase::AwaitingChild { .. }
-        | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
+        | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
             return Err(
                 ModelCallCorruption::Inconsistent("fresh tool round recovery phase").into(),
             );

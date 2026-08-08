@@ -2818,7 +2818,8 @@ async fn persist_batch_decision(
             require_single(rows, "approved tool execution phase")?;
         }
         ActiveTurnPhase::AwaitingChild { .. }
-        | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
+        | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
             return Err(ToolLoopRepositoryError::InvalidTransition(
                 "approval command cannot enter recovery",
             ));

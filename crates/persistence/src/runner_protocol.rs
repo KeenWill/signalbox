@@ -486,6 +486,38 @@ pub struct StoredSessionRunnerPlacement {
     placement: SessionRunnerPlacement,
     registration: Option<StoredValidatedRunnerRegistration>,
     grant: Option<CredentialProfileGrant>,
+    interrupted_tool_attempt: Option<ToolAttemptId>,
+}
+
+/// One relationally authenticated active turn parked on runner loss.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoredRunnerRecoveryWait {
+    turn: TurnId,
+    runner: RunnerId,
+    placement_revision: RunnerGeneration,
+    interrupted_tool_attempt: Option<ToolAttemptId>,
+}
+
+impl StoredRunnerRecoveryWait {
+    /// Returns the active turn retaining the session's progressing slot.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns the exact lost runner.
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    /// Returns the positive placement revision against which loss was projected.
+    pub const fn placement_revision(&self) -> RunnerGeneration {
+        self.placement_revision
+    }
+
+    /// Returns the physical tool attempt interrupted by loss, when one exists.
+    pub const fn interrupted_tool_attempt(&self) -> Option<ToolAttemptId> {
+        self.interrupted_tool_attempt
+    }
 }
 
 impl StoredSessionRunnerPlacement {
@@ -507,6 +539,11 @@ impl StoredSessionRunnerPlacement {
     /// Returns the credential grant pinned by this placement, if any.
     pub const fn grant(&self) -> Option<&CredentialProfileGrant> {
         self.grant.as_ref()
+    }
+
+    /// Returns the physical tool attempt named by this exact loss record.
+    pub const fn interrupted_tool_attempt(&self) -> Option<ToolAttemptId> {
+        self.interrupted_tool_attempt
     }
 
     /// Separates the placement from its durable ordinal and pinned evidence.
@@ -1622,12 +1659,96 @@ impl RunnerProtocolStore {
             profileless_tombstone,
         )
         .await?;
+        let interrupted_tool_attempt = row
+            .decode_column::<Option<Uuid>>("interrupted_tool_attempt_id")?
+            .map(tool_attempt_id);
+        let event_kind: String = row.decode_column("event_kind")?;
+        if interrupted_tool_attempt.is_some() && event_kind != "runner_lost" {
+            return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+        }
         transaction.commit().await?;
         Ok(Some(StoredSessionRunnerPlacement {
             event_ordinal,
             placement,
             registration,
             grant,
+            interrupted_tool_attempt,
+        }))
+    }
+
+    /// Loads the exact authenticated runner-recovery wait for one session.
+    pub async fn load_runner_recovery_wait(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<StoredRunnerRecoveryWait>, RunnerProtocolStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let row = sqlx::query(
+            "SELECT turn.turn_id, turn.runner_recovery_runner_id,
+                    turn.runner_recovery_placement_revision,
+                    turn.runner_recovery_tool_attempt_id,
+                    placement.state_kind AS placement_state_kind,
+                    placement.lost_runner_id,
+                    placement.placement_revision,
+                    placement.interrupted_tool_attempt_id,
+                    attempt.turn_id AS interrupted_turn_id,
+                    attempt.session_id AS interrupted_session_id
+               FROM turn_lifecycle AS turn
+               JOIN runner_current_session_placement AS current_placement
+                 ON current_placement.session_id = turn.session_id
+               JOIN runner_session_placement_record AS placement
+                 ON placement.session_id = current_placement.session_id
+                AND placement.event_ordinal = current_placement.event_ordinal
+               LEFT JOIN tool_attempt AS attempt
+                 ON attempt.attempt_id = turn.runner_recovery_tool_attempt_id
+              WHERE turn.session_id = $1
+                AND turn.state_kind = 'active'
+                AND turn.active_phase_kind = 'awaiting_runner_recovery'",
+        )
+        .bind(session.into_uuid())
+        .fetch_optional(transaction.as_mut())
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let turn = TurnId::from_uuid(row.decode_column("turn_id")?);
+        let runner = runner_id(row.decode_column("runner_recovery_runner_id")?);
+        let placement_revision =
+            decode_generation(row.decode_column("runner_recovery_placement_revision")?)?;
+        let interrupted_tool_attempt = row
+            .decode_column::<Option<Uuid>>("runner_recovery_tool_attempt_id")?
+            .map(tool_attempt_id);
+        let placement_state: String = row.decode_column("placement_state_kind")?;
+        let stored_lost_runner = row
+            .decode_column::<Option<Uuid>>("lost_runner_id")?
+            .map(runner_id);
+        let stored_revision = decode_generation(row.decode_column("placement_revision")?)?;
+        let stored_interrupted_attempt = row
+            .decode_column::<Option<Uuid>>("interrupted_tool_attempt_id")?
+            .map(tool_attempt_id);
+        let interrupted_turn = row
+            .decode_column::<Option<Uuid>>("interrupted_turn_id")?
+            .map(TurnId::from_uuid);
+        let interrupted_session = row
+            .decode_column::<Option<Uuid>>("interrupted_session_id")?
+            .map(session_id);
+        if !matches!(
+            placement_state.as_str(),
+            "runner_lost" | "runner_lost_before_pin"
+        ) || stored_lost_runner != Some(runner)
+            || stored_revision != placement_revision
+            || stored_interrupted_attempt != interrupted_tool_attempt
+            || interrupted_tool_attempt.is_some()
+                != (interrupted_turn == Some(turn) && interrupted_session == Some(session))
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        transaction.commit().await?;
+        Ok(Some(StoredRunnerRecoveryWait {
+            turn,
+            runner,
+            placement_revision,
+            interrupted_tool_attempt,
         }))
     }
 

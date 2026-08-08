@@ -11924,6 +11924,15 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             ended_attempt_id: wire_uuid(ended_attempt.into_uuid()),
             recovery_tool_attempt_id: wire_uuid(recovery_attempt.into_uuid()),
         },
+        ProcessTurnState::ActiveAwaitingRunnerRecovery {
+            runner,
+            placement_revision,
+            interrupted_tool_attempt,
+        } => TurnState::ActiveAwaitingRunnerRecovery {
+            runner_id: wire_uuid(runner.into_uuid()),
+            placement_revision: CanonicalU64::new(*placement_revision),
+            tool_attempt_id: interrupted_tool_attempt.map(|attempt| wire_uuid(attempt.into_uuid())),
+        },
         ProcessTurnState::Failed {
             terminal_frontier,
             terminal_attempt,

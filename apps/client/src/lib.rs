@@ -3840,7 +3840,8 @@ fn queued_turn_blocker_recovery(
 fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError> {
     match state {
         TurnState::ActiveAwaitingModelCallRecovery { .. }
-        | TurnState::ActiveAwaitingToolRecovery { .. } => Err(ClientError::TurnRecoveryRequired),
+        | TurnState::ActiveAwaitingToolRecovery { .. }
+        | TurnState::ActiveAwaitingRunnerRecovery { .. } => Err(ClientError::TurnRecoveryRequired),
         TurnState::Queued { .. }
         | TurnState::QueuedDelegated { .. }
         | TurnState::QueuedDelegationWake { .. }
@@ -3936,7 +3937,8 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
         ) => Ok(None),
         Some(
             TurnState::ActiveAwaitingModelCallRecovery { .. }
-            | TurnState::ActiveAwaitingToolRecovery { .. },
+            | TurnState::ActiveAwaitingToolRecovery { .. }
+            | TurnState::ActiveAwaitingRunnerRecovery { .. },
         ) => Err(ClientError::TurnRecoveryRequired),
         None => Err(ClientError::Protocol(
             "follow snapshot omitted the submitted turn",

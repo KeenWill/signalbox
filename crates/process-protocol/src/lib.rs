@@ -4505,6 +4505,16 @@ pub enum TurnState {
         /// Ambiguous tool attempt awaiting recovery.
         recovery_tool_attempt_id: CanonicalUuid,
     },
+    /// The turn is parked on replacement of one exact lost runner placement.
+    ActiveAwaitingRunnerRecovery {
+        /// Runner whose durable loss owns this wait.
+        runner_id: CanonicalUuid,
+        /// Positive placement revision against which loss was projected.
+        placement_revision: CanonicalU64,
+        /// Physical tool attempt interrupted by loss, or null when none exists.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        tool_attempt_id: Option<CanonicalUuid>,
+    },
     /// The turn terminalized as failed.
     Failed {
         /// Exact terminal frontier.
@@ -4605,6 +4615,12 @@ enum RawTurnState {
     ActiveAwaitingToolRecovery {
         ended_attempt_id: CanonicalUuid,
         recovery_tool_attempt_id: CanonicalUuid,
+    },
+    ActiveAwaitingRunnerRecovery {
+        runner_id: CanonicalUuid,
+        placement_revision: CanonicalU64,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        tool_attempt_id: Option<CanonicalUuid>,
     },
     Failed {
         terminal_frontier_id: CanonicalUuid,
@@ -4733,6 +4749,15 @@ impl<'de> Deserialize<'de> for TurnState {
             } => Self::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
                 recovery_tool_attempt_id,
+            },
+            RawTurnState::ActiveAwaitingRunnerRecovery {
+                runner_id,
+                placement_revision,
+                tool_attempt_id,
+            } => Self::ActiveAwaitingRunnerRecovery {
+                runner_id,
+                placement_revision,
+                tool_attempt_id,
             },
             RawTurnState::Failed {
                 terminal_frontier_id,
@@ -8564,6 +8589,66 @@ mod tests {
         assert_delegation_terminal_state_rejected("stopped", "child_completed");
         assert_delegation_terminal_state_rejected("already_terminal", "parent_cancelled");
         Ok(())
+    }
+
+    #[test]
+    fn runner_recovery_turn_state_round_trips_interrupted_attempt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::ActiveAwaitingRunnerRecovery {
+            runner_id: uuid(2),
+            placement_revision: CanonicalU64::new(3),
+            tool_attempt_id: Some(uuid(4)),
+        };
+        let encoded = serde_json::to_value(&state)?;
+        let decoded = serde_json::from_value::<TurnState>(encoded.clone())?;
+
+        assert_eq!(decoded, state);
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "active_awaiting_runner_recovery",
+                "runner_id": "00000000-0000-0000-0000-000000000002",
+                "placement_revision": "3",
+                "tool_attempt_id": "00000000-0000-0000-0000-000000000004"
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runner_recovery_turn_state_round_trips_explicit_absent_attempt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::ActiveAwaitingRunnerRecovery {
+            runner_id: uuid(2),
+            placement_revision: CanonicalU64::new(3),
+            tool_attempt_id: None,
+        };
+        let encoded = serde_json::to_value(&state)?;
+        let decoded = serde_json::from_value::<TurnState>(encoded.clone())?;
+
+        assert_eq!(decoded, state);
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "active_awaiting_runner_recovery",
+                "runner_id": "00000000-0000-0000-0000-000000000002",
+                "placement_revision": "3",
+                "tool_attempt_id": null
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runner_recovery_turn_state_requires_nullable_attempt_member() {
+        let rejected = serde_json::from_value::<TurnState>(serde_json::json!({
+            "type": "active_awaiting_runner_recovery",
+            "runner_id": "00000000-0000-0000-0000-000000000002",
+            "placement_revision": "3"
+        }))
+        .expect_err("the nullable tool attempt remains a required wire member");
+
+        assert!(rejected.to_string().contains("tool_attempt_id"));
     }
 
     #[test]

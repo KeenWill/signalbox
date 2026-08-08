@@ -30,7 +30,7 @@ use signalbox_domain::{
     OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
     ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
-    SemanticTranscriptEntryId,
+    RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -53,8 +53,8 @@ use signalbox_domain::{
     SubmitInputRejectedSessionNotFoundReconstitutionInput,
     SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
     SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,
-    SubmitInputTurnOriginReconstitutionInput, TerminalAttemptEndReconstitutionInput, ToolRequestId,
-    TranscriptAncestry, TurnAttemptId, TurnId, UnstoppedAttemptDisposition,
+    SubmitInputTurnOriginReconstitutionInput, TerminalAttemptEndReconstitutionInput, ToolAttemptId,
+    ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId, UnstoppedAttemptDisposition,
     UnsupportedModelSetting, UserContent,
 };
 use sqlx::{FromRow, PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
@@ -1026,7 +1026,8 @@ where
                     signalbox_domain::ActiveTurnPhase::Running { .. }
                     | signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. }
                     | signalbox_domain::ActiveTurnPhase::AwaitingChild { .. }
-                    | signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. } => None,
+                    | signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. }
+                    | signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. } => None,
                 });
             if let Some(IssuedOperationRef::ToolAttempt(recovery_attempt)) = recovery_operation {
                 let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(
@@ -1461,7 +1462,8 @@ async fn prepare_against_locked_state(
                     "running"
                     | "awaiting_child"
                     | "awaiting_model_call_recovery"
-                    | "awaiting_tool_recovery" => false,
+                    | "awaiting_tool_recovery"
+                    | "awaiting_runner_recovery" => false,
                     "awaiting_tool_approval" => true,
                     value => {
                         return Err(SubmitInputCorruption::Unsupported {
@@ -1666,6 +1668,9 @@ pub(crate) async fn load_scheduling_projection(
             turn.active_tool_round_call_id,
             turn.approval_tool_request_id,
             turn.recovery_tool_attempt_id,
+            turn.runner_recovery_runner_id,
+            turn.runner_recovery_placement_revision,
+            turn.runner_recovery_tool_attempt_id,
             turn.child_wait_request_id,
             turn.model_identity_boundary_required,
             turn.terminal_attempt_id,
@@ -1918,11 +1923,25 @@ pub(crate) async fn load_scheduling_projection(
         let active_tool_round: Option<Uuid> = row.try_get("active_tool_round_call_id")?;
         let approval_tool_request: Option<Uuid> = row.try_get("approval_tool_request_id")?;
         let recovery_tool_attempt: Option<Uuid> = row.try_get("recovery_tool_attempt_id")?;
+        let runner_recovery_runner: Option<Uuid> = row.try_get("runner_recovery_runner_id")?;
+        let runner_recovery_revision: Option<Decimal> =
+            row.try_get("runner_recovery_placement_revision")?;
+        let runner_recovery_tool_attempt: Option<Uuid> =
+            row.try_get("runner_recovery_tool_attempt_id")?;
         let child_wait_request: Option<Uuid> = row.try_get("child_wait_request_id")?;
         let terminal_attempt: Option<Uuid> = row.try_get("terminal_attempt_id")?;
         let terminal_model_call: Option<Uuid> = row.try_get("terminal_model_call_id")?;
         let terminal_tool_attempt: Option<Uuid> = row.try_get("terminal_tool_attempt_id")?;
         let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
+        if active_phase.as_deref() != Some("awaiting_runner_recovery")
+            && (runner_recovery_runner.is_some()
+                || runner_recovery_revision.is_some()
+                || runner_recovery_tool_attempt.is_some())
+        {
+            return Err(
+                SubmitInputCorruption::Inconsistent("runner recovery lifecycle payload").into(),
+            );
+        }
         let state = match state_kind.as_str() {
             "queued" => {
                 if lineage_kind.is_some()
@@ -1935,6 +1954,9 @@ pub(crate) async fn load_scheduling_projection(
                     || active_tool_round.is_some()
                     || approval_tool_request.is_some()
                     || recovery_tool_attempt.is_some()
+                    || runner_recovery_runner.is_some()
+                    || runner_recovery_revision.is_some()
+                    || runner_recovery_tool_attempt.is_some()
                     || child_wait_request.is_some()
                     || terminal_attempt.is_some()
                     || terminal_model_call.is_some()
@@ -1959,6 +1981,31 @@ pub(crate) async fn load_scheduling_projection(
                     );
                 }
                 let phase = match active_phase.as_deref() {
+                    Some("awaiting_runner_recovery")
+                        if current_attempt.is_none()
+                            && recovery_model_call.is_none()
+                            && approval_tool_request.is_none()
+                            && recovery_tool_attempt.is_none()
+                            && child_wait_request.is_none() =>
+                    {
+                        let runner = runner_recovery_runner
+                            .ok_or(SubmitInputCorruption::Missing("runner_recovery_runner_id"))?;
+                        let revision = runner_recovery_revision.ok_or(
+                            SubmitInputCorruption::Missing("runner_recovery_placement_revision"),
+                        )?;
+                        let revision = positive_u64_from_numeric(revision)
+                            .ok()
+                            .and_then(RunnerGeneration::try_from_u64)
+                            .ok_or(SubmitInputCorruption::Inconsistent(
+                                "runner recovery placement revision",
+                            ))?;
+                        ActiveTurnSchedulingReconstitutionInput::awaiting_runner_recovery(
+                            lifecycle_turn,
+                            RunnerId::from_uuid(runner),
+                            revision,
+                            runner_recovery_tool_attempt.map(ToolAttemptId::from_uuid),
+                        )
+                    }
                     Some("running") if recovery_model_call.is_none() => {
                         if approval_tool_request.is_some() || recovery_tool_attempt.is_some() {
                             return Err(SubmitInputCorruption::Inconsistent(

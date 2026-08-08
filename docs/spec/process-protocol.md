@@ -1,5 +1,8 @@
 # Process protocol
 
+The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
+against this PR (`agent/runner-awaiting-recovery-persistence`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 

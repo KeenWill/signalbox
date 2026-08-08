@@ -2591,6 +2591,11 @@ pub enum ActiveTurnPhase {
         ambiguous_operations: NonEmptyIssuedOperationRefs,
         applied_interrupt: Option<AppliedInterruptProof>,
     },
+    AwaitingRunnerRecovery {
+        runner: RunnerId,
+        placement_revision: RunnerGeneration,
+        optional_tool_attempt: Option<ToolAttemptId>,
+    },
 }
 impl ActiveTurnPhase {
     pub const fn retains_progressing_slot(&self) -> bool;  // always true
@@ -2799,6 +2804,12 @@ impl ActiveTurnSchedulingReconstitutionInput {
         ended_attempt: TurnAttemptId,
         ambiguous_call: ModelCallId,
         interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
+    pub const fn awaiting_runner_recovery(
+        owning_turn: TurnId,
+        runner: RunnerId,
+        placement_revision: RunnerGeneration,
+        interrupted_tool_attempt: Option<ToolAttemptId>,
     ) -> Self;
     // accessor: owning_turn()
 }

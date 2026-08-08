@@ -1,5 +1,8 @@
 # Persistence protocol
 
+The runner-recovery turn-phase representation and read boundary were verified
+against this PR (`agent/runner-awaiting-recovery-persistence`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -370,19 +373,23 @@ Representation rules, all enforced in the schema:
   proof. Those lifecycle checks preserve the immutable next-safe-point command
   receipt, so equal replay after either transition still returns the original
   applied pending-steering result (INV-012, INV-016).
-- The runner-orchestration slice adds the `awaiting_runner_recovery` active
-  phase to `turn_lifecycle` with payload columns total only for that
-  discriminator: the exact lost runner, the positive placement revision the loss
-  was projected against, and a nullable tool attempt naming the physical attempt
-  the loss interrupted. Deferred checks require that runner and revision to name
-  the session's current lost placement, require a present tool attempt to belong
-  to the same session and to be the attempt the loss recorded, and admit the
-  phase only while that placement is `RunnerLost` or `RunnerLostBeforePin`. The
+- Migration `202608080101` adds the `awaiting_runner_recovery` active phase to
+  `turn_lifecycle` with payload columns total only for that discriminator: the
+  exact lost runner, the positive placement revision the loss was projected
+  against, and a nullable tool attempt naming the physical attempt the loss
+  interrupted. Deferred checks require that runner and revision to name the
+  session's current lost placement, require a present tool attempt to belong to
+  the same session and to be the attempt the loss recorded, and admit the phase
+  only while that placement is `RunnerLost` or `RunnerLostBeforePin`. The
   lifecycle transition matrix admits the phase exactly where
   `awaiting_tool_recovery` is admitted, and restart reconstitutes it from those
   correlated facts rather than from the stored discriminator. Without this shape
   the loss transaction has nowhere to store the phase and restart cannot rebuild
-  it.
+  it. The same migration adds the optional interrupted-attempt fact to the exact
+  placement-loss record, and the runner persistence read boundary round-trips
+  both nullable arms. **Committed unimplemented functionality.** No present
+  adapter produces the phase: the dedicated runner-loss propagation transaction
+  will install it under the lock order below.
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.

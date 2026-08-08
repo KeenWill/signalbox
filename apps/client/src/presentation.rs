@@ -1993,6 +1993,24 @@ impl<'a> Output<'a> {
                 "turn={turn_id} position={position} state=active_awaiting_tool_recovery \
                  attempt={ended_attempt_id} tool_attempt={recovery_tool_attempt_id}"
             ),
+            TurnState::ActiveAwaitingRunnerRecovery {
+                runner_id,
+                placement_revision,
+                tool_attempt_id,
+            } => match tool_attempt_id {
+                Some(tool_attempt_id) => writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=active_awaiting_runner_recovery \
+                     runner={runner_id} placement_revision={} tool_attempt={tool_attempt_id}",
+                    placement_revision.value()
+                ),
+                None => writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=active_awaiting_runner_recovery \
+                     runner={runner_id} placement_revision={} tool_attempt=none",
+                    placement_revision.value()
+                ),
+            },
             TurnState::Failed {
                 terminal_frontier_id,
                 terminal_attempt_id,

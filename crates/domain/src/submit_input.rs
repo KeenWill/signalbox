@@ -410,7 +410,8 @@ impl SubmitInput {
                 CurrentTurnAttemptState::Prepared | CurrentTurnAttemptState::Running => None,
             },
             crate::ActiveTurnPhase::AwaitingApproval { .. }
-            | crate::ActiveTurnPhase::AwaitingChild { .. } => None,
+            | crate::ActiveTurnPhase::AwaitingChild { .. }
+            | crate::ActiveTurnPhase::AwaitingRunnerRecovery { .. } => None,
             crate::ActiveTurnPhase::AwaitingRecoveryDecision {
                 applied_interrupt, ..
             } => *applied_interrupt,

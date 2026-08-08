@@ -531,6 +531,11 @@ enum StoredActiveTurnPhase {
         call: crate::ModelCallId,
         attempt_end: TerminalAttemptEndReconstitutionInput,
     },
+    AwaitingRunnerRecovery {
+        runner: crate::RunnerId,
+        placement_revision: crate::RunnerGeneration,
+        interrupted_tool_attempt: Option<crate::ToolAttemptId>,
+    },
 }
 
 impl ActiveTurnSchedulingReconstitutionInput {
@@ -809,6 +814,26 @@ impl ActiveTurnSchedulingReconstitutionInput {
         }
     }
 
+    /// Supplies facts for a stored runner-loss wait whose relational evidence
+    /// has already been checked by the persistence boundary.
+    pub const fn awaiting_runner_recovery(
+        owning_turn: TurnId,
+        runner: crate::RunnerId,
+        placement_revision: crate::RunnerGeneration,
+        interrupted_tool_attempt: Option<crate::ToolAttemptId>,
+    ) -> Self {
+        Self {
+            owning_turn,
+            current_attempt: None,
+            state: StoredActiveTurnPhase::AwaitingRunnerRecovery {
+                runner,
+                placement_revision,
+                interrupted_tool_attempt,
+            },
+            executing_tool_batch: None,
+        }
+    }
+
     /// Returns the turn named as owner by the active-phase record.
     pub const fn owning_turn(&self) -> TurnId {
         self.owning_turn
@@ -828,6 +853,20 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 .is_none()
                 .then_some(ActiveTurnPhase::AwaitingChild { wait: *wait });
         }
+        if let StoredActiveTurnPhase::AwaitingRunnerRecovery {
+            runner,
+            placement_revision,
+            interrupted_tool_attempt,
+        } = self.state
+        {
+            return self.current_attempt.is_none().then_some(
+                ActiveTurnPhase::AwaitingRunnerRecovery {
+                    runner,
+                    placement_revision,
+                    optional_tool_attempt: interrupted_tool_attempt,
+                },
+            );
+        }
         let current_attempt = CurrentTurnAttempt::prepared(self.current_attempt?);
         let current_attempt = match &self.state {
             StoredActiveTurnPhase::Prepared => current_attempt,
@@ -839,7 +878,8 @@ impl ActiveTurnSchedulingReconstitutionInput {
             StoredActiveTurnPhase::AwaitingApproval { .. }
             | StoredActiveTurnPhase::AwaitingChild { .. }
             | StoredActiveTurnPhase::AwaitingToolRecovery { .. }
-            | StoredActiveTurnPhase::AwaitingModelCallRecovery { .. } => return None,
+            | StoredActiveTurnPhase::AwaitingModelCallRecovery { .. }
+            | StoredActiveTurnPhase::AwaitingRunnerRecovery { .. } => return None,
         };
         Some(ActiveTurnPhase::Running { current_attempt })
     }
@@ -4528,6 +4568,10 @@ fn reconstitute_inner(
                                     _,
                                 ) => false,
                                 (
+                                    StoredActiveTurnPhase::AwaitingRunnerRecovery { .. },
+                                    _,
+                                ) => false,
+                                (
                                     StoredActiveTurnPhase::AwaitingModelCallRecovery {
                                         call, ..
                                     },
@@ -5041,6 +5085,14 @@ fn reconstitute_inner(
                         }
                         ActiveTurnPhase::AwaitingChild { wait: *wait }
                     }
+                    StoredActiveTurnPhase::AwaitingRunnerRecovery { .. } => phase
+                        .canonical_evidence_free_phase()
+                        .ok_or(
+                        AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                            turn,
+                            accepted_input: record.accepted_input.id(),
+                        },
+                    )?,
                     StoredActiveTurnPhase::AwaitingToolRecovery { wait, attempt_end } => {
                         let Some(current_attempt) = phase.current_attempt else {
                             return Err(
@@ -6557,7 +6609,8 @@ fn reconstitute_active_acceptance_tail(
             StoredActiveTurnPhase::Prepared
             | StoredActiveTurnPhase::Running
             | StoredActiveTurnPhase::AwaitingApproval { .. }
-            | StoredActiveTurnPhase::AwaitingChild { .. } => None,
+            | StoredActiveTurnPhase::AwaitingChild { .. }
+            | StoredActiveTurnPhase::AwaitingRunnerRecovery { .. } => None,
         },
         AcceptedInputTurnSchedulingRecordState::Queued
         | AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }
@@ -7400,7 +7453,8 @@ fn prepare_active_turn_lost_failure(
         Some(
             ActiveTurnPhase::AwaitingApproval { .. }
             | ActiveTurnPhase::AwaitingChild { .. }
-            | ActiveTurnPhase::AwaitingRecoveryDecision { .. },
+            | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
+            | ActiveTurnPhase::AwaitingRunnerRecovery { .. },
         )
         | None => {
             return Err(fail(
@@ -16399,6 +16453,32 @@ mod tests {
             AcceptedInputSchedulingReconstitutionFailure::DuplicateModelCallIdentityAcrossKinds {
                 call,
             }
+        );
+    }
+
+    /// INV-009 / INV-044: checked relational runner-loss facts reconstitute the
+    /// exact closed active phase without a live turn attempt.
+    #[test]
+    fn inv009_inv044_runner_recovery_phase_reconstitutes_exact_loss_subject() {
+        let owning_turn = turn_id(801);
+        let runner = crate::RunnerId::from_uuid(uuid::Uuid::from_u128(802));
+        let revision = crate::RunnerGeneration::try_from_u64(3)
+            .expect("the fixture placement revision is positive");
+        let interrupted_tool_attempt = Some(tool_attempt_id(803));
+        let input = ActiveTurnSchedulingReconstitutionInput::awaiting_runner_recovery(
+            owning_turn,
+            runner,
+            revision,
+            interrupted_tool_attempt,
+        );
+
+        assert_eq!(
+            input.canonical_evidence_free_phase(),
+            Some(ActiveTurnPhase::AwaitingRunnerRecovery {
+                runner,
+                placement_revision: revision,
+                optional_tool_attempt: interrupted_tool_attempt,
+            })
         );
     }
 }
