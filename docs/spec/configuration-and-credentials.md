@@ -809,23 +809,32 @@ filesystem root rejects a symlink in any component and requires the final
 component to be a directory, then records its device and inode as the profile's
 credential-home identity; failure blocks scheduling but cannot block recovery of
 acknowledged work. Two `codex_home` profiles may not resolve to the same
-identity even when their lexically normalized paths differ. Before every
-preparation, the daemon repeats that no-symlink walk and requires the same
-identity before it reserves capacity or starts a child; replacement or aliasing
-is a typed pre-send credential-configuration failure. It exists so a deployment
-can point the daemon at a login an operator already established interactively,
-provisioning nothing. Concurrent invocations against one such profile are
-admitted by default, matching how the CLI is ordinarily used. The store has no
-cross-process file locking, but the CLI re-reads it immediately before
-refreshing and adopts a token another process wrote rather than refreshing
-again, so the residual race is two processes crossing the refresh threshold
-within one token-exchange round trip — narrow, because a process refreshes about
-once per access-token lifetime. When it does fire the authorization is
-invalidated and the profile quarantines; recovery is the ordinary
-re-provisioning an operator already performs, and the pool fails over meanwhile.
-A deployment preferring not to carry that risk sets the optional bound, which is
-unbounded when absent. The knob exists because the tradeoff is a deployment's to
-make and code cannot observe which side of it a given operator is on.
+identity even when their lexically normalized paths differ. The daemon repeats
+that no-symlink walk before every invocation and requires the same identity;
+replacement or aliasing is a typed pre-send credential-configuration failure and
+starts no child. That walk runs in off-transaction capability preparation, after
+the reservation and the call's `Prepared` record have committed — not before
+them. Why that order: the member and its reservation are chosen atomically under
+the capacity locks, so doing the walk first would decide against exclusion and
+capacity facts that the selecting transaction may then contradict, while doing
+it inside that transaction would hold a database transaction across filesystem
+I/O, which [staged execution](model-call-execution.md#staged-execution) forbids.
+A mismatch therefore fails the call in preparation and releases its reservation
+through the ordinary guarded pre-send closure, exactly as a spawn failure does.
+It exists so a deployment can point the daemon at a login an operator already
+established interactively, provisioning nothing. Concurrent invocations against
+one such profile are admitted by default, matching how the CLI is ordinarily
+used. The store has no cross-process file locking, but the CLI re-reads it
+immediately before refreshing and adopts a token another process wrote rather
+than refreshing again, so the residual race is two processes crossing the
+refresh threshold within one token-exchange round trip — narrow, because a
+process refreshes about once per access-token lifetime. When it does fire the
+authorization is invalidated and the profile quarantines; recovery is the
+ordinary re-provisioning an operator already performs, and the pool fails over
+meanwhile. A deployment preferring not to carry that risk sets the optional
+bound, which is unbounded when absent. The knob exists because the tradeoff is a
+deployment's to make and code cannot observe which side of it a given operator
+is on.
 
 Two profiles whose validated credential-home identities differ are independent
 token families with nothing shared, so a pool holds as many as a deployment has

@@ -141,10 +141,13 @@ and does not leave its wait pointing at a reservation that no longer exists:
 under those locks it atomically replaces the wait's evidence with the current
 snapshot — the live reservation identities and generations now holding the
 bound, or the complete exclusion snapshot if the pool has meanwhile become
-exhausted — and the turn stays parked in the corresponding wait form. A
-reservation identity therefore never outlives the wait that names it, and losing
-a race costs a re-park rather than a failed turn or an admission above the
-bound.
+exhausted — and the turn stays parked in the corresponding wait form. Releasing
+a bounded reservation holds that profile's capacity row across the atomic
+release-and-wake commit, and a rewrite holds the capacity rows of every bounded
+member its evidence names, so a completion cannot slip between a loser's read
+and its commit. A reservation identity therefore never outlives the wait that
+names it, and losing a race costs a re-park rather than a failed turn, a missed
+wake, or an admission above the bound.
 
 The wait has an exact occupied-slot control matrix. `steer` is accepted as
 ordinary pending steering bound to this source turn and remains pending until a

@@ -644,10 +644,17 @@ Locks per transaction, in acquisition order:
   transactions waits: a `Prepared` insert either precedes the exclusion commit
   or reads the member as already excluded. This is what a selection needs when
   it takes no other lock the writer takes — an unbounded `first_listed` member
-  acquires neither a capacity row nor a cursor row. No other path may take a
-  scheduler lock while holding an action-head, capacity-, or cursor-row lock;
-  take an action-head lock while holding a capacity-row or cursor-row lock; or
-  take a capacity-row lock while holding a cursor-row lock.
+  acquires neither a capacity row nor a cursor row. Releasing a bounded
+  profile's reservation takes that profile's capacity row `FOR UPDATE` at the
+  same position and holds it through the atomic release-and-wake commit, and a
+  woken waiter rewriting its own wait evidence takes the capacity rows of every
+  bounded member that evidence names, in the same byte order. A release and a
+  snapshot rewrite therefore cannot interleave: no wait can commit naming a
+  reservation another transaction has already released, and no release can
+  publish its wake between a loser's read and its rewrite. No other path may
+  take a scheduler lock while holding an action-head, capacity-, or cursor-row
+  lock; take an action-head lock while holding a capacity-row or cursor-row
+  lock; or take a capacity-row lock while holding a cursor-row lock.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -1564,15 +1571,19 @@ committed reservation. Because every invocation is recorded, a bound newly
 lowered from unbounded is still enforced against complete startup fencing
 evidence rather than against only the invocations that were bounded when they
 started. Invocation completion releases its reservation and writes the wake
-signal atomically. One release can wake several waits while admitting one, so
-each woken transaction reruns admission under the same capacity locks. The one
-that acquires the freed reservation releases its wait; a transaction finding no
-admissible member instead atomically rewrites its own wait's evidence to the
-current snapshot under those locks — the live reservation identities and
-generations now holding the bound, or the complete exclusion snapshot when the
-pool has become exhausted — and stays parked. A deferred constraint therefore
-never has to reject a losing waiter's call, and no stored wait names a released
-reservation. Entering either wait ends the call-free current attempt as
+signal atomically, holding that profile's capacity row `FOR UPDATE` across both
+so a release and its wake are never visible apart. One release can wake several
+waits while admitting one, so each woken transaction reruns admission under the
+same capacity locks. The one that acquires the freed reservation releases its
+wait; a transaction finding no admissible member instead atomically rewrites its
+own wait's evidence to the current snapshot under those locks — the live
+reservation identities and generations now holding the bound, or the complete
+exclusion snapshot when the pool has become exhausted — and stays parked.
+Because the rewrite holds the capacity rows of every bounded member it names, a
+concurrent completion cannot release one of them between the read and the
+commit. A deferred constraint therefore never has to reject a losing waiter's
+call, and no stored wait names a released reservation or misses the only wake
+that concerned it. Entering either wait ends the call-free current attempt as
 `WithoutStop(YieldedToDurableWait)` in the same transaction. Release atomically
 consumes the wait and creates its fresh `Prepared` successor attempt;
 `stop_turn` instead atomically consumes it, creates the fresh
@@ -1590,14 +1601,16 @@ have started before the identity update, so startup fails before scheduling
 rather than releasing it without process-death proof. After that reconciliation
 and before scheduling is enabled, startup iterates the retained `contended`
 waits themselves rather than the currently bounded profiles, so a profile whose
-bound was removed still has an entry to evaluate. A wait naming a profile the
-current registration leaves unbounded becomes eligible outright, with no
-reservation count to compare against. For a wait naming a still-bounded profile,
-startup counts that profile's surviving live reservations under its capacity
-lock and makes the wait eligible when the count is below the current bound. A
-bound raised, lowered, or removed across a restart is therefore evaluated the
-same way, without waiting for an unrelated release. These are the shapes
-required by
+bound was removed still has an entry to evaluate. Each wait stores a complete
+nonempty bounded-member set, so startup evaluates every member in that set
+rather than one profile: a member the current registration leaves unbounded
+makes the wait eligible outright with no count to compare against, and a member
+still bounded makes it eligible when that profile's surviving live reservation
+count, taken under its capacity lock, is below the current bound. Any one such
+member suffices, since one admissible member is all preparation needs. A bound
+raised, lowered, or removed across a restart is therefore evaluated the same way
+for every member of every wait, without waiting for an unrelated release. These
+are the shapes required by
 [turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
 Reconstitution and wake must fail closed on partial, stale, or mismatched
 evidence. This paragraph constrains that future schema; no present storage
