@@ -121,7 +121,7 @@ fn serve(catalog_path: PathBuf, ready_path: PathBuf) -> ExitCode {
     let Ok(catalog_bytes) = std::fs::read(catalog_path) else {
         return ExitCode::FAILURE;
     };
-    let Ok(catalog) = decode_catalog(&catalog_bytes) else {
+    let Ok(catalog) = serde_json::from_slice::<Catalog>(&catalog_bytes) else {
         return ExitCode::FAILURE;
     };
     if !catalog_is_valid(&catalog) {
@@ -171,14 +171,6 @@ fn serve(catalog_path: PathBuf, ready_path: PathBuf) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-}
-
-fn decode_catalog(bytes: &[u8]) -> Result<Catalog, serde_json::Error> {
-    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    deserializer.disable_recursion_limit();
-    let catalog = Catalog::deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
-    deserializer.end()?;
-    Ok(catalog)
 }
 
 fn catalog_is_valid(catalog: &Catalog) -> bool {
