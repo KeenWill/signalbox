@@ -147,24 +147,51 @@ WRAPPED_GAP = rf"(?:{MARKUP}(?:[ \t]+|[ \t]*\r?\n[ \t]*(?:>[ \t]*)*){MARKUP})"
 # is skipped rather than misreported as a different number.
 NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 
-# A number that is the upper bound of a range written in words states no total.
-# Each alternative is its own fixed-width lookbehind because Python requires
-# that; `and` is deliberately absent, being ordinary conjunction far more often
-# than a range terminus.
-# A range terminus immediately before a number, with whatever whitespace — or
-# hard wrap — the formatter left between them. Applied by searching the text
-# *before* a candidate match rather than as a lookbehind, because Python
-# lookbehinds must be fixed width and these are not: "5 to 37", "5 to\n37",
-# "5 – 37" and "5\u201337" are the same statement, and each one reports the upper
-# bound as a total that can agree with the catalog and pass in silence.
+# The whitespace a range terminus may be separated from either of its bounds
+# by, including the hard wrap the required mdformat pass can leave between them
+# and the block-quote markers such a wrap carries. At most one newline, for the
+# same reason `WRAPPED_GAP` stops there: a blank line ends the paragraph, and a
+# number in one paragraph bounds nothing in the next.
+RANGE_GAP = r"[ \t]*(?:\r?\n[ \t]*(?:>[ \t]*)*)?[ \t]*"
+
+# A number that is only one bound of a range states no total, so the text on
+# both sides of a candidate is examined. `and` is deliberately absent from both
+# patterns, being ordinary conjunction far more often than a range terminus:
+# "3 sessions and 37 scenarios" states a real total.
 #
-# The dashes live here rather than in the boundary class below for the same
-# reason. `INV-002` is still refused, since `INV-` ends in one.
+# Both are applied by searching the text around a candidate match rather than as
+# lookarounds, because Python lookbehinds must be fixed width and these are not:
+# "5 to 37", "5 to\n37", "5 – 37" and "5\u201337" are the same statement.
+#
+# A terminus immediately *before* the number makes it the upper bound, and each
+# such number reports a total that can agree with the catalog and pass in
+# silence. The dashes live here rather than in the boundary class below for the
+# same reason; that is also what refuses `INV-002`, since `INV-` ends in one.
 RANGE_PREFIX = re.compile(
-    r"(?:\bto|\bthrough|\bthru|[-\u2010-\u2015])"
-    r"[ \t]*(?:\r?\n[ \t]*(?:>[ \t]*)*)?[ \t]*$",
+    rf"(?:\bto|\bthrough|\bthru|[-\u2010-\u2015]){RANGE_GAP}$",
     re.IGNORECASE,
 )
+
+# A terminus immediately *after* the number makes it the lower bound. Only the
+# noun-count phrases below reach this shape — nothing separates
+# "scenario count: 37" from "scenario count: 37\u201350", so a range written
+# against the catalog's own size was read as a stated total and passed — while
+# `NUMBER_BEFORE_NOUN` cannot, its noun standing where a terminus would.
+#
+# An upper bound is required rather than assumed, so prose that merely ends in a
+# dash still leaves its count readable.
+#
+# Anchored by `re.match` at the number's end rather than by `^`, which asserts
+# a line start and would refuse every terminus that does not follow a newline.
+RANGE_SUFFIX = re.compile(
+    rf"{RANGE_GAP}(?P<terminus>to\b|through\b|thru\b|[-\u2010-\u2015])"
+    rf"{RANGE_GAP}[0-9]",
+    re.IGNORECASE,
+)
+
+# What may precede a list bullet on its own line: indentation, and the
+# block-quote markers of whatever depth the bullet is nested inside.
+LIST_BULLET_LEAD = re.compile(r"[ \t]*(?:>[ \t]*)*")
 
 # A number sitting directly before the noun: "50 invariants", "1 scenario".
 # The lookbehind refuses a digit run glued to a preceding word, decimal point,
@@ -368,6 +395,49 @@ def as_one_phrase(matched: str) -> str:
     return " ".join(word for word in without_markup.split() if set(word) != {">"})
 
 
+def opens_a_list_item(text: str, offset: int) -> bool:
+    """Whether the character at `offset` is a bullet marker, not a range dash.
+
+    A hyphen that opens a Markdown list item is the one range terminus this
+    repository's prose writes for a different purpose entirely: "- 9 scenarios
+    are catalogued" is a bullet stating a total, not the tail of a range, and
+    reading it as one discarded the count and let a stale total pass — while the
+    same sentence as a paragraph, or under a `+` or `*` bullet, failed as it
+    should. `+` and `*` are not range termini, so only `-` is ambiguous, and only
+    the ASCII hyphen: CommonMark's bullets are exactly `-`, `+` and `*`, so a
+    line opening with U+2010-U+2015 is prose whichever dash it uses.
+
+    A bullet is a marker with nothing but indentation and block-quote markers
+    before it on its line, and whitespace after it — `-9` is a negative number,
+    not an empty list item, so the count it bounds stays refused.
+    """
+    if text[offset] != "-":
+        return False
+    if offset + 1 >= len(text) or text[offset + 1] not in " \t\r\n":
+        return False
+    line_start = text.rfind("\n", 0, offset) + 1
+    return LIST_BULLET_LEAD.fullmatch(text[line_start:offset]) is not None
+
+
+def bounds_a_range(text: str, match: re.Match[str]) -> bool:
+    """Whether the captured number is one bound of a range rather than a total.
+
+    Both sides are asked, because a range states no total from either end: the
+    upper bound of "5 to 37 scenarios" and the lower bound of "scenario count:
+    37-50" each report 37, which *agrees* with a 37-scenario catalog and so
+    passes in silence — the one failure mode nothing downstream would surface.
+
+    A terminus that turns out to be a list bullet is not a range on either side.
+    Testing that here rather than inside the patterns keeps the ambiguity in one
+    place, so the two directions cannot disagree about what a dash means.
+    """
+    before = RANGE_PREFIX.search(text[: match.start("number")])
+    if before is not None and not opens_a_list_item(text, before.start()):
+        return True
+    after = RANGE_SUFFIX.match(text, match.end("number"))
+    return after is not None and not opens_a_list_item(text, after.start("terminus"))
+
+
 def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
     """Return (line, noun, stated count, matched text) for one Markdown file.
 
@@ -400,9 +470,9 @@ def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
     # can be read the same way regardless of which order the words fall in.
     for pattern in (NUMBER_BEFORE_NOUN, NOUN_COUNT_PHRASE, COUNT_OF_NOUN_PHRASE):
         for match in pattern.finditer(text):
-            # A number that terminates a range states no total, however the
-            # range was spelled or wrapped.
-            if RANGE_PREFIX.search(text[: match.start("number")]):
+            # A number that bounds a range states no total, from either end and
+            # however the range was spelled or wrapped.
+            if bounds_a_range(text, match):
                 continue
             noun = (
                 "invariant"

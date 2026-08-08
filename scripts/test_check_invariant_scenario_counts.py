@@ -8,11 +8,18 @@ between its number and its noun still fails while a number and noun in
 separate paragraphs do not, a count inside fenced code is invisible to the
 scan for every fence shape this repository writes (```` ``` ````, `~~~`,
 long fences holding short ones, and fences nested in block quotes and list
-items), an INV-NNN identifier is never mistaken for a stated count, and an
-untracked sibling worktree (the `.claude/worktrees/` pattern this repo uses
-for concurrent agent checkouts) is never scanned. Every case runs the
-checker as a subprocess against a synthetic Git working tree, and every
-expected total is derived from the fixture rosters rather than restated.
+items), an INV-NNN identifier is never mistaken for a stated count, a range
+states no total from either of its bounds while a hyphen that opens a list
+item is a bullet and not a range terminus, and an untracked sibling worktree
+(the `.claude/worktrees/` pattern this repo uses for concurrent agent
+checkouts) is never scanned. Every case runs the checker as a subprocess
+against a synthetic Git working tree, and every expected total is derived
+from the fixture rosters rather than restated.
+
+The range cases state a *stale* bound deliberately. A range whose bound
+agrees with the catalog passes whether or not the checker rejects it, so it
+proves nothing; only a stale bound makes reading it at all visible as a
+failure.
 """
 
 from __future__ import annotations
@@ -721,6 +728,72 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
 
     def test_a_spaced_hyphen_range_is_not_read_as_its_upper_bound(self) -> None:
         self.assert_no_count_read_from(f"There are 5 - {SCENARIO_COUNT} scenarios")
+
+    def test_a_range_after_an_explicit_count_is_not_read_as_its_lower_bound(
+        self,
+    ) -> None:
+        """A range can open with the catalog's own size as well as close with
+        it: "scenario count: N-M" states a range, and reading its lower bound
+        reports N as a total — which *agrees* with an N-scenario catalog and so
+        passes in silence, the one failure mode nothing downstream surfaces.
+
+        The stale lower bound here makes that visible: reading it at all fails
+        the run, so only rejecting the whole range can pass this.
+        """
+        self.assert_no_count_read_from(
+            f"scenario count: {STALE_SCENARIO_COUNT}–{STALE_SCENARIO_COUNT + 5}"
+        )
+
+    def test_a_hyphen_range_after_an_explicit_count_is_not_read(self) -> None:
+        self.assert_no_count_read_from(
+            f"scenario count: {STALE_SCENARIO_COUNT}-{STALE_SCENARIO_COUNT + 5}"
+        )
+
+    def test_a_textual_range_after_a_count_of_noun_phrase_is_not_read(self) -> None:
+        self.assert_no_count_read_from(
+            f"count of scenarios: {STALE_SCENARIO_COUNT} to {STALE_SCENARIO_COUNT + 5}"
+        )
+
+    def test_a_range_terminus_with_no_upper_bound_still_states_a_total(self) -> None:
+        """Only a terminus followed by a bound makes the number a lower bound;
+        prose that merely ends in a dash still states its count."""
+        self.assert_stale_scenario_count_caught(
+            f"scenario count: {STALE_SCENARIO_COUNT} -"
+        )
+
+    def test_a_stale_count_under_a_hyphen_bullet_fails(self) -> None:
+        """A hyphen opening a list item is a bullet, not a range terminus.
+        Reading it as one discarded the count, so this stale total passed —
+        while the same sentence as a paragraph, or under a `+` or `*` bullet,
+        failed as it should."""
+        self.assert_stale_scenario_count_caught(
+            f"- {STALE_SCENARIO_COUNT} scenarios are catalogued"
+        )
+
+    def test_a_stale_count_under_an_indented_hyphen_bullet_fails(self) -> None:
+        self.assert_stale_scenario_count_caught(
+            f"  - {STALE_SCENARIO_COUNT} scenarios are catalogued"
+        )
+
+    def test_a_stale_count_under_a_quoted_hyphen_bullet_fails(self) -> None:
+        """The quote markers a nested bullet carries lead the marker rather
+        than making it a range."""
+        self.assert_stale_scenario_count_caught(
+            f"> > - {STALE_SCENARIO_COUNT} scenarios are catalogued"
+        )
+
+    def test_a_stale_count_before_a_hyphen_bullet_line_still_fails(self) -> None:
+        """The mirror of the case above, on the other side of the number: a
+        bullet opening the next line is not the upper bound of a range, so the
+        count it follows is still a stated total."""
+        self.assert_stale_scenario_count_caught(
+            f"scenario count: {STALE_SCENARIO_COUNT}\n- 5 unrelated items"
+        )
+
+    def test_a_negative_number_is_still_not_read_as_a_total(self) -> None:
+        """A hyphen glued to its digits opens no list item, so the number it
+        bounds stays refused."""
+        self.assert_no_count_read_from(f"There are -{STALE_SCENARIO_COUNT} scenarios")
 
     def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
         """A tracked path can vanish between `git ls-files` and the read.
