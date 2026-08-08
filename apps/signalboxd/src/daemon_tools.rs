@@ -2057,8 +2057,7 @@ mod tests {
             }
         } else {
             let recognized_target = artifact_parent.file_name().filter(|name| {
-                artifact_parent.parent() == Some(default_target_dir.as_path())
-                    && input.known_targets.contains(*name)
+                artifact_parent != default_target_dir && input.known_targets.contains(*name)
             });
             recognized_target.map_or_else(
                 || (artifact_parent.to_path_buf(), None),
@@ -2192,18 +2191,20 @@ mod tests {
     }
 
     #[test]
-    fn bridge_artifact_selection_does_not_infer_target_from_cli_target_dir_name() {
-        let target_dir = Path::new("synthetic-parent").join(SYNTHETIC_CARGO_TARGET);
-        let executable = target_dir.join("debug/deps/daemon-tools-test");
+    fn bridge_artifact_selection_preserves_a_target_with_a_cli_target_directory() {
+        let target_dir = Path::new("synthetic-parent");
+        let executable = target_dir
+            .join(SYNTHETIC_CARGO_TARGET)
+            .join("debug/deps/daemon-tools-test");
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
             executable: &executable,
-            target_dir: &target_dir,
+            target_dir,
             configured_target_dir: None,
             default_target_dir: Path::new("synthetic-default-target"),
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: CARGO_TEST_PROFILE,
-            expected_target: None,
+            expected_target: Some(SYNTHETIC_CARGO_TARGET),
             recognized_target: Some(SYNTHETIC_CARGO_TARGET),
         });
     }
@@ -3541,7 +3542,7 @@ mod tests {
             "jsonrpc": "2.0",
             "id": request_id.clone(),
             "result": {},
-            "error": {"code": -32603, "message": "synthetic error"},
+            "error": {"code": -32603, "message": SYNTHETIC_JSON_RPC_ERROR_MESSAGE},
         });
 
         assert!(!valid_mcp_response_envelope(McpResponseEnvelope {
@@ -3553,7 +3554,7 @@ mod tests {
     #[test]
     fn raw_list_response_rejects_result_and_error_together() {
         let response = format!(
-            r#"{{"jsonrpc":"2.0","id":{MCP_LIST_TOOLS_REQUEST_ID},"result":{{"tools":[]}},"error":{{"code":-32603,"message":"synthetic error"}}}}"#
+            r#"{{"jsonrpc":"2.0","id":{MCP_LIST_TOOLS_REQUEST_ID},"result":{{"tools":[]}},"error":{{"code":-32603,"message":"{SYNTHETIC_JSON_RPC_ERROR_MESSAGE}"}}}}"#
         );
         let response: ListedBridgeResponse =
             serde_json::from_str(&response).expect("synthetic list response is valid JSON");
@@ -4255,6 +4256,7 @@ mod tests {
     const MCP_UNDECLARED_TOOL_REQUEST_ID: u64 = 5;
     const MCP_NON_OBJECT_ARGUMENTS_REQUEST_ID: u64 = 6;
     const MCP_ENVELOPE_REQUEST_ID: u64 = 7;
+    const SYNTHETIC_JSON_RPC_ERROR_MESSAGE: &str = "synthetic error";
     const MCP_OTHER_REQUEST_ID: u64 = 8;
     const MCP_BLOCKING_LIST_REQUEST_ID: u64 = 9;
     const MCP_UNDECLARED_TOOL_NAME: &str = "synthetic_undeclared_tool";
