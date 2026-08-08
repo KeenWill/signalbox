@@ -2237,10 +2237,6 @@ pub enum SubmitInputRejectedResult {
         session: SessionId,
         active_turn: TurnId,
     },
-    InterruptUnavailableWhileAwaitingRunnerRecovery {
-        session: SessionId,
-        active_turn: TurnId,
-    },
 }
 
 pub struct PreparedSubmitInput { /* private */ }
@@ -2347,10 +2343,6 @@ pub struct SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput {
 pub struct SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput {
     /* public named command, active-turn, and canonical origin facts */
 }
-pub struct SubmitInputRejectedInterruptUnavailableWhileAwaitingRunnerRecoveryReconstitutionInput {
-    /* public named command, active-turn, and canonical origin facts */
-}
-
 pub struct SubmitInputReconstitutionInput { /* private */ }
 impl SubmitInputReconstitutionInput {
     pub fn applied_turn_origin(
@@ -2367,9 +2359,6 @@ impl SubmitInputReconstitutionInput {
     ) -> Self;
     pub fn rejected_interrupt_unavailable_while_awaiting_approval(
         input: SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
-    ) -> Self;
-    pub fn rejected_interrupt_unavailable_while_awaiting_runner_recovery(
-        input: SubmitInputRejectedInterruptUnavailableWhileAwaitingRunnerRecoveryReconstitutionInput,
     ) -> Self;
     pub fn rejected_session_not_found(
         input: SubmitInputRejectedSessionNotFoundReconstitutionInput,
@@ -9854,7 +9843,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: accepted_input                             | 5                     |
 | domain: delivery_request                           | 2                     |
 | domain: user_content                               | 4                     |
-| domain: submit_input                               | 33                    |
+| domain: submit_input                               | 32                    |
 | domain: queue_order                                | 5 (+1 free fn)        |
 | domain: repo_watch                                 | 49                    |
 | domain: turn_lifecycle                             | 10                    |
@@ -9877,7 +9866,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 69                    |
-| **signalbox-domain total**                         | **759 (+10 free fn)** |
+| **signalbox-domain total**                         | **758 (+10 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

@@ -378,18 +378,20 @@ Representation rules, all enforced in the schema:
   exact lost runner, the positive placement revision the loss was projected
   against, and a nullable tool attempt naming the physical attempt the loss
   interrupted. Deferred checks require that runner and revision to name the
-  session's current lost placement, require a present tool attempt to belong to
-  the same session and to be the attempt the loss recorded, and admit the phase
-  only while that placement is `RunnerLost` or `RunnerLostBeforePin`. The
-  lifecycle transition matrix admits the phase exactly where
-  `awaiting_tool_recovery` is admitted, and restart reconstitutes it from those
-  correlated facts rather than from the stored discriminator. Without this shape
-  the loss transaction has nowhere to store the phase and restart cannot rebuild
-  it. The same migration adds the optional interrupted-attempt fact to the exact
-  placement-loss record, and the runner persistence read boundary round-trips
-  both nullable arms. **Committed unimplemented functionality.** No present
-  adapter produces the phase: the dedicated runner-loss propagation transaction
-  will install it under the lock order below.
+  session's current lost placement. A present tool attempt must also be the
+  attempt the loss recorded and must carry runner-lease lineage to that exact
+  runner and placement revision. Lifecycle-side and placement-side checks lock
+  the shared session-scheduler row before evaluating the relationship, so a
+  concurrent placement advance cannot validate against a stale loss. The
+  lifecycle transition matrix admits the phase from an already-active running
+  boundary, never directly from queued work, and restart reconstitutes it from
+  those correlated facts rather than from the stored discriminator. Without this
+  shape the loss transaction has nowhere to store the phase and restart cannot
+  rebuild it. The same migration adds the optional interrupted-attempt fact to
+  the exact placement-loss record, and the runner persistence read boundary
+  round-trips both nullable arms. **Committed unimplemented functionality.** No
+  present adapter produces the phase: the dedicated runner-loss propagation
+  transaction will install it under the lock order below.
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.

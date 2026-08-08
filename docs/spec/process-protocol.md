@@ -1,8 +1,7 @@
 # Process protocol
 
-The `active_awaiting_runner_recovery` transcript-turn vocabulary and its typed
-non-consuming interrupt rejection were verified against this PR
-(`agent/runner-awaiting-recovery-persistence`).
+The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
+against this PR (`agent/runner-awaiting-recovery-persistence`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -686,10 +685,7 @@ proof, and `interrupt_unavailable_while_awaiting_approval` when the active turn
 is parked on a tool-approval wait, which a stop can neither decide nor bypass —
 the caller denies the pending request through `decide_tool_request` first, then
 stops ([tool-loop](tool-loop.md#approval-policy-and-decision-sources) owns the
-deny-first caller protocol). A stop against `active_awaiting_runner_recovery`
-records `interrupt_unavailable_while_awaiting_runner_recovery`; it accepts no
-input and leaves the wait for the checked runner-replacement or abandonment
-command.
+deny-first caller protocol).
 
 `decide_tool_request` carries the canonical user decision command for one
 pending tool request. A claimed command identity reaches the durable replay
@@ -1173,9 +1169,7 @@ for the refused precondition. A `stop_turn` rejection admits
 `active_turn_mismatch`,
 `interrupt_already_applied { session_id, active_turn_id, existing_command_id }`,
 and
-`interrupt_unavailable_while_awaiting_approval { session_id, active_turn_id }`,
-or
-`interrupt_unavailable_while_awaiting_runner_recovery { session_id, active_turn_id }`.
+`interrupt_unavailable_while_awaiting_approval { session_id, active_turn_id }`.
 A `decide_tool_request` rejection admits
 `tool_request_not_found { tool_request_id }`,
 `tool_request_already_resolved { tool_request_id }`,

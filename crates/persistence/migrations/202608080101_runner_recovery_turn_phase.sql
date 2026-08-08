@@ -90,6 +90,18 @@ DECLARE
     lifecycle turn_lifecycle%ROWTYPE;
     placement runner_session_placement_record%ROWTYPE;
 BEGIN
+    -- Both the lifecycle-side and placement-side deferred checks rendezvous on
+    -- the scheduler row.  A waiter that lost the race then evaluates the
+    -- relationship from a fresh READ COMMITTED statement snapshot.
+    PERFORM 1
+      FROM session_scheduler
+     WHERE session_id = checked_session_id
+     FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'runner recovery wait lacks its session scheduler'
+            USING ERRCODE = '23514';
+    END IF;
+
     SELECT * INTO lifecycle
       FROM turn_lifecycle
      WHERE session_id = checked_session_id
@@ -124,15 +136,31 @@ BEGIN
             SELECT 1
               FROM tool_attempt AS attempt
               JOIN tool_request AS request
-                ON request.request_id = attempt.request_id
+               ON request.request_id = attempt.request_id
                AND request.turn_id = attempt.turn_id
                AND request.session_id = attempt.session_id
+              JOIN runner_physical_attempt_lease_binding AS binding
+                ON binding.attempt_id = attempt.attempt_id
+              JOIN runner_lease_generation AS lease
+                ON lease.lease_id = binding.lease_id
+               AND lease.attempt_id = attempt.attempt_id
+               AND lease.session_id = attempt.session_id
+              JOIN runner_session_placement_record AS leased_placement
+                ON leased_placement.session_id = lease.session_id
+               AND leased_placement.event_ordinal =
+                    lease.placement_event_ordinal
              WHERE attempt.attempt_id =
                     lifecycle.runner_recovery_tool_attempt_id
                AND attempt.turn_id = checked_turn_id
                AND attempt.session_id = checked_session_id
                AND request.producing_model_call_id =
                     lifecycle.active_tool_round_call_id
+               AND lease.runner_id = lifecycle.runner_recovery_runner_id
+               AND leased_placement.placement_revision =
+                    lifecycle.runner_recovery_placement_revision
+               AND leased_placement.state_kind = 'pinned'
+               AND leased_placement.pinned_runner_id =
+                    lifecycle.runner_recovery_runner_id
        )
     THEN
         RAISE EXCEPTION
@@ -175,6 +203,15 @@ DECLARE
     checked_session_id uuid := COALESCE(NEW.session_id, OLD.session_id);
     checked_turn_id uuid;
 BEGIN
+    PERFORM 1
+      FROM session_scheduler
+     WHERE session_id = checked_session_id
+     FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'runner recovery recheck lacks its session scheduler'
+            USING ERRCODE = '23514';
+    END IF;
+
     FOR checked_turn_id IN
         SELECT turn_id
           FROM turn_lifecycle
@@ -201,9 +238,28 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF NEW.state_kind = 'active'
+       AND NEW.active_phase_kind = 'awaiting_runner_recovery'
+       AND OLD.active_phase_kind IS DISTINCT FROM 'awaiting_runner_recovery'
+       AND NOT (
+            OLD.state_kind = 'active'
+            AND OLD.active_phase_kind = 'running'
+       )
+    THEN
+        RAISE EXCEPTION
+            'runner recovery wait requires an active runner boundary'
+            USING ERRCODE = '23514';
+    END IF;
+
     IF OLD.state_kind = 'active'
        AND OLD.active_phase_kind = 'awaiting_runner_recovery'
        AND NEW.state_kind = 'active'
+       AND NOT (
+            NOT OLD.delegation_runtime_terminal
+            AND NEW.delegation_runtime_terminal
+            AND (to_jsonb(OLD) - 'delegation_runtime_terminal') =
+                (to_jsonb(NEW) - 'delegation_runtime_terminal')
+       )
     THEN
         RAISE EXCEPTION
             'runner recovery wait cannot reopen without a checked replacement'
@@ -297,162 +353,3 @@ BEGIN
     EXECUTE replacement_definition;
 END;
 $migration$;
-
--- Interrupt is not authority to consume an administrative runner-recovery
--- wait. Store that refusal as a distinct closed result and correlate it with
--- the exact active phase at commit.
-DO $migration$
-DECLARE
-    closed_kind text;
-    result_shape text;
-BEGIN
-    SELECT pg_get_expr(conbin, conrelid) INTO closed_kind
-      FROM pg_constraint
-     WHERE conrelid = 'submit_input_command'::regclass
-       AND conname = 'submit_input_command_rejection_kind_closed';
-    SELECT pg_get_expr(conbin, conrelid) INTO result_shape
-      FROM pg_constraint
-     WHERE conrelid = 'submit_input_command'::regclass
-       AND conname = 'submit_input_command_result_shape';
-    IF closed_kind IS NULL OR result_shape IS NULL THEN
-        RAISE EXCEPTION 'submit-input result constraints are missing';
-    END IF;
-    ALTER TABLE submit_input_command
-        DROP CONSTRAINT submit_input_command_rejection_kind_closed,
-        DROP CONSTRAINT submit_input_command_result_shape;
-    EXECUTE format(
-        'ALTER TABLE submit_input_command
-         ADD CONSTRAINT submit_input_command_rejection_kind_closed CHECK (
-            (%s) OR rejection_kind =
-                ''interrupt_unavailable_while_awaiting_runner_recovery''
-         ),
-         ADD CONSTRAINT submit_input_command_result_shape CHECK (
-            (%s) OR (
-                result_kind = ''rejected''
-                AND rejection_kind =
-                    ''interrupt_unavailable_while_awaiting_runner_recovery''
-                AND delivery_kind = ''interrupt''
-                AND result_accepted_input_id IS NULL
-                AND result_turn_id IS NULL
-                AND result_actual_active_turn_id = expected_active_turn_id
-                AND result_actual_active_turn_id IS NOT NULL
-                AND result_expected_active_turn_id IS NULL
-                AND result_expected_defaults_version IS NULL
-                AND result_current_defaults_version IS NULL
-                AND result_unknown_alias_id IS NULL
-                AND result_selected_defaults_version IS NULL
-                AND result_last_position IS NULL
-                AND result_existing_interrupt_command_id IS NULL
-            )
-         )',
-        closed_kind,
-        result_shape
-    );
-END;
-$migration$;
-
-DO $migration$
-DECLARE
-    current_definition text;
-    replacement_definition text;
-    old_arm text := $old$
-    ELSIF NEW.rejection_kind
-        = 'interrupt_unavailable_while_awaiting_approval'
-    THEN
-        SELECT count(*)
-          INTO matching_records
-          FROM turn_lifecycle AS parked
-         WHERE parked.turn_id = NEW.result_actual_active_turn_id
-           AND parked.session_id = NEW.result_session_id
-           AND parked.state_kind = 'active'
-           AND parked.active_phase_kind = 'awaiting_tool_approval'
-           AND NOT EXISTS (
-                SELECT 1
-                  FROM accepted_input
-                 WHERE accepting_command_id = NEW.command_id
-           );
-$old$;
-    new_arm text := $new$
-    ELSIF NEW.rejection_kind IN (
-        'interrupt_unavailable_while_awaiting_approval',
-        'interrupt_unavailable_while_awaiting_runner_recovery'
-    )
-    THEN
-        SELECT count(*)
-          INTO matching_records
-          FROM turn_lifecycle AS parked
-         WHERE parked.turn_id = NEW.result_actual_active_turn_id
-           AND parked.session_id = NEW.result_session_id
-           AND parked.state_kind = 'active'
-           AND parked.active_phase_kind = CASE NEW.rejection_kind
-                WHEN 'interrupt_unavailable_while_awaiting_approval'
-                    THEN 'awaiting_tool_approval'
-                ELSE 'awaiting_runner_recovery'
-           END
-           AND NOT EXISTS (
-                SELECT 1
-                  FROM accepted_input
-                 WHERE accepting_command_id = NEW.command_id
-           );
-$new$;
-BEGIN
-    SELECT pg_get_functiondef(
-        'require_interrupt_submit_input_effect_correlation()'::regprocedure
-    ) INTO current_definition;
-    replacement_definition := replace(current_definition, old_arm, new_arm);
-    IF replacement_definition = current_definition THEN
-        RAISE EXCEPTION
-            'submit-input runner-recovery rejection insertion point is missing';
-    END IF;
-    EXECUTE replacement_definition;
-END;
-$migration$;
-
-DROP TRIGGER submit_input_command_requires_correlated_effect
-    ON submit_input_command;
-DROP TRIGGER submit_input_command_requires_interrupt_effect
-    ON submit_input_command;
-
-CREATE CONSTRAINT TRIGGER submit_input_command_requires_correlated_effect
-AFTER INSERT ON submit_input_command
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW
-WHEN (
-    NOT (
-        (
-            NEW.result_kind = 'applied'
-            AND NEW.delivery_kind = 'interrupt'
-        )
-        OR COALESCE(
-            NEW.rejection_kind IN (
-                'safe_point_unavailable_while_stopping',
-                'interrupt_already_applied',
-                'interrupt_unavailable_while_awaiting_approval',
-                'interrupt_unavailable_while_awaiting_runner_recovery'
-            ),
-            false
-        )
-    )
-)
-EXECUTE FUNCTION require_submit_input_legacy_effect_correlation();
-
-CREATE CONSTRAINT TRIGGER submit_input_command_requires_interrupt_effect
-AFTER INSERT ON submit_input_command
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW
-WHEN (
-    (
-        NEW.result_kind = 'applied'
-        AND NEW.delivery_kind = 'interrupt'
-    )
-    OR COALESCE(
-        NEW.rejection_kind IN (
-            'safe_point_unavailable_while_stopping',
-            'interrupt_already_applied',
-            'interrupt_unavailable_while_awaiting_approval',
-            'interrupt_unavailable_while_awaiting_runner_recovery'
-        ),
-        false
-    )
-)
-EXECUTE FUNCTION require_interrupt_submit_input_effect_correlation();

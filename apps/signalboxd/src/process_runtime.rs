@@ -11255,13 +11255,6 @@ fn map_rejection(
             session_id: wire_uuid(session.into_uuid()),
             active_turn_id: wire_uuid(active_turn.into_uuid()),
         },
-        SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingRunnerRecovery {
-            session,
-            active_turn,
-        } => RejectionDetail::InterruptUnavailableWhileAwaitingRunnerRecovery {
-            session_id: wire_uuid(session.into_uuid()),
-            active_turn_id: wire_uuid(active_turn.into_uuid()),
-        },
         SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
             session,
             active_turn,
@@ -14296,18 +14289,6 @@ mod tests {
                 }
             )?,
             RejectionDetail::InterruptUnavailableWhileAwaitingApproval {
-                session_id: wire_uuid(session.into_uuid()),
-                active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
-            }
-        );
-        assert_eq!(
-            map_rejection(
-                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingRunnerRecovery {
-                    session,
-                    active_turn: actual_active_turn,
-                }
-            )?,
-            RejectionDetail::InterruptUnavailableWhileAwaitingRunnerRecovery {
                 session_id: wire_uuid(session.into_uuid()),
                 active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
             }
