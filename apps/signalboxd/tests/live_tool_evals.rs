@@ -118,6 +118,7 @@ const DEFAULT_MODEL: &str = "gpt-5-nano";
 /// any plausible reasoning burn for these single-call fixtures; it bounds a
 /// runaway response rather than shaping the expected one.
 const MAX_OUTPUT_TOKENS: u32 = 16_384;
+const MAX_NATURAL_APPROVAL_CONTINUATIONS: usize = 2;
 const CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 /// Four exchanges cover the accepted premature fetch, search, later fetch,
@@ -289,17 +290,23 @@ async fn run_case(
     timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
         .await
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
+    let approval_mode = if forced_tool == Some(UNSANDBOXED_EXEC_NAME) {
+        ExecApprovalMode::ApproveExactForced
+    } else {
+        ExecApprovalMode::DenyAll
+    };
+    let mut approval_continuations = 0;
     while database
-        .decide_pending_unsandboxed_requests(
-            session,
-            turn,
-            forced_tool == Some(UNSANDBOXED_EXEC_NAME),
-        )
+        .decide_pending_unsandboxed_requests(session, turn, approval_mode)
         .await?
     {
+        if approval_continuations == MAX_NATURAL_APPROVAL_CONTINUATIONS {
+            break;
+        }
         timeout(TURN_TIMEOUT, execution.resume_active(session))
             .await
             .map_err(|_| io::Error::other("the daemon tool eval resume exceeded its timeout"))??;
+        approval_continuations += 1;
     }
     let snapshot = CaseSnapshot::read(&database.pool, session, turn).await?;
     Ok(CaseOutcome {
@@ -1383,7 +1390,7 @@ impl EvalDatabase {
         &self,
         session: SessionId,
         turn: TurnId,
-        approve_exact_forced_request: bool,
+        approval_mode: ExecApprovalMode,
     ) -> EvalResult<bool> {
         let mut decided_any = false;
         loop {
@@ -1400,7 +1407,7 @@ impl EvalDatabase {
                 .find(|candidate| candidate.id() == request)
                 .ok_or_else(|| io::Error::other("the pending approval request is absent"))?;
             let decision = exec_eval_approval_decision(
-                approve_exact_forced_request,
+                approval_mode,
                 pending.name().as_str(),
                 pending.arguments(),
             );
@@ -1425,12 +1432,20 @@ impl EvalDatabase {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ExecApprovalMode {
+    DenyAll,
+    ApproveExactForced,
+}
+
 fn exec_eval_approval_decision(
-    approve_exact_forced_request: bool,
+    approval_mode: ExecApprovalMode,
     name: &str,
     arguments: &NormalizedToolArguments,
 ) -> ToolApprovalDecision {
-    if approve_exact_forced_request && ExecEvalCase::ForcedUnsandboxed.admits(name, arguments) {
+    if matches!(approval_mode, ExecApprovalMode::ApproveExactForced)
+        && ExecEvalCase::ForcedUnsandboxed.admits(name, arguments)
+    {
         ToolApprovalDecision::Approve
     } else {
         ToolApprovalDecision::Deny { reason: None }
@@ -1888,6 +1903,17 @@ impl CaseOutcome {
     }
 
     fn natural_loop_disposition(&self, family: EvalFamily) -> EvalDisposition {
+        if family == EvalFamily::Exec
+            && self
+                .snapshot
+                .requests
+                .iter()
+                .filter(|request| request.name == UNSANDBOXED_EXEC_NAME)
+                .count()
+                > MAX_NATURAL_APPROVAL_CONTINUATIONS
+        {
+            return EvalDisposition::Miss;
+        }
         if self.snapshot.turn_disposition.is_infrastructure() {
             return EvalDisposition::Infrastructure;
         }
@@ -2672,7 +2698,11 @@ fn forced_unsandboxed_eval_denies_model_argument_drift() {
     .expect("drifted unsandboxed fixture arguments normalize");
 
     assert_eq!(
-        exec_eval_approval_decision(true, UNSANDBOXED_EXEC_NAME, &drifted),
+        exec_eval_approval_decision(
+            ExecApprovalMode::ApproveExactForced,
+            UNSANDBOXED_EXEC_NAME,
+            &drifted,
+        ),
         ToolApprovalDecision::Deny { reason: None }
     );
 }
@@ -2686,7 +2716,11 @@ fn unforced_exec_eval_denies_the_exact_forced_unsandboxed_fixture() {
     .expect("the exact forced unsandboxed fixture arguments normalize");
 
     assert_eq!(
-        exec_eval_approval_decision(false, UNSANDBOXED_EXEC_NAME, &exact_forced),
+        exec_eval_approval_decision(
+            ExecApprovalMode::DenyAll,
+            UNSANDBOXED_EXEC_NAME,
+            &exact_forced,
+        ),
         ToolApprovalDecision::Deny { reason: None }
     );
 }
