@@ -394,8 +394,8 @@ struct ForcedCase {
 const GIT_CASES: &[ForcedCase] = &[
     ForcedCase {
         name: GIT_BRANCH_CREATE_NAME,
-        expected_arguments: r#"{"name":"created-by-eval","start":"HEAD"}"#,
-        prompt: "Call git_branch_create with exactly {\"name\":\"created-by-eval\",\"start\":\"HEAD\"}. After its result, answer done without another tool call.",
+        expected_arguments: r#"{"name":"created-by-eval","start":"refs/heads/log-target"}"#,
+        prompt: "Call git_branch_create with exactly {\"name\":\"created-by-eval\",\"start\":\"refs/heads/log-target\"}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: GIT_BRANCH_SWITCH_NAME,
@@ -787,9 +787,14 @@ fn git_forced_case_passed(
             let Some(branch_name) = arguments["name"].as_str() else {
                 return Ok(false);
             };
+            let Some(start) = arguments["start"].as_str() else {
+                return Ok(false);
+            };
+            let expected = repository.revparse_single(start)?.peel_to_commit()?.id();
             let branch = repository.find_branch(branch_name, BranchType::Local)?;
-            let branch_target = branch.get().target().map(|target| target.to_string());
-            result["branch"] == branch_name && result["head"].as_str() == branch_target.as_deref()
+            result["branch"] == branch_name
+                && branch.get().target() == Some(expected)
+                && result["head"] == expected.to_string()
         }
         GIT_BRANCH_SWITCH_NAME => {
             let Some(branch_name) = arguments["name"].as_str() else {
@@ -841,8 +846,18 @@ fn git_forced_case_passed(
                 .flatten()
                 .filter_map(|entry| entry["path"].as_str())
                 .collect::<BTreeSet<_>>();
-            result["head"] == head.id().to_string()
+            let branch = repository.head()?.shorthand().ok().map(str::to_owned);
+            result["branch"].as_str() == branch.as_deref()
+                && result["branch_truncated"] == false
+                && result["head"] == head.id().to_string()
                 && entries.is_some_and(|entries| entries.len() == 3)
+                && entries.is_some_and(|entries| {
+                    entries.iter().all(|entry| {
+                        entry["previous_path"].is_null()
+                            && entry["index"] == "unchanged"
+                            && entry["worktree"] == "untracked"
+                    })
+                })
                 && paths == BTreeSet::from([GIT_STAGE_PATH, GIT_COMMIT_PATH, GIT_NATURAL_PATH])
                 && result["truncated"] == false
         }
@@ -3589,6 +3604,27 @@ fn forced_git_stage_verifier_rejects_success_without_the_postcondition() -> Eval
 }
 
 #[test]
+fn forced_git_branch_create_verifier_rejects_the_default_head() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_BRANCH_CREATE_NAME)
+        .expect("the Git branch-create fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let head = repository.head()?.peel_to_commit()?;
+    repository.branch("created-by-eval", &head, false)?;
+    let result = serde_json::json!({
+        "branch": "created-by-eval",
+        "head": head.id().to_string(),
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_diff_verifier_accepts_the_seeded_worktree_patch() -> EvalResult {
     let suite = FamilySuite::git()?;
     let case = GIT_CASES
@@ -3664,6 +3700,53 @@ fn forced_git_log_verifier_rejects_more_than_the_requested_limit() -> EvalResult
         "commits": [
             {"commit": target.id().to_string()},
             {"commit": parent.id().to_string()},
+        ],
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_status_verifier_rejects_incorrect_entry_metadata() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let head = repository.head()?.peel_to_commit()?;
+    let branch = repository
+        .head()?
+        .shorthand()
+        .expect("the Git status fixture has a branch")
+        .to_owned();
+    let result = serde_json::json!({
+        "branch": branch,
+        "branch_truncated": false,
+        "head": head.id().to_string(),
+        "entries": [
+            {
+                "path": GIT_COMMIT_PATH,
+                "previous_path": null,
+                "index": "unchanged",
+                "worktree": "untracked"
+            },
+            {
+                "path": GIT_NATURAL_PATH,
+                "previous_path": null,
+                "index": "unchanged",
+                "worktree": "modified"
+            },
+            {
+                "path": GIT_STAGE_PATH,
+                "previous_path": null,
+                "index": "unchanged",
+                "worktree": "untracked"
+            }
         ],
         "truncated": false,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
