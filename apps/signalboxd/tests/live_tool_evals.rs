@@ -2529,6 +2529,16 @@ impl CaseOutcome {
     }
 
     fn natural_loop_disposition(&self, family: EvalFamily) -> EvalDisposition {
+        if self.snapshot.turn_disposition.is_infrastructure() {
+            return EvalDisposition::Infrastructure;
+        }
+        if self.snapshot.exact_natural_request_failed(family) {
+            return EvalDisposition::Infrastructure;
+        }
+        if family == EvalFamily::Exec && self.tool_results.iter().any(exec_result_is_infrastructure)
+        {
+            return EvalDisposition::Infrastructure;
+        }
         if family == EvalFamily::Exec
             && self
                 .snapshot
@@ -2539,16 +2549,6 @@ impl CaseOutcome {
                 > MAX_NATURAL_APPROVAL_CONTINUATIONS
         {
             return EvalDisposition::Miss;
-        }
-        if self.snapshot.turn_disposition.is_infrastructure() {
-            return EvalDisposition::Infrastructure;
-        }
-        if self.snapshot.exact_natural_request_failed(family) {
-            return EvalDisposition::Infrastructure;
-        }
-        if family == EvalFamily::Exec && self.tool_results.iter().any(exec_result_is_infrastructure)
-        {
-            return EvalDisposition::Infrastructure;
         }
         let required_names: &[&str] = match family {
             EvalFamily::Git => &[GIT_STAGE_NAME, GIT_CREATE_COMMIT_NAME],
@@ -4304,6 +4304,38 @@ fn unforced_exec_tier_reports_sandbox_refusal_as_infrastructure() {
         },
         "",
         CaptureCompleteness::Complete,
+    ));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn unforced_exec_tier_keeps_setup_failure_above_the_approval_cap() {
+    let mut outcome = natural_exec_outcome(direct_exec_result(
+        ExecutionConfinement::SandboxSetupFailed,
+        ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::SandboxSetup,
+        },
+        "",
+        CaptureCompleteness::Complete,
+    ));
+    outcome.snapshot.requests.push(successful_request(
+        Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+        UNSANDBOXED_EXEC_NAME,
+        serde_json::json!({}),
+    ));
+    outcome.snapshot.requests.push(successful_request(
+        Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID + 1),
+        UNSANDBOXED_EXEC_NAME,
+        serde_json::json!({}),
+    ));
+    outcome.snapshot.requests.push(successful_request(
+        Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID + 2),
+        UNSANDBOXED_EXEC_NAME,
+        serde_json::json!({}),
     ));
 
     assert_eq!(
