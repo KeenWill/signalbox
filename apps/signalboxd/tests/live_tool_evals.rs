@@ -68,9 +68,9 @@ use signalbox_tools_exec::{
     CARGO_DIAGNOSTICS_NAME, CaptureCompleteness, CargoDiagnosticRecords, CargoDiagnosticsCommand,
     CargoDiagnosticsExecution, CargoDiagnosticsExecutor, CargoDiagnosticsResult,
     CargoDiagnosticsStream, CargoDiagnosticsTool, CargoEvidenceProvenance, CargoTestRecords,
-    ExecExecutor, ExecutionConfinement, OutputEncoding, ProcessOutcome, SANDBOXED_EXEC_NAME,
-    SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME,
-    UnsandboxedCommandRunner, UnsandboxedExecTool,
+    ExecExecutor, ExecutionConfinement, OutputEncoding, ProcessOutcome, ProcessSpawnFailure,
+    SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner,
+    UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
 use signalbox_tools_git::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
@@ -289,7 +289,7 @@ async fn run_case(
     timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
         .await
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
-    if database
+    while database
         .decide_pending_unsandboxed_requests(
             session,
             turn,
@@ -1861,6 +1861,13 @@ impl CaseOutcome {
         let Some(expected_arguments) = self.expected_arguments.as_deref() else {
             return EvalDisposition::Miss;
         };
+        if matches!(
+            target,
+            SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
+        ) && self.tool_results.iter().any(exec_result_is_infrastructure)
+        {
+            return EvalDisposition::Infrastructure;
+        }
         if self.snapshot.requests.len() == 1
             && self.snapshot.requests[0].name == target
             && self.snapshot.requests[0].arguments_text == expected_arguments
@@ -1885,6 +1892,10 @@ impl CaseOutcome {
             return EvalDisposition::Infrastructure;
         }
         if self.snapshot.exact_natural_request_failed(family) {
+            return EvalDisposition::Infrastructure;
+        }
+        if family == EvalFamily::Exec && self.tool_results.iter().any(exec_result_is_infrastructure)
+        {
             return EvalDisposition::Infrastructure;
         }
         let required_names: &[&str] = match family {
@@ -1969,6 +1980,27 @@ impl CaseOutcome {
             _ => false,
         }
     }
+}
+
+/// Whether a serialized direct-command or Cargo result reports a runner failure
+/// before or around execution, rather than evidence about the requested task.
+fn exec_result_is_infrastructure(result: &TrackedToolResult) -> bool {
+    if result.is_error {
+        return false;
+    }
+    let Ok(result) = serde_json::from_str::<serde_json::Value>(&result.content) else {
+        return false;
+    };
+    let execution = result.get("execution").unwrap_or(&result);
+    matches!(
+        execution["confinement"]["kind"].as_str(),
+        Some("sandbox_refused" | "sandbox_setup_failed")
+    ) || matches!(
+        execution["outcome"]["kind"].as_str(),
+        Some("spawn_failed" | "supervision_failed")
+    ) || execution
+        .get("preparation_failure")
+        .is_some_and(|failure| !failure.is_null())
 }
 
 /// Whether one serialized execution reports a zero-code process exit.
@@ -2365,7 +2397,10 @@ fn unforced_git_tier_reports_a_premature_commit_failure_as_a_miss() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
+        tool_results: vec![TrackedToolResult {
+            content: String::from("fixture result"),
+            is_error: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![RequestSnapshot {
@@ -2391,7 +2426,10 @@ fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        result_round_trips: 1,
+        tool_results: vec![TrackedToolResult {
+            content: String::from("fixture result"),
+            is_error: true,
+        }],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![
@@ -2772,6 +2810,18 @@ fn successful_cargo_diagnostics_result() -> serde_json::Value {
         completeness: CaptureCompleteness::Complete,
         encoding: OutputEncoding::Utf8,
     };
+    cargo_diagnostics_result(CargoDiagnosticsExecution {
+        confinement: ExecutionConfinement::FilesystemConfined,
+        outcome: ProcessOutcome::Exited { code: Some(0) },
+        stdout: stream,
+        stderr: stream,
+        cargo_failure: None,
+        preparation_failure: None,
+    })
+}
+
+/// One serialized Cargo check result carrying the supplied execution evidence.
+fn cargo_diagnostics_result(execution: CargoDiagnosticsExecution) -> serde_json::Value {
     let records = CargoDiagnosticRecords {
         values: Vec::new(),
         limit_reached: false,
@@ -2786,14 +2836,7 @@ fn successful_cargo_diagnostics_result() -> serde_json::Value {
     };
     serde_json::to_value(CargoDiagnosticsResult {
         command: CargoDiagnosticsCommand::Check,
-        execution: CargoDiagnosticsExecution {
-            confinement: ExecutionConfinement::FilesystemConfined,
-            outcome: ProcessOutcome::Exited { code: Some(0) },
-            stdout: stream,
-            stderr: stream,
-            cargo_failure: None,
-            preparation_failure: None,
-        },
+        execution,
         diagnostics: records,
         tests,
     })
@@ -2867,6 +2910,30 @@ fn forced_cargo_diagnostics_accepts_a_complete_successful_check() {
     );
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Pass);
+}
+
+#[test]
+fn forced_cargo_diagnostics_reports_sandbox_setup_failure_as_infrastructure() {
+    let stream = CargoDiagnosticsStream {
+        completeness: CaptureCompleteness::Complete,
+        encoding: OutputEncoding::Utf8,
+    };
+    let result = cargo_diagnostics_result(CargoDiagnosticsExecution {
+        confinement: ExecutionConfinement::SandboxSetupFailed,
+        outcome: ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::SandboxSetup,
+        },
+        stdout: stream,
+        stderr: stream,
+        cargo_failure: None,
+        preparation_failure: None,
+    });
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -2962,7 +3029,7 @@ fn unforced_exec_tier_rejects_a_nonzero_exit() {
 }
 
 #[test]
-fn unforced_exec_tier_rejects_a_supervision_failure() {
+fn unforced_exec_tier_reports_a_supervision_failure_as_infrastructure() {
     let outcome = natural_exec_outcome(serde_json::json!({
         "confinement": {"kind": "filesystem_confined"},
         "outcome": {"kind": "supervision_failed", "reason": "wait"},
@@ -2971,7 +3038,38 @@ fn unforced_exec_tier_rejects_a_supervision_failure() {
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
-        EvalDisposition::Miss
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn unforced_exec_tier_reports_sandbox_refusal_as_infrastructure() {
+    let outcome = natural_exec_outcome(serde_json::json!({
+        "confinement": {"kind": "sandbox_refused", "availability": "unusable"},
+        "outcome": {"kind": "spawn_failed", "reason": "sandbox_unavailable"},
+        "stdout": {"text": "", "completeness": "complete", "encoding": "utf8"},
+    }));
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn forced_sandboxed_exec_tier_reports_setup_failure_as_infrastructure() {
+    let outcome = forced_exec_outcome(
+        SANDBOXED_EXEC_NAME,
+        serde_json::json!({
+            "confinement": {"kind": "sandbox_setup_failed"},
+            "outcome": {"kind": "spawn_failed", "reason": "sandbox_setup"},
+            "stdout": {"text": "", "completeness": "complete", "encoding": "utf8"},
+        }),
+    );
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
     );
 }
 
