@@ -4371,7 +4371,11 @@ fn decode_transcript_entry(
                 })
                 .to_string(),
             ),
-            _ => {
+            (Some(ToolAttemptDispositionStorageKind::Completed), _, _, _)
+            | (Some(ToolAttemptDispositionStorageKind::KnownFailed), _, _, _)
+            | (Some(ToolAttemptDispositionStorageKind::AwaitingChild), _, _, _)
+            | (Some(ToolAttemptDispositionStorageKind::Ambiguous), _, _, _)
+            | (None, _, _, _) => {
                 return Err(
                     ProcessReadCorruption::Inconsistent("tool execution-result evidence").into(),
                 );
