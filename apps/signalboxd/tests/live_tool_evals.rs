@@ -1818,13 +1818,12 @@ impl CaseOutcome {
         let Ok(result) = serde_json::from_str::<serde_json::Value>(&result.content) else {
             return false;
         };
-        let execution = if target == CARGO_DIAGNOSTICS_NAME {
-            &result["execution"]
-        } else {
-            &result
-        };
+        if target == CARGO_DIAGNOSTICS_NAME {
+            return cargo_diagnostics_result_passed(&result);
+        }
+        let execution = &result;
         let expected_confinement = match target {
-            SANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME => "filesystem_confined",
+            SANDBOXED_EXEC_NAME => "filesystem_confined",
             UNSANDBOXED_EXEC_NAME => "unsandboxed",
             _ => return false,
         };
@@ -1834,9 +1833,7 @@ impl CaseOutcome {
         match target {
             SANDBOXED_EXEC_NAME => captured_stdout_is(execution, EXEC_FORCED_SANDBOXED_OUTPUT),
             UNSANDBOXED_EXEC_NAME => captured_stdout_is(execution, EXEC_FORCED_READ_ONLY_OUTPUT),
-            // Cargo owns the diagnostics stdout, so the fixture asserts the
-            // absence of a preparation or Cargo failure instead of exact bytes.
-            _ => execution["preparation_failure"].is_null() && execution["cargo_failure"].is_null(),
+            _ => false,
         }
     }
 }
@@ -1856,6 +1853,77 @@ fn captured_stdout_is(execution: &serde_json::Value, expected: &str) -> bool {
     execution["stdout"]["text"] == expected
         && execution["stdout"]["completeness"] == "complete"
         && execution["stdout"]["encoding"] == "utf8"
+}
+
+/// The complete result shape needed before one successful Cargo diagnostics
+/// exchange can count as forced-tier evidence.
+#[derive(serde::Deserialize)]
+struct CargoDiagnosticsEvalResult {
+    command: String,
+    execution: CargoDiagnosticsEvalExecution,
+    diagnostics: CargoDiagnosticsEvalRecords,
+    tests: CargoDiagnosticsEvalRecords,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoDiagnosticsEvalExecution {
+    confinement: CargoDiagnosticsEvalConfinement,
+    outcome: CargoDiagnosticsEvalOutcome,
+    stdout: CargoDiagnosticsEvalStream,
+    stderr: CargoDiagnosticsEvalStream,
+    cargo_failure: serde_json::Value,
+    preparation_failure: serde_json::Value,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoDiagnosticsEvalConfinement {
+    kind: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoDiagnosticsEvalOutcome {
+    kind: String,
+    code: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoDiagnosticsEvalStream {
+    completeness: String,
+    encoding: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoDiagnosticsEvalRecords {
+    #[serde(rename = "values")]
+    _values: Vec<serde_json::Value>,
+    #[serde(rename = "limit_reached")]
+    _limit_reached: bool,
+    provenance: String,
+    #[serde(rename = "known_truncated")]
+    _known_truncated: bool,
+}
+
+/// Whether Cargo diagnostics returned the requested successful pass together
+/// with every execution and record envelope the tool promises.
+fn cargo_diagnostics_result_passed(result: &serde_json::Value) -> bool {
+    let Ok(result) = serde_json::from_value::<CargoDiagnosticsEvalResult>(result.clone()) else {
+        return false;
+    };
+    result.command == "check"
+        && result.execution.confinement.kind == "filesystem_confined"
+        && result.execution.outcome.kind == "exited"
+        && result.execution.outcome.code == Some(0)
+        && cargo_diagnostics_stream_is_valid(&result.execution.stdout)
+        && cargo_diagnostics_stream_is_valid(&result.execution.stderr)
+        && result.execution.cargo_failure.is_null()
+        && result.execution.preparation_failure.is_null()
+        && result.diagnostics.provenance == "workspace_influenced"
+        && result.tests.provenance == "workspace_influenced"
+}
+
+fn cargo_diagnostics_stream_is_valid(stream: &CargoDiagnosticsEvalStream) -> bool {
+    matches!(stream.completeness.as_str(), "complete" | "truncated")
+        && matches!(stream.encoding.as_str(), "utf8" | "lossy_utf8")
 }
 
 fn synthetic_tool_result(
@@ -2351,19 +2419,58 @@ fn forced_exec_outcome(target: &'static str, execution: serde_json::Value) -> Ca
     }
 }
 
+struct ZeroExitEvidence<'a> {
+    confinement_kind: &'a str,
+    stdout: &'a str,
+}
+
 /// One serialized execution with the selected confinement and zero exit.
-fn zero_exit_with_confinement(confinement: &str, stdout: &str) -> serde_json::Value {
+fn zero_exit_with_confinement(evidence: ZeroExitEvidence<'_>) -> serde_json::Value {
     serde_json::json!({
-        "confinement": {"kind": confinement},
+        "confinement": {"kind": evidence.confinement_kind},
         "outcome": {"kind": "exited", "code": 0},
-        "stdout": {"text": stdout, "completeness": "complete", "encoding": "utf8"},
+        "stdout": {
+            "text": evidence.stdout,
+            "completeness": "complete",
+            "encoding": "utf8",
+        },
         "stderr": {"text": "", "completeness": "complete", "encoding": "utf8"},
     })
 }
 
 /// One serialized confined execution that exited zero with the given output.
 fn confined_exit(stdout: &str) -> serde_json::Value {
-    zero_exit_with_confinement("filesystem_confined", stdout)
+    zero_exit_with_confinement(ZeroExitEvidence {
+        confinement_kind: "filesystem_confined",
+        stdout,
+    })
+}
+
+/// One complete, successful Cargo check result in the eval workspace.
+fn successful_cargo_diagnostics_result() -> serde_json::Value {
+    serde_json::json!({
+        "command": "check",
+        "execution": {
+            "confinement": {"kind": "filesystem_confined"},
+            "outcome": {"kind": "exited", "code": 0},
+            "stdout": {"completeness": "complete", "encoding": "utf8"},
+            "stderr": {"completeness": "complete", "encoding": "utf8"},
+            "cargo_failure": null,
+            "preparation_failure": null,
+        },
+        "diagnostics": {
+            "values": [],
+            "limit_reached": false,
+            "provenance": "workspace_influenced",
+            "known_truncated": false,
+        },
+        "tests": {
+            "values": [],
+            "limit_reached": false,
+            "provenance": "workspace_influenced",
+            "known_truncated": false,
+        },
+    })
 }
 
 #[test]
@@ -2397,7 +2504,10 @@ fn forced_exec_tier_rejects_the_other_case_s_output() {
 fn forced_sandboxed_exec_rejects_an_unconfined_zero_exit() {
     let outcome = forced_exec_outcome(
         SANDBOXED_EXEC_NAME,
-        zero_exit_with_confinement("unsandboxed", EXEC_FORCED_SANDBOXED_OUTPUT),
+        zero_exit_with_confinement(ZeroExitEvidence {
+            confinement_kind: "unsandboxed",
+            stdout: EXEC_FORCED_SANDBOXED_OUTPUT,
+        }),
     );
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
@@ -2415,12 +2525,30 @@ fn forced_unsandboxed_exec_rejects_a_confined_zero_exit() {
 
 #[test]
 fn forced_cargo_diagnostics_rejects_an_unconfined_zero_exit() {
-    let mut execution = zero_exit_with_confinement("unsandboxed", "");
-    execution["preparation_failure"] = serde_json::Value::Null;
-    execution["cargo_failure"] = serde_json::Value::Null;
+    let mut result = successful_cargo_diagnostics_result();
+    result["execution"]["confinement"]["kind"] = serde_json::json!("unsandboxed");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_accepts_a_complete_successful_check() {
     let outcome = forced_exec_outcome(
         CARGO_DIAGNOSTICS_NAME,
-        serde_json::json!({"execution": execution}),
+        successful_cargo_diagnostics_result(),
+    );
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Pass);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_an_incomplete_result_shape() {
+    let outcome = forced_exec_outcome(
+        CARGO_DIAGNOSTICS_NAME,
+        serde_json::json!({
+            "execution": confined_exit(""),
+        }),
     );
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
