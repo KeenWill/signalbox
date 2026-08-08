@@ -125,6 +125,7 @@ const WORKSPACE_ANSWER_PATH: &str = "answer.txt";
 const WORKSPACE_ANSWER: &str = "model loop observed\n";
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
+const EXPECTED_WEB_CREDENTIAL_REFERENCE: &str = "brave-search-primary";
 const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
 const ARBITRARY_EVAL_SELECTION_ID: u128 = 0x9101;
 const ARBITRARY_EVAL_PROVIDER_ID: u128 = 0x9102;
@@ -855,8 +856,9 @@ struct FixtureWebCredential;
 impl CredentialAccess for FixtureWebCredential {
     async fn resolve(
         &self,
-        _reference: &CredentialReference,
+        reference: &CredentialReference,
     ) -> Result<CredentialValue, CredentialAccessError> {
+        assert_eq!(reference.as_str(), EXPECTED_WEB_CREDENTIAL_REFERENCE);
         Ok(CredentialValue::new(SYNTHETIC_WEB_CREDENTIAL.to_vec()))
     }
 }
