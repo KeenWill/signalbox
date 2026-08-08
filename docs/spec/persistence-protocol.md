@@ -1552,12 +1552,18 @@ identities and generations. One shared capacity row per bounded profile
 serializes reservation admission across sessions and pools. Preparation locks
 all candidate capacity rows in profile-reference byte order, counts their live
 reservation rows under those locks, and inserts the selected reservation with
-the `Prepared` call. A deferred constraint rejects a committed live count above
-the bound the profile's current registration declares; the bound is a live
-profile property rather than a frozen policy field, so it governs the next
-admission and never retroactively invalidates a committed reservation.
-Invocation completion releases its reservation and writes the wake signal
-atomically. Entering either wait ends the call-free current attempt as
+the `Prepared` call. Every `codex_home` invocation inserts a reservation
+regardless of whether its profile currently declares a bound; the bound decides
+only whether preparation takes that capacity lock and counts, so an unbounded
+profile records the same supervision evidence without serializing. A deferred
+constraint rejects a committed live count above the bound the profile's current
+registration declares; the bound is a live profile property rather than a frozen
+policy field, so it governs the next admission and never retroactively
+invalidates a committed reservation. Because every invocation is recorded, a
+bound newly lowered from unbounded is still enforced against complete startup
+fencing evidence rather than against only the invocations that were bounded when
+they started. Invocation completion releases its reservation and writes the wake
+signal atomically. Entering either wait ends the call-free current attempt as
 `WithoutStop(YieldedToDurableWait)` in the same transaction. Release atomically
 consumes the wait and creates its fresh `Prepared` successor attempt;
 `stop_turn` instead atomically consumes it, creates the fresh

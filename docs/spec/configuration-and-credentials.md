@@ -838,15 +838,21 @@ did not start — an operator running the CLI by hand against the same directory
 is outside anything the daemon can coordinate.
 
 Where `max_concurrent_invocations` is set and reached, that member is skipped
-during selection exactly as an excluded member is. Contention is not exhaustion:
-whenever at least one otherwise-admissible member is merely at its bound, the
-turn waits for any such member to free rather than consulting
-`on_pool_exhausted`. This includes a mixed pool whose other members carry
-durable exclusions. A bounded member has reported no failure and carries no
-reset time; its invocation completion wakes the waiter. Exhaustion means every
-member is excluded by a trigger or a quarantine and no otherwise-admissible
-member is merely bounded, which is a durable condition; contention resolves on
-its own.
+during selection exactly as an excluded member is, and selection continues
+through the remaining priorities. A member at its bound therefore never blocks a
+lower-priority member that is free: priority states which account is preferred,
+not which the turn must wait for, and waiting for the preferred account while
+another is idle would trade throughput for a preference the deployment did not
+ask to be enforced that way.
+
+Contention arises only when that traversal selects nothing. If at least one
+member was skipped solely because it was at its bound, the turn waits for any
+such member to free rather than consulting `on_pool_exhausted` — contention is
+not exhaustion. This includes a mixed pool whose other members carry durable
+exclusions. A bounded member has reported no failure and carries no reset time;
+its invocation completion wakes the waiter. Exhaustion means the traversal
+selected nothing and no member was skipped merely for its bound, which is a
+durable condition; contention resolves on its own.
 
 The wait records which case it represents. An exhausted wait carries the
 complete policy-member exclusion snapshot described below. A contended wait
@@ -868,20 +874,38 @@ therefore admits more work at the next preparation, and a lowered one restricts
 the next admission without revoking a reservation already committed — a live
 count above a freshly lowered bound drains as those invocations complete rather
 than terminating them. Spawn failure or another pre-send closure releases that
-pending reservation. Immediately after a successful spawn, the daemon replaces
-`pending_spawn` with `spawned { process_group_identity }`, carrying the process
-group's reuse-safe host identity; terminal observation atomically releases that
-reservation and emits the durable availability update that makes the waiter
-eligible. Startup retains a `spawned` reservation owned by the live fenced
-process. It may close an earlier-process `spawned` reservation as lost and make
-its waiters eligible only after it proves that exact group absent, or terminates
-that exact group and then proves it absent; the daemon fence generation alone is
-not process-death evidence. An earlier-process `pending_spawn` record is
-deliberately ambiguous: the prior daemon may have crashed immediately after the
-child started but before attaching its identity, so startup fails before
-scheduling rather than releasing capacity without proof. No provider request is
-repeated because a contended waiter has not issued one. Partial, foreign, or
-stale reservation evidence likewise fails reconstitution closed.
+pending reservation.
+
+Every `codex_home` invocation acquires a reservation, whether or not the profile
+currently declares a bound. The bound decides only whether preparation takes the
+capacity lock and counts: an unbounded profile inserts its reservation without
+locking or counting, so the unbounded path stays free of contention it does not
+need. What it must not stay free of is supervision evidence. A bound is a live
+setting, so the deployment that runs unbounded today can declare
+`max_concurrent_invocations = 1` tomorrow, and if unbounded invocations left no
+reservation and no process-group identity, a child that survived a daemon crash
+would be invisible to the startup fencing below. Startup would admit a
+replacement while that orphan still held the login store, and the actual
+concurrency would exceed the bound the operator just set — recreating exactly
+the refresh race the bound exists to prevent, in the moment the operator acted
+to prevent it. Recording the reservation unconditionally means the fencing rules
+below apply to every child this daemon ever started, so tightening a bound is
+always evaluated against complete evidence rather than against whichever
+invocations happened to be bounded when they started. Immediately after a
+successful spawn, the daemon replaces `pending_spawn` with
+`spawned { process_group_identity }`, carrying the process group's reuse-safe
+host identity; terminal observation atomically releases that reservation and
+emits the durable availability update that makes the waiter eligible. Startup
+retains a `spawned` reservation owned by the live fenced process. It may close
+an earlier-process `spawned` reservation as lost and make its waiters eligible
+only after it proves that exact group absent, or terminates that exact group and
+then proves it absent; the daemon fence generation alone is not process-death
+evidence. An earlier-process `pending_spawn` record is deliberately ambiguous:
+the prior daemon may have crashed immediately after the child started but before
+attaching its identity, so startup fails before scheduling rather than releasing
+capacity without proof. No provider request is repeated because a contended
+waiter has not issued one. Partial, foreign, or stale reservation evidence
+likewise fails reconstitution closed.
 
 **`oauth`** is spelled `delivery = "oauth"` with exactly four required fields:
 TOML strings `client_id`, `token_url`, and `device_authorization_url`, plus TOML
@@ -1129,6 +1153,21 @@ request. A `codex_home` refresh race or rejected daemon-owned OAuth refresh
 occurs in the delivery layer before such a request and bypasses pool trigger
 policy: either one quarantines the profile unconditionally as specified above.
 
+`switch_now` is further admitted only for a pool whose adapter can supply the
+typed non-acceptance proof that authorizes a successor. Every pool's members
+already agree on one adapter, and
+[runtime-substrate](runtime-substrate.md#terminal-evidence) admits that proof
+only from a decoded native error envelope. Neither `claude_cli` nor `codex_cli`
+exposes one — both classify from rendered failure prose — so `switch_now` on a
+CLI-adapter pool is a typed startup failure in this build, whichever of the
+three availability triggers names it. Why reject rather than accept and ignore:
+a configured `switch_now` that can never fire reads as failover the deployment
+does not have, and every such response would terminalize exactly as `stay` does
+while the document claims otherwise. This is the same fail-closed admission rule
+that rejects `headroom_reserve_percent` and `least_used` below, for the same
+reason. The key stays in the grammar so that an adapter gaining a stable
+machine-readable discriminator admits it with no configuration change.
+
 Selection happens at model-call preparation, never at session creation. For the
 resolved target's family, preparation reads the session's current immutable
 pool-policy snapshot from its credential history. It first selects the sticky
@@ -1217,14 +1256,15 @@ positive integer, an unknown tie-break or exhaustion value, an unknown action,
 an action on a trigger that does not admit it, and any unknown field. It also
 rejects `headroom_reserve_percent`, `tie_break = "least_used"`, and any
 `on_headroom_low` action other than `stay` in this build, because no composed
-runtime observes remaining capacity. Reporting capacity alone does not admit
-`least_used`: a later accepted adapter contract must first define the normalized
-quantity, observation lifetime, and deterministic secondary tie-break it uses.
-Why: a configured reserve or selection rule that silently never fires — or whose
-metric varies by implementation — would read as protection the deployment does
-not have. The keys are admitted by the grammar so that supplying that later
-contract needs no configuration grammar change; the observation itself is routed
-through
+runtime observes remaining capacity, and `switch_now` on a `claude_cli` or
+`codex_cli` pool, because neither adapter can supply the non-acceptance proof a
+successor requires. Reporting capacity alone does not admit `least_used`: a
+later accepted adapter contract must first define the normalized quantity,
+observation lifetime, and deterministic secondary tie-break it uses. Why: a
+configured reserve or selection rule that silently never fires — or whose metric
+varies by implementation — would read as protection the deployment does not
+have. The keys are admitted by the grammar so that supplying that later contract
+needs no configuration grammar change; the observation itself is routed through
 [model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 
 A one-member pool is the ordinary single-account deployment and requires no

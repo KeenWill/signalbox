@@ -358,9 +358,13 @@ newer generation elsewhere describes a different exclusion the operator did not
 name. Without that confinement a still-active target the listing API returned
 could not be cleared until every unrelated newer exclusion was cleared first,
 and a profile taking continuous triggers in another pool could block the
-requested repair indefinitely. A chain target whose predecessor does not exactly
-correlate with the named profile's active exclusion, or any target with no such
-record, is `unknown_credential_exclusion`; and ordinary authorization failure is
+requested repair indefinitely. A chain target whose named predecessor correlates
+with no retained record for that profile and scope, or whose retained record
+does not exactly match the named correlation, is `unknown_credential_exclusion`
+— as is any other target with no such record. An exact retained record that an
+earlier command already marked inactive is not unknown: it follows the
+`already_cleared` path below, so the idempotent repair returns one answer rather
+than depending on which command ran first. Ordinary authorization failure is
 `credential_administration_forbidden`. Equal `command_id` replay still returns
 its stored receipt before this current-state precedence is evaluated. OAuth
 quarantine rejects this mutation because only re-provisioning can clear it.
