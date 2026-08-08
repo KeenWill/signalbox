@@ -1519,6 +1519,17 @@ source turn and cannot apply within that turn. Clearing marks the exact
 generation inactive rather than deleting it, which supplies the replay and
 `already_cleared` contract.
 
+Each attached correlation stores the reset that observation reported, as a
+required-nullable instant, and the generation stores the effective reset derived
+from them. That derivation is the accumulation rule the configuration contract
+states: the latest reported reset wins, and any correlation reporting none makes
+the effective reset null and absorbing, so no later correlation restores a
+deadline. Storing the per-correlation resets as well as the derived value is
+what lets reconstitution reproduce the rule exactly after a restart instead of
+inferring it — without them a repository could clear a member on a stale
+deadline or hold it excluded forever, and the two would be indistinguishable
+from the stored row.
+
 A chain-exclusion row is scoped to the session, turn, immutable pool policy,
 profile, and predecessor model call whose qualifying observation created it. It
 carries active/cleared state and that exact observation correlation rather than
@@ -1592,22 +1603,32 @@ immediate-successor attempt, applies the interrupt proof, ends that attempt
 a closed `pending_spawn` state with no process identity and a
 `spawned { process_group_identity }` state carrying the child process group's
 reuse-safe host identity. Successful spawn replaces `pending_spawn` with
-`spawned` immediately. Startup must resolve every prior-process `spawned`
-reservation before scheduling — proving that exact group absent, or terminating
-it and then proving absence — and only then closes it as lost; failure to
-establish absence fails startup. Retaining one for a later death notice is not
-admitted, because the terminal observation that would release it died with its
-daemon. It retains a `spawned` reservation owned by the live fenced process,
-whose observation path this daemon still owns. A prior-process `pending_spawn`
-reservation is ambiguous because its child may have started before the identity
-update, so startup fails before scheduling rather than releasing it without
-process-death proof. After that reconciliation and before scheduling is enabled,
-startup iterates the retained `contended` waits themselves rather than the
-currently bounded profiles, so a profile whose bound was removed still has an
-entry to evaluate. Each wait stores a complete nonempty bounded-member set, so
-startup evaluates every member in that set rather than one profile: a member the
-current registration leaves unbounded makes the wait eligible outright with no
-count to compare against, and a member still bounded makes it eligible when that
+`spawned` immediately, and that attach is guarded on the reservation still being
+`pending_spawn` for this exact reservation identity. The invocation path may not
+finish while that update's outcome is unknown: a failed or ambiguous commit is
+resolved before the caller proceeds. It rereads the reservation authoritatively
+— a committed `spawned` carrying this exact process-group identity is adopted,
+and a still-`pending_spawn` row is reattached under the same guard. Only when it
+can neither commit the attach nor confirm one does it terminate that exact
+process group, prove it absent, and close the reservation as lost in one
+transaction. Leaving a live child behind a `pending_spawn` row is what the
+startup rule below cannot recover from, so this path never exits into that
+state. Startup must resolve every prior-process `spawned` reservation before
+scheduling — proving that exact group absent, or terminating it and then proving
+absence — and only then closes it as lost; failure to establish absence fails
+startup. Retaining one for a later death notice is not admitted, because the
+terminal observation that would release it died with its daemon. It retains a
+`spawned` reservation owned by the live fenced process, whose observation path
+this daemon still owns. A prior-process `pending_spawn` reservation is ambiguous
+because its child may have started before the identity update, so startup fails
+before scheduling rather than releasing it without process-death proof. After
+that reconciliation and before scheduling is enabled, startup iterates the
+retained `contended` waits themselves rather than the currently bounded
+profiles, so a profile whose bound was removed still has an entry to evaluate.
+Each wait stores a complete nonempty bounded-member set, so startup evaluates
+every member in that set rather than one profile: a member the current
+registration leaves unbounded makes the wait eligible outright with no count to
+compare against, and a member still bounded makes it eligible when that
 profile's surviving live reservation count, taken under its capacity lock, is
 below the current bound. Any one such member suffices, since one admissible
 member is all preparation needs. A bound raised, lowered, or removed across a

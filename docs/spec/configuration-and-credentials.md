@@ -1198,20 +1198,27 @@ request. A `codex_home` refresh race or rejected daemon-owned OAuth refresh
 occurs in the delivery layer before such a request and bypasses pool trigger
 policy: either one quarantines the profile unconditionally as specified above.
 
-`switch_now` is further admitted only for a pool whose adapter can supply the
-typed non-acceptance proof that authorizes a successor. Every pool's members
+`switch_now` is further admitted only where the pool's adapter can supply the
+typed non-acceptance proof for that exact trigger's cause. Every pool's members
 already agree on one adapter, and
 [runtime-substrate](runtime-substrate.md#terminal-evidence) admits that proof
-only from a decoded native error envelope. Neither `claude_cli` nor `codex_cli`
-exposes one — both classify from rendered failure prose — so `switch_now` on a
-CLI-adapter pool is a typed startup failure in this build, whichever of the
-three availability triggers names it. Why reject rather than accept and ignore:
-a configured `switch_now` that can never fire reads as failover the deployment
-does not have, and every such response would terminalize exactly as `stay` does
-while the document claims otherwise. This is the same fail-closed admission rule
-that rejects `headroom_reserve_percent` and `least_used` below, for the same
-reason. The key stays in the grammar so that an adapter gaining a stable
-machine-readable discriminator admits it with no configuration change.
+only from a decoded native error envelope naming a cause in that adapter's own
+exhaustive mapping — so the check is per adapter *and* per trigger, not once per
+adapter. In this build that admits exactly `on_rate_limited` and `on_overloaded`
+for an `anthropic` pool, and `on_rate_limited` and `on_quota_exhausted` for an
+`openai` pool. `on_quota_exhausted` under `anthropic` and `on_overloaded` under
+`openai` are typed startup failures because those adapters' mappings carry no
+native token for those causes and can reach them only by status-derived
+fallback, which carries no proof. Neither `claude_cli` nor `codex_cli` exposes a
+native envelope at all — both classify from rendered failure prose — so
+`switch_now` on a CLI-adapter pool is rejected for all three triggers. Why
+reject rather than accept and ignore: a configured `switch_now` that can never
+fire reads as failover the deployment does not have, and every such response
+would terminalize exactly as `stay` does while the document claims otherwise.
+This is the same fail-closed admission rule that rejects
+`headroom_reserve_percent` and `least_used` below, for the same reason. The keys
+stay in the grammar so that an adapter gaining a native token for a cause admits
+that pair with no configuration change.
 
 Selection happens at model-call preparation, never at session creation. For the
 resolved target's family, preparation reads the session's current immutable
@@ -1301,15 +1308,17 @@ positive integer, an unknown tie-break or exhaustion value, an unknown action,
 an action on a trigger that does not admit it, and any unknown field. It also
 rejects `headroom_reserve_percent`, `tie_break = "least_used"`, and any
 `on_headroom_low` action other than `stay` in this build, because no composed
-runtime observes remaining capacity, and `switch_now` on a `claude_cli` or
-`codex_cli` pool, because neither adapter can supply the non-acceptance proof a
-successor requires. Reporting capacity alone does not admit `least_used`: a
-later accepted adapter contract must first define the normalized quantity,
-observation lifetime, and deterministic secondary tie-break it uses. Why: a
-configured reserve or selection rule that silently never fires — or whose metric
-varies by implementation — would read as protection the deployment does not
-have. The keys are admitted by the grammar so that supplying that later contract
-needs no configuration grammar change; the observation itself is routed through
+runtime observes remaining capacity, and `switch_now` on any adapter-and-trigger
+pair whose adapter supplies no native token for that cause — every trigger under
+`claude_cli` and `codex_cli`, `on_quota_exhausted` under `anthropic`, and
+`on_overloaded` under `openai`. Reporting capacity alone does not admit
+`least_used`: a later accepted adapter contract must first define the normalized
+quantity, observation lifetime, and deterministic secondary tie-break it uses.
+Why: a configured reserve or selection rule that silently never fires — or whose
+metric varies by implementation — would read as protection the deployment does
+not have. The keys are admitted by the grammar so that supplying that later
+contract needs no configuration grammar change; the observation itself is routed
+through
 [model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 
 A one-member pool is the ordinary single-account deployment and requires no

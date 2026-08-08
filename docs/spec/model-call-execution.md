@@ -615,12 +615,25 @@ excluded from the current availability-successor chain, so at most one call per
 member exists per chain and the longest possible chain is the pool's member
 count. A successful call ends that chain before any tool-round continuation is
 prepared. Releasing a parked wait also ends the exhausted chain; the resumed
-turn starts a fresh chain and recomputes admission. It drops a chain-local
-member exclusion only when that member's reported reset has passed or a durable
-availability update invalidates it; every later or absent reset remains initial
-exclusion evidence in the fresh chain. An explicit clear of its exact
-predecessor correlation is such an update. Every durable membership exclusion
-and profile quarantine is retained as well.
+turn starts a fresh chain and recomputes admission. Every durable membership
+exclusion and profile quarantine is retained as well.
+
+A member that produced a qualifying failure stays excluded for the rest of the
+turn, not merely for the chain that observed it. A release therefore never
+re-admits a profile whose own failure parked the turn, and the turn's total
+provider calls stay bounded by the pool's member count however many times it
+parks and resumes. Why this is stated rather than left to the chain rule: a
+one-member pool configured `switch_now` with `park` would otherwise park on a
+reset-bearing failure, wake at the deadline, drop the sole member's exclusion,
+call the same profile again, and repeat without bound — an automatic
+same-profile retry loop, which INV-014 and INV-018 forbid and which
+[model fallback and provenance](../open-questions.md#model-fallback-and-provenance)
+explicitly leaves outside accepted policy under its future same-profile retry
+question. Only an operator clear of the exact predecessor correlation, or a
+durable availability update that invalidates it, readmits such a member within
+the same turn; a reset passing releases the wait without readmitting the member
+that failed. When no member remains, the turn takes the exhaustion path below
+rather than calling a failed member again.
 
 When no member remains admissible, the pool's `on_pool_exhausted` decides. If
 the chain observed a qualifying provider failure, `fail` fails the turn as a
