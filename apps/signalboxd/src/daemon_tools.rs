@@ -1715,6 +1715,12 @@ mod tests {
                     .find(|ancestor| ancestor.file_name() == Some(configured_name))
             })
         else {
+            assert!(
+                artifact_parent
+                    .file_name()
+                    .is_none_or(|name| !known_targets.contains(name)),
+                "relative Cargo target directory is ambiguous when its root cannot be recovered"
+            );
             return artifact_parent.to_path_buf();
         };
         if closest == artifact_parent
@@ -2257,25 +2263,39 @@ mod tests {
     }
 
     #[test]
-    fn bridge_artifact_selection_keeps_a_recognized_name_as_a_symlinked_host_root() {
+    #[should_panic(
+        expected = "relative Cargo target directory is ambiguous when its root cannot be recovered"
+    )]
+    fn bridge_artifact_selection_rejects_a_recognized_name_as_an_unresolved_host_root() {
         let target_dir = Path::new("synthetic-parent").join(SYNTHETIC_CARGO_TARGET);
         let executable = target_dir.join("debug/deps/daemon-tools-test");
-        let configured_target_dir =
-            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
-                current_executable: &executable,
-                configured: Path::new("target-link"),
-                known_targets: &synthetic_known_targets(),
-            });
+        configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+            current_executable: &executable,
+            configured: Path::new("target-link"),
+            known_targets: &synthetic_known_targets(),
+        });
+    }
 
-        assert_bridge_artifact_selection(BridgeArtifactExpectation {
-            executable: &executable,
-            target_dir: &target_dir,
-            configured_target_dir: Some(&configured_target_dir),
-            default_target_dir: Path::new("synthetic-default-target"),
-            debug_profile: CARGO_TEST_PROFILE,
-            expected_profile: CARGO_TEST_PROFILE,
-            expected_target: None,
-            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
+    #[cfg(unix)]
+    #[test]
+    #[should_panic(
+        expected = "relative Cargo target directory is ambiguous when its root cannot be recovered"
+    )]
+    fn bridge_artifact_selection_rejects_a_hidden_symlink_root_for_a_target_build() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let target_dir = parent.path().join("resolved-target");
+        let target_link = parent.path().join("target-link");
+        fs::create_dir(&target_dir).expect("fixture target directory exists");
+        std::os::unix::fs::symlink(&target_dir, &target_link)
+            .expect("fixture target symlink exists");
+        let executable = target_dir
+            .join(SYNTHETIC_CARGO_TARGET)
+            .join("debug/deps/daemon-tools-test");
+
+        configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+            current_executable: &executable,
+            configured: Path::new("target-link"),
+            known_targets: &synthetic_known_targets(),
         });
     }
 
