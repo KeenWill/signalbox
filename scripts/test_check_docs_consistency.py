@@ -662,6 +662,27 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertIn("| INV-001", render_invariant_index(self.root))
 
+    def test_binary_include_uses_the_implicit_name_for_a_relocated_library(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture-package"\nversion = "0.0.0"\n\n'
+            '[lib]\npath = "src/custom_library.rs"\n',
+            encoding="utf-8",
+        )
+        target = self.root / "src/custom_library.rs"
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_implicit_library_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture-package"\n'
+            'include_binaries = ["fixture_package"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
     def test_ci_ignored_test_skips_exclude_only_named_enforcement(self) -> None:
         selected_invariant = "INV-001"
         skipped_invariant = "INV-002"

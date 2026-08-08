@@ -2777,6 +2777,8 @@ def cargo_test_target_names(package: Path) -> dict[Path, str]:
         if root is None and (package / "src/lib.rs").is_file():
             root = package / "src/lib.rs"
         name = library.get("name")
+        if not isinstance(name, str) and isinstance(package_name, str):
+            name = package_name.replace("-", "_")
         if root is not None and isinstance(name, str):
             names[root] = name
     for table, directory in (("bin", "src/bin"), ("test", "tests")):
