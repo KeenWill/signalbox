@@ -1417,7 +1417,7 @@ impl SnapshotTurnDisposition {
                 Self::ProviderFailure(cause)
             }
             Some((ProcessFailedModelCallDisposition::Cancelled, _)) => Self::Infrastructure,
-            None => Self::Other,
+            None => Self::Infrastructure,
         }
     }
 
@@ -1581,6 +1581,14 @@ fn turn_snapshot_reports_a_terminal_provider_failure_distinctly() {
             None
         ))),
         SnapshotTurnDisposition::ProviderFailure(None)
+    );
+}
+
+#[test]
+fn turn_snapshot_reports_failed_without_a_model_call_as_infrastructure() {
+    assert_eq!(
+        SnapshotTurnDisposition::from_failed_model_call(None),
+        SnapshotTurnDisposition::Infrastructure
     );
 }
 
