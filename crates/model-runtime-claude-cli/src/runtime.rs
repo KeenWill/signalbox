@@ -439,7 +439,7 @@ fn create_support_files(
     let ready_text = ready
         .to_str()
         .ok_or_else(|| "MCP readiness path is not valid UTF-8".to_string())?;
-    let catalog_bytes = serde_json::to_vec(&translated.catalog)
+    let catalog_bytes = crate::translate::serialize_mcp_catalog(&translated.catalog)
         .map_err(|error| format!("could not serialize MCP catalog: {error}"))?;
     std::fs::write(&catalog, catalog_bytes)
         .map_err(|error| format!("could not write MCP catalog: {error}"))?;

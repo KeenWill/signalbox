@@ -26,3 +26,4 @@ pub use runtime::{
     ClaudeCliConstructionError, ClaudeCliPreparedRequest, ClaudeCliRuntime,
     DISABLED_CLAUDE_CLI_BUILTIN_TOOLS, SUPPORTED_CLAUDE_CLI_VERSION, validate_model_settings,
 };
+pub use translate::serialize_mcp_tool_catalog;
