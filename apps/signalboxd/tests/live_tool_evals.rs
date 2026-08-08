@@ -3020,17 +3020,25 @@ fn forced_tool_sequence_allows_only_one_forced_exchange() {
 }
 
 #[test]
-fn exec_eval_rejects_model_argument_drift_before_dispatch() {
-    let drifted = NormalizedToolArguments::try_from_provider_text(
-        serde_json::json!({
-            "program": "curl",
-            "arguments": ["https://example.com"],
-            "working_directory": ".",
-            "timeout_seconds": 30,
-        })
-        .to_string(),
-    )
-    .expect("drifted fixture arguments normalize");
+fn exec_eval_rejects_program_drift_before_dispatch() {
+    let fixture = forced_exec_fixture(SANDBOXED_EXEC_NAME);
+    let mut drifted: serde_json::Value = serde_json::from_str(fixture.expected_arguments)
+        .expect("the sandboxed fixture arguments decode");
+    drifted["program"] = serde_json::json!("curl");
+    let drifted = NormalizedToolArguments::try_from_provider_text(drifted.to_string())
+        .expect("drifted fixture arguments normalize");
+
+    assert!(!ExecEvalCase::ForcedSandboxed.admits(SANDBOXED_EXEC_NAME, &drifted));
+}
+
+#[test]
+fn exec_eval_rejects_argument_drift_before_dispatch() {
+    let fixture = forced_exec_fixture(SANDBOXED_EXEC_NAME);
+    let mut drifted: serde_json::Value = serde_json::from_str(fixture.expected_arguments)
+        .expect("the sandboxed fixture arguments decode");
+    drifted["arguments"] = serde_json::json!(["different output\n"]);
+    let drifted = NormalizedToolArguments::try_from_provider_text(drifted.to_string())
+        .expect("drifted fixture arguments normalize");
 
     assert!(!ExecEvalCase::ForcedSandboxed.admits(SANDBOXED_EXEC_NAME, &drifted));
 }
@@ -3060,7 +3068,7 @@ fn forced_unsandboxed_eval_denies_model_argument_drift() {
 
 #[test]
 fn unforced_exec_eval_denies_the_exact_forced_unsandboxed_fixture() {
-    let [_, unsandboxed, _] = EXEC_CASES;
+    let unsandboxed = forced_exec_fixture(UNSANDBOXED_EXEC_NAME);
     let exact_forced = NormalizedToolArguments::try_from_provider_text(String::from(
         unsandboxed.expected_arguments,
     ))
@@ -3107,12 +3115,20 @@ fn unforced_exec_tier_rejects_an_additional_tool_call() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
-        tool_results: vec![TrackedToolResult {
-            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
-            content: confined_exit("").to_string(),
-            is_error: false,
-            round_tripped: true,
-        }],
+        tool_results: vec![
+            TrackedToolResult {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                content: confined_exit("").to_string(),
+                is_error: false,
+                round_tripped: true,
+            },
+            TrackedToolResult {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                content: confined_exit("").to_string(),
+                is_error: false,
+                round_tripped: true,
+            },
+        ],
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
             requests: vec![
