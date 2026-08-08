@@ -3972,6 +3972,14 @@ pub enum RejectionDetail {
         /// Authoritative active turn.
         active_turn_id: CanonicalUuid,
     },
+    /// The active turn is parked on runner recovery, which only a checked
+    /// replacement or abandonment command may consume.
+    InterruptUnavailableWhileAwaitingRunnerRecovery {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Authoritative active turn.
+        active_turn_id: CanonicalUuid,
+    },
     /// A next-safe-point input targeted a turn that is already stopping.
     SafePointUnavailableWhileStopping {
         /// Target session.
@@ -4175,6 +4183,7 @@ impl RejectionDetail {
             | Self::TurnNotAwaitingReconciliation { .. }
             | Self::InterruptAlreadyApplied { .. }
             | Self::InterruptUnavailableWhileAwaitingApproval { .. }
+            | Self::InterruptUnavailableWhileAwaitingRunnerRecovery { .. }
             | Self::SafePointUnavailableWhileStopping { .. }
             | Self::ToolRequestNotFound { .. }
             | Self::ToolRequestAlreadyResolved { .. }
@@ -4827,6 +4836,13 @@ impl<'de> Deserialize<'de> for TurnState {
 
 impl TurnState {
     fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::ActiveAwaitingRunnerRecovery {
+            placement_revision, ..
+        } = self
+            && placement_revision.value() == 0
+        {
+            return Err(FrameValidationError::TurnStateShape);
+        }
         if let Self::QueuedDelegationWake {
             first_delivery_sequence,
             through_delivery_sequence,
@@ -7132,6 +7148,7 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
         | RejectionDetail::InterruptAlreadyApplied { .. }
         | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
+        | RejectionDetail::InterruptUnavailableWhileAwaitingRunnerRecovery { .. }
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestNotFound { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
@@ -7226,6 +7243,7 @@ fn validate_conversation_import_detail(
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
         | RejectionDetail::InterruptAlreadyApplied { .. }
         | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
+        | RejectionDetail::InterruptUnavailableWhileAwaitingRunnerRecovery { .. }
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestNotFound { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
@@ -8649,6 +8667,15 @@ mod tests {
         .expect_err("the nullable tool attempt remains a required wire member");
 
         assert!(rejected.to_string().contains("tool_attempt_id"));
+    }
+
+    /// INV-044: runner-recovery wire state preserves the positive placement
+    /// revision required by its relational source.
+    #[test]
+    fn inv044_runner_recovery_turn_state_rejects_zero_placement_revision() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000002","acceptance_position":"1","model_settings":null,"state":{"type":"active_awaiting_runner_recovery","runner_id":"00000000-0000-0000-0000-000000000003","placement_revision":"0","tool_attempt_id":null}}}"#,
+        );
     }
 
     #[test]
@@ -11976,6 +12003,20 @@ mod tests {
                 ),
             },
             r#"{"type":"error","code":"rejected","message":"the active turn awaits a tool decision","detail":{"type":"interrupt_unavailable_while_awaiting_approval","session_id":"00000000-0000-0000-0000-000000000006","active_turn_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(5)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the active turn awaits runner recovery"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::InterruptUnavailableWhileAwaitingRunnerRecovery {
+                        session_id: uuid(6),
+                        active_turn_id: uuid(7),
+                    },
+                ),
+            },
+            r#"{"type":"error","code":"rejected","message":"the active turn awaits runner recovery","detail":{"type":"interrupt_unavailable_while_awaiting_runner_recovery","session_id":"00000000-0000-0000-0000-000000000006","active_turn_id":"00000000-0000-0000-0000-000000000007"}}"#,
         )
     }
 

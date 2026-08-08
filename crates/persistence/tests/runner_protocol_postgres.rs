@@ -10,10 +10,13 @@ use std::{error::Error, time::Duration};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    ApprovedToolRequest, CanonicalCloneUrlDigest, ContextFrontierId, CredentialProfileGrant,
-    CredentialProfileGrantReconstitutionInput, CredentialProfileName, CredentialProfilePolicy,
-    CredentialToolApproval, DecideToolRequest, DurableCommandId, EndedToolAttempt, ModelCallId,
-    NormalizedToolArguments, ProvisionedWorkspace, ResolvedContextFrontierReconstitutionInput,
+    AcceptedInputId, AcceptedInputTurnActivationIdentities, ApprovedToolRequest,
+    CancelledModelCallTurnIdentities, CanonicalCloneUrlDigest, ContextFrontierId, CreateSession,
+    CredentialProfileGrant, CredentialProfileGrantReconstitutionInput, CredentialProfileName,
+    CredentialProfilePolicy, CredentialToolApproval, DecideToolRequest, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId, EndedToolAttempt,
+    ModelCallId, ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
+    PerInputConfigurationChoices, ProvisionedWorkspace, ResolvedContextFrontierReconstitutionInput,
     RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
     RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId,
     RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
@@ -21,23 +24,31 @@ use signalbox_domain::{
     RunnerPlacementReconstitutionHistory, RunnerRepositoryEntry, RunnerSandboxProfile,
     RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
     RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
-    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest, ToolAdmissibleLoci,
-    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
+    RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, SubmitInput, SubmitInputRejectedResult, SubmitInputResult,
+    ToolAdmissibleLoci, ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
     ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
-    ToolRequestReconstitutionInput, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
-    WorkingDirectorySelection, WorkspaceCapability, WorkspaceManifestId, WorkspaceRecovery,
-    WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
+    ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    ValidatedRunnerRegistration, WorkingDirectorySelection, WorkspaceCapability,
+    WorkspaceManifestId, WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey,
+    WorkspaceRequirement, WorkspaceRevision,
 };
 use signalbox_persistence::{
-    MIGRATOR, local_test_connection_options, migrate,
+    MIGRATOR,
+    create_session::CreateSessionRepository,
+    local_test_connection_options, migrate,
     runner_protocol::{
         RunnerConnectionTransition, RunnerProtocolCorruption, RunnerProtocolStore,
         RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
     },
+    session_credentials::{SessionCredentialPin, SessionModelCredential},
+    start_eligible_turn::StartEligibleTurnRepository,
+    submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository},
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -1336,6 +1347,64 @@ async fn insert_runner_recovery_turn(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+async fn insert_runner_recovery_interrupt_rejection(
+    pool: &PgPool,
+    command: DurableCommandId,
+    source_command: DurableCommandId,
+    active_turn: TurnId,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         SELECT $1, command_kind, storage_version, transaction_timestamp()
+           FROM durable_command
+          WHERE command_id = $2",
+    )
+    .bind(command.into_uuid())
+    .bind(source_command.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, delivery_kind, descendant_scope,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_accepted_input_id, result_turn_id,
+             result_actual_active_turn_id, result_expected_active_turn_id,
+             result_expected_defaults_version, result_current_defaults_version,
+             result_unknown_alias_id, result_selected_defaults_version,
+             result_last_position, result_existing_interrupt_command_id)
+         SELECT
+             $1, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, 'interrupt', 'parent_alone',
+             $3, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             'rejected',
+             'interrupt_unavailable_while_awaiting_runner_recovery',
+             result_session_id,
+             NULL, NULL,
+             $3, NULL,
+             NULL, NULL,
+             NULL, NULL,
+             NULL, NULL
+           FROM submit_input_command
+          WHERE command_id = $2",
+    )
+    .bind(command.into_uuid())
+    .bind(source_command.into_uuid())
+    .bind(active_turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
 }
 
 async fn append_runner_registration_loss_projection(
@@ -4689,6 +4758,168 @@ async fn s32_inv009_inv044_pre_pin_runner_recovery_wait_round_trips_without_atte
     assert_eq!(loaded.runner(), runner);
     assert_eq!(loaded.placement_revision(), placement.revision());
     assert_eq!(loaded.interrupted_tool_attempt(), None);
+    drop(pool);
+    Ok(())
+}
+
+/// S07 / INV-009 / INV-012 / INV-044: the ordinary final-state checker admits
+/// the exact runner-loss wait with no live attempt, and an interrupt records
+/// and reloads the distinct non-consuming rejection while that wait remains.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s07_inv009_inv012_inv044_runner_recovery_interrupt_rejection_round_trips()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let turn_attempt = TurnAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn + 1));
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let selection = DirectModelSelection::from_uuid(uuid(0xa101));
+    let credentials = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+        "fixture-model-family",
+        "fixture-credential-reference",
+    )])
+    .expect("the fixture credential pin is valid");
+    let creation = CreateSession::new(
+        DurableCommandId::from_uuid(uuid(0xa102)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+    )
+    .prepare(session)
+    .expect("the fixture session creation is preparable");
+    CreateSessionRepository::new(pool.clone(), credentials)
+        .handle(creation)
+        .await?;
+    let submit = SubmitInputRepository::new(pool.clone());
+    let starting_input = SubmitInput::new(
+        DurableCommandId::from_uuid(uuid(0xa103)),
+        session,
+        UserContent::try_text(String::from("runner recovery fixture"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    submit
+        .handle_with_candidates(
+            starting_input,
+            AcceptedInputId::from_uuid(uuid(0xa104)),
+            Some(turn),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa105)),
+                ContextFrontierId::from_uuid(uuid(0xa106)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xa107)),
+            |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xa108))),
+        )
+        .await?;
+    StartEligibleTurnRepository::new(pool.clone())
+        .handle(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa109)),
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa10a)),
+                ContextFrontierId::from_uuid(uuid(0xa10b)),
+                turn_attempt,
+            ),
+        )
+        .await?;
+    let forged = insert_runner_recovery_interrupt_rejection(
+        &pool,
+        DurableCommandId::from_uuid(uuid(0xa113)),
+        DurableCommandId::from_uuid(uuid(0xa103)),
+        turn,
+    )
+    .await
+    .expect_err("a runner-recovery rejection cannot name a running turn");
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let mut recovery = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $1,
+                runner_recovery_placement_revision = $2
+          WHERE turn_id = $3 AND session_id = $4",
+    )
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    recovery.commit().await?;
+    let interrupt_command = DurableCommandId::from_uuid(uuid(0xa10c));
+    let interrupt = SubmitInput::new(
+        interrupt_command,
+        session,
+        UserContent::try_text(String::from("stop during runner recovery"))
+            .expect("the fixture interrupt is valid"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    let expected = SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingRunnerRecovery {
+            session,
+            active_turn: turn,
+        },
+    );
+    let recorded = submit
+        .handle_with_candidates(
+            interrupt,
+            AcceptedInputId::from_uuid(uuid(0xa10d)),
+            Some(TurnId::from_uuid(uuid(0xa10e))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa10f)),
+                ContextFrontierId::from_uuid(uuid(0xa110)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xa111)),
+            |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xa112))),
+        )
+        .await?;
+    let replayed = submit
+        .load(interrupt_command)
+        .await?
+        .expect("the runner-recovery rejection is durable");
+
+    assert_eq!(
+        recorded,
+        SubmitInputHandlingOutcome::Recorded(expected.clone())
+    );
+    assert_eq!(replayed.result(), &expected);
+    assert_eq!(
+        forged.as_database_error().and_then(|error| error.code()),
+        Some("23503".into())
+    );
     drop(pool);
     Ok(())
 }

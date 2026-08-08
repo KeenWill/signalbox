@@ -47,6 +47,7 @@ pub(crate) enum ClientError {
     AmbiguousMutation,
     Input(&'static str),
     TurnRecoveryRequired,
+    RunnerRecoveryRequired,
     TurnFailed(Option<FailedModelCallCause>),
     TurnRefused,
     TurnCancelled,
@@ -128,6 +129,7 @@ impl ClientError {
             | Self::AmbiguousMutation
             | Self::Input(_)
             | Self::TurnRecoveryRequired
+            | Self::RunnerRecoveryRequired
             | Self::TurnFailed(_)
             | Self::TurnRefused
             | Self::TurnCancelled
@@ -209,6 +211,8 @@ impl fmt::Display for ClientError {
             Self::TurnRecoveryRequired => formatter.write_str(
                 "the submitted turn requires model-call recovery that the terminal cannot perform",
             ),
+            Self::RunnerRecoveryRequired => formatter
+                .write_str("the submitted turn awaits lost-runner replacement or abandonment"),
             Self::TurnFailed(None) => formatter.write_str("the submitted turn failed"),
             Self::TurnFailed(Some(cause)) => write!(
                 formatter,
@@ -246,6 +250,7 @@ impl Error for ClientError {
             | Self::SourceExceedsFrame
             | Self::ScanIncomplete { .. }
             | Self::TurnRecoveryRequired
+            | Self::RunnerRecoveryRequired
             | Self::TurnFailed(_)
             | Self::TurnRefused
             | Self::TurnCancelled
@@ -415,6 +420,14 @@ impl fmt::Display for RejectionDisplay {
                 formatter,
                 "interrupt_unavailable_while_awaiting_approval session={session_id} \
                  active_turn={active_turn_id}; deny the pending tool request first"
+            ),
+            RejectionDetail::InterruptUnavailableWhileAwaitingRunnerRecovery {
+                session_id,
+                active_turn_id,
+            } => write!(
+                formatter,
+                "interrupt_unavailable_while_awaiting_runner_recovery session={session_id} \
+                 active_turn={active_turn_id}; replace or abandon the lost runner first"
             ),
             RejectionDetail::SafePointUnavailableWhileStopping {
                 session_id,

@@ -217,3 +217,242 @@ CREATE TRIGGER turn_lifecycle_runner_recovery_does_not_reopen
 BEFORE UPDATE ON turn_lifecycle
 FOR EACH ROW
 EXECUTE FUNCTION reject_runner_recovery_reopen();
+
+-- The baseline lifecycle checker formerly divided active turns into only a
+-- running arm and a model-call-recovery arm. Runner recovery deliberately has
+-- no current turn attempt, while retaining any ended attempt history.
+DO $migration$
+DECLARE
+    current_definition text;
+    replacement_definition text;
+    old_arm text := $old$
+        ELSIF checked_active_phase = 'awaiting_child' THEN
+            IF live_attempt_count <> 0 OR exact_attempt_count <> 0 THEN
+                RAISE EXCEPTION 'child-wait turn % retains a live current attempt', checked_turn_id
+                    USING ERRCODE = '23514';
+            END IF;
+        ELSE
+$old$;
+    new_arm text := $new$
+        ELSIF checked_active_phase = 'awaiting_child' THEN
+            IF live_attempt_count <> 0 OR exact_attempt_count <> 0 THEN
+                RAISE EXCEPTION 'child-wait turn % retains a live current attempt', checked_turn_id
+                    USING ERRCODE = '23514';
+            END IF;
+        ELSIF checked_active_phase = 'awaiting_runner_recovery' THEN
+            IF live_attempt_count <> 0 OR exact_attempt_count <> 0 THEN
+                RAISE EXCEPTION
+                    'runner recovery turn % retains a current attempt',
+                    checked_turn_id
+                    USING ERRCODE = '23514';
+            END IF;
+        ELSE
+$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'assert_turn_lifecycle_final_state_without_steering(uuid)'::regprocedure
+    ) INTO current_definition;
+    replacement_definition := replace(current_definition, old_arm, new_arm);
+    IF replacement_definition = current_definition THEN
+        RAISE EXCEPTION
+            'turn-lifecycle runner-recovery insertion point is missing';
+    END IF;
+    EXECUTE replacement_definition;
+END;
+$migration$;
+
+-- The tool-loop final-state checker predates the runner-recovery phase. Keep
+-- its complete current definition and add only the new no-live-attempt arm;
+-- the exact placement and optional tool-attempt correlation remains owned by
+-- the dedicated deferred constraint above.
+DO $migration$
+DECLARE
+    current_definition text;
+    replacement_definition text;
+    old_arm text := $old$
+            ELSE
+                RAISE EXCEPTION 'unsupported active tool-loop phase'
+                    USING ERRCODE = '23514';
+$old$;
+    new_arm text := $new$
+            WHEN 'awaiting_runner_recovery' THEN
+                IF live_attempt_count <> 0 THEN
+                    RAISE EXCEPTION
+                        'runner recovery wait retains a live turn attempt'
+                        USING ERRCODE = '23514';
+                END IF;
+            ELSE
+                RAISE EXCEPTION 'unsupported active tool-loop phase'
+                    USING ERRCODE = '23514';
+$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'assert_tool_loop_turn_final_state_pre_delegation(uuid)'::regprocedure
+    ) INTO current_definition;
+    replacement_definition := replace(current_definition, old_arm, new_arm);
+    IF replacement_definition = current_definition THEN
+        RAISE EXCEPTION
+            'tool-loop final-state runner-recovery insertion point is missing';
+    END IF;
+    EXECUTE replacement_definition;
+END;
+$migration$;
+
+-- Interrupt is not authority to consume an administrative runner-recovery
+-- wait. Store that refusal as a distinct closed result and correlate it with
+-- the exact active phase at commit.
+DO $migration$
+DECLARE
+    closed_kind text;
+    result_shape text;
+BEGIN
+    SELECT pg_get_expr(conbin, conrelid) INTO closed_kind
+      FROM pg_constraint
+     WHERE conrelid = 'submit_input_command'::regclass
+       AND conname = 'submit_input_command_rejection_kind_closed';
+    SELECT pg_get_expr(conbin, conrelid) INTO result_shape
+      FROM pg_constraint
+     WHERE conrelid = 'submit_input_command'::regclass
+       AND conname = 'submit_input_command_result_shape';
+    IF closed_kind IS NULL OR result_shape IS NULL THEN
+        RAISE EXCEPTION 'submit-input result constraints are missing';
+    END IF;
+    ALTER TABLE submit_input_command
+        DROP CONSTRAINT submit_input_command_rejection_kind_closed,
+        DROP CONSTRAINT submit_input_command_result_shape;
+    EXECUTE format(
+        'ALTER TABLE submit_input_command
+         ADD CONSTRAINT submit_input_command_rejection_kind_closed CHECK (
+            (%s) OR rejection_kind =
+                ''interrupt_unavailable_while_awaiting_runner_recovery''
+         ),
+         ADD CONSTRAINT submit_input_command_result_shape CHECK (
+            (%s) OR (
+                result_kind = ''rejected''
+                AND rejection_kind =
+                    ''interrupt_unavailable_while_awaiting_runner_recovery''
+                AND delivery_kind = ''interrupt''
+                AND result_accepted_input_id IS NULL
+                AND result_turn_id IS NULL
+                AND result_actual_active_turn_id = expected_active_turn_id
+                AND result_actual_active_turn_id IS NOT NULL
+                AND result_expected_active_turn_id IS NULL
+                AND result_expected_defaults_version IS NULL
+                AND result_current_defaults_version IS NULL
+                AND result_unknown_alias_id IS NULL
+                AND result_selected_defaults_version IS NULL
+                AND result_last_position IS NULL
+                AND result_existing_interrupt_command_id IS NULL
+            )
+         )',
+        closed_kind,
+        result_shape
+    );
+END;
+$migration$;
+
+DO $migration$
+DECLARE
+    current_definition text;
+    replacement_definition text;
+    old_arm text := $old$
+    ELSIF NEW.rejection_kind
+        = 'interrupt_unavailable_while_awaiting_approval'
+    THEN
+        SELECT count(*)
+          INTO matching_records
+          FROM turn_lifecycle AS parked
+         WHERE parked.turn_id = NEW.result_actual_active_turn_id
+           AND parked.session_id = NEW.result_session_id
+           AND parked.state_kind = 'active'
+           AND parked.active_phase_kind = 'awaiting_tool_approval'
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM accepted_input
+                 WHERE accepting_command_id = NEW.command_id
+           );
+$old$;
+    new_arm text := $new$
+    ELSIF NEW.rejection_kind IN (
+        'interrupt_unavailable_while_awaiting_approval',
+        'interrupt_unavailable_while_awaiting_runner_recovery'
+    )
+    THEN
+        SELECT count(*)
+          INTO matching_records
+          FROM turn_lifecycle AS parked
+         WHERE parked.turn_id = NEW.result_actual_active_turn_id
+           AND parked.session_id = NEW.result_session_id
+           AND parked.state_kind = 'active'
+           AND parked.active_phase_kind = CASE NEW.rejection_kind
+                WHEN 'interrupt_unavailable_while_awaiting_approval'
+                    THEN 'awaiting_tool_approval'
+                ELSE 'awaiting_runner_recovery'
+           END
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM accepted_input
+                 WHERE accepting_command_id = NEW.command_id
+           );
+$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'require_interrupt_submit_input_effect_correlation()'::regprocedure
+    ) INTO current_definition;
+    replacement_definition := replace(current_definition, old_arm, new_arm);
+    IF replacement_definition = current_definition THEN
+        RAISE EXCEPTION
+            'submit-input runner-recovery rejection insertion point is missing';
+    END IF;
+    EXECUTE replacement_definition;
+END;
+$migration$;
+
+DROP TRIGGER submit_input_command_requires_correlated_effect
+    ON submit_input_command;
+DROP TRIGGER submit_input_command_requires_interrupt_effect
+    ON submit_input_command;
+
+CREATE CONSTRAINT TRIGGER submit_input_command_requires_correlated_effect
+AFTER INSERT ON submit_input_command
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+WHEN (
+    NOT (
+        (
+            NEW.result_kind = 'applied'
+            AND NEW.delivery_kind = 'interrupt'
+        )
+        OR COALESCE(
+            NEW.rejection_kind IN (
+                'safe_point_unavailable_while_stopping',
+                'interrupt_already_applied',
+                'interrupt_unavailable_while_awaiting_approval',
+                'interrupt_unavailable_while_awaiting_runner_recovery'
+            ),
+            false
+        )
+    )
+)
+EXECUTE FUNCTION require_submit_input_legacy_effect_correlation();
+
+CREATE CONSTRAINT TRIGGER submit_input_command_requires_interrupt_effect
+AFTER INSERT ON submit_input_command
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+WHEN (
+    (
+        NEW.result_kind = 'applied'
+        AND NEW.delivery_kind = 'interrupt'
+    )
+    OR COALESCE(
+        NEW.rejection_kind IN (
+            'safe_point_unavailable_while_stopping',
+            'interrupt_already_applied',
+            'interrupt_unavailable_while_awaiting_approval',
+            'interrupt_unavailable_while_awaiting_runner_recovery'
+        ),
+        false
+    )
+)
+EXECUTE FUNCTION require_interrupt_submit_input_effect_correlation();

@@ -291,6 +291,7 @@ pub use submit_input::{
     SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput,
     SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
     SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
+    SubmitInputRejectedInterruptUnavailableWhileAwaitingRunnerRecoveryReconstitutionInput,
     SubmitInputRejectedNoActiveTurnReconstitutionInput, SubmitInputRejectedResult,
     SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
     SubmitInputRejectedSessionNotFoundReconstitutionInput,

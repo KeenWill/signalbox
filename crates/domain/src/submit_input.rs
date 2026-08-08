@@ -444,6 +444,20 @@ impl SubmitInput {
                         ),
                     });
                 }
+                if matches!(
+                    active_turn.active_phase(),
+                    Some(crate::ActiveTurnPhase::AwaitingRunnerRecovery { .. })
+                ) {
+                    return Ok(PreparedSubmitInput {
+                        command: self,
+                        result: SubmitInputResult::Rejected(
+                            SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingRunnerRecovery {
+                                session: target_session,
+                                active_turn: actual_active_turn,
+                            },
+                        ),
+                    });
+                }
                 let Some(turn) = turn else {
                     return Err(SubmitInputPreparationError {
                         command: Box::new(self),
@@ -1378,6 +1392,15 @@ pub enum SubmitInputRejectedResult {
         /// The exact active turn retaining the slot on its approval wait.
         active_turn: TurnId,
     },
+    /// An interrupt arrived while runner replacement held the active slot;
+    /// only the checked replacement or abandonment commands may consume that
+    /// administrative recovery state.
+    InterruptUnavailableWhileAwaitingRunnerRecovery {
+        /// The target session.
+        session: SessionId,
+        /// The exact active turn retaining the slot on runner recovery.
+        active_turn: TurnId,
+    },
 }
 
 /// One sealed pre-commit command/result candidate.
@@ -1855,6 +1878,11 @@ enum SubmitInputReconstitutionFacts {
         result_active_turn: TurnId,
         active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
     },
+    RejectedInterruptUnavailableWhileAwaitingRunnerRecovery {
+        result_session: SessionId,
+        result_active_turn: TurnId,
+        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+    },
 }
 
 /// Named facts for reconstructing an applied turn-origin submission.
@@ -2085,6 +2113,21 @@ pub struct SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput {
 /// Named facts for reconstructing a parked-approval interrupt rejection.
 #[derive(Clone, Debug)]
 pub struct SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput {
+    /// The canonical durable command.
+    pub command: SubmitInput,
+    /// The actor spelling stored with the command.
+    pub stored_actor: Actor,
+    /// The target session identity stored in the result.
+    pub result_session: SessionId,
+    /// The authoritative active turn stored in the result.
+    pub result_active_turn: TurnId,
+    /// The canonical origin facts for the active turn.
+    pub active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+}
+
+/// Named facts for reconstructing a runner-recovery interrupt rejection.
+#[derive(Clone, Debug)]
+pub struct SubmitInputRejectedInterruptUnavailableWhileAwaitingRunnerRecoveryReconstitutionInput {
     /// The canonical durable command.
     pub command: SubmitInput,
     /// The actor spelling stored with the command.
@@ -2445,6 +2488,29 @@ impl SubmitInputReconstitutionInput {
                     result_active_turn,
                     active_turn_origin,
                 },
+        }
+    }
+
+    /// Supplies a runner-recovery interrupt rejection and the canonical
+    /// origin of the active turn retaining the administrative recovery slot.
+    pub fn rejected_interrupt_unavailable_while_awaiting_runner_recovery(
+        input: SubmitInputRejectedInterruptUnavailableWhileAwaitingRunnerRecoveryReconstitutionInput,
+    ) -> Self {
+        let SubmitInputRejectedInterruptUnavailableWhileAwaitingRunnerRecoveryReconstitutionInput {
+            command,
+            stored_actor,
+            result_session,
+            result_active_turn,
+            active_turn_origin,
+        } = input;
+        Self {
+            command,
+            stored_actor,
+            facts: SubmitInputReconstitutionFacts::RejectedInterruptUnavailableWhileAwaitingRunnerRecovery {
+                result_session,
+                result_active_turn,
+                active_turn_origin,
+            },
         }
     }
 
@@ -3099,6 +3165,40 @@ impl SubmitInputReconstitutionInput {
                     },
                 )
             }
+            SubmitInputReconstitutionFacts::RejectedInterruptUnavailableWhileAwaitingRunnerRecovery {
+                result_session,
+                result_active_turn,
+                active_turn_origin,
+            } => {
+                if result_session != self.command.session {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::ResultSessionMismatch,
+                    ));
+                }
+                if !matches!(
+                    self.command.delivery,
+                    DeliveryRequest::Interrupt {
+                        expected_active_turn,
+                        ..
+                    } if expected_active_turn == result_active_turn
+                ) {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::StoppingRejectionMismatch,
+                    ));
+                }
+                validate_rejection_active_turn_origin(
+                    &self.command,
+                    Some(result_active_turn),
+                    Some(&active_turn_origin),
+                )
+                .map_err(&fail)?;
+                SubmitInputResult::Rejected(
+                    SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingRunnerRecovery {
+                        session: result_session,
+                        active_turn: result_active_turn,
+                    },
+                )
+            }
         };
 
         Ok(ReconstitutedSubmitInput {
@@ -3642,6 +3742,7 @@ mod tests {
         SubmitInputRejectedActiveTurnPresentReconstitutionInput,
         SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput,
         SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
+        SubmitInputRejectedInterruptUnavailableWhileAwaitingRunnerRecoveryReconstitutionInput,
         SubmitInputRejectedNoActiveTurnReconstitutionInput, SubmitInputRejectedResult,
         SubmitInputRejectedSessionNotFoundReconstitutionInput,
         SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
@@ -3879,6 +3980,79 @@ mod tests {
         )
         .reconstitute()
         .expect("test active scheduling facts are complete")
+    }
+
+    fn runner_recovery_turn(current: &Session) -> AcceptedInputSchedulingProjection {
+        let origin_entry = semantic_transcript_entry_id(0x31);
+        let accepted_input = AcceptedInputLifecycle::new(
+            accepted_input_id(0x21),
+            AcceptedInputDisposition::OriginOf(turn_id(7)),
+        );
+        let runner = crate::RunnerId::from_uuid(uuid::Uuid::from_u128(0x81));
+        let placement_revision = crate::RunnerGeneration::try_from_u64(2)
+            .expect("the fixture placement revision is positive");
+        AcceptedInputSchedulingReconstitutionInput::new(
+            current.clone(),
+            vec![AcceptedInputTurnSchedulingRecord::new(
+                current.id(),
+                turn_id(7),
+                current.id(),
+                accepted_input.clone(),
+                current.id(),
+                turn_id(7),
+                AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: choices(
+                        current.current_configuration_defaults().version().as_u64(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
+                origin_configuration(current),
+                AcceptedInputTurnSchedulingRecordState::Active {
+                    starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                    starting_frontier: context_frontier_id(0x41),
+                    phase: ActiveTurnSchedulingReconstitutionInput::awaiting_runner_recovery(
+                        turn_id(7),
+                        runner,
+                        placement_revision,
+                        None,
+                    ),
+                },
+            )],
+            vec![SemanticTranscriptEntryReconstitutionInput::new(
+                origin_entry,
+                current.id(),
+                InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                    accepted_input: accepted_input_id(0x21),
+                },
+            )],
+            vec![ResolvedContextFrontierReconstitutionInput::new(
+                current.id(),
+                context_frontier_id(0x41),
+                vec![SemanticTranscriptEntryRef::from_source(
+                    current.id(),
+                    origin_entry,
+                )],
+            )],
+            Some(SessionAcceptanceTailReconstitutionInput::new(
+                current.id(),
+                accepted_input.id(),
+                SessionInputPosition::first(),
+                vec![SessionAcceptanceTailEntryReconstitutionInput::new(
+                    current.id(),
+                    accepted_input,
+                    SessionInputPosition::first(),
+                    DeliveryRequest::StartWhenNoActiveTurn {
+                        configuration: choices(
+                            current.current_configuration_defaults().version().as_u64(),
+                            ModelSelectionOverride::UseSessionDefault,
+                        ),
+                    },
+                )],
+            )),
+        )
+        .reconstitute()
+        .expect("test runner-recovery scheduling facts are complete")
     }
 
     fn queued_turn(current: &Session) -> AcceptedInputSchedulingProjection {
@@ -5354,6 +5528,32 @@ mod tests {
         );
     }
 
+    /// S07 / INV-012 / INV-044: an interrupt cannot consume the
+    /// administrative runner-recovery wait reserved for replacement or
+    /// abandonment.
+    #[test]
+    fn s07_inv012_inv044_interrupt_against_runner_recovery_wait_is_rejected() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let active = runner_recovery_turn(&current);
+        let actual_active_turn = active
+            .active_turn()
+            .expect("the fixture has one active turn")
+            .turn();
+        let rejected = interrupt_command(6, actual_active_turn)
+            .prepare_with_active_turn(&active, accepted_input_id(3), Some(turn_id(8)), |_| None)
+            .expect("runner recovery is an authoritative interrupt rejection");
+
+        assert!(matches!(
+            rejected.result(),
+            SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingRunnerRecovery {
+                    session,
+                    active_turn,
+                },
+            ) if *session == current.id() && *active_turn == actual_active_turn
+        ));
+    }
+
     /// S07 / S10 / INV-012 / INV-028: the recorded parked-approval interrupt
     /// rejection reconstructs exactly.
     #[test]
@@ -5372,6 +5572,30 @@ mod tests {
                 },
             ),
             SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                session,
+                active_turn,
+            },
+        );
+    }
+
+    /// S07 / INV-012 / INV-044: the recorded runner-recovery interrupt
+    /// rejection reconstructs exactly.
+    #[test]
+    fn s07_inv012_inv044_runner_recovery_interrupt_rejection_reconstitutes_exactly() {
+        let session = session_id(1);
+        let active_turn = turn_id(7);
+
+        assert_reconstitutes_rejection(
+            SubmitInputReconstitutionInput::rejected_interrupt_unavailable_while_awaiting_runner_recovery(
+                SubmitInputRejectedInterruptUnavailableWhileAwaitingRunnerRecoveryReconstitutionInput {
+                    command: interrupt_command(1, active_turn),
+                    stored_actor: Actor::User,
+                    result_session: session,
+                    result_active_turn: active_turn,
+                    active_turn_origin: source_turn_origin(),
+                },
+            ),
+            SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingRunnerRecovery {
                 session,
                 active_turn,
             },
