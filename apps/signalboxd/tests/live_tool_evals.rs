@@ -1624,6 +1624,16 @@ impl CaseSnapshot {
                     })
             }))
     }
+
+    fn exact_web_request_failed(&self) -> bool {
+        self.requests.iter().any(|request| {
+            !request.attempt_succeeded
+                && ((request.name == WEB_SEARCH_NAME
+                    && request.arguments_text == r#"{"query":"Signalbox tool evaluation"}"#)
+                    || (request.name == WEB_FETCH_NAME
+                        && request.arguments_text == r#"{"url":"https://example.com/eval"}"#))
+        })
+    }
 }
 
 fn workspace_read_covers_seed(arguments: &serde_json::Value) -> bool {
@@ -1786,6 +1796,13 @@ impl CaseOutcome {
         let Some(expected_arguments) = self.expected_arguments.as_deref() else {
             return EvalDisposition::Miss;
         };
+        if self.snapshot.requests.len() == 1
+            && self.snapshot.requests[0].name == target
+            && self.snapshot.requests[0].arguments_text == expected_arguments
+            && !self.snapshot.requests[0].attempt_succeeded
+        {
+            return EvalDisposition::Infrastructure;
+        }
         EvalDisposition::from_passed(
             self.execution_completed
                 && self.snapshot.turn_disposition.is_completed()
@@ -1800,6 +1817,9 @@ impl CaseOutcome {
 
     fn natural_loop_disposition(&self, family: EvalFamily) -> EvalDisposition {
         if self.snapshot.turn_disposition.is_infrastructure() {
+            return EvalDisposition::Infrastructure;
+        }
+        if family == EvalFamily::Web && self.snapshot.exact_web_request_failed() {
             return EvalDisposition::Infrastructure;
         }
         let required_names: &[&str] = match family {
@@ -2187,7 +2207,7 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
 }
 
 #[test]
-fn forced_tier_reports_a_miss_for_a_known_failed_attempt() {
+fn forced_tier_reports_infrastructure_for_an_exact_known_failed_attempt() {
     let target = GIT_STATUS_NAME;
     let outcome = CaseOutcome {
         target: Some(String::from(target)),
@@ -2210,7 +2230,36 @@ fn forced_tier_reports_a_miss_for_a_known_failed_attempt() {
         },
     };
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+}
+
+#[test]
+fn unforced_web_tier_reports_infrastructure_for_an_exact_known_failed_attempt() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        result_round_trips: 1,
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(WEB_SEARCH_NAME),
+                arguments_text: String::from(r#"{"query":"Signalbox tool evaluation"}"#),
+                attempt_succeeded: false,
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Web),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
