@@ -139,6 +139,7 @@ const EXEC_FORCED_READ_ONLY_OUTPUT: &str = "forced unsandboxed eval\n";
 const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
+const EXPECTED_OPENAI_CREDENTIAL_REFERENCE: &str = "openai-tool-eval";
 const EXPECTED_WEB_CREDENTIAL_REFERENCE: &str = "brave-search-primary";
 const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
 const ARBITRARY_EVAL_SELECTION_ID: u128 = 0x9101;
@@ -1105,6 +1106,7 @@ impl CredentialAccess for EnvironmentCredential {
         &self,
         reference: &CredentialReference,
     ) -> Result<CredentialValue, CredentialAccessError> {
+        assert_eq!(reference.as_str(), EXPECTED_OPENAI_CREDENTIAL_REFERENCE);
         match std::env::var(API_KEY_VARIABLE) {
             Ok(value) if !value.is_empty() => Ok(CredentialValue::new(value.into_bytes())),
             _ => Err(CredentialAccessError::new(
