@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fmt, io,
     path::{Path, PathBuf},
+    string::FromUtf8Error,
 };
 
 use signalbox_process_protocol::{
@@ -18,6 +19,14 @@ pub(crate) enum ClientError {
     GoalTextFile {
         path: PathBuf,
         source: io::Error,
+    },
+    DelegationContentFile {
+        path: PathBuf,
+        source: io::Error,
+    },
+    DelegationContentFileUtf8 {
+        path: PathBuf,
+        source: FromUtf8Error,
     },
     ReviewInputFile(io::Error),
     ReviewInputJson(serde_json::Error),
@@ -68,6 +77,20 @@ impl ClientError {
         }
     }
 
+    pub(crate) fn delegation_content_file(path: &Path, source: io::Error) -> Self {
+        Self::DelegationContentFile {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
+    pub(crate) fn delegation_content_file_utf8(path: &Path, source: FromUtf8Error) -> Self {
+        Self::DelegationContentFileUtf8 {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
     pub(crate) fn review_input_file(error: io::Error) -> Self {
         Self::ReviewInputFile(error)
     }
@@ -90,6 +113,8 @@ impl ClientError {
             | Self::SourceFile(_)
             | Self::SystemPromptFile(_)
             | Self::GoalTextFile { .. }
+            | Self::DelegationContentFile { .. }
+            | Self::DelegationContentFileUtf8 { .. }
             | Self::ReviewInputFile(_)
             | Self::ReviewInputJson(_)
             | Self::ReviewInputExceedsFrame
@@ -128,6 +153,16 @@ impl fmt::Display for ClientError {
             Self::GoalTextFile { path, source } => write!(
                 formatter,
                 "the goal text file '{}' could not be read: {source}",
+                path.display()
+            ),
+            Self::DelegationContentFile { path, source } => write!(
+                formatter,
+                "the delegation content file '{}' could not be read: {source}",
+                path.display()
+            ),
+            Self::DelegationContentFileUtf8 { path, source } => write!(
+                formatter,
+                "the delegation content file '{}' is not valid UTF-8: {source}",
                 path.display()
             ),
             Self::ReviewInputFile(_) => {
@@ -196,8 +231,10 @@ impl Error for ClientError {
             | Self::SourceFile(error)
             | Self::SystemPromptFile(error)
             | Self::GoalTextFile { source: error, .. }
+            | Self::DelegationContentFile { source: error, .. }
             | Self::ReviewInputFile(error)
             | Self::ScanDirectory(error) => Some(error),
+            Self::DelegationContentFileUtf8 { source, .. } => Some(source),
             Self::ReviewInputJson(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::Decode(error) => Some(error),
@@ -413,6 +450,67 @@ impl fmt::Display for RejectionDisplay {
                 formatter,
                 "tool_request_not_in_session session={session_id} request={tool_request_id}"
             ),
+            RejectionDetail::DelegationRequestNotInTurn {
+                session_id,
+                turn_id,
+                tool_request_id,
+            } => write!(
+                formatter,
+                "delegation_request_not_in_turn session={session_id} turn={turn_id} \
+                 request={tool_request_id}"
+            ),
+            RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id,
+                state,
+            } => write!(
+                formatter,
+                "delegation_tool_request_not_executable request={tool_request_id} state={}",
+                state.as_str()
+            ),
+            RejectionDetail::DelegationSpawnConflict { tool_request_id } => write!(
+                formatter,
+                "delegation_spawn_conflict request={tool_request_id}"
+            ),
+            RejectionDetail::DelegatedChildIdentityCollision { child_session_id } => write!(
+                formatter,
+                "delegated_child_identity_collision child_session={child_session_id}"
+            ),
+            RejectionDetail::DelegationRelationNotFound {
+                session_id,
+                peer_session_id,
+            } => write!(
+                formatter,
+                "delegation_relation_not_found session={session_id} peer_session={peer_session_id}"
+            ),
+            RejectionDetail::DelegationAwaitConflict { tool_request_id } => write!(
+                formatter,
+                "delegation_await_conflict request={tool_request_id}"
+            ),
+            RejectionDetail::DelegationMessageConflict { tool_request_id } => write!(
+                formatter,
+                "delegation_message_conflict request={tool_request_id}"
+            ),
+            RejectionDetail::DelegationMessageIdentityCollision { message_id } => write!(
+                formatter,
+                "delegation_message_identity_collision message={message_id}"
+            ),
+            RejectionDetail::DelegationEventOrdinalExhausted {
+                spawning_request_id,
+                last,
+            } => write!(
+                formatter,
+                "delegation_event_ordinal_exhausted spawning_request={spawning_request_id} last={}",
+                last.value()
+            ),
+            RejectionDetail::DelegationDeliverySequenceExhausted {
+                recipient_session_id,
+                last,
+            } => write!(
+                formatter,
+                "delegation_delivery_sequence_exhausted recipient_session={recipient_session_id} \
+                 last={}",
+                last.value()
+            ),
             RejectionDetail::DefaultsVersionMismatch {
                 session_id,
                 expected,
@@ -578,9 +676,10 @@ const fn conversation_import_rejection_class_name(
 mod tests {
     use expect_test::expect;
     use signalbox_process_protocol::{
-        CanonicalU64, ConversationImportRejectionClass, ErrorCode, ErrorDetail,
+        CanonicalU64, CanonicalUuid, ConversationImportRejectionClass, ErrorCode, ErrorDetail,
         FailedModelCallCause, RejectionDetail,
     };
+    use uuid::Uuid;
 
     use super::ClientError;
 
@@ -623,6 +722,49 @@ mod tests {
         expect![[r#"
             invalid_request: conversation import was rejected (conversation_import_source_too_large limit_bytes=8 declared_size_bytes=7 actual_size_bytes=9)"#]]
         .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn delegation_delivery_sequence_exhaustion_names_the_recipient_and_counter() {
+        let recipient_session_id = CanonicalUuid::from_uuid(Uuid::from_u128(17));
+        let error = ClientError::remote(
+            ErrorCode::Rejected,
+            "delegation delivery sequence exhausted".to_owned(),
+            ErrorDetail::rejected(RejectionDetail::DelegationDeliverySequenceExhausted {
+                recipient_session_id,
+                last: CanonicalU64::new(u64::MAX),
+            }),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "rejected: delegation delivery sequence exhausted \
+                 (delegation_delivery_sequence_exhausted \
+                 recipient_session={recipient_session_id} last={})",
+                u64::MAX
+            )
+        );
+    }
+
+    #[test]
+    fn delegation_message_identity_collision_names_the_message() {
+        let message_id = CanonicalUuid::from_uuid(Uuid::from_u128(18));
+        let error = ClientError::remote(
+            ErrorCode::Rejected,
+            "delegation message identity collision".to_owned(),
+            ErrorDetail::rejected(RejectionDetail::DelegationMessageIdentityCollision {
+                message_id,
+            }),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "rejected: delegation message identity collision \
+                 (delegation_message_identity_collision message={message_id})"
+            )
+        );
     }
 
     #[test]

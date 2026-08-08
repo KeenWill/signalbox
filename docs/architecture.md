@@ -210,29 +210,34 @@ module layout.
 Acknowledged work must not vanish. On restart, an idempotent startup scan
 reconstructs durable state from Postgres, ends each nonterminal turn attempt
 owned by the prior process with disposition `Lost`, and classifies every
-interrupted physical operation; the scan is not itself an attempt and issues no
-semantic effects. Live and startup classification share the single outcome
-precedence that
+interrupted physical operation. The scan is not itself an attempt and issues no
+semantic effects.
+
+Live and startup classification share the single outcome precedence that
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
-[model-call-execution](spec/model-call-execution.md) define normatively;
-provider model-call evidence is specified in
+[model-call-execution](spec/model-call-execution.md) define normatively.
+Provider model-call evidence is specified in
 [runtime-substrate](spec/runtime-substrate.md) and classified in
-model-call-execution. Ambiguous external effects are preserved as ambiguous
-rather than coerced to failure. Separate resolving evidence may clear a blocking
-ambiguity without rewriting the physical record, after which unfinished work
-continues without repeating it; continuing past a still-unresolved ambiguity
-requires an explicit user decision that records accepted duplicate risk.
+model-call-execution.
+
+Ambiguous external effects are preserved as ambiguous rather than coerced to
+failure. Separate resolving evidence may clear a blocking ambiguity without
+rewriting the physical record, after which unfinished work continues without
+repeating it. Continuing past a still-unresolved ambiguity requires an explicit
+user decision that records accepted duplicate risk.
 
 At most one logical turn actively progresses per session initially; every
 implemented active phase, including approval and recovery waits, retains the
 session slot. A running turn owns exactly one current attempt, while a waiting
-turn carries its exact wait subject and no attempt. The complete state,
-stop-cause, and terminal-guard algebra, including live closed-boundary fatal
-handling and delegated foreground/background waits, is normative in
-[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md). Future
-branching beyond the accepted foreground/background wait modes remains separate
-scope. Initial scheduler mechanics are fixed in the same page; their listed
-operational refinements remain open.
+turn carries its exact wait subject and no attempt.
+
+The complete state, stop-cause, and terminal-guard algebra, including live
+closed-boundary fatal handling and delegated foreground/background waits, is
+normative in
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md). Initial
+scheduler mechanics are fixed in the same page; their listed operational
+refinements remain open. Future branching beyond the accepted
+foreground/background wait modes remains separate scope.
 
 ## Explicitly open boundaries
 

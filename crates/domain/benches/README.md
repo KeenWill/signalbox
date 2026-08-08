@@ -18,16 +18,16 @@ SIGNALBOX_DOMAIN_INSTRUCTION_BENCHMARK=1 \
   cargo bench -p signalbox-domain --bench instruction_counts
 ```
 
-The run marker distinguishes an explicit instruction benchmark from Cargo
-executing the custom bench binary during `cargo test --all-targets`. An explicit
-run with debug assertions exits nonzero instead of publishing an empty report.
+Each suite's run marker distinguishes an explicit benchmark from Cargo executing
+the custom bench binary during `cargo test --all-targets`. An explicit run with
+debug assertions exits nonzero instead of publishing an empty report.
 
 The detailed profiles are written below `target/gungraun`. The Rust workflow
 runs this command and copies its complete terminal report into the GitHub job
-summary. That job is explicitly report-only and allowed to fail. It has no
-limit, comparison threshold, or required status. A structurally invalid fixed
-fixture exits nonzero instead of publishing a meaningless count; because the job
-is tolerated, that correctness check cannot block a merge.
+summary. That job is explicitly report-only: it is allowed to fail and carries
+no required status. A structurally invalid fixed fixture exits nonzero instead
+of publishing a meaningless count; because the job is tolerated, that
+correctness check cannot block a merge.
 
 Wall-clock measurements use [Divan](https://github.com/nvzqz/divan) and are
 local only:
@@ -36,10 +36,6 @@ local only:
 SIGNALBOX_DOMAIN_WALL_CLOCK_BENCHMARK=1 \
   cargo bench -p signalbox-domain --bench wall_clock
 ```
-
-This run marker likewise distinguishes an explicit benchmark from Cargo
-executing the custom bench binary during `cargo test --all-targets`. An explicit
-run with debug assertions exits nonzero instead of publishing an empty report.
 
 Do not add the wall-clock suite to CI. Shared-runner load changes elapsed time
 enough to obscure the small regressions these benchmarks are intended to
@@ -56,9 +52,8 @@ code-performance change.
   This target preserves a pre-refactor comparison point for that function. A
   sustained instruction increase means the complete scheduling read path does
   more CPU work. A 4% increase is an investigation lead, not an acceptance
-  threshold: first confirm the compiler, dependencies, harness, and fixture are
-  equivalent, then use the profile and code diff to decide whether the added
-  work is justified.
+  threshold: first confirm the runs are comparable, then use the profile and
+  code diff to decide whether the added work is justified.
 - `build_deep_frontier` builds 64 structurally shared layers containing 512
   entries. A change tracks the cost of persistent frontier construction and
   append validation.
@@ -85,7 +80,8 @@ cache configuration, so preserve the full report when investigating a delta.
 
 Neither suite is a performance gate. Several weeks of observations are needed
 before normal variance and meaningful effect sizes are understood, and this
-repository deliberately has no automatic threshold or failure condition.
+repository deliberately has no limit, comparison threshold, or automatic failure
+condition.
 
 ## Add a target
 

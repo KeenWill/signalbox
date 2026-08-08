@@ -52,6 +52,7 @@ signalbox-tools-exec = { path = "../../crates/tools-exec" }
 signalbox-tools-git = { path = "../../crates/tools-git" }
 signalbox-tools-github = { path = "../../crates/tools-github" }
 signalbox-tools-plan = { path = "../../crates/tools-plan" }
+signalbox-tools-sessions = { path = "../../crates/tools-sessions" }
 signalbox-tools-web = { path = "../../crates/tools-web" }
 signalbox-tools-workspace = { path = "../../crates/tools-workspace" }
 rustix = { version = "1.1.4", default-features = false, features = [
@@ -94,6 +95,7 @@ opentelemetry_sdk = { version = "0.32.0", default-features = false, features = [
     "testing",
     "trace",
 ] }
+signalbox-test-bin = { path = "../../crates/test-bin" }
 testcontainers-modules = { version = "0.15.0", default-features = false, features = [
     "postgres",
     "ring",
