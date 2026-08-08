@@ -1905,19 +1905,22 @@ mod tests {
 
     fn verified_compiler_invocation_directory() -> Option<PathBuf> {
         let reported = PathBuf::from(std::env::var_os("PWD")?);
+        let actual = std::env::current_dir().ok()?;
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)?;
-        verified_compiler_invocation_directory_for(&reported, workspace)
+        verified_compiler_invocation_directory_for(&reported, &actual, workspace)
     }
 
     fn verified_compiler_invocation_directory_for(
         reported: &Path,
+        actual: &Path,
         workspace: &Path,
     ) -> Option<PathBuf> {
         let reported = fs::canonicalize(reported).ok()?;
+        let actual = fs::canonicalize(actual).ok()?;
         let workspace = fs::canonicalize(workspace).ok()?;
-        (reported == workspace).then_some(reported)
+        (reported == workspace && actual == workspace).then_some(reported)
     }
 
     fn rustc_command_for(
@@ -2723,11 +2726,25 @@ mod tests {
         let expected_workspace = fs::canonicalize(&workspace).expect("workspace canonicalizes");
 
         assert_eq!(
-            verified_compiler_invocation_directory_for(&workspace, &workspace),
+            verified_compiler_invocation_directory_for(&workspace, &workspace, &workspace),
             Some(expected_workspace)
         );
         assert_eq!(
-            verified_compiler_invocation_directory_for(&stale, &workspace),
+            verified_compiler_invocation_directory_for(&stale, &stale, &workspace),
+            None
+        );
+    }
+
+    #[test]
+    fn bridge_compiler_invocation_rejects_a_stale_workspace_pwd() {
+        let fixture = tempfile::tempdir().expect("fixture root exists");
+        let workspace = fixture.path().join("workspace");
+        let actual = fixture.path().join("actual-invocation");
+        fs::create_dir(&workspace).expect("workspace fixture exists");
+        fs::create_dir(&actual).expect("actual invocation fixture exists");
+
+        assert_eq!(
+            verified_compiler_invocation_directory_for(&workspace, &actual, &workspace),
             None
         );
     }
