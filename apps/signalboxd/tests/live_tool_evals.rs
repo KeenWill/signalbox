@@ -837,7 +837,7 @@ impl WebFetchTransport for FixtureWebFetchTransport {
         request: WebFetchRequest,
     ) -> Result<WebFetchResponse, WebFetchTransportFailure> {
         if request.url().as_str() != WEB_URL {
-            return Err(WebFetchTransportFailure::DispatchUnknown);
+            return Err(WebFetchTransportFailure::RequestFailed);
         }
         WebFetchResponse::new(
             200,
@@ -872,7 +872,7 @@ impl WebSearchTransport for FixtureWebSearchTransport {
     ) -> WebSearchTransportOutcome {
         if request.query() != "Signalbox tool evaluation" {
             return WebSearchTransportOutcome::failed(
-                WebSearchTransportFailure::DispatchUnknown,
+                WebSearchTransportFailure::RequestFailed,
                 credential,
             );
         }
