@@ -22,7 +22,9 @@ use std::{
     time::Duration,
 };
 
-use git2::{BranchType, DiffOptions, IndexAddOption, Oid, Patch, Repository, Signature, Status};
+use git2::{
+    BranchType, Delta, DiffOptions, IndexAddOption, Oid, Patch, Repository, Signature, Status,
+};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
@@ -123,10 +125,12 @@ const GIT_AUTHOR_EMAIL: &str = "signalbox-tool-eval@example.test";
 const GIT_SEED_PATH: &str = "seed.txt";
 const GIT_STAGE_PATH: &str = "stage-me.txt";
 const GIT_COMMIT_PATH: &str = "commit-me.txt";
+const GIT_COMMIT_CONTENT: &str = "commit me\n";
 const GIT_NATURAL_PATH: &str = "eval.txt";
 const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
-const WORKSPACE_SEED: &str = "alpha\nbeta fixture\n";
+const WORKSPACE_SEED: &str = "alpha\nbeta fixture\nalpha\n";
+const WORKSPACE_FORCED_READ_MAX_BYTES: usize = 6;
 const WORKSPACE_ANSWER_PATH: &str = "answer.txt";
 const WORKSPACE_ANSWER: &str = "model loop observed\n";
 const WEB_ORIGIN: &str = "https://example.com";
@@ -396,8 +400,8 @@ const WORKSPACE_CASES: &[ForcedCase] = &[
     },
     ForcedCase {
         name: EDIT_FILE_NAME,
-        expected_arguments: r#"{"path":"brief.txt","old_string":"alpha","new_string":"beta","replace_all":false}"#,
-        prompt: "Call edit_file with exactly {\"path\":\"brief.txt\",\"old_string\":\"alpha\",\"new_string\":\"beta\",\"replace_all\":false}. After its result, answer done without another tool call.",
+        expected_arguments: r#"{"path":"brief.txt","old_string":"alpha","new_string":"beta","replace_all":true}"#,
+        prompt: "Call edit_file with exactly {\"path\":\"brief.txt\",\"old_string\":\"alpha\",\"new_string\":\"beta\",\"replace_all\":true}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: WRITE_FILE_NAME,
@@ -406,8 +410,8 @@ const WORKSPACE_CASES: &[ForcedCase] = &[
     },
     ForcedCase {
         name: READ_FILE_NAME,
-        expected_arguments: r#"{"path":"brief.txt","max_bytes":1024}"#,
-        prompt: "Call read_file with exactly {\"path\":\"brief.txt\",\"max_bytes\":1024}. After its result, answer done without another tool call.",
+        expected_arguments: r#"{"path":"brief.txt","max_bytes":6}"#,
+        prompt: "Call read_file with exactly {\"path\":\"brief.txt\",\"max_bytes\":6}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: LIST_DIRECTORY_NAME,
@@ -685,6 +689,12 @@ fn git_forced_case_passed(
             result["commit"] == head.id().to_string()
                 && result["state_cleaned"] == true
                 && head.message().ok() == arguments["message"].as_str()
+                && commit_adds_exact_fixture(
+                    &repository,
+                    &head,
+                    GIT_COMMIT_PATH,
+                    GIT_COMMIT_CONTENT.as_bytes(),
+                )?
         }
         GIT_DIFF_NAME => {
             result["patch"].as_str() == Some(expected_git_worktree_patch(root)?.as_str())
@@ -715,6 +725,8 @@ fn git_forced_case_passed(
                         repository.status_file(Path::new(path)).ok() == Some(Status::INDEX_NEW)
                     })
                 })
+                && repository.status_file(Path::new(GIT_COMMIT_PATH)).ok() == Some(Status::WT_NEW)
+                && repository.status_file(Path::new(GIT_NATURAL_PATH)).ok() == Some(Status::WT_NEW)
         }
         GIT_STATUS_NAME => {
             let entries = result["entries"].as_array();
@@ -741,6 +753,38 @@ fn git_forced_case_passed(
         _ => false,
     };
     Ok(passed)
+}
+
+fn commit_adds_exact_fixture(
+    repository: &Repository,
+    commit: &git2::Commit<'_>,
+    path: &str,
+    expected: &[u8],
+) -> EvalResult<bool> {
+    if commit.parent_count() != 1 {
+        return Ok(false);
+    }
+    let parent = commit.parent(0)?;
+    let parent_tree = parent.tree()?;
+    let tree = commit.tree()?;
+    let diff = repository.diff_tree_to_tree(Some(&parent_tree), Some(&tree), None)?;
+    let mut deltas = diff.deltas();
+    let Some(delta) = deltas.next() else {
+        return Ok(false);
+    };
+    let Ok(entry) = tree.get_path(Path::new(path)) else {
+        return Ok(false);
+    };
+    let Ok(blob) = entry
+        .to_object(repository)
+        .and_then(|object| object.peel_to_blob())
+    else {
+        return Ok(false);
+    };
+    Ok(deltas.next().is_none()
+        && delta.status() == Delta::Added
+        && delta.new_file().path() == Some(Path::new(path))
+        && blob.content() == expected)
 }
 
 fn expected_git_worktree_patch(root: &Path) -> EvalResult<String> {
@@ -790,12 +834,21 @@ fn workspace_forced_case_passed(
             let Some(path) = arguments["path"].as_str() else {
                 return Ok(false);
             };
-            let expected = WORKSPACE_SEED.replace(
-                arguments["old_string"].as_str().unwrap_or_default(),
-                arguments["new_string"].as_str().unwrap_or_default(),
-            );
+            let old = arguments["old_string"].as_str().unwrap_or_default();
+            let new = arguments["new_string"].as_str().unwrap_or_default();
+            let replace_all = arguments["replace_all"].as_bool().unwrap_or_default();
+            let replacements = if replace_all {
+                WORKSPACE_SEED.match_indices(old).count()
+            } else {
+                usize::from(WORKSPACE_SEED.contains(old))
+            };
+            let expected = if replace_all {
+                WORKSPACE_SEED.replace(old, new)
+            } else {
+                WORKSPACE_SEED.replacen(old, new, 1)
+            };
             result["path"] == path
-                && result["replacements"] == 1
+                && result["replacements"] == replacements
                 && result["bytes_written"] == expected.len()
                 && fs::read_to_string(root.join(path))? == expected
         }
@@ -815,19 +868,29 @@ fn workspace_forced_case_passed(
             let Some(path) = arguments["path"].as_str() else {
                 return Ok(false);
             };
-            let expected = fs::read_to_string(root.join(path))?;
+            let Some(max_bytes) = arguments["max_bytes"]
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+            else {
+                return Ok(false);
+            };
+            let complete = fs::read_to_string(root.join(path))?;
+            let Some(expected) = complete.get(..max_bytes) else {
+                return Ok(false);
+            };
             result["path"] == path
+                && max_bytes == WORKSPACE_FORCED_READ_MAX_BYTES
                 && result["content"] == expected
                 && result["bytes_read"] == expected.len()
-                && result["total_bytes"] == expected.len()
-                && result["truncated"] == false
+                && result["total_bytes"] == complete.len()
+                && result["truncated"] == true
         }
         LIST_DIRECTORY_NAME => {
-            result_paths_equal(&result["entries"], [WORKSPACE_SEED_PATH])
+            result_entries_equal(&result["entries"], [(WORKSPACE_SEED_PATH, "file")])
                 && result["truncated"] == false
         }
         GLOB_FILES_NAME => {
-            result_paths_equal(&result["matches"], [WORKSPACE_SEED_PATH])
+            result_entries_equal(&result["matches"], [(WORKSPACE_SEED_PATH, "file")])
                 && result["truncated"] == false
         }
         SEARCH_FILES_NAME => {
@@ -861,12 +924,15 @@ fn workspace_forced_case_passed(
     Ok(passed)
 }
 
-fn result_paths_equal<const N: usize>(value: &serde_json::Value, expected: [&str; N]) -> bool {
+fn result_entries_equal<const N: usize>(
+    value: &serde_json::Value,
+    expected: [(&str, &str); N],
+) -> bool {
     value.as_array().is_some_and(|entries| {
         entries.len() == N
             && entries
                 .iter()
-                .filter_map(|entry| entry["path"].as_str())
+                .filter_map(|entry| Some((entry["path"].as_str()?, entry["kind"].as_str()?)))
                 .eq(expected)
     })
 }
@@ -885,15 +951,14 @@ fn web_forced_case_passed(
                 && result["truncated"] == false
         }
         WEB_SEARCH_NAME => {
-            result["results"]
-                .as_array()
-                .and_then(|results| results.first())
-                .is_some_and(|first| {
-                    first["title"] == arguments["query"]
-                        && first["url"] == WEB_URL
-                        && first["snippet"] == WEB_SEARCH_SNIPPET
-                })
-                && result["truncated"] == false
+            result["results"].as_array().is_some_and(|results| {
+                results.len() == 1
+                    && results.first().is_some_and(|first| {
+                        first["title"] == arguments["query"]
+                            && first["url"] == WEB_URL
+                            && first["snippet"] == WEB_SEARCH_SNIPPET
+                    })
+            }) && result["truncated"] == false
         }
         _ => false,
     }
@@ -909,7 +974,7 @@ fn seed_git_repository(root: &Path) -> EvalResult<Oid> {
     let repository = Repository::init(root)?;
     fs::write(root.join(GIT_SEED_PATH), "seed\n")?;
     fs::write(root.join(GIT_STAGE_PATH), "stage me\n")?;
-    fs::write(root.join(GIT_COMMIT_PATH), "commit me\n")?;
+    fs::write(root.join(GIT_COMMIT_PATH), GIT_COMMIT_CONTENT)?;
     fs::write(root.join(GIT_NATURAL_PATH), "natural eval\n")?;
     let mut index = repository.index()?;
     index.add_path(Path::new(GIT_SEED_PATH))?;
@@ -2697,12 +2762,10 @@ fn failed_request_snapshot(name: &str, arguments: serde_json::Value) -> CaseSnap
 }
 
 fn bounded_workspace_read_arguments() -> serde_json::Value {
-    let case = WORKSPACE_CASES
-        .iter()
-        .find(|case| case.name == READ_FILE_NAME)
-        .expect("the bounded workspace read fixture exists");
-    serde_json::from_str(case.expected_arguments)
-        .expect("the bounded workspace read fixture is valid JSON")
+    serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "max_bytes": WORKSPACE_SEED.len(),
+    })
 }
 
 #[test]
@@ -2938,6 +3001,83 @@ fn forced_git_stage_verifier_rejects_success_without_the_postcondition() -> Eval
 }
 
 #[test]
+fn forced_git_stage_verifier_rejects_an_extra_staged_fixture() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STAGE_NAME)
+        .expect("the Git stage fixture exists");
+    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    stage_path(suite.workspace.path(), GIT_COMMIT_PATH)?;
+    let result = serde_json::json!({
+        "staged_paths": 1,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_commit_verifier_accepts_the_exact_fixture_tree() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_CREATE_COMMIT_NAME)
+        .expect("the Git commit fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let message = arguments["message"]
+        .as_str()
+        .expect("the Git commit fixture has a message");
+    stage_path(suite.workspace.path(), GIT_COMMIT_PATH)?;
+    commit_staged_paths(suite.workspace.path(), message)?;
+    let head = Repository::open(suite.workspace.path())?
+        .head()?
+        .peel_to_commit()?
+        .id()
+        .to_string();
+    let result = serde_json::json!({
+        "commit": head,
+        "state_cleaned": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_commit_verifier_rejects_the_wrong_fixture_tree() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_CREATE_COMMIT_NAME)
+        .expect("the Git commit fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let message = arguments["message"]
+        .as_str()
+        .expect("the Git commit fixture has a message");
+    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    commit_staged_paths(suite.workspace.path(), message)?;
+    let head = Repository::open(suite.workspace.path())?
+        .head()?
+        .peel_to_commit()?
+        .id()
+        .to_string();
+    let result = serde_json::json!({
+        "commit": head,
+        "state_cleaned": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_branch_create_verifier_rejects_the_default_head() -> EvalResult {
     let suite = FamilySuite::git()?;
     let case = GIT_CASES
@@ -3100,6 +3240,108 @@ fn forced_workspace_search_verifier_rejects_an_empty_success() -> EvalResult {
         .expect("the workspace search fixture exists");
     let result = serde_json::json!({
         "matches": [],
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_read_verifier_rejects_an_unbounded_result() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == READ_FILE_NAME)
+        .expect("the workspace read fixture exists");
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "content": WORKSPACE_SEED,
+        "bytes_read": WORKSPACE_SEED.len(),
+        "total_bytes": WORKSPACE_SEED.len(),
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_listing_verifiers_reject_the_wrong_entry_kind() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let list = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == LIST_DIRECTORY_NAME)
+        .expect("the workspace list fixture exists");
+    let glob = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == GLOB_FILES_NAME)
+        .expect("the workspace glob fixture exists");
+    let list_result = serde_json::json!({
+        "entries": [{"path": WORKSPACE_SEED_PATH, "kind": "directory"}],
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+    let glob_result = serde_json::json!({
+        "matches": [{"path": WORKSPACE_SEED_PATH, "kind": "directory"}],
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(list, &list_result)?);
+    assert!(!suite.forced_case_result_passed(glob, &glob_result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_edit_fixture_exercises_replace_all() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == EDIT_FILE_NAME)
+        .expect("the workspace edit fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let old = arguments["old_string"]
+        .as_str()
+        .expect("the edit fixture has an old string");
+    let new = arguments["new_string"]
+        .as_str()
+        .expect("the edit fixture has a new string");
+    let expected = WORKSPACE_SEED.replace(old, new);
+    fs::write(suite.workspace.path().join(WORKSPACE_SEED_PATH), &expected)?;
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "replacements": WORKSPACE_SEED.match_indices(old).count(),
+        "bytes_written": expected.len(),
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert_eq!(arguments["replace_all"], true);
+    assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_web_search_verifier_rejects_an_extra_result() -> EvalResult {
+    let suite = FamilySuite::web()?;
+    let case = WEB_CASES
+        .iter()
+        .find(|case| case.name == WEB_SEARCH_NAME)
+        .expect("the web search fixture exists");
+    let fixture = serde_json::json!({
+        "title": WEB_QUERY,
+        "url": WEB_URL,
+        "snippet": WEB_SEARCH_SNIPPET,
+    });
+    let result = serde_json::json!({
+        "results": [fixture.clone(), fixture],
         "truncated": false,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
