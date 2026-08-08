@@ -23,10 +23,11 @@ use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 use crate::{
     conversation_import_codec::decode_content,
     mapping::{
-        ToolApprovalDecisionSourceStorageKind, defaults_version_from_numeric,
-        durable_command_id_from_uuid, model_change_adjustments_from_json, model_settings_from_json,
+        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
+        defaults_version_from_numeric, durable_command_id_from_uuid,
+        model_change_adjustments_from_json, model_settings_from_json,
         model_settings_overlay_from_json, session_id_from_uuid, session_id_to_uuid,
-        tool_approval_decision_source_from_str,
+        tool_approval_decision_source_from_str, tool_attempt_disposition_from_str,
     },
     outbox::{
         DispatchedDelegationOutcome, DispatchedDelegationProvenance, DispatchedDelegationReason,
@@ -4352,15 +4353,15 @@ fn decode_transcript_entry(
             );
         };
         let (disposition, content) = match (
-            disposition,
+            tool_attempt_disposition_from_str(disposition),
             result_text,
             result_error_kind,
             result_error_detail,
         ) {
-            ("completed", Some(text), None, None) => {
+            (Some(ToolAttemptDispositionStorageKind::Completed), Some(text), None, None) => {
                 (ProcessToolExecutionResultDisposition::Completed, text)
             }
-            ("known_failed", None, Some(kind), detail) => (
+            (Some(ToolAttemptDispositionStorageKind::KnownFailed), None, Some(kind), detail) => (
                 ProcessToolExecutionResultDisposition::KnownFailed,
                 serde_json::json!({
                     "error": {
