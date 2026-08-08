@@ -139,7 +139,25 @@ SCENARIO_HEADING = re.compile(r"^##\s+(S[0-9]+)\b", re.MULTILINE)
 # spelling out here; its body excludes the closing delimiter and newlines, so
 # the repetition is anchored and cannot run away across a document.
 MARKUP_CONSTRUCT = re.compile(r"\]\[[^\]\n]*\]|[*_~`\[\]]")
-MARKUP = rf"(?:{MARKUP_CONSTRUCT.pattern})*"
+
+# The run is bounded rather than starred. Two markup repetitions that can each
+# consume the same delimiters — `{MARKUP}` beside a gap that itself begins with
+# `{MARKUP}` — let the engine partition one delimiter run in quadratically many
+# ways before failing, so `scenario` followed by a long unmatched `*` run took
+# time growing with its square: ~0.02s at 1,000 delimiters, ~0.08s at 2,000,
+# ~0.31s at 4,000. That is a stall in a checker that reads every tracked
+# Markdown file, and generated or malformed Markdown is where such a run
+# appears. A constant bound caps every partition count at a constant, whatever
+# the surrounding structure, which a careful ordering of the repetitions alone
+# would not survive the next edit.
+#
+# Eight is far past what a real construct writes: `***bold italic***` opens
+# with three, and the emphasis, strikethrough, code and link delimiters do not
+# stack past a handful. A longer run is not a rendered construct, and the cost
+# of declining to look through one is a statement not recognised — the
+# best-effort direction this file already accepts, and the safe one.
+MARKUP_RUN_LIMIT = 8
+MARKUP = rf"(?:{MARKUP_CONSTRUCT.pattern}){{0,{MARKUP_RUN_LIMIT}}}"
 WRAPPED_GAP = rf"(?:{MARKUP}(?:[ \t]+|[ \t]*\r?\n[ \t]*(?:>[ \t]*)*){MARKUP})"
 
 # A digit run that is only part of a larger number: "37.5" and "1,000" must not
@@ -167,8 +185,23 @@ RANGE_GAP = r"[ \t]*(?:\r?\n[ \t]*(?:>[ \t]*)*)?[ \t]*"
 # such number reports a total that can agree with the catalog and pass in
 # silence. The dashes live here rather than in the boundary class below for the
 # same reason; that is also what refuses `INV-002`, since `INV-` ends in one.
+#
+# The two kinds of terminus are treated differently, and the asymmetry is the
+# point rather than an oversight. `to`, `through` and `thru` are ordinary
+# English prepositions before they are range termini: "The rule applies to 9
+# scenarios" states a total, and reading the preposition as a range discarded
+# it and hid a stale count. So a textual terminus counts as one only with a
+# numeric lower bound in front of it, which is what makes "5 to 37" a range and
+# "applies to 37" a sentence.
+#
+# A dash gets no such requirement, because it is never a preposition — a dash
+# before a number is a range ("5-37"), an identifier's tail ("INV-002") or a
+# negative sign ("-9"), and none of the three states a total. Demanding a lower
+# bound there would make `INV-002` read as a count of two and fail the checker
+# on the very citations AGENTS.md requires. What the dash needs instead is the
+# list-bullet exception below, which is about position, not arithmetic.
 RANGE_PREFIX = re.compile(
-    rf"(?:\bto|\bthrough|\bthru|[-\u2010-\u2015]){RANGE_GAP}$",
+    rf"(?:[0-9]{RANGE_GAP}\b(?:to|through|thru)\b|[-\u2010-\u2015]){RANGE_GAP}$",
     re.IGNORECASE,
 )
 
@@ -240,7 +273,7 @@ NUMBER_BEFORE_NOUN = re.compile(
 # delimiter directly before the punctuation, where no whitespace follows for
 # the gap to absorb it.
 NOUN_COUNT_PHRASE = re.compile(
-    rf"\b(?P<noun>invariant|scenario)s?{MARKUP}{WRAPPED_GAP}count{MARKUP}{WRAPPED_GAP}?"
+    rf"\b(?P<noun>invariant|scenario)s?{WRAPPED_GAP}count{MARKUP}{WRAPPED_GAP}?"
     rf"(?:is|of|:|=)?{WRAPPED_GAP}?(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
     re.IGNORECASE,
 )
@@ -249,7 +282,7 @@ NOUN_COUNT_PHRASE = re.compile(
 # noun follows `count` rather than leading it, and the number is too far from
 # the noun for `NUMBER_BEFORE_NOUN` to bridge.
 COUNT_OF_NOUN_PHRASE = re.compile(
-    rf"\bcount{MARKUP}{WRAPPED_GAP}of{WRAPPED_GAP}(?P<noun>invariant|scenario)s?{MARKUP}"
+    rf"\bcount{WRAPPED_GAP}of{WRAPPED_GAP}(?P<noun>invariant|scenario)s?{MARKUP}"
     rf"{WRAPPED_GAP}?(?:is|of|:|=)?{WRAPPED_GAP}?(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}",
     re.IGNORECASE,
 )
@@ -438,6 +471,39 @@ def bounds_a_range(text: str, match: re.Match[str]) -> bool:
     return after is not None and not opens_a_list_item(text, after.start("terminus"))
 
 
+def one_per_statement(
+    matched: list[tuple[int, int, str, int, str]],
+) -> list[tuple[int, int, str, int, str]]:
+    """Drop matches that overlap a match already kept.
+
+    The three patterns describe overlapping grammars, so one sentence can
+    satisfy two of them: "scenario count: 9 scenarios" is `9 scenarios` to
+    `NUMBER_BEFORE_NOUN` and `scenario count: 9` to `NOUN_COUNT_PHRASE`. Both
+    report the same number about the same words, and emitting both would make
+    the report promise one finding per statement and deliver two — duplicated
+    through every file that writes the combined form.
+
+    Overlap is the test rather than an equal number, because two *distinct*
+    statements can legitimately state the same total ("50 invariants ... 50
+    invariants" in one document is two claims, and both should be reported when
+    stale). Distinct statements cannot share characters; one statement read two
+    ways always does.
+
+    The longest match at a given start wins, so the surviving phrase is the one
+    quoting most of what the document actually wrote — `scenario count: 9`
+    rather than the `9 scenarios` inside it.
+    """
+    kept: list[tuple[int, int, str, int, str]] = []
+    covered = 0
+    for entry in sorted(matched, key=lambda entry: (entry[0], -entry[1])):
+        start, end = entry[0], entry[1]
+        if kept and start < covered:
+            continue
+        kept.append(entry)
+        covered = max(covered, end)
+    return kept
+
+
 def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
     """Return (line, noun, stated count, matched text) for one Markdown file.
 
@@ -465,7 +531,7 @@ def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
     if has_non_authoritative_planning_banner(raw):
         return []
     text = mask_link_metadata(mask_inline_code(mask_block_content(raw)))
-    found: list[tuple[int, str, int, str]] = []
+    matched: list[tuple[int, int, str, int, str]] = []
     # Every pattern names its two captures `noun` and `number`, so the three
     # can be read the same way regardless of which order the words fall in.
     for pattern in (NUMBER_BEFORE_NOUN, NOUN_COUNT_PHRASE, COUNT_OF_NOUN_PHRASE):
@@ -479,15 +545,19 @@ def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
                 if match.group("noun").lower().startswith("invariant")
                 else "scenario"
             )
-            found.append(
+            matched.append(
                 (
-                    line_number_at(text, match.start()),
+                    match.start(),
+                    match.end(),
                     noun,
                     int(match.group("number")),
                     as_one_phrase(match.group(0)),
                 )
             )
-    return found
+    return [
+        (line_number_at(text, start), noun, number, phrase)
+        for start, _, noun, number, phrase in one_per_statement(matched)
+    ]
 
 
 def main() -> int:

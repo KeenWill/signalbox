@@ -20,6 +20,11 @@ The range cases state a *stale* bound deliberately. A range whose bound
 agrees with the catalog passes whether or not the checker rejects it, so it
 proves nothing; only a stale bound makes reading it at all visible as a
 failure.
+
+Two cases are about the report rather than the reading: one statement that
+satisfies two patterns is reported once, and two statements of the same
+total stay two findings. One is about cost — a long delimiter run must not
+stall a scan that reads every tracked Markdown file.
 """
 
 from __future__ import annotations
@@ -70,13 +75,14 @@ def git(root: Path, *arguments: str) -> None:
     )
 
 
-def run_checker(root: Path) -> subprocess.CompletedProcess[str]:
+def run_checker(root: Path, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(CHECKER)],
         cwd=root,
         check=False,
         capture_output=True,
         text=True,
+        timeout=timeout,
     )
 
 
@@ -794,6 +800,101 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
         """A hyphen glued to its digits opens no list item, so the number it
         bounds stays refused."""
         self.assert_no_count_read_from(f"There are -{STALE_SCENARIO_COUNT} scenarios")
+
+    def test_a_prepositional_to_is_not_a_range_terminus(self) -> None:
+        """`to` is an ordinary English preposition before it is a range
+        terminus. "The rule applies to N scenarios" states a total, and reading
+        the preposition as a range discarded the count and hid it when stale."""
+        self.assert_stale_scenario_count_caught(
+            f"The rule applies to {STALE_SCENARIO_COUNT} scenarios"
+        )
+
+    def test_a_prepositional_through_is_not_a_range_terminus(self) -> None:
+        self.assert_stale_scenario_count_caught(
+            f"The catalog is enforced through {STALE_SCENARIO_COUNT} scenarios"
+        )
+
+    def test_a_textual_range_with_a_lower_bound_is_still_refused(self) -> None:
+        """The guard on the case above: a textual terminus with a number in
+        front of it is a range, and stating a stale upper bound proves the
+        rejection rather than merely agreeing with the catalog."""
+        self.assert_no_count_read_from(
+            f"There are 5 to {STALE_SCENARIO_COUNT} scenarios"
+        )
+
+    def test_an_identifier_dash_still_needs_no_lower_bound(self) -> None:
+        """A dash is never a preposition, so it keeps refusing without one —
+        which is what stops `INV-NNN` citations reading as stated totals."""
+        self.assert_no_count_read_from(
+            f"The INV-{STALE_INVARIANT_COUNT:03d} invariant is enforced"
+        )
+
+    def test_a_statement_matching_two_patterns_is_reported_once(self) -> None:
+        """"scenario count: N scenarios" satisfies two of the three patterns.
+        Both describe the same words and the same number, so reporting both
+        would make the promised per-statement report emit two findings for one
+        statement."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {
+                    "docs/spec/example.md": (
+                        f"scenario count: {STALE_SCENARIO_COUNT} scenarios\n"
+                    )
+                },
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        findings = [line for line in result.stdout.splitlines() if "example.md" in line]
+        self.assertEqual(findings, findings[:1], result.stdout)
+        # The surviving phrase quotes the wider of the two readings.
+        self.assertIn(f"scenario count: {STALE_SCENARIO_COUNT}", findings[0])
+
+    def test_two_distinct_statements_of_one_total_are_both_reported(self) -> None:
+        """The guard on the case above: deduplication is by overlap, not by
+        equal number, so two separate sentences stating the same stale total
+        stay two findings."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {
+                    "docs/spec/example.md": (
+                        f"There are {STALE_SCENARIO_COUNT} scenarios. "
+                        f"Also {STALE_SCENARIO_COUNT} scenarios.\n"
+                    )
+                },
+            )
+
+            result = run_checker(root)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        findings = [line for line in result.stdout.splitlines() if "example.md" in line]
+        self.assertEqual(len(findings), 2, result.stdout)
+
+    def test_a_long_delimiter_run_does_not_stall_the_scan(self) -> None:
+        """Two markup repetitions that can each consume the same delimiters let
+        the engine partition one run in quadratically many ways. A delimiter run
+        after `scenario` took time growing with its square, which is a stall in a
+        checker that reads every tracked Markdown file; generated or malformed
+        Markdown is where such a run appears.
+
+        The bound makes the work constant. This fixture ran in about 0.16s
+        against the bounded patterns and about 48s against the unbounded ones,
+        so the timeout sits far below the old cost and far above the new one:
+        it is a stall detector, not a benchmark, and needs no tight margin to
+        tell the two apart.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(
+                tmp,
+                {"docs/spec/example.md": "scenario" + "*" * 40000 + "\n"},
+            )
+
+            result = run_checker(root, timeout=10)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
         """A tracked path can vanish between `git ls-files` and the read.
