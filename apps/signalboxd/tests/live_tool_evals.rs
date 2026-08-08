@@ -128,9 +128,12 @@ const GIT_COMMIT_PATH: &str = "commit-me.txt";
 const GIT_COMMIT_CONTENT: &str = "commit me\n";
 const GIT_NATURAL_PATH: &str = "eval.txt";
 const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
+const GIT_SWITCH_CONTENT: &str = "seed two\n";
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
 const WORKSPACE_SEED: &str = "alpha\nbeta fixture\nalpha\n";
 const WORKSPACE_FORCED_READ_MAX_BYTES: usize = 6;
+const WORKSPACE_LIST_MAX_RESULTS: usize = 20;
+const WORKSPACE_NONMATCHING_COUNT: usize = WORKSPACE_LIST_MAX_RESULTS;
 const WORKSPACE_ANSWER_PATH: &str = "answer.txt";
 const WORKSPACE_ANSWER: &str = "model loop observed\n";
 const WEB_ORIGIN: &str = "https://example.com";
@@ -473,6 +476,12 @@ impl FamilySuite {
     fn workspace() -> EvalResult<Self> {
         let workspace = tempfile::tempdir()?;
         fs::write(workspace.path().join(WORKSPACE_SEED_PATH), WORKSPACE_SEED)?;
+        for index in 0..WORKSPACE_NONMATCHING_COUNT {
+            fs::write(
+                workspace.path().join(workspace_nonmatching_path(index)),
+                "nonmatching fixture\n",
+            )?;
+        }
         let reads = WorkspaceReadTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
         let mutations =
             WorkspaceMutationTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
@@ -681,9 +690,14 @@ fn git_forced_case_passed(
             let Some(branch_name) = arguments["name"].as_str() else {
                 return Ok(false);
             };
+            let branch = repository.find_branch(branch_name, BranchType::Local)?;
+            let branch_target = branch.get().target();
             result["branch"] == branch_name
+                && branch_target == Some(head.id())
                 && result["head"] == head.id().to_string()
                 && repository.head()?.shorthand().ok() == Some(branch_name)
+                && fs::read_to_string(root.join(GIT_SEED_PATH))? == GIT_SWITCH_CONTENT
+                && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
         }
         GIT_CREATE_COMMIT_NAME => {
             result["commit"] == head.id().to_string()
@@ -713,7 +727,7 @@ fn git_forced_case_passed(
                     && commits
                         .first()
                         .is_some_and(|commit| commit["commit"] == expected.id().to_string())
-            }) && result["truncated"] == false
+            }) && result["truncated"] == true
         }
         GIT_STAGE_NAME => {
             let Some(paths) = arguments["paths"].as_array() else {
@@ -886,12 +900,12 @@ fn workspace_forced_case_passed(
                 && result["truncated"] == true
         }
         LIST_DIRECTORY_NAME => {
-            result_entries_equal(&result["entries"], [(WORKSPACE_SEED_PATH, "file")])
-                && result["truncated"] == false
+            result_entries_equal(&result["entries"], &expected_workspace_listing())
+                && result["truncated"] == true
         }
         GLOB_FILES_NAME => {
-            result_entries_equal(&result["matches"], [(WORKSPACE_SEED_PATH, "file")])
-                && result["truncated"] == false
+            let expected = [(String::from(WORKSPACE_SEED_PATH), "file")];
+            result_entries_equal(&result["matches"], &expected) && result["truncated"] == false
         }
         SEARCH_FILES_NAME => {
             let Some(pattern) = arguments["pattern"].as_str() else {
@@ -924,17 +938,42 @@ fn workspace_forced_case_passed(
     Ok(passed)
 }
 
-fn result_entries_equal<const N: usize>(
-    value: &serde_json::Value,
-    expected: [(&str, &str); N],
-) -> bool {
+fn result_entries_equal(value: &serde_json::Value, expected: &[(String, &'static str)]) -> bool {
     value.as_array().is_some_and(|entries| {
-        entries.len() == N
+        entries.len() == expected.len()
             && entries
                 .iter()
                 .filter_map(|entry| Some((entry["path"].as_str()?, entry["kind"].as_str()?)))
-                .eq(expected)
+                .eq(expected.iter().map(|(path, kind)| (path.as_str(), *kind)))
     })
+}
+
+fn workspace_nonmatching_path(index: usize) -> String {
+    format!("zz-extra-{index:02}.bin")
+}
+
+fn workspace_listing(entry_count: usize) -> Vec<(String, &'static str)> {
+    std::iter::once((String::from(WORKSPACE_SEED_PATH), "file"))
+        .chain(
+            (0..entry_count.saturating_sub(1))
+                .map(|index| (workspace_nonmatching_path(index), "file")),
+        )
+        .collect()
+}
+
+fn expected_workspace_listing() -> Vec<(String, &'static str)> {
+    workspace_listing(WORKSPACE_LIST_MAX_RESULTS)
+}
+
+fn complete_workspace_listing() -> Vec<(String, &'static str)> {
+    workspace_listing(WORKSPACE_NONMATCHING_COUNT + 1)
+}
+
+fn workspace_listing_json(entries: Vec<(String, &'static str)>) -> Vec<serde_json::Value> {
+    entries
+        .into_iter()
+        .map(|(path, kind)| serde_json::json!({"path": path, "kind": kind}))
+        .collect()
 }
 
 fn web_forced_case_passed(
@@ -991,10 +1030,10 @@ fn seed_git_repository(root: &Path) -> EvalResult<Oid> {
         &[],
     )?;
     let commit = repository.find_commit(commit)?;
-    let second = commit_git_seed_revision(&repository, &commit, "seed two\n", "second seed")?;
+    let second = commit_git_seed_revision(&repository, &commit, GIT_SWITCH_CONTENT, "second seed")?;
     repository.branch("log-target", &second, false)?;
+    repository.branch("switch-target", &second, false)?;
     let third = commit_git_seed_revision(&repository, &second, "seed three\n", "third seed")?;
-    repository.branch("switch-target", &third, false)?;
     Ok(third.id())
 }
 
@@ -2950,7 +2989,9 @@ fn git_natural_state_keeps_the_captured_seed_after_a_branch_switch() -> EvalResu
     let workspace = tempfile::tempdir()?;
     let seed = seed_git_repository(workspace.path())?;
     let repository = Repository::open(workspace.path())?;
-    repository.set_head("refs/heads/switch-target")?;
+    let head = repository.head()?.peel_to_commit()?;
+    repository.branch("natural-target", &head, false)?;
+    repository.set_head("refs/heads/natural-target")?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
 
@@ -3099,6 +3140,31 @@ fn forced_git_branch_create_verifier_rejects_the_default_head() -> EvalResult {
 }
 
 #[test]
+fn forced_git_branch_switch_verifier_rejects_a_head_only_update() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_BRANCH_SWITCH_NAME)
+        .expect("the Git branch-switch fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("switch-target", BranchType::Local)?
+        .get()
+        .target()
+        .expect("the Git branch-switch fixture has a target");
+    repository.set_head("refs/heads/switch-target")?;
+    let result = serde_json::json!({
+        "branch": "switch-target",
+        "head": target.to_string(),
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_diff_verifier_accepts_the_seeded_worktree_patch() -> EvalResult {
     let suite = FamilySuite::git()?;
     let case = GIT_CASES
@@ -3148,12 +3214,36 @@ fn forced_git_log_verifier_rejects_the_default_head() -> EvalResult {
         .to_string();
     let result = serde_json::json!({
         "commits": [{"commit": head}],
-        "truncated": false,
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
 
     assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_accepts_the_bounded_target() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let target = Repository::open(suite.workspace.path())?
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?
+        .id()
+        .to_string();
+    let result = serde_json::json!({
+        "commits": [{"commit": target}],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
@@ -3175,7 +3265,7 @@ fn forced_git_log_verifier_rejects_more_than_the_requested_limit() -> EvalResult
             {"commit": target.id().to_string()},
             {"commit": parent.id().to_string()},
         ],
-        "truncated": false,
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
@@ -3281,9 +3371,11 @@ fn forced_workspace_listing_verifiers_reject_the_wrong_entry_kind() -> EvalResul
         .iter()
         .find(|case| case.name == GLOB_FILES_NAME)
         .expect("the workspace glob fixture exists");
+    let mut list_entries = workspace_listing_json(expected_workspace_listing());
+    list_entries[0]["kind"] = serde_json::json!("directory");
     let list_result = serde_json::json!({
-        "entries": [{"path": WORKSPACE_SEED_PATH, "kind": "directory"}],
-        "truncated": false,
+        "entries": list_entries,
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
@@ -3296,6 +3388,45 @@ fn forced_workspace_listing_verifiers_reject_the_wrong_entry_kind() -> EvalResul
 
     assert!(!suite.forced_case_result_passed(list, &list_result)?);
     assert!(!suite.forced_case_result_passed(glob, &glob_result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_list_verifier_rejects_an_unbounded_result() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == LIST_DIRECTORY_NAME)
+        .expect("the workspace list fixture exists");
+    let result = serde_json::json!({
+        "entries": workspace_listing_json(complete_workspace_listing()),
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_glob_verifier_rejects_a_nonmatching_path() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == GLOB_FILES_NAME)
+        .expect("the workspace glob fixture exists");
+    let result = serde_json::json!({
+        "matches": [
+            {"path": WORKSPACE_SEED_PATH, "kind": "file"},
+            {"path": workspace_nonmatching_path(0), "kind": "file"}
+        ],
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
