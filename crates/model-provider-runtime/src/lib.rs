@@ -1726,7 +1726,8 @@ fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
     }
 }
 
-fn render_delegation_outcome(outcome: &DelegationOutcome) -> String {
+/// Renders the compact provider-neutral JSON for a non-content delegation outcome.
+pub fn render_delegation_outcome(outcome: &DelegationOutcome) -> String {
     let outcome_kind = match outcome.kind() {
         DelegationOutcomeKind::ResultReturned => "returned",
         DelegationOutcomeKind::ChildFailed => "failed",

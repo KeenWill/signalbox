@@ -8,6 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use signalbox_test_bin::test_bin_path;
 use signalbox_tools_exec::{
     CaptureCompleteness, ProcessEnvironment, ProcessOutcome, ProcessRequest, ProcessRunner,
     ProcessStatusProtocol, ProcessSupervisionFailure, TokioProcessRunner,
@@ -40,7 +41,7 @@ const CARGO_TEST_RUNNER_RETURN_LIMIT: Duration = Duration::from_secs(2);
 fn cargo_test_runner_marks_workspace_influenced_stdout_incomplete()
 -> Result<(), Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"))
+    let output = std::process::Command::new(test_bin_path!("signalbox-exec-supervisor"))
         .arg(CARGO_TEST_RUNNER_MODE)
         .arg(&executable)
         .args(["--ignored", "--exact", INHERITED_STDOUT_FIXTURE_NAME])
@@ -95,7 +96,7 @@ fn cargo_test_runner_stops_reading_after_the_test_leader_exits()
 -> Result<(), Box<dyn std::error::Error>> {
     let executable = std::env::current_exe()?;
     let started = std::time::Instant::now();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"))
+    let output = std::process::Command::new(test_bin_path!("signalbox-exec-supervisor"))
         .arg(CARGO_TEST_RUNNER_MODE)
         .arg(&executable)
         .args(["--ignored", "--exact", HELD_STDOUT_FIXTURE_NAME])
@@ -148,7 +149,7 @@ async fn production_runner_pins_the_supervisor_executable_identity()
         std::fs::create_dir(directory.as_path())?;
         let supplied = directory.as_path().join("supervisor");
         let moved = directory.as_path().join("original-supervisor");
-        std::fs::copy(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"), &supplied)?;
+        std::fs::copy(test_bin_path!("signalbox-exec-supervisor"), &supplied)?;
         std::fs::set_permissions(&supplied, std::fs::Permissions::from_mode(0o700))?;
         let mut runner = TokioProcessRunner::try_new(&supplied)?;
         std::fs::rename(&supplied, &moved)?;
@@ -310,7 +311,7 @@ async fn production_runner_clears_ambient_environment_when_requested()
 async fn production_dispatcher_marks_started_target_that_exits_127()
 -> Result<(), Box<dyn std::error::Error>> {
     with_procfs_supervision(async {
-        let supervisor = std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"));
+        let supervisor = test_bin_path!("signalbox-exec-supervisor");
         let request = ProcessRequest {
             program: supervisor.into_os_string(),
             arguments: vec![
@@ -345,7 +346,7 @@ async fn production_dispatcher_marks_started_target_that_exits_127()
 async fn production_dispatcher_preserves_target_spawn_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     with_procfs_supervision(async {
-        let supervisor = std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"));
+        let supervisor = test_bin_path!("signalbox-exec-supervisor");
         let missing = std::env::temp_dir().join(format!(
             "signalbox-exec-missing-dispatched-target-{}",
             std::process::id()
@@ -379,7 +380,7 @@ async fn production_dispatcher_preserves_target_spawn_failure()
 async fn production_dispatcher_preserves_target_signal_termination()
 -> Result<(), Box<dyn std::error::Error>> {
     with_procfs_supervision(async {
-        let supervisor = std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"));
+        let supervisor = test_bin_path!("signalbox-exec-supervisor");
         let request = ProcessRequest {
             program: supervisor.into_os_string(),
             arguments: vec![
@@ -409,7 +410,7 @@ async fn production_dispatcher_preserves_target_signal_termination()
 async fn production_dispatcher_does_not_wait_for_descendant_held_pipes()
 -> Result<(), Box<dyn std::error::Error>> {
     with_procfs_supervision(async {
-        let supervisor = std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"));
+        let supervisor = test_bin_path!("signalbox-exec-supervisor");
         let script = format!("{} 30 & printf %s $!", fixture_program("sleep")?.display());
         let request = ProcessRequest {
             program: supervisor.into_os_string(),
@@ -929,7 +930,7 @@ fn fixture_program(name: &str) -> Result<std::path::PathBuf, Box<dyn std::error:
 }
 
 fn production_runner() -> Result<TokioProcessRunner, Box<dyn std::error::Error>> {
-    Ok(TokioProcessRunner::try_new(env!(
-        "CARGO_BIN_EXE_signalbox-exec-supervisor"
+    Ok(TokioProcessRunner::try_new(test_bin_path!(
+        "signalbox-exec-supervisor"
     ))?)
 }
