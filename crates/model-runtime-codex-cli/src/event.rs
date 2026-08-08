@@ -3,14 +3,24 @@
 //! **Dropped-content rule.** Provider-controlled text this adapter drops
 //! without interpreting still governs the output that follows it: a credential
 //! marker the dropped bytes end in (`api_`) marks a value that opens the next
-//! emitted text (`key=value`) as a secret. Every dropped field therefore
-//! reaches the redactor's match-only lookbehind — match state, never itself
-//! emitted — before that following text is emitted or retained, so the value
-//! is suppressed wherever it next surfaces, in a streamed delta or in the
-//! buffered final text alike. Text the adapter models and then drops goes in
-//! whole through `extend_dropped_context`; fields it does not model go through
-//! `fold_uninterpreted`, which weighs them as independent units. Each arm of
-//! `EventDecoder::push` cites this rule and adds only what is local to it.
+//! emitted text (`key=value`) as a secret. Every uninterpreted dropped field
+//! therefore reaches the redactor's match-only lookbehind — match state, never
+//! itself emitted — before that following text is emitted or retained, so the
+//! value is suppressed wherever it next surfaces, in a streamed delta or in
+//! the buffered final text alike. Text the adapter models and then drops goes
+//! in whole through `extend_dropped_context`; fields it does not model go
+//! through `fold_uninterpreted`, which weighs them as independent units.
+//!
+//! Interpreted fields are outside the rule even where they are also dropped.
+//! `validate_item_identity` reads `item.id` and `item.type` on every item
+//! event, so every item arm excludes both from the fold; where the arm drops
+//! the item as well — an unsupported item, a bare lifecycle event — nothing
+//! carries their bytes to the lookbehind, and a marker one of them ends in
+//! arms nothing. Widening the fold to the identity, not a broader claim here,
+//! is what would close that.
+//!
+//! Each arm of `EventDecoder::push` cites this rule and adds only what is
+//! local to it.
 
 use std::collections::HashSet;
 
@@ -266,10 +276,9 @@ impl<C: Clone> EventDecoder<C> {
                     ItemDetails::Other => {
                         // An unsupported item is dropped from the output. Its
                         // shape is unmodeled — provider text can live in any
-                        // field or
-                        // nested within one — so every field outside the
-                        // validated item identity folds as an independent unit
-                        // (dropped-content rule).
+                        // field or nested within one — so every field outside
+                        // the validated item identity folds as an independent
+                        // unit (dropped-content rule).
                         fold_uninterpreted(
                             sink,
                             &value,
