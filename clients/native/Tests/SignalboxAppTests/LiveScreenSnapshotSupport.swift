@@ -99,6 +99,7 @@ extension SnapshotCanvas {
     /// pinned simulator model would still record a different golden with either
     /// switched on.
     func overrideTraits(on controller: UIViewController) {
+        controller.traitOverrides.userInterfaceIdiom = userInterfaceIdiom
         controller.traitOverrides.horizontalSizeClass = horizontalSizeClass
         controller.traitOverrides.verticalSizeClass = verticalSizeClass
         controller.traitOverrides.userInterfaceStyle = Self.userInterfaceStyle
@@ -143,6 +144,37 @@ extension SnapshotCanvas {
             right: Self.safeAreaInsets.right - inherited.right
         )
         window.layoutIfNeeded()
+    }
+
+    /// The idiom each canvas renders as, pinned for the same reason the size
+    /// classes are and against a stronger default.
+    ///
+    /// A trait override rather than a resolved value: this suite runs in one
+    /// iPhone scene, so without this every canvas inherits `.phone` and the two
+    /// named for an iPad record phone behaviour at iPad dimensions. No view in
+    /// the application reads the idiom — it is the whole of
+    /// `grep -rn userInterfaceIdiom clients/native/Sources` — but the framework
+    /// containers those views are built from do: `RootView`'s
+    /// `NavigationSplitView` and every `.sheet` presentation adapt by idiom as
+    /// well as by size class, and a presented sheet is the case this suite
+    /// actually records, in `testSessionListPresentingTheCreationSheet`.
+    /// Without the override those goldens would accept a regression confined to
+    /// the real pad presentation.
+    ///
+    /// What it does not buy is a real iPad. The trait is what the hosted
+    /// content and its presentations resolve against, which is what decides
+    /// these renderings; a device idiom read from `UIDevice` is not, and
+    /// nothing here reads one. The remaining destination dependence is the
+    /// window's corner mask and the glass materials, already stated on
+    /// `LiveScreenRenderer`, and rendering on an iPad destination is what would
+    /// close that rather than this.
+    private var userInterfaceIdiom: UIUserInterfaceIdiom {
+        switch self {
+        case .iPhonePortrait, .iPhoneLandscape, .sheet:
+            return .phone
+        case .iPadPortrait, .iPadLandscape:
+            return .pad
+        }
     }
 
     /// The size class each canvas resolves to, stated rather than derived from

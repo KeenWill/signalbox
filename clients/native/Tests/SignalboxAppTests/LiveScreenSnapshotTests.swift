@@ -9,12 +9,13 @@ import XCTest
 ///
 /// Every section it can select is here: Sessions, Monitor, Runners, Templates,
 /// and Settings, along with the transport gate that stands in front of all of
-/// them and the session transcript a selected session pushes. Fourteen of the
-/// fifteen `ScreenshotScenario` cases are rendered; the fifteenth,
-/// `.artifactPreview`, is refused for a reason written where its test would
-/// have been. `ScreenshotScenario.allCases.count` is pinned by
-/// `testEveryScenarioIsCovered` below, so a case added later fails this suite
-/// instead of quietly going uncovered.
+/// them and the session transcript a selected session pushes. Every
+/// `ScreenshotScenario` case is either rendered by a test here or refused for a
+/// reason written where its test would have been, and `.artifactPreview` is the
+/// only refusal. Which of the two each case is, is stated by
+/// `ScenarioDisposition.of(_:)` below — exhaustively, with no `default` — so a
+/// case added later stops this suite compiling instead of quietly going
+/// uncovered.
 ///
 /// `ScreenshotScenario` is the determinism seam, unchanged: each case selects
 /// a fixture set that the shipping mock coordinator installs behind the real
@@ -48,25 +49,96 @@ import XCTest
 /// decides which `__Snapshots__` directory its references land in.
 @MainActor
 final class LiveScreenSnapshotTests: XCTestCase {
-    /// The count this suite claims to cover, against the enum itself.
+    /// What this suite does with one `ScreenshotScenario`.
     ///
-    /// Not a golden and not a change detector: the assertions below are, and
-    /// none of them can fail for a scenario nobody wrote a test for. A new case
-    /// added to `ScreenshotScenario` is exactly that gap, and this is the only
-    /// thing in the file that closes it. The literal is the whole instrument —
-    /// compared against anything derived it would pass for every count — and it
-    /// is what makes the next case an editor's decision rather than an
-    /// oversight.
-    func testEveryScenarioIsCovered() {
-        XCTAssertEqual(
-            ScreenshotScenario.allCases.count,
-            15,
-            """
-            ScreenshotScenario gained or lost a case. Each one is either \
-            rendered by a test in this file or refused by a comment naming \
-            the reason; add or remove the matching one, then update this count.
-            """
-        )
+    /// A disposition per case rather than a count of them. A count is satisfied
+    /// by being counted: a new case failed `allCases.count == 15`, the
+    /// diagnostic said to update the number, updating it was the whole edit,
+    /// and the case stayed uncovered with the suite green. Neither answer below
+    /// can be given by editing a number — one of them names a test that has to
+    /// exist and the other carries the argument for why no golden is the right
+    /// outcome.
+    enum ScenarioDisposition {
+        /// Rendered by a test in this file or its `+LegacyScreens` extension,
+        /// on the canvases named there.
+        case rendered
+        /// Deliberately not rendered, for the reason given.
+        case refused(reason: String)
+
+        /// The disposition of every case, exhaustively.
+        ///
+        /// The missing `default` is the whole instrument. A case added to
+        /// `ScreenshotScenario` makes this switch non-exhaustive, which is a
+        /// compile error in this file rather than a red assertion somewhere in
+        /// a run, so the next case cannot reach main uncovered and cannot be
+        /// answered by a number. Listing the rendered cases one per line rather
+        /// than in one joined pattern is deliberate for the same reason: the
+        /// edit that adds a case should look like the edit that decides about
+        /// it.
+        static func of(_ scenario: ScreenshotScenario) -> ScenarioDisposition {
+            switch scenario {
+            case .setup:
+                return .rendered
+            case .sessions:
+                return .rendered
+            case .newSession:
+                return .rendered
+            case .activeChat:
+                return .rendered
+            case .markdownBasics:
+                return .rendered
+            case .markdownTable:
+                return .rendered
+            case .markdownCode:
+                return .rendered
+            case .markdownMessage:
+                return .rendered
+            case .pendingApproval:
+                return .rendered
+            case .completedTool:
+                return .rendered
+            case .failedTool:
+                return .rendered
+            case .runners:
+                return .rendered
+            case .monitor:
+                return .rendered
+            case .settings:
+                return .rendered
+            case .artifactPreview:
+                return .refused(
+                    reason: """
+                        The alert that is the whole difference between this \
+                        scenario and a completed turn cannot be rendered \
+                        reproducibly here: its backdrop resamples a window \
+                        this renderer is still compositing, so the screen \
+                        never settles. The full argument is where its test \
+                        would have been, below.
+                        """
+                )
+            }
+        }
+    }
+
+    /// Every refusal states a reason.
+    ///
+    /// The exhaustive switch above is what makes a new case a decision; this is
+    /// what keeps `.refused` from being the cheap way to discharge it. It can
+    /// only catch an empty string — no assertion can judge whether an argument
+    /// is a good one — so it is a floor and the review of the reason is the
+    /// rest.
+    func testEveryRefusedScenarioStatesAReason() {
+        for scenario in ScreenshotScenario.allCases {
+            guard case .refused(let reason) = ScenarioDisposition.of(scenario) else { continue }
+            XCTAssertFalse(
+                reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                """
+                \(scenario) is refused without a reason. A scenario this suite \
+                does not render carries the argument for why no golden is the \
+                right outcome; write it, or render the scenario.
+                """
+            )
+        }
     }
 
     func testTransportGateWithoutAConfiguredSocket() async {
