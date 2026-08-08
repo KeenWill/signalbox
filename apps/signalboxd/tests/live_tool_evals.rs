@@ -1226,6 +1226,7 @@ struct OperationTrackerState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TrackedToolResult {
+    request_id: Uuid,
     content: String,
     is_error: bool,
 }
@@ -1234,13 +1235,18 @@ impl OperationTracker {
     fn observe(&self, operation: &ModelOperation<ModelCallId>) {
         let tool_results = operation.messages.iter().flat_map(|message| {
             message.parts.iter().filter_map(|part| match part {
-                MessagePart::ToolResult(result) => Some((
-                    String::from(result.tool_call_id.as_str()),
-                    TrackedToolResult {
-                        content: result.content.clone(),
-                        is_error: result.is_error,
-                    },
-                )),
+                MessagePart::ToolResult(result) => Uuid::parse_str(result.tool_call_id.as_str())
+                    .ok()
+                    .map(|request_id| {
+                        (
+                            String::from(result.tool_call_id.as_str()),
+                            TrackedToolResult {
+                                request_id,
+                                content: result.content.clone(),
+                                is_error: result.is_error,
+                            },
+                        )
+                    }),
                 MessagePart::Text(_)
                 | MessagePart::ToolCall(_)
                 | MessagePart::Thinking { .. }
@@ -1474,10 +1480,6 @@ struct CaseSnapshot {
 }
 
 struct RequestSnapshot {
-    #[expect(
-        dead_code,
-        reason = "the typed request identity records the proposal/result join in snapshots"
-    )]
     request_id: Uuid,
     producing_model_call_id: Uuid,
     name: String,
@@ -1664,7 +1666,14 @@ impl CaseSnapshot {
                         (request.name == READ_FILE_NAME
                             && request
                                 .arguments()
-                                .is_some_and(|arguments| workspace_read_covers_seed(&arguments)))
+                                .is_some_and(|arguments| workspace_read_covers_seed(&arguments))
+                            && !self.requests[..index].iter().any(|earlier| {
+                                earlier.attempt_succeeded
+                                    && matches!(
+                                        earlier.name.as_str(),
+                                        WRITE_FILE_NAME | EDIT_FILE_NAME | APPLY_PATCH_NAME
+                                    )
+                            }))
                             || (request.name == WRITE_FILE_NAME
                                 && request.arguments().is_some_and(|arguments| {
                                     arguments["path"] == WORKSPACE_ANSWER_PATH
@@ -1894,6 +1903,10 @@ impl CaseOutcome {
             self.execution_completed
                 && self.snapshot.turn_disposition.is_completed()
                 && self.snapshot.model_calls >= MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP
+                && self
+                    .tool_results
+                    .iter()
+                    .any(|result| result.request_id == self.snapshot.requests[0].request_id)
                 && self.forced_result_passed(target)
                 && self.snapshot.requests.len() == 1
                 && self.snapshot.requests[0].name == target
@@ -1934,6 +1947,11 @@ impl CaseOutcome {
             self.execution_completed
                 && self.snapshot.turn_disposition.is_completed()
                 && !self.tool_results.is_empty()
+                && self.snapshot.requests.iter().all(|request| {
+                    self.tool_results
+                        .iter()
+                        .any(|result| result.request_id == request.request_id)
+                })
                 && required_names.iter().all(|required| {
                     self.snapshot
                         .requests
@@ -2286,6 +2304,7 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
             is_error: false,
         }],
@@ -2337,6 +2356,7 @@ fn forced_tier_reports_infrastructure_for_an_exact_known_failed_attempt() {
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
             is_error: false,
         }],
@@ -2366,6 +2386,7 @@ fn unforced_web_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
         expected_arguments: None,
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
             is_error: true,
         }],
@@ -2395,6 +2416,7 @@ fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
         expected_arguments: None,
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
             is_error: true,
         }],
@@ -2424,6 +2446,7 @@ fn unforced_git_tier_reports_a_premature_commit_failure_as_a_miss() {
         expected_arguments: None,
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
             is_error: true,
         }],
@@ -2453,6 +2476,7 @@ fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
         expected_arguments: None,
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
             is_error: true,
         }],
@@ -2491,6 +2515,7 @@ fn unforced_workspace_tier_reports_infrastructure_for_an_exact_known_failed_atte
         expected_arguments: None,
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
             is_error: true,
         }],
@@ -2518,12 +2543,95 @@ fn unforced_workspace_tier_reports_infrastructure_for_an_exact_known_failed_atte
 }
 
 #[test]
+fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: false,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(APPLY_PATCH_NAME),
+                    arguments_text: String::from("{}"),
+                    attempt_succeeded: true,
+                },
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                    name: String::from(READ_FILE_NAME),
+                    arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                    attempt_succeeded: false,
+                },
+            ],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Workspace),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
+fn unforced_workspace_tier_requires_each_request_result_to_round_trip() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: false,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(READ_FILE_NAME),
+                    arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                    attempt_succeeded: true,
+                },
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                    name: String::from(WRITE_FILE_NAME),
+                    arguments_text: serde_json::json!({
+                        "path": WORKSPACE_ANSWER_PATH,
+                        "content": WORKSPACE_ANSWER,
+                    })
+                    .to_string(),
+                    attempt_succeeded: true,
+                },
+            ],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Workspace),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
 fn unforced_git_tier_requires_both_task_tools() {
     let outcome = CaseOutcome {
         target: None,
         expected_arguments: None,
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
             is_error: false,
         }],
@@ -2638,6 +2746,7 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
             is_error: false,
         }],
@@ -2730,6 +2839,7 @@ fn operation_tracker_records_each_cumulative_tool_result_once() {
     let tracker = OperationTracker::default();
     let tool_call_id = String::from("synthetic-tool-call");
     let result = TrackedToolResult {
+        request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
         content: String::from("synthetic result"),
         is_error: false,
     };
@@ -2755,6 +2865,7 @@ fn unforced_exec_tier_rejects_an_additional_tool_call() {
         expected_arguments: None,
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: confined_exit("").to_string(),
             is_error: false,
         }],
@@ -2794,6 +2905,7 @@ fn forced_exec_outcome(target: &'static str, execution: serde_json::Value) -> Ca
         expected_arguments: Some(String::from(fixture.expected_arguments)),
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: execution.to_string(),
             is_error: false,
         }],
@@ -3007,6 +3119,7 @@ fn natural_exec_outcome(execution: serde_json::Value) -> CaseOutcome {
         expected_arguments: None,
         execution_completed: true,
         tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: execution.to_string(),
             is_error: false,
         }],
