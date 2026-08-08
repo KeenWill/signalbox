@@ -134,6 +134,14 @@ fn object_rooted_schema(mut value: serde_json::Value) -> serde_json::Value {
     value
 }
 
+/// Keywords a discriminating tag property may carry into the fold.
+///
+/// `const` names the variant, `type` may restate that it is a string, and
+/// `description` is prose. The merged tag property is rebuilt from those and
+/// nothing else, so a branch stating more about its tag states something the
+/// fold would silently drop.
+const TAG_PROPERTY_KEYWORDS: [&str; 3] = ["const", "description", "type"];
+
 /// One internally-tagged union branch decomposed for merging.
 struct TaggedVariant<'schema> {
     description: Option<&'schema str>,
@@ -144,12 +152,30 @@ struct TaggedVariant<'schema> {
 
 impl<'schema> TaggedVariant<'schema> {
     /// Reads this variant's constant for an already-validated tag property.
+    ///
+    /// The fold rebuilds the tag as an `enum` of the variants' constants,
+    /// typed `string`, described by generated prose — so whatever else a
+    /// branch states about the tag property is replaced rather than carried.
+    /// A `maxLength` its own constant violates, or a `not` making the branch
+    /// unsatisfiable, would become an advertised tag the declaration rejects,
+    /// which is worse than declining: the schema would invite a call that
+    /// cannot decode. Such a property is not a discriminator this fold can
+    /// express, so it reads as none and the union is left alone.
     fn tag_value(&self, tag: &str) -> Option<&'schema str> {
-        self.properties
-            .get(tag)?
-            .as_object()?
-            .get("const")?
-            .as_str()
+        let property = self.properties.get(tag)?.as_object()?;
+        if property
+            .keys()
+            .any(|keyword| !TAG_PROPERTY_KEYWORDS.contains(&keyword.as_str()))
+        {
+            return None;
+        }
+        if property
+            .get("type")
+            .is_some_and(|declared| declared != "string")
+        {
+            return None;
+        }
+        property.get("const")?.as_str()
     }
 
     /// Names the properties this variant requires beside the tag.
@@ -277,6 +303,14 @@ fn tagged_variant(branch: &serde_json::Value) -> Option<TaggedVariant<'_>> {
             .collect::<Option<BTreeSet<_>>>()?,
         None => BTreeSet::new(),
     };
+    // The merged root's property set is derived from the declared properties,
+    // so a required name with no property of its own would not merely lose its
+    // schema — it would vanish from the advertised object altogether, which
+    // never mentions a member the branch demands. Declining keeps the root
+    // union for the conformance gate instead.
+    if required.iter().any(|name| !properties.contains_key(*name)) {
+        return None;
+    }
     let description = match branch.get("description") {
         Some(description) => Some(description.as_str()?),
         None => None,
@@ -1118,6 +1152,61 @@ mod tests {
                     "minProperties": 2,
                     "properties": {"label": {"type": "string"}, "mode": {"const": "labelled"}},
                     "required": ["label", "mode"],
+                    "type": "object"
+                }
+            ]
+        });
+
+        assert_eq!(object_rooted_schema(declared.clone()), declared);
+    }
+
+    /// A tag property stating more than its constant declines the fold instead
+    /// of having the surplus replaced.
+    ///
+    /// The merged tag is rebuilt as an `enum` of the branches' constants typed
+    /// `string`, so a `maxLength` this branch's own constant already violates
+    /// would not survive the rebuild. The advertised tag would then offer a
+    /// value the declaration refuses — a schema inviting a call that cannot
+    /// decode, which is a worse failure than declining to fold at all.
+    #[test]
+    fn a_tag_property_constraining_more_than_its_constant_declines_the_fold() {
+        let declared = serde_json::json!({
+            "oneOf": [
+                {
+                    "properties": {"mode": {"const": "brief", "maxLength": 2}},
+                    "required": ["mode"],
+                    "type": "object"
+                },
+                {
+                    "properties": {"mode": {"const": "full"}},
+                    "required": ["mode"],
+                    "type": "object"
+                }
+            ]
+        });
+
+        assert_eq!(object_rooted_schema(declared.clone()), declared);
+    }
+
+    /// A branch requiring a name it never declares as a property declines the
+    /// fold.
+    ///
+    /// The merged property set is derived from the declared properties, so
+    /// such a name would not merely lose its schema — the advertised object
+    /// would never mention a member the branch demands, which is a widening
+    /// past the tag-to-payload pairing the fold is allowed to lose.
+    #[test]
+    fn a_required_name_without_a_declared_property_declines_the_fold() {
+        let declared = serde_json::json!({
+            "oneOf": [
+                {
+                    "properties": {"mode": {"const": "bare"}},
+                    "required": ["mode"],
+                    "type": "object"
+                },
+                {
+                    "properties": {"mode": {"const": "tenanted"}},
+                    "required": ["mode", "tenant"],
                     "type": "object"
                 }
             ]

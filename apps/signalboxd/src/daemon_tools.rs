@@ -1753,11 +1753,20 @@ mod tests {
     ///
     /// This assertion pins the strictest reading of those two rules — a
     /// declared `"type": "object"` root carrying nothing outside
-    /// [`PERMITTED_ROOT_KEYWORDS`] — for two reasons. The rejection this test
-    /// exists to prevent was a root `oneOf`, and a catalog that satisfies the
-    /// strict-mode root rule stays usable if a strict function contract is
-    /// ever requested. Accepted cost: a schema may not express a root-level
-    /// union, and must instead discriminate through one tag property, as
+    /// [`PERMITTED_ROOT_KEYWORDS`]. The rejection this test exists to prevent
+    /// was a root `oneOf`, and the root is what both rules constrain directly.
+    ///
+    /// It claims nothing past the root. Strict Structured Outputs demands more
+    /// of a schema than this gate reads — every property named in `required`,
+    /// `additionalProperties: false` throughout — and this catalog does not
+    /// meet that: `current_time` advertises an optional `timezone`, declared
+    /// but unrequired. Enabling a strict function contract would need the
+    /// schema transformation the OpenAI adapter already notes, which this gate
+    /// neither performs nor approximates. Passing here is evidence about the
+    /// root and nothing else.
+    ///
+    /// Accepted cost: a schema may not express a root-level union, and must
+    /// instead discriminate through one tag property, as
     /// `signalbox_tool_contract::rendered_contract_schema` now renders
     /// internally tagged argument enums.
     ///

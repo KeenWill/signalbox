@@ -1353,6 +1353,8 @@ fn read_rejects_current_entries_that_contradict_complete_history() {
 /// excludes is still refused here.
 #[test]
 fn plan_write_arguments_decode_unchanged_under_the_object_rooted_schema() {
+    let requested_entry = 1;
+    let requested_dependency = 2;
     let create = decode_write_operation(&arguments(json!({
         "kind": "create",
         "text": INITIAL_TEXT
@@ -1360,20 +1362,20 @@ fn plan_write_arguments_decode_unchanged_under_the_object_rooted_schema() {
     .expect("create arguments are admitted");
     let revise = decode_write_operation(&arguments(json!({
         "kind": "revise",
-        "entry_id": 1,
+        "entry_id": requested_entry,
         "text": REVISED_TEXT
     })))
     .expect("revise arguments are admitted");
     let set_status = decode_write_operation(&arguments(json!({
         "kind": "set_status",
-        "entry_id": 1,
+        "entry_id": requested_entry,
         "status": "completed"
     })))
     .expect("status arguments are admitted");
     let depends_on = decode_write_operation(&arguments(json!({
         "kind": "depends_on",
-        "entry_id": 1,
-        "dependency_id": 2
+        "entry_id": requested_entry,
+        "dependency_id": requested_dependency
     })))
     .expect("dependency arguments are admitted");
 
@@ -1386,22 +1388,22 @@ fn plan_write_arguments_decode_unchanged_under_the_object_rooted_schema() {
     assert_eq!(
         revise,
         PlanOperation::Write(PlanEventDraft::Revise {
-            entry: entry(1),
+            entry: entry(requested_entry),
             text: text(REVISED_TEXT)
         })
     );
     assert_eq!(
         set_status,
         PlanOperation::Write(PlanEventDraft::SetStatus {
-            entry: entry(1),
+            entry: entry(requested_entry),
             status: PlanStatus::Completed
         })
     );
     assert_eq!(
         depends_on,
         PlanOperation::Write(PlanEventDraft::DependsOn {
-            entry: entry(1),
-            dependency: entry(2)
+            entry: entry(requested_entry),
+            dependency: entry(requested_dependency)
         })
     );
 }
