@@ -43,6 +43,7 @@ on:
       - "apps/signalboxd/tests/live_tool_evals.rs"
       - "crates/application/src/create_session.rs"
       - "crates/application/src/model_execution.rs"
+      - "crates/application/src/operator_failure.rs"
       - "crates/application/src/scheduler.rs"
       - "crates/application/src/start_eligible_turn.rs"
       - "crates/application/src/submit_input.rs"
@@ -83,6 +84,7 @@ on:
       - "apps/signalboxd/tests/live_tool_evals.rs"
       - "crates/application/src/create_session.rs"
       - "crates/application/src/model_execution.rs"
+      - "crates/application/src/operator_failure.rs"
       - "crates/application/src/scheduler.rs"
       - "crates/application/src/start_eligible_turn.rs"
       - "crates/application/src/submit_input.rs"
@@ -208,6 +210,7 @@ jobs:
               echo
               echo "Harness failure: no model-behavior report was produced."
             } >> "${GITHUB_STEP_SUMMARY}"
+            status=1
           fi
           passed_count=$(sed -n \
             's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' \
