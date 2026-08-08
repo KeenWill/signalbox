@@ -315,11 +315,13 @@ async fn run_case(
         ExecApprovalMode::DenyAll
     };
     let mut approval_continuations = 0;
+    let mut approval_cap_reached = false;
     while database
         .decide_pending_unsandboxed_requests(session, turn, approval_mode)
         .await?
     {
         if approval_continuations == MAX_NATURAL_APPROVAL_CONTINUATIONS {
+            approval_cap_reached = true;
             break;
         }
         timeout(TURN_TIMEOUT, execution.resume_active(session))
@@ -327,7 +329,7 @@ async fn run_case(
             .map_err(|_| io::Error::other("the daemon tool eval resume exceeded its timeout"))??;
         approval_continuations += 1;
     }
-    let snapshot = CaseSnapshot::read(&database.pool, session, turn).await?;
+    let snapshot = CaseSnapshot::read(&database.pool, session, turn, approval_cap_reached).await?;
     let execution_completed = match (forced_case, snapshot.requests.as_slice()) {
         (None, _) => true,
         (Some(case), [request]) => match tracker.result_content(request.request_id) {
@@ -2197,7 +2199,12 @@ impl RequestSnapshot {
 }
 
 impl CaseSnapshot {
-    async fn read(pool: &PgPool, session: SessionId, turn: TurnId) -> EvalResult<Self> {
+    async fn read(
+        pool: &PgPool,
+        session: SessionId,
+        turn: TurnId,
+        approval_cap_reached: bool,
+    ) -> EvalResult<Self> {
         let transcript = ProcessReadRepository::new(pool.clone())
             .read_transcript(session)
             .await?
@@ -2208,7 +2215,13 @@ impl CaseSnapshot {
             .find(|candidate| candidate.turn() == turn)
             .ok_or_else(|| io::Error::other("the eval transcript turn is missing"))?
             .state();
-        let turn_disposition = SnapshotTurnDisposition::from_process_state(turn_state);
+        let turn_disposition = if approval_cap_reached
+            && matches!(turn_state, ProcessTurnState::ActiveRunning { .. })
+        {
+            SnapshotTurnDisposition::ApprovalCapReached
+        } else {
+            SnapshotTurnDisposition::from_process_state(turn_state)
+        };
         let successful_requests = successful_tool_requests(transcript.entries());
         let requests = transcript
             .entries()
@@ -2475,6 +2488,9 @@ fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SnapshotTurnDisposition {
     Completed,
+    /// The eval deliberately stopped after its bounded denied approvals while
+    /// the daemon remained in the post-decision active-running state.
+    ApprovalCapReached,
     /// The turn terminalized on a definitive provider failure, carrying the
     /// closed cause the daemon retained for it when one was recorded.
     ProviderFailure(Option<ProcessProviderModelCallFailureCause>),
@@ -2529,14 +2545,17 @@ impl SnapshotTurnDisposition {
     const fn is_completed(self) -> bool {
         match self {
             Self::Completed => true,
-            Self::ProviderFailure(_) | Self::Infrastructure | Self::Refused => false,
+            Self::ApprovalCapReached
+            | Self::ProviderFailure(_)
+            | Self::Infrastructure
+            | Self::Refused => false,
         }
     }
 
     const fn is_infrastructure(self) -> bool {
         match self {
             Self::ProviderFailure(_) | Self::Infrastructure => true,
-            Self::Completed | Self::Refused => false,
+            Self::Completed | Self::ApprovalCapReached | Self::Refused => false,
         }
     }
 
@@ -2545,6 +2564,7 @@ impl SnapshotTurnDisposition {
     fn label(self) -> String {
         match self {
             Self::Completed => String::from("completed"),
+            Self::ApprovalCapReached => String::from("approval cap reached"),
             Self::ProviderFailure(None) => String::from("provider failure"),
             Self::ProviderFailure(Some(cause)) => {
                 format!("provider failure: {}", provider_failure_cause_label(cause))
@@ -3441,6 +3461,16 @@ fn successful_request(
         name: name.to_owned(),
         arguments_text: arguments.to_string(),
         attempt_succeeded: true,
+    }
+}
+
+fn denied_unsandboxed_request(request_id: Uuid) -> RequestSnapshot {
+    RequestSnapshot {
+        request_id,
+        producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+        name: String::from(UNSANDBOXED_EXEC_NAME),
+        arguments_text: String::from("{}"),
+        attempt_succeeded: false,
     }
 }
 
@@ -4385,26 +4415,97 @@ struct ZeroExitEvidence<'a> {
 
 /// One serialized execution with the selected confinement and zero exit.
 fn zero_exit_with_confinement(evidence: ZeroExitEvidence<'_>) -> serde_json::Value {
-    direct_exec_result(
+    direct_exec_result(DirectExecEvidence::successful_with_confinement(
         evidence.confinement,
-        ProcessOutcome::Exited { code: Some(0) },
         evidence.stdout,
-        CaptureCompleteness::Complete,
-    )
+    ))
 }
 
-fn direct_exec_result(
+struct DirectExecEvidence<'a> {
     confinement: ExecutionConfinement,
     outcome: ProcessOutcome,
-    stdout: &str,
+    stdout: &'a str,
     completeness: CaptureCompleteness,
-) -> serde_json::Value {
+}
+
+impl<'a> DirectExecEvidence<'a> {
+    fn confined_success(stdout: &'a str) -> Self {
+        Self::successful_with_confinement(ExecutionConfinement::FilesystemConfined, stdout)
+    }
+
+    fn successful_with_confinement(confinement: ExecutionConfinement, stdout: &'a str) -> Self {
+        Self {
+            confinement,
+            outcome: ProcessOutcome::Exited { code: Some(0) },
+            stdout,
+            completeness: CaptureCompleteness::Complete,
+        }
+    }
+
+    fn unsandboxed_truncated(stdout: &'a str) -> Self {
+        Self {
+            confinement: ExecutionConfinement::Unsandboxed,
+            outcome: ProcessOutcome::Exited { code: Some(0) },
+            stdout,
+            completeness: CaptureCompleteness::Truncated,
+        }
+    }
+
+    fn timed_out() -> Self {
+        Self {
+            outcome: ProcessOutcome::TimedOut,
+            ..Self::confined_success("")
+        }
+    }
+
+    fn nonzero_exit() -> Self {
+        Self {
+            outcome: ProcessOutcome::Exited { code: Some(1) },
+            ..Self::confined_success("")
+        }
+    }
+
+    fn supervision_failure() -> Self {
+        Self {
+            outcome: ProcessOutcome::SupervisionFailed {
+                reason: ProcessSupervisionFailure::Wait,
+            },
+            ..Self::confined_success("")
+        }
+    }
+
+    fn sandbox_refusal() -> Self {
+        Self {
+            confinement: ExecutionConfinement::SandboxRefused {
+                availability: BwrapAvailability::Unusable,
+            },
+            outcome: ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::SandboxUnavailable,
+            },
+            stdout: "",
+            completeness: CaptureCompleteness::Complete,
+        }
+    }
+
+    fn sandbox_setup_failure() -> Self {
+        Self {
+            confinement: ExecutionConfinement::SandboxSetupFailed,
+            outcome: ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::SandboxSetup,
+            },
+            stdout: "",
+            completeness: CaptureCompleteness::Complete,
+        }
+    }
+}
+
+fn direct_exec_result(evidence: DirectExecEvidence<'_>) -> serde_json::Value {
     serde_json::to_value(ExecResult {
-        confinement,
-        outcome,
+        confinement: evidence.confinement,
+        outcome: evidence.outcome,
         stdout: OutputCapture {
-            text: stdout.to_owned(),
-            completeness,
+            text: evidence.stdout.to_owned(),
+            completeness: evidence.completeness,
             encoding: OutputEncoding::Utf8,
         },
         stderr: OutputCapture {
@@ -4572,12 +4673,9 @@ fn forced_cargo_diagnostics_rejects_an_incomplete_result_shape() {
 fn forced_exec_tier_rejects_a_truncated_output_capture() {
     let outcome = forced_exec_outcome(
         UNSANDBOXED_EXEC_NAME,
-        direct_exec_result(
-            ExecutionConfinement::Unsandboxed,
-            ProcessOutcome::Exited { code: Some(0) },
+        direct_exec_result(DirectExecEvidence::unsandboxed_truncated(
             EXEC_FORCED_READ_ONLY_OUTPUT,
-            CaptureCompleteness::Truncated,
-        ),
+        )),
     );
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
@@ -4621,12 +4719,7 @@ fn unforced_exec_tier_passes_a_confined_zero_exit() {
 
 #[test]
 fn unforced_exec_tier_rejects_a_timed_out_process() {
-    let outcome = natural_exec_outcome(direct_exec_result(
-        ExecutionConfinement::FilesystemConfined,
-        ProcessOutcome::TimedOut,
-        "",
-        CaptureCompleteness::Complete,
-    ));
+    let outcome = natural_exec_outcome(direct_exec_result(DirectExecEvidence::timed_out()));
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
@@ -4636,12 +4729,7 @@ fn unforced_exec_tier_rejects_a_timed_out_process() {
 
 #[test]
 fn unforced_exec_tier_rejects_a_nonzero_exit() {
-    let outcome = natural_exec_outcome(direct_exec_result(
-        ExecutionConfinement::FilesystemConfined,
-        ProcessOutcome::Exited { code: Some(1) },
-        "",
-        CaptureCompleteness::Complete,
-    ));
+    let outcome = natural_exec_outcome(direct_exec_result(DirectExecEvidence::nonzero_exit()));
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
@@ -4651,14 +4739,8 @@ fn unforced_exec_tier_rejects_a_nonzero_exit() {
 
 #[test]
 fn unforced_exec_tier_reports_a_supervision_failure_as_infrastructure() {
-    let outcome = natural_exec_outcome(direct_exec_result(
-        ExecutionConfinement::FilesystemConfined,
-        ProcessOutcome::SupervisionFailed {
-            reason: ProcessSupervisionFailure::Wait,
-        },
-        "",
-        CaptureCompleteness::Complete,
-    ));
+    let outcome =
+        natural_exec_outcome(direct_exec_result(DirectExecEvidence::supervision_failure()));
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
@@ -4668,16 +4750,7 @@ fn unforced_exec_tier_reports_a_supervision_failure_as_infrastructure() {
 
 #[test]
 fn unforced_exec_tier_reports_sandbox_refusal_as_infrastructure() {
-    let outcome = natural_exec_outcome(direct_exec_result(
-        ExecutionConfinement::SandboxRefused {
-            availability: BwrapAvailability::Unusable,
-        },
-        ProcessOutcome::SpawnFailed {
-            reason: ProcessSpawnFailure::SandboxUnavailable,
-        },
-        "",
-        CaptureCompleteness::Complete,
-    ));
+    let outcome = natural_exec_outcome(direct_exec_result(DirectExecEvidence::sandbox_refusal()));
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
@@ -4686,14 +4759,33 @@ fn unforced_exec_tier_reports_sandbox_refusal_as_infrastructure() {
 }
 
 #[test]
+fn unforced_exec_tier_scores_the_explicit_approval_cap_as_a_miss() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        tool_results: Vec::new(),
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::ApprovalCapReached,
+            requests: vec![
+                denied_unsandboxed_request(Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)),
+                denied_unsandboxed_request(Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID)),
+                denied_unsandboxed_request(Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID + 1)),
+            ],
+            model_calls: MAX_NATURAL_MODEL_CALLS,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
 fn unforced_exec_tier_keeps_setup_failure_above_the_approval_cap() {
     let mut outcome = natural_exec_outcome(direct_exec_result(
-        ExecutionConfinement::SandboxSetupFailed,
-        ProcessOutcome::SpawnFailed {
-            reason: ProcessSpawnFailure::SandboxSetup,
-        },
-        "",
-        CaptureCompleteness::Complete,
+        DirectExecEvidence::sandbox_setup_failure(),
     ));
     outcome.snapshot.requests.push(successful_request(
         Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -4721,14 +4813,7 @@ fn unforced_exec_tier_keeps_setup_failure_above_the_approval_cap() {
 fn forced_sandboxed_exec_tier_reports_setup_failure_as_infrastructure() {
     let outcome = forced_exec_outcome(
         SANDBOXED_EXEC_NAME,
-        direct_exec_result(
-            ExecutionConfinement::SandboxSetupFailed,
-            ProcessOutcome::SpawnFailed {
-                reason: ProcessSpawnFailure::SandboxSetup,
-            },
-            "",
-            CaptureCompleteness::Complete,
-        ),
+        direct_exec_result(DirectExecEvidence::sandbox_setup_failure()),
     );
 
     assert_eq!(
