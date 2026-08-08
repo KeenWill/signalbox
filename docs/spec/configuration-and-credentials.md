@@ -858,11 +858,18 @@ The wait records which case it represents. An exhausted wait carries the
 complete policy-member exclusion snapshot described below. A contended wait
 carries that same frozen policy identity, every durable exclusion that removed a
 member, and the complete nonempty set of otherwise-admissible bounded members
-with their exact invocation-reservation identities and generations. A member's
-admission first locks the shared capacity rows for every bounded profile the
-preparation may select, in profile-reference byte order. The rows are
-profile-scoped rather than session- or pool-scoped, so concurrent sessions and
-distinct pools serialize against the same bound without a lock-order cycle.
+with their exact invocation-reservation identities and generations. A contended
+wait also carries the earliest unelapsed reset among those durable exclusions as
+its deadline, exactly as an exhausted wait does, and the scheduler makes it
+eligible when that deadline passes. Without it a turn contending on a bounded
+member would stay parked past the moment an excluded member became admissible
+again — visibly so for a chain-local reset, whose passage produces no separate
+durable availability update. A contended wait whose exclusions report no reset
+has no deadline, and its bounded members' completions remain its wake. A
+member's admission first locks the shared capacity rows for every bounded
+profile the preparation may select, in profile-reference byte order. The rows
+are profile-scoped rather than session- or pool-scoped, so concurrent sessions
+and distinct pools serialize against the same bound without a lock-order cycle.
 Under those locks the transaction counts live reservations, chooses the member,
 and acquires its `pending_spawn` reservation together with the call's `Prepared`
 record; a database constraint rejects a live count above the configured bound.
@@ -875,13 +882,16 @@ the next admission without revoking a reservation already committed — a live
 count above a freshly lowered bound drains as those invocations complete rather
 than terminating them. A turn already parked in a contended wait is not left
 behind by a raise: a configuration edit produces neither a reservation release
-nor an availability update, so startup re-evaluates every retained contended
-wait against the current registrations and makes eligible each one now under its
-profile's bound, including a profile whose bound was removed
+nor an availability update, so startup re-evaluates the retained contended waits
+themselves against the current registrations
 ([turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot)).
-Otherwise a raise would admit nothing until some unrelated older invocation
-happened to finish. Spawn failure or another pre-send closure releases that
-pending reservation.
+A wait whose profile is now unbounded becomes eligible outright; one whose
+profile is still bounded becomes eligible when that profile's surviving
+reservation count is below the current bound. Iterating waits rather than
+bounded profiles is what lets a removed bound be seen at all, since the profile
+it names is no longer in any bounded set. Otherwise a raise would admit nothing
+until some unrelated older invocation happened to finish. Spawn failure or
+another pre-send closure releases that pending reservation.
 
 Every `codex_home` invocation acquires a reservation, whether or not the profile
 currently declares a bound. The bound decides only whether preparation takes the
@@ -1137,6 +1147,17 @@ one, so a repeated trigger is idempotent on the exclusion and can never make a
 uniqueness conflict block the terminal observation that requires it. An operator
 clear takes the same lock, which is what lets a clear and a concurrent
 re-observation agree on which generation is current.
+
+Attaching a correlation also accumulates its reset evidence, because a
+reset-aware exclusion clears itself when its reported reset passes and a
+generation carrying a stale deadline would re-admit a member the provider is
+still refusing. The generation's effective reset is the latest reset any
+correlation attached to it reported, and an observation reporting no reset makes
+the generation indefinite. Indefinite is absorbing: once any correlation
+reported no reset, a later correlation carrying one does not restore a deadline,
+since the observation that reported none is evidence the provider named no
+recovery time. Only an operator clear, an availability probe, or another durable
+availability update ends an indefinite generation.
 
 Preparation is the other side of that race and joins the same protocol. Before
 it reads any member's exclusion state, it locks the action head of every member

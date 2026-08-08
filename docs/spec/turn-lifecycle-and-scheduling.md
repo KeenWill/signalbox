@@ -132,6 +132,20 @@ wait, creates a fresh `Prepared` successor attempt, and returns the same turn to
 whose reset has not passed, every durable membership exclusion, and every
 profile quarantine.
 
+Eligibility is permission to retry selection, not a guarantee of a slot. One
+release can make several contended waits eligible while admitting only one, so
+each release transaction reruns admission under the same capacity locks
+preparation takes. The transaction that acquires the freed reservation performs
+the release above. A transaction that finds no admissible member does not fail
+and does not leave its wait pointing at a reservation that no longer exists:
+under those locks it atomically replaces the wait's evidence with the current
+snapshot — the live reservation identities and generations now holding the
+bound, or the complete exclusion snapshot if the pool has meanwhile become
+exhausted — and the turn stays parked in the corresponding wait form. A
+reservation identity therefore never outlives the wait that names it, and losing
+a race costs a re-park rather than a failed turn or an admission above the
+bound.
+
 The wait has an exact occupied-slot control matrix. `steer` is accepted as
 ordinary pending steering bound to this source turn and remains pending until a
 release transaction consumes it with the fresh call. `stop_turn` is admitted:

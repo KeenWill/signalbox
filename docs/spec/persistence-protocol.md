@@ -1546,24 +1546,33 @@ wait must atomically retain the active turn slot and store a closed
 `exhausted`/`contended` discriminator plus the immutable pool-policy identity.
 The exhausted form stores every policy member's exclusion evidence and optional
 reset plus the optional earliest-reset deadline. The contended form stores every
-durable exclusion in the selection snapshot and the complete nonempty set of
+durable exclusion in the selection snapshot, the complete nonempty set of
 otherwise-admissible bounded members with their exact invocation-reservation
-identities and generations. One shared capacity row per bounded profile
-serializes reservation admission across sessions and pools. Preparation locks
-all candidate capacity rows in profile-reference byte order, counts their live
-reservation rows under those locks, and inserts the selected reservation with
-the `Prepared` call. Every `codex_home` invocation inserts a reservation
-regardless of whether its profile currently declares a bound; the bound decides
-only whether preparation takes that capacity lock and counts, so an unbounded
-profile records the same supervision evidence without serializing. A deferred
-constraint rejects a committed live count above the bound the profile's current
-registration declares; the bound is a live profile property rather than a frozen
-policy field, so it governs the next admission and never retroactively
-invalidates a committed reservation. Because every invocation is recorded, a
-bound newly lowered from unbounded is still enforced against complete startup
-fencing evidence rather than against only the invocations that were bounded when
-they started. Invocation completion releases its reservation and writes the wake
-signal atomically. Entering either wait ends the call-free current attempt as
+identities and generations, and the same optional earliest-reset deadline over
+those durable exclusions. One shared capacity row per bounded profile serializes
+reservation admission across sessions and pools. Preparation locks all candidate
+capacity rows in profile-reference byte order, counts their live reservation
+rows under those locks, and inserts the selected reservation with the `Prepared`
+call. Every `codex_home` invocation inserts a reservation regardless of whether
+its profile currently declares a bound; the bound decides only whether
+preparation takes that capacity lock and counts, so an unbounded profile records
+the same supervision evidence without serializing. A deferred constraint rejects
+a committed live count above the bound the profile's current registration
+declares; the bound is a live profile property rather than a frozen policy
+field, so it governs the next admission and never retroactively invalidates a
+committed reservation. Because every invocation is recorded, a bound newly
+lowered from unbounded is still enforced against complete startup fencing
+evidence rather than against only the invocations that were bounded when they
+started. Invocation completion releases its reservation and writes the wake
+signal atomically. One release can wake several waits while admitting one, so
+each woken transaction reruns admission under the same capacity locks. The one
+that acquires the freed reservation releases its wait; a transaction finding no
+admissible member instead atomically rewrites its own wait's evidence to the
+current snapshot under those locks — the live reservation identities and
+generations now holding the bound, or the complete exclusion snapshot when the
+pool has become exhausted — and stays parked. A deferred constraint therefore
+never has to reject a losing waiter's call, and no stored wait names a released
+reservation. Entering either wait ends the call-free current attempt as
 `WithoutStop(YieldedToDurableWait)` in the same transaction. Release atomically
 consumes the wait and creates its fresh `Prepared` successor attempt;
 `stop_turn` instead atomically consumes it, creates the fresh
@@ -1579,11 +1588,16 @@ It retains a `spawned` reservation owned by the live fenced process. A
 prior-process `pending_spawn` reservation is ambiguous because its child may
 have started before the identity update, so startup fails before scheduling
 rather than releasing it without process-death proof. After that reconciliation
-and before scheduling is enabled, startup counts each bounded profile's
-surviving live reservations under its capacity lock and makes eligible every
-retained `contended` wait now under that profile's current bound, so a bound
-raised or removed across a restart admits work without waiting for an unrelated
-release. These are the shapes required by
+and before scheduling is enabled, startup iterates the retained `contended`
+waits themselves rather than the currently bounded profiles, so a profile whose
+bound was removed still has an entry to evaluate. A wait naming a profile the
+current registration leaves unbounded becomes eligible outright, with no
+reservation count to compare against. For a wait naming a still-bounded profile,
+startup counts that profile's surviving live reservations under its capacity
+lock and makes the wait eligible when the count is below the current bound. A
+bound raised, lowered, or removed across a restart is therefore evaluated the
+same way, without waiting for an unrelated release. These are the shapes
+required by
 [turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
 Reconstitution and wake must fail closed on partial, stale, or mismatched
 evidence. This paragraph constrains that future schema; no present storage
