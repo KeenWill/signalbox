@@ -2202,8 +2202,7 @@ impl CaseSnapshot {
                                 }))
                     }
                     EvalFamily::Exec => {
-                        request.name == SANDBOXED_EXEC_NAME
-                            && request.arguments_text == EXEC_NATURAL_ARGUMENTS
+                        request.name == SANDBOXED_EXEC_NAME && exact_exec_natural_arguments(request)
                     }
                 }
         })
@@ -2386,6 +2385,14 @@ struct CaseOutcome {
     execution_completed: bool,
     tool_results: Vec<TrackedToolResult>,
     snapshot: CaseSnapshot,
+}
+
+fn exact_exec_natural_arguments(request: &RequestSnapshot) -> bool {
+    let Some(arguments) = request.arguments() else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(EXEC_NATURAL_ARGUMENTS)
+        .is_ok_and(|expected| arguments == expected)
 }
 
 impl CaseOutcome {
@@ -2901,6 +2908,38 @@ fn forced_tier_reports_infrastructure_for_an_exact_known_failed_attempt() {
         outcome.forced_disposition(),
         EvalDisposition::Infrastructure
     );
+}
+
+#[test]
+fn unforced_exec_tier_reports_a_normalized_exact_failure_as_infrastructure() -> EvalResult {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: true,
+            round_tripped: true,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(SANDBOXED_EXEC_NAME),
+                arguments_text: normalized_arguments_text(EXEC_NATURAL_ARGUMENTS)?,
+                attempt_succeeded: false,
+            }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Infrastructure
+    );
+    Ok(())
 }
 
 #[test]
