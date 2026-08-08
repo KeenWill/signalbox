@@ -1705,4 +1705,63 @@ mod tests {
             ]
         );
     }
+
+    /// Composition preserves each execution declaration's permission default:
+    /// the sandboxed command and the diagnostics reader stay automatic, while
+    /// the unsandboxed command keeps `AlwaysConfirm` — human-only regardless of
+    /// the dangerous session blanket. Only an ignored live smoke observed this
+    /// before, so a silent downgrade in the mapped composition could reach main
+    /// unnoticed.
+    #[test]
+    fn composed_execution_tools_keep_their_declared_permission_defaults() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
+        let (catalog, _executor) = DaemonTools::try_new(
+            || SystemTime::UNIX_EPOCH,
+            OfflineTransport,
+            MappedDaemonCredentialInputs {
+                web_search: OfflineCredentials,
+                code_host: OfflineCredentials,
+                github: OfflineCredentials,
+            },
+            OfflineSearchTransport,
+            OfflineWriter,
+            OfflineCodeHostTransport,
+            OfflineGitHubTransport,
+            GitHubEgressPolicy::github_api_only(),
+            LocalWorkspaceFileSystem,
+            workspace.path(),
+            git_identity(),
+            TokioProcessRunner::try_new(
+                std::env::current_exe().expect("test executable path is available"),
+            )
+            .expect("test executable can stand in for the unused supervisor"),
+            OfflineConversationPort,
+            OfflineConversationPort,
+            WebFetchEgressPolicy::deny_all(),
+        )
+        .expect("static daemon tools compile")
+        .into_parts();
+
+        let permission_default = |name: &str| {
+            let name = ToolName::try_new(String::from(name)).expect("fixture name is valid");
+            catalog
+                .definition(&name)
+                .expect("the execution tool remains composed")
+                .permission_default()
+        };
+
+        assert_eq!(
+            permission_default(SANDBOXED_EXEC_NAME),
+            signalbox_domain::ToolPermissionDefault::Auto
+        );
+        assert_eq!(
+            permission_default(CARGO_DIAGNOSTICS_NAME),
+            signalbox_domain::ToolPermissionDefault::Auto
+        );
+        assert_eq!(
+            permission_default(UNSANDBOXED_EXEC_NAME),
+            signalbox_domain::ToolPermissionDefault::AlwaysConfirm
+        );
+    }
 }
