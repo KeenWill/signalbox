@@ -331,7 +331,7 @@ jobs:
   # The matrix is generated from `.github/postgres-integration-suites.toml`:
   # one runner per shard, so a suite declaring one shard costs one runner and
   # still travels the same archive-and-partition path a sharded suite does.
-  # Only persistence is sharded today — 594 of the 832 ignored tests, and
+  # Only persistence is sharded today — 594 of the 861 ignored tests, and
   # 22m22s as a single job against roughly 7m at three ways.
   #
   # Runner cost, stated plainly: this asks for more runners than the matrix it

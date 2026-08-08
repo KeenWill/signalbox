@@ -47,15 +47,17 @@ endpoint locks were verified through this PR
 immutable evidence, snapshot projection, and typed outbox records were verified
 through this PR (`agent/model-settings-persistence`); the defaults-replacement
 pointer-lock admission is verified through this PR
-(`agent/model-settings-execution`). This page covers the Postgres representation
-in `crates/persistence` (source and migrations), migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+(`agent/model-settings-execution`). The runner placement loss-source,
+lost-before-pin, pre-pin replacement, and abandonment records are verified
+through this PR (`agent/runner-placement-loss-persistence`). This page covers the
+Postgres representation in `crates/persistence` (source and migrations),
+migration discipline, durable command storage and replay equality, the
+fail-closed reconstitution boundary, the lock protocol, pending-steering durable
+state, the corruption taxonomy, commit-ambiguity handling, and the transactional
+outbox. Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -294,6 +296,18 @@ Representation rules, all enforced in the schema:
   `without_stop` and `after_cancellation`, and model-call state
   `prepared`/`in_flight`/`cancellation_requested`/`terminal` with terminal
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
+- Migration `202608080100` closes runner placement history over
+  `runner_lost_before_pin`, `pre_pin_replaced`, sourced `runner_lost`, and
+  `abandoned` records. Every state retains its complete selector, request,
+  pinned, registration, grant-lineage, workspace, tool, and permission facts;
+  pre-pin reconstitution reads the exact replacement and lost predecessor
+  records instead of inferring history from a revision. The generic placement
+  snapshot writer refuses loss, either replacement, and abandonment because
+  those transitions require connection/loss, durable-command, scheduler, and
+  outbox authority outside the placement aggregate. **Committed unimplemented
+  functionality.** No present adapter installs those transitions; their
+  dedicated orchestration transactions will install these same checked records,
+  and direct snapshot storage cannot stand in for those transactions.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,

@@ -15,18 +15,20 @@ use std::{
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_domain::{
-    CanonicalCloneUrlDigest, CredentialDispatchAuthorization, CredentialProfileGrant,
-    CredentialProfileGrantReconstitutionInput, CredentialProfileGrantState, CredentialProfileName,
-    CredentialProfilePolicy, CredentialToolApproval, EndedToolAttempt, PinnedRunnerPlacement,
-    ProvisionedWorkspace, RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass,
-    RunnerCatalog, RunnerClaimedAttemptReplacement, RunnerCredentialGrantLineage,
-    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentReconstitutionInput,
-    RunnerEnrollmentState, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
-    RunnerLeaseId, RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation,
-    RunnerLeaseState, RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector,
-    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerToolPermissionOverride, RunnerToolPermissionOverrides, RunnerWorkingDirectory, SessionId,
-    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    AbandonedRunnerPlacement, CanonicalCloneUrlDigest, CredentialDispatchAuthorization,
+    CredentialProfileGrant, CredentialProfileGrantReconstitutionInput, CredentialProfileGrantState,
+    CredentialProfileName, CredentialProfilePolicy, CredentialToolApproval, EndedToolAttempt,
+    LostPinnedRunnerPlacement, PinnedRunnerPlacement, ProvisionedWorkspace, RunnerAdvertisement,
+    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
+    RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
+    RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerId,
+    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseLoss,
+    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
+    RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
+    RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
+    RunnerToolPermissionOverrides, RunnerWorkingDirectory, SessionId, SessionRunnerPin,
+    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
     ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind,
@@ -1289,8 +1291,34 @@ impl RunnerProtocolStore {
         registration: Option<&StoredValidatedRunnerRegistration>,
         grant: Option<&CredentialProfileGrant>,
     ) -> Result<(), RunnerProtocolStoreError> {
-        validate_placement_snapshot(placement, registration, grant)?;
+        self.store_placement_projection(placement, registration, grant, false)
+            .await
+    }
 
+    /// Stores a checked runner-replacement projection for PostgreSQL integration tests.
+    ///
+    /// Production replacement must use the dedicated command-authorized transaction;
+    /// this test-only surface exists so relational round trips can cover the committed
+    /// representation before that transaction is implemented.
+    #[cfg(feature = "postgres-integration")]
+    #[doc(hidden)]
+    pub async fn store_runner_replacement_projection_for_test(
+        &self,
+        placement: &SessionRunnerPlacement,
+        registration: &StoredValidatedRunnerRegistration,
+        grant: Option<&CredentialProfileGrant>,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        self.store_placement_projection(placement, Some(registration), grant, true)
+            .await
+    }
+
+    async fn store_placement_projection(
+        &self,
+        placement: &SessionRunnerPlacement,
+        registration: Option<&StoredValidatedRunnerRegistration>,
+        grant: Option<&CredentialProfileGrant>,
+        admit_test_runner_replacement: bool,
+    ) -> Result<(), RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(placement.session().into_uuid())
@@ -1304,12 +1332,38 @@ impl RunnerProtocolStore {
             .checked_add(1)
             .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
         let event_kind = classify_placement_event(prior.as_ref(), placement)?;
-        // Both replacement events install successor authority, so the supplied
+        // Loss propagation, either replacement, and abandonment each require
+        // authority outside the placement aggregate (connection/loss evidence,
+        // a durable replacement command, or the scheduler's empty-turn proof).
+        // Their relational representations are loadable here, but this generic
+        // snapshot writer must not fabricate the multi-aggregate transaction.
+        if matches!(
+            event_kind,
+            "runner_lost_before_pin"
+                | "pre_pin_replaced"
+                | "runner_lost"
+                | "runner_replaced"
+                | "abandoned"
+        ) && !(admit_test_runner_replacement && event_kind == "runner_replaced")
+        {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        let history = prospective_placement_reconstitution_history(
+            transaction.as_mut(),
+            prior.as_ref(),
+            event_kind,
+            placement,
+        )
+        .await?;
+        validate_placement_snapshot(placement, registration, grant, history)?;
+        // Every replacement event installs successor authority, so the supplied
         // registration must still be the enrollment-owned current revision of
         // an active enrollment at commit time, verified under the enrollment
         // row lock: a replacement prepared before a concurrent revocation or
         // re-registration is rejected rather than committed as stale authority.
-        if event_kind == "runner_replaced" || event_kind == "profile_replaced" {
+        if matches!(event_kind, "runner_replaced" | "profile_replaced") {
             let registration = registration.ok_or(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
             ))?;
@@ -1335,6 +1389,19 @@ impl RunnerProtocolStore {
                 return Err(RunnerProtocolStoreError::Domain(
                     RunnerDomainError::EnrollmentRevoked,
                 ));
+            }
+            if event_kind == "runner_replaced" {
+                let connection = load_connection_head_in(
+                    transaction.as_mut(),
+                    registration.registration().enrollment(),
+                )
+                .await?
+                .ok_or(RunnerProtocolCorruption::MissingCanonicalConnection)?;
+                if connection.state() != RunnerConnectionState::Connected {
+                    return Err(RunnerProtocolStoreError::Domain(
+                        RunnerDomainError::InvalidState,
+                    ));
+                }
             }
             let current: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
                 .bind(enrollment_id.into_uuid())
@@ -1373,6 +1440,10 @@ impl RunnerProtocolStore {
                 snapshot.decode_column::<Option<Uuid>>("registration_enrollment_id")?,
                 snapshot.decode_column::<Option<Decimal>>("registration_revision")?,
             )
+        } else if event_kind == "pre_pin_replaced" {
+            // The registration is checked under lock above, but the successor
+            // remains unpinned and therefore retains no registration snapshot.
+            (None, None)
         } else {
             stored_registration_identity(registration)
         };
@@ -1420,7 +1491,12 @@ impl RunnerProtocolStore {
         pin: &SessionRunnerPin,
         registration: &StoredValidatedRunnerRegistration,
     ) -> Result<(), RunnerProtocolStoreError> {
-        validate_placement_snapshot(&pin.placement, Some(registration), pin.grant.as_ref())?;
+        validate_placement_snapshot(
+            &pin.placement,
+            Some(registration),
+            pin.grant.as_ref(),
+            RunnerPlacementReconstitutionHistory::Initial,
+        )?;
         if pin.lease.state() != RunnerLeaseState::Offered {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
@@ -2786,6 +2862,19 @@ fn classify_placement_event(
     let prior_revision = decode_generation(prior.decode_column("placement_revision")?)?;
     let prior_state: String = prior.decode_column("state_kind")?;
     match (prior_state.as_str(), placement.state()) {
+        ("unpinned", SessionRunnerPlacementState::RunnerLostBeforePin(_))
+            if placement.revision() == prior_revision =>
+        {
+            Ok("runner_lost_before_pin")
+        }
+        ("runner_lost_before_pin", SessionRunnerPlacementState::Unpinned)
+            if placement.revision()
+                == prior_revision
+                    .checked_next()
+                    .ok_or(RunnerProtocolCorruption::GenerationExhausted)? =>
+        {
+            Ok("pre_pin_replaced")
+        }
         ("unpinned", SessionRunnerPlacementState::Pinned(_))
             if placement.revision() == prior_revision =>
         {
@@ -2812,6 +2901,14 @@ fn classify_placement_event(
         {
             Ok("profile_replaced")
         }
+        (
+            "runner_lost_before_pin",
+            SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(_)),
+        )
+        | (
+            "runner_lost",
+            SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(_)),
+        ) if placement.revision() == prior_revision => Ok("abandoned"),
         _ => Err(RunnerProtocolStoreError::Domain(
             RunnerDomainError::InvalidState,
         )),
@@ -2824,9 +2921,16 @@ fn placement_grant_origin(
     placement: &SessionRunnerPlacement,
 ) -> Result<Option<Decimal>, RunnerProtocolStoreError> {
     let lineage = match placement.state() {
-        SessionRunnerPlacementState::Unpinned => None,
-        SessionRunnerPlacementState::Pinned(pinned)
-        | SessionRunnerPlacementState::RunnerLost(pinned) => pinned.grant_lineage,
+        SessionRunnerPlacementState::Pinned(pinned) => pinned.grant_lineage,
+        SessionRunnerPlacementState::RunnerLost(lost) => lost.pinned().grant_lineage,
+        SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(lost)) => {
+            lost.pinned().grant_lineage
+        }
+        SessionRunnerPlacementState::Unpinned
+        | SessionRunnerPlacementState::RunnerLostBeforePin(_)
+        | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(_)) => {
+            None
+        }
     };
     let Some(lineage) = lineage else {
         return Ok(None);
@@ -2892,7 +2996,8 @@ async fn insert_placement_record(
              directory_selection_kind, requested_working_directory,
              requested_credential_profile_name, workspace_requirement_kind,
              requested_repository_key, requested_sandbox_profile,
-             permission_override_count, state_kind, pinned_runner_id,
+             permission_override_count, state_kind, lost_runner_id,
+             loss_source_kind, pinned_runner_id,
              pinned_working_directory, pinned_credential_profile_name,
              registration_enrollment_id, registration_revision,
              pinned_tool_count, workspace_repository_key,
@@ -2907,7 +3012,7 @@ async fn insert_placement_record(
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
              $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
              $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
-             $32, $33, $34, $35
+             $32, $33, $34, $35, $36, $37
          )",
     )
     .bind(placement.session().into_uuid())
@@ -2930,6 +3035,8 @@ async fn insert_placement_record(
     .bind(encode_sandbox(request.sandbox))
     .bind(count_decimal(permission_overrides.len())?)
     .bind(state.kind)
+    .bind(state.lost_runner)
+    .bind(state.loss_source)
     .bind(state.pinned_runner)
     .bind(state.pinned_directory)
     .bind(state.pinned_profile)
@@ -3003,10 +3110,8 @@ async fn insert_grant_if_new(
     let historical_registration;
     let mut tombstone_policy_event = None;
     let tombstone = matches!(
-        placement.state(),
-        SessionRunnerPlacementState::Pinned(pinned)
-            | SessionRunnerPlacementState::RunnerLost(pinned)
-            if pinned.credential_profile.is_none()
+        pinned_placement(placement.state()),
+        Some(pinned) if pinned.credential_profile.is_none()
     );
     let grant_registration = if !tombstone {
         registration
@@ -3350,21 +3455,39 @@ async fn decode_placement(
     let session = session_id(row.decode_column("session_id")?);
     let event = row.decode_column::<Decimal>("event_ordinal")?;
     let placement_revision = decode_generation(row.decode_column("placement_revision")?)?;
-    let permission_overrides = load_permission_overrides(connection, row).await?;
-    let request = SessionRunnerPlacementRequest {
-        selector: decode_selector(row)?,
-        working_directory: decode_directory(row)?,
-        credential_profile: row
-            .decode_column::<Option<String>>("requested_credential_profile_name")?
-            .map(profile_name)
-            .transpose()?,
-        workspace: decode_workspace_requirement(row)?,
-        sandbox: decode_sandbox(row.decode_column("requested_sandbox_profile")?)?,
-        permission_overrides: permission_overrides.clone(),
-    };
+    let request = decode_placement_request(connection, row).await?;
+    let permission_overrides = request.permission_overrides.clone();
     let state_kind: String = row.decode_column("state_kind")?;
+    let lost_runner = row
+        .decode_column::<Option<Uuid>>("lost_runner_id")?
+        .map(runner_id);
+    let loss_source = row
+        .decode_column::<Option<String>>("loss_source_kind")?
+        .map(|source| decode_loss_source(&source))
+        .transpose()?;
     let state = if state_kind == "unpinned" {
+        if lost_runner.is_some() || loss_source.is_some() {
+            return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+        }
         SessionRunnerPlacementState::Unpinned
+    } else if state_kind == "runner_lost_before_pin" {
+        let runner = lost_runner.ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+        if loss_source.is_some() {
+            return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+        }
+        SessionRunnerPlacementState::RunnerLostBeforePin(RunnerLostBeforePin::from_stored(runner))
+    } else if state_kind == "runner_abandoned"
+        && row
+            .decode_column::<Option<Uuid>>("pinned_runner_id")?
+            .is_none()
+    {
+        let runner = lost_runner.ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+        if loss_source.is_some() {
+            return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+        }
+        SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(
+            RunnerLostBeforePin::from_stored(runner),
+        ))
     } else {
         let tool_rows = sqlx::query(
             "SELECT tool_name, runner_required
@@ -3416,8 +3539,31 @@ async fn decode_placement(
         };
         match state_kind.as_str() {
             "pinned" => SessionRunnerPlacementState::Pinned(pinned),
-            "runner_lost" => SessionRunnerPlacementState::RunnerLost(pinned),
+            "runner_lost" => {
+                SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
+                    pinned,
+                    loss_source.ok_or(RunnerProtocolCorruption::IncompleteInventory)?,
+                ))
+            }
+            "runner_abandoned" => SessionRunnerPlacementState::RunnerAbandoned(
+                AbandonedRunnerPlacement::Pinned(Box::new(LostPinnedRunnerPlacement::from_stored(
+                    pinned,
+                    loss_source.ok_or(RunnerProtocolCorruption::IncompleteInventory)?,
+                ))),
+            ),
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+        }
+    };
+    let history = match &state {
+        SessionRunnerPlacementState::Unpinned
+        | SessionRunnerPlacementState::RunnerLostBeforePin(_)
+        | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(_)) => {
+            load_placement_reconstitution_history(connection, row).await?
+        }
+        SessionRunnerPlacementState::Pinned(_)
+        | SessionRunnerPlacementState::RunnerLost(_)
+        | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(_)) => {
+            RunnerPlacementReconstitutionHistory::Initial
         }
     };
     SessionRunnerPlacement::reconstitute(
@@ -3426,12 +3572,89 @@ async fn decode_placement(
             revision: placement_revision,
             request,
             state,
+            history,
         },
         session,
         registration,
         profileless_tombstone,
     )
     .map_err(RunnerProtocolStoreError::Domain)
+}
+
+async fn decode_placement_request(
+    connection: &mut PgConnection,
+    row: &PgRow,
+) -> Result<SessionRunnerPlacementRequest, RunnerProtocolStoreError> {
+    Ok(SessionRunnerPlacementRequest {
+        selector: decode_selector(row)?,
+        working_directory: decode_directory(row)?,
+        credential_profile: row
+            .decode_column::<Option<String>>("requested_credential_profile_name")?
+            .map(profile_name)
+            .transpose()?,
+        workspace: decode_workspace_requirement(row)?,
+        sandbox: decode_sandbox(row.decode_column("requested_sandbox_profile")?)?,
+        permission_overrides: load_permission_overrides(connection, row).await?,
+    })
+}
+
+async fn load_placement_reconstitution_history(
+    connection: &mut PgConnection,
+    row: &PgRow,
+) -> Result<RunnerPlacementReconstitutionHistory, RunnerProtocolStoreError> {
+    let revision = decode_generation(row.decode_column("placement_revision")?)?;
+    if revision == RunnerGeneration::one() {
+        return Ok(RunnerPlacementReconstitutionHistory::Initial);
+    }
+    let session = row.decode_column::<Uuid>("session_id")?;
+    let origins = sqlx::query(
+        "SELECT *
+           FROM runner_session_placement_record
+          WHERE session_id = $1
+            AND placement_revision = $2
+            AND event_kind = 'pre_pin_replaced'
+          ORDER BY event_ordinal",
+    )
+    .bind(session)
+    .bind(Decimal::from(revision.get()))
+    .fetch_all(&mut *connection)
+    .await?;
+    let [origin] = origins.as_slice() else {
+        return Err(RunnerProtocolCorruption::MissingCanonicalPlacement.into());
+    };
+    let origin_ordinal = decode_u64(origin.decode_column("event_ordinal")?)?;
+    let predecessor_ordinal = origin_ordinal
+        .checked_sub(1)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+    let predecessor = sqlx::query(
+        "SELECT *
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_ordinal = $2",
+    )
+    .bind(session)
+    .bind(Decimal::from(predecessor_ordinal))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+    let predecessor_kind: String = predecessor.decode_column("event_kind")?;
+    let predecessor_state: String = predecessor.decode_column("state_kind")?;
+    if predecessor_kind != "runner_lost_before_pin" || predecessor_state != "runner_lost_before_pin"
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let prior_revision = decode_generation(predecessor.decode_column("placement_revision")?)?;
+    let lost_runner = predecessor
+        .decode_column::<Option<Uuid>>("lost_runner_id")?
+        .map(runner_id)
+        .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+    let prior_request = decode_placement_request(connection, &predecessor).await?;
+    let replacement_request = decode_placement_request(connection, origin).await?;
+    Ok(RunnerPlacementReconstitutionHistory::PrePinReplacement {
+        prior_revision,
+        lost_runner,
+        prior_request: Box::new(prior_request),
+        replacement_request: Box::new(replacement_request),
+    })
 }
 
 fn decode_provisioned_workspace(
@@ -3983,14 +4206,12 @@ fn validate_placement_snapshot(
     placement: &SessionRunnerPlacement,
     registration: Option<&StoredValidatedRunnerRegistration>,
     grant: Option<&CredentialProfileGrant>,
+    history: RunnerPlacementReconstitutionHistory,
 ) -> Result<(), RunnerProtocolStoreError> {
-    let profileless_tombstone = match (placement.state(), grant) {
-        (
-            SessionRunnerPlacementState::Pinned(pinned)
-            | SessionRunnerPlacementState::RunnerLost(pinned),
-            Some(grant),
-        ) if pinned.credential_profile.is_none()
-            && grant.state() == CredentialProfileGrantState::Revoked =>
+    let profileless_tombstone = match (pinned_placement(placement.state()), grant) {
+        (Some(pinned), Some(grant))
+            if pinned.credential_profile.is_none()
+                && grant.state() == CredentialProfileGrantState::Revoked =>
         {
             Some(grant)
         }
@@ -4002,6 +4223,7 @@ fn validate_placement_snapshot(
             revision: placement.revision(),
             request: placement.request().clone(),
             state: placement.state().clone(),
+            history,
         },
         placement.session(),
         registration.map(StoredValidatedRunnerRegistration::registration),
@@ -4013,13 +4235,9 @@ fn validate_placement_snapshot(
             RunnerProtocolCorruption::MissingCanonicalRegistration,
         ));
     }
-    let binding_matches = match (placement.state(), grant) {
-        (SessionRunnerPlacementState::Unpinned, None) => true,
-        (
-            SessionRunnerPlacementState::Pinned(pinned)
-            | SessionRunnerPlacementState::RunnerLost(pinned),
-            Some(grant),
-        ) => match pinned.credential_profile.as_ref() {
+    let binding_matches = match (pinned_placement(placement.state()), grant) {
+        (None, None) => true,
+        (Some(pinned), Some(grant)) => match pinned.credential_profile.as_ref() {
             Some(profile) => {
                 profile == grant.profile()
                     && placement.session() == grant.session()
@@ -4033,12 +4251,10 @@ fn validate_placement_snapshot(
                     && pinned.grant_lineage == Some(grant.lineage())
             }
         },
-        (
-            SessionRunnerPlacementState::Pinned(pinned)
-            | SessionRunnerPlacementState::RunnerLost(pinned),
-            None,
-        ) => pinned.credential_profile.is_none() && pinned.grant_lineage.is_none(),
-        (SessionRunnerPlacementState::Unpinned, Some(_)) => false,
+        (Some(pinned), None) => {
+            pinned.credential_profile.is_none() && pinned.grant_lineage.is_none()
+        }
+        (None, Some(_)) => false,
     };
     if !binding_matches {
         return Err(RunnerProtocolStoreError::Domain(
@@ -4046,6 +4262,59 @@ fn validate_placement_snapshot(
         ));
     }
     Ok(())
+}
+
+fn pinned_placement(state: &SessionRunnerPlacementState) -> Option<&PinnedRunnerPlacement> {
+    match state {
+        SessionRunnerPlacementState::Pinned(pinned) => Some(pinned),
+        SessionRunnerPlacementState::RunnerLost(lost) => Some(lost.pinned()),
+        SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(lost)) => {
+            Some(lost.pinned())
+        }
+        SessionRunnerPlacementState::Unpinned
+        | SessionRunnerPlacementState::RunnerLostBeforePin(_)
+        | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(_)) => {
+            None
+        }
+    }
+}
+
+async fn prospective_placement_reconstitution_history(
+    connection: &mut PgConnection,
+    prior: Option<&PgRow>,
+    event_kind: &str,
+    placement: &SessionRunnerPlacement,
+) -> Result<RunnerPlacementReconstitutionHistory, RunnerProtocolStoreError> {
+    if placement.revision() == RunnerGeneration::one()
+        || matches!(
+            placement.state(),
+            SessionRunnerPlacementState::Pinned(_)
+                | SessionRunnerPlacementState::RunnerLost(_)
+                | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(_))
+        )
+    {
+        return Ok(RunnerPlacementReconstitutionHistory::Initial);
+    }
+    let prior = prior.ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+    if event_kind != "pre_pin_replaced" {
+        return load_placement_reconstitution_history(connection, prior).await;
+    }
+    let prior_revision = decode_generation(prior.decode_column("placement_revision")?)?;
+    let prior_kind: String = prior.decode_column("event_kind")?;
+    let prior_state: String = prior.decode_column("state_kind")?;
+    if prior_kind != "runner_lost_before_pin" || prior_state != "runner_lost_before_pin" {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let lost_runner = prior
+        .decode_column::<Option<Uuid>>("lost_runner_id")?
+        .map(runner_id)
+        .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+    Ok(RunnerPlacementReconstitutionHistory::PrePinReplacement {
+        prior_revision,
+        lost_runner,
+        prior_request: Box::new(decode_placement_request(connection, prior).await?),
+        replacement_request: Box::new(placement.request().clone()),
+    })
 }
 
 fn grant_input(grant: &CredentialProfileGrant) -> CredentialProfileGrantReconstitutionInput {
@@ -4111,6 +4380,8 @@ fn require_stored_lease_identity(
 
 struct EncodedPlacementState<'a> {
     kind: &'static str,
+    lost_runner: Option<Uuid>,
+    loss_source: Option<&'static str>,
     pinned_runner: Option<Uuid>,
     pinned_directory: Option<&'a str>,
     pinned_profile: Option<&'a str>,
@@ -4131,10 +4402,12 @@ struct EncodedPlacementState<'a> {
 }
 
 fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlacementState<'_> {
-    let (state_kind, pinned) = match state {
+    let (state_kind, pinned, lost_runner, loss_source) = match state {
         SessionRunnerPlacementState::Unpinned => {
             return EncodedPlacementState {
                 kind: "unpinned",
+                lost_runner: None,
+                loss_source: None,
                 pinned_runner: None,
                 pinned_directory: None,
                 pinned_profile: None,
@@ -4154,8 +4427,67 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
                 workspace_revision: None,
             };
         }
-        SessionRunnerPlacementState::Pinned(pinned) => ("pinned", pinned),
-        SessionRunnerPlacementState::RunnerLost(pinned) => ("runner_lost", pinned),
+        SessionRunnerPlacementState::RunnerLostBeforePin(lost) => {
+            return EncodedPlacementState {
+                kind: "runner_lost_before_pin",
+                lost_runner: Some(lost.runner().into_uuid()),
+                loss_source: None,
+                pinned_runner: None,
+                pinned_directory: None,
+                pinned_profile: None,
+                grant_lineage: None,
+                tools: Vec::new(),
+                runner_required_tools: BTreeSet::new(),
+                workspace_repository: None,
+                workspace_directory: None,
+                workspace_manifest: None,
+                workspace_placement_revision: None,
+                workspace_clone_url_digest: None,
+                workspace_credential_profile: None,
+                workspace_sandbox: None,
+                workspace_relative_path: None,
+                workspace_recovery_kind: None,
+                workspace_branch_name: None,
+                workspace_revision: None,
+            };
+        }
+        SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(lost)) => {
+            return EncodedPlacementState {
+                kind: "runner_abandoned",
+                lost_runner: Some(lost.runner().into_uuid()),
+                loss_source: None,
+                pinned_runner: None,
+                pinned_directory: None,
+                pinned_profile: None,
+                grant_lineage: None,
+                tools: Vec::new(),
+                runner_required_tools: BTreeSet::new(),
+                workspace_repository: None,
+                workspace_directory: None,
+                workspace_manifest: None,
+                workspace_placement_revision: None,
+                workspace_clone_url_digest: None,
+                workspace_credential_profile: None,
+                workspace_sandbox: None,
+                workspace_relative_path: None,
+                workspace_recovery_kind: None,
+                workspace_branch_name: None,
+                workspace_revision: None,
+            };
+        }
+        SessionRunnerPlacementState::Pinned(pinned) => ("pinned", pinned, None, None),
+        SessionRunnerPlacementState::RunnerLost(lost) => (
+            "runner_lost",
+            lost.pinned(),
+            Some(lost.pinned().runner.into_uuid()),
+            Some(encode_loss_source(lost.source())),
+        ),
+        SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(lost)) => (
+            "runner_abandoned",
+            lost.pinned(),
+            Some(lost.pinned().runner.into_uuid()),
+            Some(encode_loss_source(lost.source())),
+        ),
     };
     let workspace = pinned.workspace.as_ref();
     let (workspace_recovery_kind, workspace_branch_name, workspace_revision) = workspace
@@ -4164,6 +4496,8 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
         .unwrap_or((None, None, None));
     EncodedPlacementState {
         kind: state_kind,
+        lost_runner,
+        loss_source,
         pinned_runner: Some(pinned.runner.into_uuid()),
         pinned_directory: Some(pinned.working_directory.as_str()),
         pinned_profile: pinned
@@ -4191,6 +4525,13 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
         workspace_recovery_kind,
         workspace_branch_name,
         workspace_revision,
+    }
+}
+
+const fn encode_loss_source(source: RunnerPlacementLossSource) -> &'static str {
+    match source {
+        RunnerPlacementLossSource::Connection => "connection",
+        RunnerPlacementLossSource::Registration => "registration",
     }
 }
 
@@ -4402,6 +4743,14 @@ fn decode_sandbox(value: String) -> Result<RunnerSandboxProfile, RunnerProtocolS
     match value.as_str() {
         "ambient" => Ok(RunnerSandboxProfile::Ambient),
         "workspace_restricted" => Ok(RunnerSandboxProfile::WorkspaceRestricted),
+        _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+    }
+}
+
+fn decode_loss_source(value: &str) -> Result<RunnerPlacementLossSource, RunnerProtocolStoreError> {
+    match value {
+        "connection" => Ok(RunnerPlacementLossSource::Connection),
+        "registration" => Ok(RunnerPlacementLossSource::Registration),
         _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
     }
 }
@@ -4773,6 +5122,8 @@ pub enum RunnerProtocolCorruption {
     MissingCanonicalAudit,
     /// Canonical registration state is absent.
     MissingCanonicalRegistration,
+    /// Canonical physical connection state is absent.
+    MissingCanonicalConnection,
     /// Canonical placement state is absent.
     MissingCanonicalPlacement,
     /// Canonical credential-grant state is absent.
@@ -4802,6 +5153,9 @@ impl fmt::Display for RunnerProtocolCorruption {
             }
             Self::MissingCanonicalRegistration => {
                 formatter.write_str("canonical runner registration is missing")
+            }
+            Self::MissingCanonicalConnection => {
+                formatter.write_str("canonical runner connection is missing")
             }
             Self::MissingCanonicalPlacement => {
                 formatter.write_str("canonical runner placement is missing")
