@@ -1156,7 +1156,8 @@ mod tests {
         time::{Duration, Instant, SystemTime},
     };
 
-    use serde::{Deserialize, Serialize};
+    use expect_test::expect;
+    use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
     use serde_json::value::RawValue;
     use signalbox_application::ToolCatalog;
     use signalbox_application::ToolInputSchema;
@@ -1521,7 +1522,21 @@ mod tests {
         jsonrpc: String,
         id: u64,
         result: Option<ListedBridgeResult>,
-        error: Option<Box<RawValue>>,
+        #[serde(
+            default,
+            rename = "error",
+            deserialize_with = "deserialize_present_json_member"
+        )]
+        error_present: bool,
+    }
+
+    fn deserialize_present_json_member<'de, DeserializerType>(
+        deserializer: DeserializerType,
+    ) -> Result<bool, DeserializerType::Error>
+    where
+        DeserializerType: Deserializer<'de>,
+    {
+        IgnoredAny::deserialize(deserializer).map(|_| true)
     }
 
     #[derive(Deserialize)]
@@ -1539,7 +1554,7 @@ mod tests {
 
     impl ListedBridgeResponse {
         fn into_tools(self, request_id: u64) -> Option<Vec<ComparableBridgeTool>> {
-            (self.jsonrpc == "2.0" && self.id == request_id && self.error.is_none())
+            (self.jsonrpc == "2.0" && self.id == request_id && !self.error_present)
                 .then_some(self.result?)
                 .map(|result| {
                     result
@@ -1599,15 +1614,11 @@ mod tests {
     #[test]
     fn bridge_catalog_projects_definition_fields_into_mcp_shape() {
         let definition = synthetic_bridge_tool_definition();
-        let expected = format!(
-            r#"{{"tools":[{{"name":"{SYNTHETIC_BRIDGE_TOOL_NAME}","description":"{SYNTHETIC_BRIDGE_TOOL_DESCRIPTION}","inputSchema":{SYNTHETIC_BRIDGE_TOOL_SCHEMA}}}]}}"#
-        );
+        let observed = String::from_utf8(bridge_catalog(&[definition]))
+            .expect("bridge catalog is valid UTF-8");
 
-        assert_eq!(
-            String::from_utf8(bridge_catalog(&[definition]))
-                .expect("bridge catalog is valid UTF-8"),
-            expected
-        );
+        expect![[r#"{"tools":[{"name":"synthetic_bridge_tool","description":"Projects a synthetic bridge tool.","inputSchema":{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}}]}"#]]
+            .assert_eq(&observed);
     }
 
     struct BridgeArtifactSelection {
@@ -1626,6 +1637,12 @@ mod tests {
         current_executable: &'a Path,
         configured: &'a Path,
         invocation_directory: &'a Path,
+        known_targets: &'a BTreeSet<OsString>,
+    }
+
+    struct ConfiguredTargetMatchInput<'a> {
+        current_executable: &'a Path,
+        candidate: &'a Path,
         known_targets: &'a BTreeSet<OsString>,
     }
 
@@ -1707,29 +1724,26 @@ mod tests {
             .then(|| input.invocation_directory.join(input.configured))
             .and_then(|candidate| fs::canonicalize(candidate).ok())
             .filter(|candidate| {
-                configured_target_matches_executable(
-                    input.current_executable,
+                configured_target_matches_executable(ConfiguredTargetMatchInput {
+                    current_executable: input.current_executable,
                     candidate,
-                    input.known_targets,
-                )
+                    known_targets: input.known_targets,
+                })
             })
     }
 
-    fn configured_target_matches_executable(
-        current_executable: &Path,
-        candidate: &Path,
-        known_targets: &BTreeSet<OsString>,
-    ) -> bool {
-        let artifact_parent = current_executable
+    fn configured_target_matches_executable(input: ConfiguredTargetMatchInput<'_>) -> bool {
+        let artifact_parent = input
+            .current_executable
             .parent()
             .and_then(Path::parent)
             .and_then(Path::parent);
         artifact_parent.is_some_and(|artifact_parent| {
-            artifact_parent == candidate
-                || artifact_parent.parent() == Some(candidate)
+            artifact_parent == input.candidate
+                || artifact_parent.parent() == Some(input.candidate)
                     && artifact_parent
                         .file_name()
-                        .is_some_and(|name| known_targets.contains(name))
+                        .is_some_and(|name| input.known_targets.contains(name))
         })
     }
 
@@ -3291,6 +3305,7 @@ mod tests {
     }
 
     const SYNTHETIC_BRIDGE_READER_ERROR_KIND: ErrorKind = ErrorKind::BrokenPipe;
+    const SYNTHETIC_BRIDGE_READER_ERROR_MESSAGE: &str = "synthetic failure";
 
     struct FailingBridgeReader;
 
@@ -3298,7 +3313,7 @@ mod tests {
         fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
             Err(io::Error::new(
                 SYNTHETIC_BRIDGE_READER_ERROR_KIND,
-                "synthetic failure",
+                SYNTHETIC_BRIDGE_READER_ERROR_MESSAGE,
             ))
         }
     }
@@ -3307,7 +3322,7 @@ mod tests {
         fn fill_buf(&mut self) -> io::Result<&[u8]> {
             Err(io::Error::new(
                 SYNTHETIC_BRIDGE_READER_ERROR_KIND,
-                "synthetic failure",
+                SYNTHETIC_BRIDGE_READER_ERROR_MESSAGE,
             ))
         }
 
@@ -3539,6 +3554,17 @@ mod tests {
     fn raw_list_response_rejects_result_and_error_together() {
         let response = format!(
             r#"{{"jsonrpc":"2.0","id":{MCP_LIST_TOOLS_REQUEST_ID},"result":{{"tools":[]}},"error":{{"code":-32603,"message":"synthetic error"}}}}"#
+        );
+        let response: ListedBridgeResponse =
+            serde_json::from_str(&response).expect("synthetic list response is valid JSON");
+
+        assert_eq!(response.into_tools(MCP_LIST_TOOLS_REQUEST_ID), None);
+    }
+
+    #[test]
+    fn raw_list_response_rejects_result_and_null_error_together() {
+        let response = format!(
+            r#"{{"jsonrpc":"2.0","id":{MCP_LIST_TOOLS_REQUEST_ID},"result":{{"tools":[]}},"error":null}}"#
         );
         let response: ListedBridgeResponse =
             serde_json::from_str(&response).expect("synthetic list response is valid JSON");

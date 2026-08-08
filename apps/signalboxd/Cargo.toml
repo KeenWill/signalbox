@@ -90,6 +90,7 @@ url = "2.5.8"
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 
 [dev-dependencies]
+expect-test = "1.5.1"
 git2 = { version = "0.21.0", default-features = false, features = ["unstable-sha256"] }
 opentelemetry_sdk = { version = "0.32.0", default-features = false, features = [
     "testing",
