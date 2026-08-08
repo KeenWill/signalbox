@@ -73,7 +73,8 @@ pub enum ToolContractCompileError {
 ///
 /// It then folds a schemars internally-tagged enum root — rendered as a
 /// bare `oneOf` with no root `type` — into the object-rooted shape every
-/// function-tool wire requires. See [`object_rooted_schema`].
+/// function-tool wire requires. See `object_rooted_schema` for the fold's
+/// exact terms and the roots it declines to touch.
 pub fn rendered_contract_schema<Contract: ToolContract + ?Sized>() -> serde_json::Value {
     let mut value = schemars::SchemaGenerator::default()
         .into_root_schema_for::<Contract::Arguments>()

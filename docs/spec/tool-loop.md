@@ -11,6 +11,10 @@ version cross-link was re-verified through this PR
 The session-delegation scheduling executor and daemon catalog composition are
 verified against PR #462 (`agent/delegation-runtime-daemon-v2`).
 
+The object root every advertised argument schema declares, and the fold that
+renders an internally tagged argument type into it, are verified through this PR
+(`agent/object-rooted-tool-schemas`).
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was

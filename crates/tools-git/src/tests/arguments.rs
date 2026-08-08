@@ -52,12 +52,14 @@ fn branch_argument_rejects_the_reserved_head_shorthand_before_execution() {
 /// so both scopes still decode to exactly the same operation.
 #[test]
 fn diff_arguments_decode_unchanged_under_the_object_rooted_schema() {
+    let requested_base = "refs/heads/main";
+    let requested_head = "HEAD";
     let worktree = NormalizedToolArguments::try_from_provider_text(
         serde_json::json!({"scope": "worktree"}).to_string(),
     )
     .expect("JSON arguments normalize");
     let revisions = NormalizedToolArguments::try_from_provider_text(
-        serde_json::json!({"scope": "revisions", "base": "refs/heads/main", "head": "HEAD"})
+        serde_json::json!({"scope": "revisions", "base": requested_base, "head": requested_head})
             .to_string(),
     )
     .expect("JSON arguments normalize");
@@ -74,8 +76,8 @@ fn diff_arguments_decode_unchanged_under_the_object_rooted_schema() {
     let LocalOperation::Diff(GitDiffArguments::Revisions { base, head }) = decoded_revisions else {
         panic!("revision arguments decode as the revision scope");
     };
-    assert_eq!(base, "refs/heads/main");
-    assert_eq!(head, "HEAD");
+    assert_eq!(base, requested_base);
+    assert_eq!(head, requested_head);
 }
 
 /// The flat advertised object cannot state that `base` and `head` belong only

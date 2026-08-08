@@ -40,7 +40,8 @@ pub(crate) const GOAL_DECLARE_SCHEMA: &str = r#"{
                 "user_input_required",
                 "external_change_required",
                 "authorization_required"
-            ]
+            ],
+            "type": "string"
         },
         "transition": {
             "description": "`achieved`: the commissioned goal is complete. Takes no other property. `blocked`: the commissioned goal cannot proceed. Requires `reason`.",
