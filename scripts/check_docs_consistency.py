@@ -2580,15 +2580,16 @@ def rust_module_graph(
 
 @dataclass(frozen=True)
 class IgnoredTestSelection:
-    """One suite's ignored-test selection: its package, minus its exclusions.
+    """One suite's ignored-test selection within one Cargo target.
 
-    A suite archives and runs every test target of its package, so membership
-    is positive by default and `skips` is the only narrowing. Each entry is a
-    test-name substring, matched the way both libtest's `--skip` and nextest's
-    `not test(...)` match one.
+    Binary includes and excludes partition same-package targets before each
+    skip entry narrows registered test names the way both libtest's `--skip`
+    and nextest's `not test(...)` do.
     """
 
     skips: tuple[str, ...]
+    includes: tuple[str, ...]
+    excludes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -2612,10 +2613,10 @@ def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
     test` to `cargo nextest`. `check_suite_manifest` gates the two sides
     against each other so the manifest cannot drift from what CI runs.
 
-    Each suite archives and runs the whole package's test targets, which is
-    what `--tests` selected before and what nextest's default target selection
-    does now, so the selection is the package's ignored tests minus the
-    manifest's skips.
+    Each suite archives its package and the run filter selects the manifest's
+    included targets, removes its excluded targets, then removes its skipped
+    test names. With no binary fields this is the whole package, matching the
+    prior `--tests` selection.
 
     A repository with no manifest runs no ignored tests in CI, which is the
     same answer the workflow-parsing predecessor gave for a repository with no
@@ -2628,7 +2629,11 @@ def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
         IgnoredTestRun(
             package=suite.package,
             features=suite.features,
-            selection=IgnoredTestSelection(skips=tuple(sorted(suite.skip))),
+            selection=IgnoredTestSelection(
+                skips=tuple(sorted(suite.skip)),
+                includes=tuple(sorted(suite.include_binaries)),
+                excludes=tuple(sorted(suite.exclude_binaries)),
+            ),
         )
         for suite in postgres_integration_suites.load_suites(root)
     ]
@@ -2763,9 +2768,23 @@ def ignored_test_selections_by_target(
         for target in cargo_test_roots(package):
             if not set(required.get(target, ())) <= enabled:
                 continue
+            target_name = target.stem
+            if run.selection.includes and target_name not in run.selection.includes:
+                continue
+            if target_name in run.selection.excludes:
+                continue
             selected.setdefault(target, set()).add(run.selection)
     return {
-        target: tuple(sorted(selections, key=lambda selection: selection.skips))
+        target: tuple(
+            sorted(
+                selections,
+                key=lambda selection: (
+                    selection.includes,
+                    selection.excludes,
+                    selection.skips,
+                ),
+            )
+        )
         for target, selections in selected.items()
     }
 
@@ -2887,7 +2906,14 @@ def rust_sources(root: Path) -> list[RustSource]:
             for selection in ignored_by_target.get(target, ())
         }
         source.ignored_test_selections = tuple(
-            sorted(ignored_selections, key=lambda selection: selection.skips)
+            sorted(
+                ignored_selections,
+                key=lambda selection: (
+                    selection.includes,
+                    selection.excludes,
+                    selection.skips,
+                ),
+            )
         )
     return prepared
 
