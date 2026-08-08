@@ -1594,23 +1594,6 @@ mod tests {
         )
     }
 
-    fn deeply_nested_bridge_tool_definition() -> ToolDefinition {
-        let depth = 512;
-        let schema = format!(
-            "{{\"value\":{}null{}}}",
-            "[".repeat(depth),
-            "]".repeat(depth)
-        );
-        ToolDefinition::new(
-            ToolName::try_new(String::from(SYNTHETIC_BRIDGE_TOOL_NAME))
-                .expect("synthetic bridge tool name is valid"),
-            String::from(SYNTHETIC_BRIDGE_TOOL_DESCRIPTION),
-            ToolInputSchema::try_new(schema).expect("deep bounded bridge schema is valid"),
-            ToolPermissionDefault::Confirm,
-            ToolEffectClass::EffectFree,
-        )
-    }
-
     #[test]
     fn bridge_catalog_projects_definition_fields_into_mcp_shape() {
         let definition = synthetic_bridge_tool_definition();
@@ -1623,19 +1606,6 @@ mod tests {
                 .expect("bridge catalog is valid UTF-8"),
             expected
         );
-    }
-
-    #[test]
-    fn claude_mcp_bridge_lists_a_deep_schema_without_building_a_value_tree() {
-        let definition = deeply_nested_bridge_tool_definition();
-        let definitions = std::slice::from_ref(&definition);
-        let expected = expected_bridge_tools(definitions);
-        let mut fixture = McpBridgeFixture::start_with_definitions(definitions);
-        fixture.initialize();
-        let listed = fixture.list_tools();
-        fixture.finish();
-
-        assert_eq!(listed, expected);
     }
 
     struct BridgeArtifactSelection {
@@ -4239,12 +4209,6 @@ mod tests {
             let catalog = mapped_daemon_catalog(workspace.path());
             let definitions = catalog.definitions();
             Self::start_with_workspace_and_definitions(workspace, &definitions)
-        }
-
-        #[track_caller]
-        fn start_with_definitions(definitions: &[ToolDefinition]) -> Self {
-            let workspace = tempfile::tempdir().expect("workspace root exists");
-            Self::start_with_workspace_and_definitions(workspace, definitions)
         }
 
         #[track_caller]

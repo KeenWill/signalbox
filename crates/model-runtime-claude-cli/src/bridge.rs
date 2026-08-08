@@ -35,18 +35,6 @@ pub(crate) struct CatalogTool {
     pub(crate) input_schema: Box<RawValue>,
 }
 
-#[derive(Serialize)]
-struct ListToolsResponse<'a> {
-    jsonrpc: &'static str,
-    id: serde_json::Value,
-    result: ListToolsResult<'a>,
-}
-
-#[derive(Serialize)]
-struct ListToolsResult<'a> {
-    tools: &'a [CatalogTool],
-}
-
 #[derive(Deserialize)]
 struct Request {
     #[serde(default)]
@@ -148,13 +136,12 @@ fn serve(catalog_path: PathBuf, ready_path: PathBuf) -> ExitCode {
         let response = match request.method.as_str() {
             "initialize" => initialize_response(request.id, &request.params),
             "tools/list" => {
-                let response = ListToolsResponse {
-                    jsonrpc: "2.0",
-                    id: request.id.unwrap_or(serde_json::Value::Null),
-                    result: ListToolsResult {
-                        tools: &catalog.tools,
-                    },
-                };
+                let response = result_response(
+                    request.id,
+                    serde_json::json!({
+                        "tools": &catalog.tools,
+                    }),
+                );
                 if write_response(&mut output, &response).is_err() {
                     return ExitCode::FAILURE;
                 }
@@ -178,14 +165,10 @@ fn catalog_is_valid(catalog: &Catalog) -> bool {
     catalog.tools.iter().all(|tool| {
         valid_mcp_tool_name(&tool.name)
             && names.insert(tool.name.as_str())
-            // `RawValue` deserialization already proved complete JSON syntax;
-            // inspect only its root token so supported deep schemas stay raw.
-            && tool
-                .input_schema
-                .get()
-                .bytes()
-                .find(|byte| !byte.is_ascii_whitespace())
-                == Some(b'{')
+            && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                tool.input_schema.get(),
+            )
+            .is_ok()
     })
 }
 
@@ -260,10 +243,7 @@ fn error_response(id: Option<serde_json::Value>, code: i64, message: &str) -> se
     })
 }
 
-fn write_response(
-    output: &mut impl Write,
-    response: &(impl Serialize + ?Sized),
-) -> std::io::Result<()> {
+fn write_response(output: &mut impl Write, response: &serde_json::Value) -> std::io::Result<()> {
     serde_json::to_writer(&mut *output, response).map_err(std::io::Error::other)?;
     output.write_all(b"\n")?;
     output.flush()
