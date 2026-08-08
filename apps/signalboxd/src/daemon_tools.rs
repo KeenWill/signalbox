@@ -1749,10 +1749,13 @@ mod tests {
     #[track_caller]
     fn rustc_target_names() -> BTreeSet<OsString> {
         let rustc = normalized_rustc_override().unwrap_or_else(|| PathBuf::from("rustc"));
-        let output = Command::new(rustc)
-            .args(["--print", "target-list"])
-            .output()
-            .expect("rustc target inventory is available");
+        let mut command = Command::new(rustc);
+        command.args(["--print", "target-list"]);
+        let Some(output) = bounded_command_output(&mut command, RUSTC_TARGET_INVENTORY_TIMEOUT)
+            .expect("rustc target inventory is available")
+        else {
+            panic!("rustc target inventory exceeded its timeout");
+        };
         assert!(output.status.success(), "rustc target inventory succeeds");
         String::from_utf8(output.stdout)
             .expect("rustc target inventory is UTF-8")
@@ -1763,7 +1766,7 @@ mod tests {
 
     fn normalized_rustc_override() -> Option<PathBuf> {
         let configured = std::env::var_os("RUSTC")?;
-        let invocation_directory = std::env::var_os("PWD").map(PathBuf::from);
+        let invocation_directory = std::env::current_dir().ok();
         Some(rustc_command_for(
             Some(&configured),
             invocation_directory.as_deref(),
@@ -1801,7 +1804,7 @@ mod tests {
         let Some(configured) = std::env::var_os(variable) else {
             return;
         };
-        let invocation_directory = std::env::var_os("PWD").map(PathBuf::from);
+        let invocation_directory = std::env::current_dir().ok();
         match compiler_wrapper_command_for(&configured, invocation_directory.as_deref()) {
             Some(wrapper) => {
                 command.env(variable, wrapper);
@@ -2586,6 +2589,7 @@ mod tests {
     }
 
     const BRIDGE_BUILD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+    const RUSTC_TARGET_INVENTORY_TIMEOUT: Duration = Duration::from_secs(30);
     const BRIDGE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
     const BRIDGE_EXIT_TIMEOUT: Duration = Duration::from_secs(12);
     const BRIDGE_CHILD_TEST_TIMEOUT: Duration = Duration::from_millis(25);
@@ -2597,6 +2601,53 @@ mod tests {
     #[cfg(target_os = "linux")]
     const SYNTHETIC_BLOCKING_DESCRIPTION_REPETITIONS: usize = 300_000;
     static BRIDGE_BUILD_LOCK: Mutex<()> = Mutex::new(());
+
+    struct BoundedCommandOutput {
+        status: ExitStatus,
+        stdout: Vec<u8>,
+    }
+
+    fn bounded_command_output(
+        command: &mut Command,
+        timeout: Duration,
+    ) -> io::Result<Option<BoundedCommandOutput>> {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        configure_owned_process_group(command);
+        let mut child = command.spawn()?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .expect("bounded command stdout is piped");
+        let reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes)?;
+            Ok::<_, io::Error>(bytes)
+        });
+        let status = match wait_for_child(&mut child, timeout) {
+            Ok(Some(status)) => status,
+            Ok(None) => {
+                terminate_owned_process_group(&mut child);
+                join_bounded_stdout(reader)?;
+                return Ok(None);
+            }
+            Err(error) => {
+                terminate_owned_process_group(&mut child);
+                let _ = join_bounded_stdout(reader);
+                return Err(error);
+            }
+        };
+        let stdout = join_bounded_stdout(reader)?;
+        Ok(Some(BoundedCommandOutput { status, stdout }))
+    }
+
+    fn join_bounded_stdout(reader: JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
+        reader
+            .join()
+            .map_err(|_| io::Error::other("bounded command stdout reader panicked"))?
+    }
 
     fn wait_for_child(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
         let deadline = Instant::now() + timeout;
@@ -2688,6 +2739,21 @@ mod tests {
                 .try_wait()
                 .expect("cleaned child status is readable")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn bounded_command_output_stops_a_stalled_inventory_process() {
+        let current = std::env::current_exe().expect("test executable path is available");
+        let mut command = Command::new(current);
+        command
+            .arg("daemon_tools::tests::bridge_wait_child_fixture")
+            .args(["--exact", "--ignored"]);
+
+        assert!(
+            bounded_command_output(&mut command, BRIDGE_CHILD_TEST_TIMEOUT)
+                .expect("bounded inventory command is observed")
+                .is_none()
         );
     }
 
