@@ -85,7 +85,13 @@ members = [
 # This parser slice validates and retains trigger policy but does not yet observe
 # provider failures, rotate members, or quarantine profiles. Calls continue to
 # select the preferred member above until the selection slice lands.
-on_quota_exhausted = "switch_now"
+#
+# switch_now needs typed proof that the provider refused before accepting, which
+# only a decoded native error envelope supplies. The Anthropic mapping names
+# rate_limit_error and overloaded_error but has no quota token, so
+# on_quota_exhausted = "switch_now" is a startup failure here and the next turn
+# carries the substitution instead.
+on_quota_exhausted = "switch_next_turn"
 on_rate_limited = "switch_now"
 on_overloaded = "switch_next_turn"
 on_credential_rejected = "quarantine"

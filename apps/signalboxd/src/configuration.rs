@@ -82,8 +82,6 @@ const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
 
-/// Adapter implementations this daemon build can construct.
-
 /// One provider-availability cause a pool trigger can react to.
 ///
 /// Only these three carry proof that the request was not accepted, so only they
@@ -98,6 +96,7 @@ pub enum AvailabilityCause {
     Overloaded,
 }
 
+/// Adapter implementations this daemon build can construct.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ModelAdapter {
     /// Anthropic's HTTP API adapter.
@@ -5211,8 +5210,8 @@ name = "anthropic-main"
 tie_break = "round_robin"
 on_pool_exhausted = "fail"
 members = [{ profile = "anthropic-primary", priority = 1 }]
-on_quota_exhausted = "switch_now"
-on_rate_limited = "switch_next_turn"
+on_quota_exhausted = "switch_next_turn"
+on_rate_limited = "switch_now"
 on_overloaded = "avoid_new_sessions"
 on_credential_rejected = "quarantine""#,
         ))
@@ -5224,13 +5223,15 @@ on_credential_rejected = "quarantine""#,
 
         assert_eq!(pool.tie_break(), CredentialPoolTieBreak::RoundRobin);
         assert_eq!(pool.on_pool_exhausted(), CredentialPoolExhaustion::Fail);
+        // Anthropic's mapping has no quota token, so only rate limiting can
+        // carry the proof `switch_now` requires.
         assert_eq!(
             pool.action(CredentialPoolTrigger::QuotaExhausted),
-            CredentialPoolAction::SwitchNow
+            CredentialPoolAction::SwitchNextTurn
         );
         assert_eq!(
             pool.action(CredentialPoolTrigger::RateLimited),
-            CredentialPoolAction::SwitchNextTurn
+            CredentialPoolAction::SwitchNow
         );
         assert_eq!(
             pool.action(CredentialPoolTrigger::Overloaded),
