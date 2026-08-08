@@ -76,8 +76,9 @@ use signalbox_tools_web::{
 };
 use signalbox_tools_workspace::{
     APPLY_PATCH_NAME, EDIT_FILE_NAME, GLOB_FILES_NAME, LIST_DIRECTORY_NAME,
-    LocalWorkspaceFileSystem, READ_FILE_NAME, SEARCH_FILES_NAME, WRITE_FILE_NAME,
-    WorkspaceMutationExecutor, WorkspaceMutationTools, WorkspaceReadExecutor, WorkspaceReadTools,
+    LocalWorkspaceFileSystem, READ_FILE_NAME, ReadFileArguments, SEARCH_FILES_NAME,
+    WRITE_FILE_NAME, WorkspaceMutationExecutor, WorkspaceMutationTools, WorkspaceReadExecutor,
+    WorkspaceReadTools,
 };
 use signalboxd::{ActivatedTurnExecution, PostgresProviderModelExecution};
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -111,9 +112,11 @@ const DEFAULT_MODEL: &str = "gpt-5-nano";
 const MAX_OUTPUT_TOKENS: u32 = 16_384;
 const CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-/// Four exchanges cover the accepted premature fetch, search, later fetch,
-/// and final answer path, with one minute for local persistence and dispatch.
+/// Three tool-enabled exchanges plus the final answer cover every accepted
+/// natural path, with one minute for local persistence and dispatch.
 const TURN_TIMEOUT: Duration = Duration::from_secs(4 * 2 * 60 + 60);
+const MAX_NATURAL_TOOL_EXCHANGES: usize = 3;
+const MAX_NATURAL_MODEL_CALLS: i64 = MAX_NATURAL_TOOL_EXCHANGES as i64 + 1;
 const LIVE_EVAL_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 const GIT_AUTHOR_NAME: &str = "Signalbox Tool Eval";
 const GIT_AUTHOR_EMAIL: &str = "signalbox-tool-eval@example.test";
@@ -1227,27 +1230,39 @@ enum ForcedToolOperation {
 
 struct ForcedToolSequence {
     pending: Option<StdMutex<Option<RuntimeToolName>>>,
+    natural_tool_rounds: Option<StdMutex<usize>>,
 }
 
 impl ForcedToolSequence {
     fn new(forced_tool: Option<&str>) -> Self {
         Self {
             pending: forced_tool.map(|tool| StdMutex::new(Some(RuntimeToolName::new(tool)))),
+            natural_tool_rounds: forced_tool.is_none().then(|| StdMutex::new(0)),
         }
     }
 
     fn next(&self) -> ForcedToolOperation {
-        let Some(pending) = &self.pending else {
-            return ForcedToolOperation::Natural;
-        };
-        pending
+        if let Some(pending) = &self.pending {
+            return pending
+                .lock()
+                .expect("forced-tool lock is available")
+                .take()
+                .map_or(
+                    ForcedToolOperation::Continuation,
+                    ForcedToolOperation::Force,
+                );
+        }
+        let mut rounds = self
+            .natural_tool_rounds
+            .as_ref()
+            .expect("natural sequence has a round counter")
             .lock()
-            .expect("forced-tool lock is available")
-            .take()
-            .map_or(
-                ForcedToolOperation::Continuation,
-                ForcedToolOperation::Force,
-            )
+            .expect("natural-round lock is available");
+        if *rounds >= MAX_NATURAL_TOOL_EXCHANGES {
+            return ForcedToolOperation::Continuation;
+        }
+        *rounds += 1;
+        ForcedToolOperation::Natural
     }
 }
 
@@ -1815,9 +1830,9 @@ impl CaseSnapshot {
                     EvalFamily::Git => self.exact_git_natural_request_failed(index, request),
                     EvalFamily::Workspace => {
                         (request.name == READ_FILE_NAME
-                            && request.arguments().is_some_and(|arguments| {
-                                arguments == serde_json::json!({"path": WORKSPACE_SEED_PATH})
-                            })
+                            && request
+                                .arguments()
+                                .is_some_and(|arguments| workspace_read_covers_seed(&arguments))
                             && !self.requests[..index].iter().any(|earlier| {
                                 earlier.attempt_succeeded
                                     && matches!(
@@ -1879,13 +1894,10 @@ fn exact_git_natural_stage_arguments(request: &RequestSnapshot) -> bool {
 }
 
 fn workspace_read_covers_seed(arguments: &serde_json::Value) -> bool {
-    let full_seed_bytes =
-        u64::try_from(WORKSPACE_SEED.len()).expect("the workspace seed fixture length fits in u64");
-    arguments["path"] == WORKSPACE_SEED_PATH
-        && arguments
-            .get("max_bytes")
-            .and_then(serde_json::Value::as_u64)
-            .is_none_or(|max_bytes| max_bytes >= full_seed_bytes)
+    let Ok(arguments) = serde_json::from_value::<ReadFileArguments>(arguments.clone()) else {
+        return false;
+    };
+    arguments.path == WORKSPACE_SEED_PATH && arguments.max_bytes >= WORKSPACE_SEED.len()
 }
 
 fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid> {
@@ -2076,6 +2088,7 @@ impl CaseOutcome {
         EvalDisposition::from_passed(
             self.execution_completed
                 && self.snapshot.turn_disposition.is_completed()
+                && self.snapshot.model_calls <= MAX_NATURAL_MODEL_CALLS
                 && self.result_round_trips >= 1
                 && self
                     .snapshot
@@ -2538,6 +2551,61 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
     );
 }
 
+#[test]
+fn unforced_workspace_tier_rejects_more_than_the_bounded_model_calls() {
+    let first = Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID);
+    let second = Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID);
+    let third = Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID + 1);
+    let fourth = Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID + 2);
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        result_round_trips: MAX_NATURAL_TOOL_EXCHANGES + 1,
+        round_tripped_request_ids: BTreeSet::from([first, second, third, fourth]),
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![
+                successful_request(first, LIST_DIRECTORY_NAME, serde_json::json!({"path": "."})),
+                successful_request(second, GLOB_FILES_NAME, serde_json::json!({"pattern": "*"})),
+                successful_request(
+                    third,
+                    READ_FILE_NAME,
+                    serde_json::json!({"path": WORKSPACE_SEED_PATH}),
+                ),
+                successful_request(
+                    fourth,
+                    WRITE_FILE_NAME,
+                    serde_json::json!({
+                        "path": WORKSPACE_ANSWER_PATH,
+                        "content": WORKSPACE_ANSWER,
+                    }),
+                ),
+            ],
+            model_calls: MAX_NATURAL_MODEL_CALLS + 1,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Workspace),
+        EvalDisposition::Miss
+    );
+}
+
+fn successful_request(
+    request_id: Uuid,
+    name: &str,
+    arguments: serde_json::Value,
+) -> RequestSnapshot {
+    RequestSnapshot {
+        request_id,
+        producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+        name: name.to_owned(),
+        arguments_text: arguments.to_string(),
+        attempt_succeeded: true,
+    }
+}
+
 fn failed_request_snapshot(name: &str, arguments: serde_json::Value) -> CaseSnapshot {
     CaseSnapshot {
         turn_disposition: SnapshotTurnDisposition::Completed,
@@ -2550,6 +2618,15 @@ fn failed_request_snapshot(name: &str, arguments: serde_json::Value) -> CaseSnap
         }],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
     }
+}
+
+fn bounded_workspace_read_arguments() -> serde_json::Value {
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == READ_FILE_NAME)
+        .expect("the bounded workspace read fixture exists");
+    serde_json::from_str(case.expected_arguments)
+        .expect("the bounded workspace read fixture is valid JSON")
 }
 
 #[test]
@@ -2568,6 +2645,40 @@ fn unforced_workspace_tier_keeps_an_out_of_range_read_as_a_miss() {
         READ_FILE_NAME,
         serde_json::json!({"path": WORKSPACE_SEED_PATH, "max_bytes": 0}),
     );
+
+    assert!(!snapshot.exact_natural_request_failed(EvalFamily::Workspace));
+}
+
+#[test]
+fn unforced_workspace_tier_reports_a_covering_bounded_read_failure_as_infrastructure() {
+    let snapshot = failed_request_snapshot(READ_FILE_NAME, bounded_workspace_read_arguments());
+
+    assert!(snapshot.exact_natural_request_failed(EvalFamily::Workspace));
+}
+
+#[test]
+fn unforced_workspace_tier_keeps_an_unknown_read_field_as_a_miss() {
+    let mut arguments = bounded_workspace_read_arguments();
+    arguments["unexpected"] = serde_json::json!(true);
+    let snapshot = failed_request_snapshot(READ_FILE_NAME, arguments);
+
+    assert!(!snapshot.exact_natural_request_failed(EvalFamily::Workspace));
+}
+
+#[test]
+fn unforced_workspace_tier_keeps_a_malformed_read_bound_as_a_miss() {
+    let mut arguments = bounded_workspace_read_arguments();
+    arguments["max_bytes"] = serde_json::json!("many");
+    let snapshot = failed_request_snapshot(READ_FILE_NAME, arguments);
+
+    assert!(!snapshot.exact_natural_request_failed(EvalFamily::Workspace));
+}
+
+#[test]
+fn unforced_workspace_tier_keeps_an_undersized_read_bound_as_a_miss() {
+    let mut arguments = bounded_workspace_read_arguments();
+    arguments["max_bytes"] = serde_json::json!(WORKSPACE_SEED.len() - 1);
+    let snapshot = failed_request_snapshot(READ_FILE_NAME, arguments);
 
     assert!(!snapshot.exact_natural_request_failed(EvalFamily::Workspace));
 }
@@ -2819,6 +2930,16 @@ fn forced_tool_sequence_allows_only_one_forced_exchange() {
         sequence.next(),
         ForcedToolOperation::Force(RuntimeToolName::new(GIT_STATUS_NAME))
     );
+    assert_eq!(sequence.next(), ForcedToolOperation::Continuation);
+}
+
+#[test]
+fn natural_tool_sequence_bounds_tool_enabled_exchanges() {
+    let sequence = ForcedToolSequence::new(None);
+
+    assert_eq!(sequence.next(), ForcedToolOperation::Natural);
+    assert_eq!(sequence.next(), ForcedToolOperation::Natural);
+    assert_eq!(sequence.next(), ForcedToolOperation::Natural);
     assert_eq!(sequence.next(), ForcedToolOperation::Continuation);
 }
 
