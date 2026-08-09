@@ -89,6 +89,7 @@ AS $$
 DECLARE
     lifecycle turn_lifecycle%ROWTYPE;
     placement runner_session_placement_record%ROWTYPE;
+    yielded_attempt_count bigint;
 BEGIN
     SELECT * INTO lifecycle
       FROM turn_lifecycle
@@ -143,6 +144,26 @@ BEGIN
             'runner recovery wait lacks its exact current lost placement'
             USING ERRCODE = '23514';
     END IF;
+    SELECT count(*) INTO yielded_attempt_count
+      FROM turn_attempt AS yielded_attempt
+     WHERE yielded_attempt.turn_id = lifecycle.turn_id
+       AND yielded_attempt.session_id = lifecycle.session_id
+       AND yielded_attempt.state_kind = 'ended'
+       AND yielded_attempt.end_variant = 'without_stop'
+       AND yielded_attempt.end_disposition = 'yielded_to_durable_wait'
+       AND yielded_attempt.interrupt_command_id IS NULL
+       AND yielded_attempt.interrupt_predecessor_turn_id IS NULL
+       AND NOT EXISTS (
+            SELECT 1
+              FROM turn_attempt AS continuation
+             WHERE continuation.continued_from_attempt_id =
+                    yielded_attempt.turn_attempt_id
+       );
+    IF yielded_attempt_count <> 1 THEN
+        RAISE EXCEPTION
+            'runner recovery wait lacks its exact yielded turn boundary'
+            USING ERRCODE = '23514';
+    END IF;
     IF lifecycle.runner_recovery_tool_attempt_id IS NOT NULL
        AND NOT EXISTS (
             SELECT 1
@@ -151,6 +172,11 @@ BEGIN
                ON request.request_id = attempt.request_id
                AND request.turn_id = attempt.turn_id
                AND request.session_id = attempt.session_id
+              JOIN turn_attempt AS yielded_attempt
+                ON yielded_attempt.turn_attempt_id =
+                    attempt.issuing_turn_attempt_id
+               AND yielded_attempt.turn_id = attempt.turn_id
+               AND yielded_attempt.session_id = attempt.session_id
               JOIN runner_physical_attempt_lease_binding AS binding
                 ON binding.attempt_id = attempt.attempt_id
               JOIN runner_lease_generation AS lease
@@ -167,6 +193,18 @@ BEGIN
                AND attempt.session_id = checked_session_id
                AND request.producing_model_call_id =
                     lifecycle.active_tool_round_call_id
+               AND yielded_attempt.state_kind = 'ended'
+               AND yielded_attempt.end_variant = 'without_stop'
+               AND yielded_attempt.end_disposition =
+                    'yielded_to_durable_wait'
+               AND yielded_attempt.interrupt_command_id IS NULL
+               AND yielded_attempt.interrupt_predecessor_turn_id IS NULL
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM turn_attempt AS continuation
+                     WHERE continuation.continued_from_attempt_id =
+                            yielded_attempt.turn_attempt_id
+               )
                AND lease.runner_id = lifecycle.runner_recovery_runner_id
                AND leased_placement.placement_revision =
                     lifecycle.runner_recovery_placement_revision
@@ -307,6 +345,22 @@ BEGIN
                 NEW.placement_revision
            AND lifecycle.runner_recovery_tool_attempt_id IS NOT DISTINCT FROM
                 NEW.interrupted_tool_attempt_id
+           AND (
+                (
+                    lifecycle.active_tool_round_call_id IS NULL
+                    AND NEW.source_frontier_id = lifecycle.starting_frontier_id
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM tool_round AS round
+                     WHERE round.producing_model_call_id =
+                            lifecycle.active_tool_round_call_id
+                       AND round.turn_id = lifecycle.turn_id
+                       AND round.session_id = lifecycle.session_id
+                       AND round.boundary_kind = 'continuing'
+                       AND round.boundary_frontier_id = NEW.source_frontier_id
+                )
+           )
            AND EXISTS (
                 SELECT 1
                   FROM turn_attempt AS yielded_attempt
@@ -407,9 +461,22 @@ BEGIN
            AND successor.interrupt_predecessor_turn_id = effect.turn_id
            AND successor.defaults_version = NEW.expected_defaults_version
            AND cancelled.state_kind = 'terminal'
-           AND cancelled.terminal_disposition_kind = 'cancelled'
            AND cancelled.terminal_attempt_id = effect.yielded_turn_attempt_id
            AND cancelled.terminal_model_call_id IS NULL
+           AND (
+                (
+                    effect.interrupted_tool_attempt_id IS NULL
+                    AND cancelled.terminal_disposition_kind = 'cancelled'
+                    AND cancelled.terminal_tool_attempt_id IS NULL
+                )
+                OR (
+                    effect.interrupted_tool_attempt_id IS NOT NULL
+                    AND cancelled.terminal_disposition_kind =
+                        'reconciliation_required'
+                    AND cancelled.terminal_tool_attempt_id =
+                        effect.interrupted_tool_attempt_id
+                )
+           )
            AND yielded_attempt.state_kind = 'ended'
            AND yielded_attempt.end_variant = 'without_stop'
            AND yielded_attempt.end_disposition = 'yielded_to_durable_wait'
@@ -833,6 +900,25 @@ BEGIN
        AND NOT (
             OLD.state_kind = 'active'
             AND OLD.active_phase_kind = 'running'
+            AND EXISTS (
+                SELECT 1
+                  FROM turn_attempt AS yielded_attempt
+                 WHERE yielded_attempt.turn_attempt_id = OLD.current_attempt_id
+                   AND yielded_attempt.turn_id = OLD.turn_id
+                   AND yielded_attempt.session_id = OLD.session_id
+                   AND yielded_attempt.state_kind = 'ended'
+                   AND yielded_attempt.end_variant = 'without_stop'
+                   AND yielded_attempt.end_disposition =
+                        'yielded_to_durable_wait'
+                   AND yielded_attempt.interrupt_command_id IS NULL
+                   AND yielded_attempt.interrupt_predecessor_turn_id IS NULL
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM turn_attempt AS continuation
+                         WHERE continuation.continued_from_attempt_id =
+                                yielded_attempt.turn_attempt_id
+                   )
+            )
        )
     THEN
         RAISE EXCEPTION

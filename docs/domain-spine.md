@@ -3165,9 +3165,19 @@ impl AcceptedInputSchedulingProjection {
     pub fn apply_interrupt_to_runner_recovery(
         self,
         source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: Option<PreparedToolResultProjection>,
         interrupt: AppliedInterruptCommandResult,
         identities: CancelledModelCallTurnIdentities,
     ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_runner_tool_recovery(
+        self,
+        wait: AwaitingToolRecovery,
+        tool_attempt: EndedToolAttempt,
+        yielded_attempt: TurnAttemptId,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
     pub fn apply_interrupt_to_tool_batch(
         self,
         batch: ToolBatch,
@@ -3245,9 +3255,19 @@ impl ActivatedTurn {
         self,
         starting_snapshot: ResolvedContextFrontierSnapshot,
         source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: Option<PreparedToolResultProjection>,
         interrupt: AppliedInterruptCommandResult,
         identities: CancelledModelCallTurnIdentities,
     ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_runner_tool_recovery(
+        self,
+        wait: AwaitingToolRecovery,
+        tool_attempt: EndedToolAttempt,
+        yielded_attempt: TurnAttemptId,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
     // accessors: session(), turn(), configuration(), configuration_provenance(),
     // start(), phase(), pending_steering(), consumed_steering()
 }

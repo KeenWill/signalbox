@@ -3123,6 +3123,16 @@ pub(crate) fn attach_recovery_interrupt_reclassification_candidates(
     ))
 }
 
+pub(crate) fn attach_recovery_interrupt_reclassification_candidates_for_activated(
+    identities: signalbox_domain::AmbiguousModelCallTurnIdentities,
+    active_turn: &signalbox_domain::ActivatedTurn,
+    next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
+) -> Result<signalbox_domain::AmbiguousModelCallTurnIdentities, ModelCallRepositoryError> {
+    Ok(identities.with_pending_steering_reclassifications(
+        pending_reclassification_candidates_for_activated(active_turn, next_turn)?,
+    ))
+}
+
 fn record_reclassified_turn_candidate(
     source_turn: TurnId,
     proposed_turn: TurnId,
@@ -5284,6 +5294,9 @@ pub(crate) async fn persist_tool_reconciliation_required(
                 active_tool_round_call_id = NULL,
                 approval_tool_request_id = NULL,
                 recovery_tool_attempt_id = NULL,
+                runner_recovery_runner_id = NULL,
+                runner_recovery_placement_revision = NULL,
+                runner_recovery_tool_attempt_id = NULL,
                 terminal_attempt_id = $2,
                 terminal_model_call_id = NULL,
                 terminal_tool_attempt_id = $3,
@@ -5291,9 +5304,35 @@ pub(crate) async fn persist_tool_reconciliation_required(
           WHERE turn_id = $4
             AND session_id = $5
             AND state_kind = 'active'
-            AND active_phase_kind = 'awaiting_tool_recovery'
-            AND current_attempt_id = $2
-            AND recovery_tool_attempt_id = $3",
+            AND (
+                (
+                    active_phase_kind = 'awaiting_tool_recovery'
+                    AND current_attempt_id = $2
+                    AND recovery_tool_attempt_id = $3
+                )
+                OR (
+                    active_phase_kind = 'awaiting_runner_recovery'
+                    AND current_attempt_id IS NULL
+                    AND runner_recovery_tool_attempt_id = $3
+                    AND EXISTS (
+                        SELECT 1
+                          FROM turn_attempt AS yielded_attempt
+                         WHERE yielded_attempt.turn_attempt_id = $2
+                           AND yielded_attempt.turn_id = turn_lifecycle.turn_id
+                           AND yielded_attempt.session_id = turn_lifecycle.session_id
+                           AND yielded_attempt.state_kind = 'ended'
+                           AND yielded_attempt.end_variant = 'without_stop'
+                           AND yielded_attempt.end_disposition =
+                                'yielded_to_durable_wait'
+                           AND NOT EXISTS (
+                                SELECT 1
+                                  FROM turn_attempt AS continuation
+                                 WHERE continuation.continued_from_attempt_id =
+                                        yielded_attempt.turn_attempt_id
+                           )
+                    )
+                )
+            )",
     )
     .bind(
         reconciliation

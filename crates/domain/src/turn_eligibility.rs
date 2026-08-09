@@ -2441,6 +2441,7 @@ impl AcceptedInputSchedulingProjection {
     pub fn apply_interrupt_to_runner_recovery(
         self,
         source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: Option<crate::PreparedToolResultProjection>,
         interrupt: AppliedInterruptCommandResult,
         identities: crate::CancelledModelCallTurnIdentities,
     ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
@@ -2455,6 +2456,32 @@ impl AcceptedInputSchedulingProjection {
         ActivatedTurn::from(active_turn).apply_interrupt_to_runner_recovery(
             starting_snapshot,
             source_snapshot,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
+    /// Closes a runner-loss wait that retained one ambiguous physical tool
+    /// attempt, preserving that ambiguity as reconciliation-required.
+    pub fn apply_interrupt_to_runner_tool_recovery(
+        self,
+        wait: crate::AwaitingToolRecovery,
+        tool_attempt: crate::EndedToolAttempt,
+        yielded_attempt: TurnAttemptId,
+        result_projection: crate::PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredToolTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        crate::model_execution::apply_interrupt_to_runner_tool_recovery_wait(
+            active_turn.into(),
+            wait,
+            tool_attempt,
+            yielded_attempt,
+            result_projection,
             interrupt,
             identities,
         )
@@ -3048,6 +3075,7 @@ impl ActivatedTurn {
         self,
         starting_snapshot: ResolvedContextFrontierSnapshot,
         source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: Option<crate::PreparedToolResultProjection>,
         interrupt: AppliedInterruptCommandResult,
         identities: crate::CancelledModelCallTurnIdentities,
     ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
@@ -3055,6 +3083,29 @@ impl ActivatedTurn {
             self,
             starting_snapshot,
             source_snapshot,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
+    /// Closes a delegated runner-loss wait that retained one ambiguous
+    /// physical tool attempt without erasing that ambiguity.
+    pub fn apply_interrupt_to_runner_tool_recovery(
+        self,
+        wait: crate::AwaitingToolRecovery,
+        tool_attempt: crate::EndedToolAttempt,
+        yielded_attempt: TurnAttemptId,
+        result_projection: crate::PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredToolTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_interrupt_to_runner_tool_recovery_wait(
+            self,
+            wait,
+            tool_attempt,
+            yielded_attempt,
+            result_projection,
             interrupt,
             identities,
         )

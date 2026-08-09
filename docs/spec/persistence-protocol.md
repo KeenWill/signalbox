@@ -380,18 +380,28 @@ Representation rules, all enforced in the schema:
   interrupted. Deferred checks require that runner and revision to name the
   session's current lost placement. A present tool attempt must also be the
   attempt the loss recorded and must carry runner-lease lineage to that exact
-  runner and placement revision. Lifecycle-side and placement-side checks lock
-  the shared session-scheduler row before evaluating the relationship, so a
-  concurrent placement advance cannot validate against a stale loss. The
-  lifecycle transition matrix admits the phase from an already-active running
-  boundary, never directly from queued work, and restart reconstitutes it from
-  those correlated facts rather than from the stored discriminator. Without this
-  shape the loss transaction has nowhere to store the phase and restart cannot
-  rebuild it. The same migration adds the optional interrupted-attempt fact to
-  the exact placement-loss record, and the runner persistence read boundary
-  round-trips both nullable arms. **Committed unimplemented functionality.** No
-  present adapter produces the phase: the dedicated runner-loss propagation
-  transaction will install it under the lock order below.
+  runner and placement revision; its issuing turn attempt must be the same
+  yielded chain-tip that authorizes the wait. Lifecycle-side and placement-side
+  checks lock the shared session-scheduler row before evaluating the
+  relationship, so a concurrent placement advance cannot validate against a
+  stale loss. The lifecycle transition matrix admits the phase from an
+  already-active running boundary only after that exact live attempt has ended
+  by yielding to a durable wait, never directly from queued work, and restart
+  reconstitutes it from those correlated facts rather than from the stored
+  discriminator. An interrupt closing the wait extends the retained active tool
+  round's exact yielded frontier, or the turn's starting frontier when no tool
+  round exists; the authenticated interrupt-effect record rejects any other
+  same-session frontier. A retained round with no interrupted physical attempt
+  appends its proposal-ordered tool closures before the cancellation entry. When
+  loss interrupted an ambiguous physical attempt, the same stop instead commits
+  the existing tool-reconciliation terminal shape, so cancellation never erases
+  or reclassifies the ambiguity. Without this shape the loss transaction has
+  nowhere to store the phase and restart cannot rebuild it. The same migration
+  adds the optional interrupted-attempt fact to the exact placement-loss record,
+  and the runner persistence read boundary round-trips both nullable arms.
+  **Committed unimplemented functionality.** No present adapter produces the
+  phase: the dedicated runner-loss propagation transaction will install it under
+  the lock order below.
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.
