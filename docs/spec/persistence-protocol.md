@@ -378,13 +378,13 @@ Representation rules, all enforced in the schema:
   exact lost runner, the positive placement revision the loss was projected
   against, and a nullable tool attempt naming the physical attempt the loss
   interrupted. Deferred checks require that runner and revision to name the
-  session's current lost placement. A present tool attempt must also be the
-  attempt the loss recorded and must carry runner-lease lineage to that exact
-  runner and placement revision; its issuing turn attempt must be the same
-  yielded chain-tip that authorizes the wait. Lifecycle-side and placement-side
-  checks lock the shared session-scheduler row before evaluating the
-  relationship, so a concurrent placement advance cannot validate against a
-  stale loss. The lifecycle transition matrix admits the phase from an
+  session's current lost placement. A present tool attempt must also be terminal
+  and ambiguous, be the attempt the loss recorded, and carry runner-lease
+  lineage to that exact runner and placement revision; its issuing turn attempt
+  must be the same yielded chain-tip that authorizes the wait. Lifecycle-side
+  and placement-side checks lock the shared session-scheduler row before
+  evaluating the relationship, so a concurrent placement advance cannot validate
+  against a stale loss. The lifecycle transition matrix admits the phase from an
   already-active running boundary only after that exact live attempt has ended
   by yielding to a durable wait, never directly from queued work, and restart
   reconstitutes it from those correlated facts rather than from the stored

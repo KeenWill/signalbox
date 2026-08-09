@@ -1278,6 +1278,21 @@ async fn append_runner_lost_with_interrupted_attempt_projection(
     session: SessionId,
     interrupted_tool_attempt: ToolAttemptId,
 ) -> Result<(), sqlx::Error> {
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET effect_class = 'external_effect', state_kind = 'terminal',
+                terminal_disposition_kind = 'ambiguous'
+          WHERE attempt_id = $1",
+    )
+    .bind(interrupted_tool_attempt.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
     let mut transaction = pool.begin().await?;
     append_runner_lost_without_advancing_head(
         &mut transaction,
@@ -5292,6 +5307,7 @@ async fn s32_inv029_inv044_runner_recovery_stop_uses_tool_round_boundary()
         .await?;
     append_runner_lost_before_pin_projection(&pool, session).await?;
     let producing_call = ModelCallId::from_uuid(uuid(0xa150));
+    let request = ToolRequestId::from_uuid(uuid(0xa15b));
     let boundary = ContextFrontierId::from_uuid(uuid(0xa151));
     attach_continuing_tool_round_projection(
         &pool,
@@ -5299,7 +5315,7 @@ async fn s32_inv029_inv044_runner_recovery_stop_uses_tool_round_boundary()
         turn,
         turn_attempt,
         producing_call,
-        ToolRequestId::from_uuid(uuid(0xa15b)),
+        request,
         boundary,
     )
     .await?;
@@ -5332,6 +5348,7 @@ async fn s32_inv029_inv044_runner_recovery_stop_uses_tool_round_boundary()
     .await?;
     recovery.commit().await?;
     let command = DurableCommandId::from_uuid(uuid(0xa152));
+    let tool_closure = SemanticTranscriptEntryId::from_uuid(uuid(0xa15a));
     let interrupt = SubmitInput::new(
         command,
         session,
@@ -5359,7 +5376,7 @@ async fn s32_inv029_inv044_runner_recovery_stop_uses_tool_round_boundary()
             |_| TurnId::from_uuid(uuid(0xa157)),
             |_| {
                 (
-                    vec![SemanticTranscriptEntryId::from_uuid(uuid(0xa15a))],
+                    vec![tool_closure],
                     ContextFrontierId::from_uuid(uuid(0xa158)),
                 )
             },
@@ -5373,8 +5390,19 @@ async fn s32_inv029_inv044_runner_recovery_stop_uses_tool_round_boundary()
     .bind(command.into_uuid())
     .fetch_one(&pool)
     .await?;
+    let closure: (String, Uuid) = sqlx::query_as(
+        "SELECT payload_kind, tool_result_request_id
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1 AND semantic_entry_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(tool_closure.into_uuid())
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(persisted_source, boundary.into_uuid());
+    assert_eq!(closure.0, "tool_closed_by_turn_end");
+    assert_eq!(closure.1, request.into_uuid());
     drop(pool);
     Ok(())
 }
@@ -5439,20 +5467,6 @@ async fn s32_inv029_inv044_runner_recovery_stop_preserves_tool_ambiguity()
         boundary,
     )
     .await?;
-    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    sqlx::query(
-        "UPDATE tool_attempt
-            SET state_kind = 'terminal', terminal_disposition_kind = 'ambiguous'
-          WHERE attempt_id = $1",
-    )
-    .bind(interrupted_attempt.into_uuid())
-    .execute(&pool)
-    .await?;
-    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
     let mut recovery = pool.begin().await?;
     sqlx::query(
         "UPDATE turn_attempt
@@ -5902,6 +5916,53 @@ async fn s32_inv009_inv044_runner_recovery_rejects_cross_wired_lease_runner()
     )
     .await
     .expect_err("runner recovery cannot claim another runner's leased attempt");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: runner recovery may retain only an ambiguous physical
+/// attempt; a known terminal result cannot be reclassified as runner loss.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rejects_non_ambiguous_tool_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    append_runner_lost_with_interrupted_attempt_projection(&pool, session, interrupted_attempt)
+        .await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET terminal_disposition_kind = 'known_failed',
+                error_kind = 'execution_failed'
+          WHERE attempt_id = $1",
+    )
+    .bind(interrupted_attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let rejected = insert_runner_recovery_turn(
+        &pool,
+        session,
+        turn,
+        expected_enrollment.runner(),
+        pin.placement.revision(),
+        Some(interrupted_attempt),
+        Some(ModelCallId::from_uuid(uuid(
+            INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+        ))),
+    )
+    .await
+    .expect_err("runner recovery cannot retain a known terminal tool attempt");
 
     assert_check_violation(rejected);
     drop(pool);

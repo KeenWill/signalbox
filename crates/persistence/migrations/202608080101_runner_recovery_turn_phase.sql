@@ -191,6 +191,8 @@ BEGIN
                     lifecycle.runner_recovery_tool_attempt_id
                AND attempt.turn_id = checked_turn_id
                AND attempt.session_id = checked_session_id
+               AND attempt.state_kind = 'terminal'
+               AND attempt.terminal_disposition_kind = 'ambiguous'
                AND request.producing_model_call_id =
                     lifecycle.active_tool_round_call_id
                AND yielded_attempt.state_kind = 'ended'
@@ -697,6 +699,7 @@ DECLARE
     prefix_mismatch_count bigint;
     checked_cancellation_entry uuid;
     cancellation_entry_count bigint;
+    runner_tool_closure_count bigint := 0;
     contradictory_entry_count bigint;
     call_count bigint;
     outbox_count bigint;
@@ -729,7 +732,8 @@ BEGIN
      WHERE session_id = checked_session
        AND turn_id = checked_turn_id;
     IF FOUND THEN
-        IF checked_terminal_attempt IS DISTINCT FROM
+        IF runner_recovery_effect.interrupted_tool_attempt_id IS NOT NULL
+           OR checked_terminal_attempt IS DISTINCT FROM
                 runner_recovery_effect.yielded_turn_attempt_id
            OR checked_terminal_call IS NOT NULL
            OR NOT EXISTS (
@@ -750,6 +754,21 @@ BEGIN
                 USING ERRCODE = '23514';
         END IF;
         base_frontier := runner_recovery_effect.source_frontier_id;
+        SELECT count(*)
+          INTO runner_tool_closure_count
+          FROM tool_round AS round
+          JOIN tool_request AS request
+            ON request.producing_model_call_id = round.producing_model_call_id
+           AND request.turn_id = round.turn_id
+           AND request.session_id = round.session_id
+          JOIN semantic_transcript_entry AS closure
+            ON closure.source_session_id = round.session_id
+           AND closure.payload_kind = 'tool_closed_by_turn_end'
+           AND closure.tool_result_request_id = request.request_id
+         WHERE round.turn_id = checked_turn_id
+           AND round.session_id = checked_session
+           AND round.boundary_kind = 'continuing'
+           AND round.boundary_frontier_id = base_frontier;
     ELSE
         IF NOT EXISTS (
             SELECT 1
@@ -869,7 +888,8 @@ BEGIN
     IF cancellation_entry_count <> 1
        OR contradictory_entry_count <> 0
        OR base_member_count IS NULL
-       OR terminal_member_count IS DISTINCT FROM base_member_count + 1
+       OR terminal_member_count IS DISTINCT FROM
+            base_member_count + runner_tool_closure_count + 1
        OR prefix_mismatch_count <> 0
        OR NOT EXISTS (
             SELECT 1
@@ -987,6 +1007,55 @@ BEGIN
     IF replacement_definition = current_definition THEN
         RAISE EXCEPTION
             'turn-lifecycle runner-recovery insertion point is missing';
+    END IF;
+    EXECUTE replacement_definition;
+END;
+$migration$;
+
+-- A runner loss yields the issuing turn attempt before preserving the
+-- interrupted physical attempt as ambiguous. Extend the existing
+-- reconciliation checker only for that exact authenticated pair.
+DO $migration$
+DECLARE
+    current_definition text;
+    replacement_definition text;
+    old_attempt_state text := $old$
+           AND state_kind = 'ended'
+           AND end_disposition IN ('ambiguous', 'lost')
+           AND (
+$old$;
+    new_attempt_state text := $new$
+           AND state_kind = 'ended'
+           AND (
+                end_disposition IN ('ambiguous', 'lost')
+                OR (
+                    end_disposition = 'yielded_to_durable_wait'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM turn_runner_recovery_interrupt_effect AS effect
+                         WHERE effect.session_id = checked_session
+                           AND effect.turn_id = checked_turn_id
+                           AND effect.yielded_turn_attempt_id =
+                                turn_attempt.turn_attempt_id
+                           AND effect.interrupted_tool_attempt_id =
+                                checked_tool_attempt
+                    )
+                )
+           )
+           AND (
+$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'assert_reconciliation_required_turn_final_state(uuid)'::regprocedure
+    ) INTO current_definition;
+    replacement_definition := replace(
+        current_definition,
+        old_attempt_state,
+        new_attempt_state
+    );
+    IF replacement_definition = current_definition THEN
+        RAISE EXCEPTION
+            'runner-recovery reconciliation insertion point is missing';
     END IF;
     EXECUTE replacement_definition;
 END;
