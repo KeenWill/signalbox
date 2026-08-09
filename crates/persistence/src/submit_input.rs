@@ -4072,38 +4072,34 @@ pub(crate) async fn load_scheduling_projection(
         direct_selection_id: Uuid,
     }
     let preceding_non_accepted_terminal = sqlx::query_as::<_, PrecedingNonAcceptedTerminalRow>(
-        "WITH earliest_accepted AS (
-            SELECT queued.turn_id
-              FROM queued_input_origin AS queued
-             WHERE queued.session_id = $1
-               AND goal_turn_is_runtime_relevant(
-                    queued.session_id, queued.turn_id
-               )
-             ORDER BY queued.acceptance_position
-             LIMIT 1
-        )
-        SELECT terminal.turn_id AS turn_id,
+        "SELECT terminal.turn_id AS turn_id,
                 turn_lifecycle_effective_terminal_frontier(
                     terminal.session_id, terminal.turn_id
                 ) AS terminal_frontier_id,
                 effective.direct_selection_id AS direct_selection_id
-           FROM earliest_accepted AS earliest
+           FROM queued_input_origin AS queued
            JOIN turn_lifecycle AS terminal
              ON terminal.session_id = $1
             AND terminal.turn_id = accepted_input_turn_queue_predecessor(
-                    $1, earliest.turn_id
+                    $1, queued.turn_id
                 )
            JOIN LATERAL turn_origin_effective_model_configuration(
                 terminal.turn_id, terminal.session_id
            ) AS effective ON true
-          WHERE terminal.origin_kind = 'delegation'
+          WHERE queued.session_id = $1
+            AND goal_turn_is_runtime_relevant(
+                    queued.session_id, queued.turn_id
+                )
+            AND terminal.origin_kind = 'delegation'
             AND (
                 terminal.state_kind = 'terminal'
                 OR terminal.delegation_runtime_terminal
             )
             AND turn_lifecycle_effective_terminal_frontier(
                     terminal.session_id, terminal.turn_id
-                ) IS NOT NULL",
+                ) IS NOT NULL
+          ORDER BY queued.acceptance_position
+          LIMIT 1",
     )
     .bind(session_id_to_uuid(session_id))
     .fetch_optional(&mut *connection)
