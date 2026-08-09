@@ -1652,6 +1652,7 @@ mod tests {
         current_executable: &'a Path,
         configured_target_dir: Option<&'a Path>,
         default_target_dir: &'a Path,
+        artifact_target_dir: Option<&'a Path>,
         known_targets: &'a BTreeSet<OsString>,
     }
 
@@ -1664,6 +1665,7 @@ mod tests {
     }
 
     const CLAUDE_MCP_BRIDGE_BINARY: &str = "signalbox-claude-mcp-bridge";
+    const CARGO_TARGET_DIRECTORY_MARKER_FILENAME: &str = "CACHEDIR.TAG";
     const CARGO_TEST_PROFILE: &str = "test";
     const SYNTHETIC_GOAL_DATABASE_URL: &str =
         "postgresql://signalbox:synthetic@127.0.0.1/signalbox";
@@ -1682,10 +1684,12 @@ mod tests {
         let default_target_dir = configured_target_dir
             .clone()
             .unwrap_or_else(cargo_metadata_target_dir);
+        let artifact_target_dir = cargo_target_dir_from_artifact(&current);
         reject_unrecognized_default_target(DefaultTargetRecognition {
             current_executable: &current,
             configured_target_dir: configured_target_dir.as_deref(),
             default_target_dir: &default_target_dir,
+            artifact_target_dir: artifact_target_dir.as_deref(),
             known_targets: &known_targets,
         });
         claude_mcp_bridge_artifact_selection_for(BridgeArtifactSelectionInput {
@@ -1854,6 +1858,22 @@ mod tests {
         canonicalized_target_dir(Path::new(target_dir))
     }
 
+    fn cargo_target_dir_from_artifact(current_executable: &Path) -> Option<PathBuf> {
+        let artifact_parent = current_executable
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)?;
+        artifact_parent
+            .ancestors()
+            .take(2)
+            .find(|candidate| {
+                candidate
+                    .join(CARGO_TARGET_DIRECTORY_MARKER_FILENAME)
+                    .is_file()
+            })
+            .map(Path::to_path_buf)
+    }
+
     #[track_caller]
     fn reject_unrecognized_default_target(input: DefaultTargetRecognition<'_>) {
         if input.configured_target_dir.is_some() {
@@ -1869,14 +1889,19 @@ mod tests {
         if artifact_parent == default_target_dir {
             return;
         }
-        if artifact_parent.parent() != Some(default_target_dir.as_path()) {
+        let artifact_target_dir = input
+            .artifact_target_dir
+            .map(lexically_normalized)
+            .unwrap_or_else(|| default_target_dir.clone());
+        if artifact_parent == artifact_target_dir {
             return;
         }
         let artifact_parent_name = artifact_parent
             .file_name()
             .expect("Cargo artifact parent has a name");
         assert!(
-            input.known_targets.contains(artifact_parent_name),
+            artifact_parent.parent() == Some(artifact_target_dir.as_path())
+                && input.known_targets.contains(artifact_parent_name),
             "custom Cargo target specifications are unsupported by the nested bridge build"
         );
     }
@@ -2254,6 +2279,7 @@ mod tests {
             current_executable: &executable,
             configured_target_dir: None,
             default_target_dir: target_dir,
+            artifact_target_dir: Some(target_dir),
             known_targets: &BTreeSet::new(),
         });
     }
@@ -2267,6 +2293,7 @@ mod tests {
             current_executable: &executable,
             configured_target_dir: None,
             default_target_dir: Path::new("synthetic-default-target"),
+            artifact_target_dir: Some(cli_target_dir),
             known_targets: &BTreeSet::new(),
         });
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
@@ -2279,6 +2306,43 @@ mod tests {
             expected_target: None,
             recognized_target: None,
         });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "custom Cargo target specifications are unsupported by the nested bridge build"
+    )]
+    fn bridge_artifact_selection_rejects_a_custom_target_with_a_cli_target_directory() {
+        let cli_target_dir = Path::new("synthetic-cli-target");
+        let executable = cli_target_dir.join("custom/debug/deps/daemon-tools-test");
+
+        reject_unrecognized_default_target(DefaultTargetRecognition {
+            current_executable: &executable,
+            configured_target_dir: None,
+            default_target_dir: Path::new("synthetic-default-target"),
+            artifact_target_dir: Some(cli_target_dir),
+            known_targets: &BTreeSet::new(),
+        });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_discovers_a_cli_target_directory_from_its_marker() {
+        let cli_target_dir = tempfile::tempdir().expect("CLI target directory is created");
+        let executable = cli_target_dir
+            .path()
+            .join("custom/debug/deps/daemon-tools-test");
+        fs::write(
+            cli_target_dir
+                .path()
+                .join(CARGO_TARGET_DIRECTORY_MARKER_FILENAME),
+            [],
+        )
+        .expect("Cargo target directory marker is written");
+
+        assert_eq!(
+            cargo_target_dir_from_artifact(&executable),
+            Some(cli_target_dir.path().to_path_buf())
+        );
     }
 
     #[test]
@@ -2679,6 +2743,7 @@ mod tests {
             current_executable: Path::new("/debug/deps/daemon-tools-test"),
             configured_target_dir: None,
             default_target_dir: Path::new("/"),
+            artifact_target_dir: None,
             known_targets: &BTreeSet::new(),
         });
     }
