@@ -26,7 +26,7 @@ use std::{
 
 use git2::{
     BranchType, Delta, DiffOptions, IndexAddOption, Oid, Patch, Repository, RepositoryState,
-    Signature, Status,
+    Signature, Status, Time,
 };
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -1998,11 +1998,20 @@ fn replace_expected_reflog_update(
         return Ok(false);
     };
     let committer = latest.committer();
+    let committer_time = committer.when();
+    let commit_time_matches = if message == GIT_COMMIT_REFLOG_MESSAGE {
+        let commit_time = repository.find_commit(new)?.committer().when();
+        committer_time.seconds() == commit_time.seconds()
+            && committer_time.offset_minutes() == commit_time.offset_minutes()
+    } else {
+        true
+    };
     if latest.id_old() != old
         || latest.id_new() != new
         || latest.message().ok().flatten() != Some(message)
         || committer.name().ok() != Some(GIT_AUTHOR_NAME)
         || committer.email().ok() != Some(GIT_AUTHOR_EMAIL)
+        || !commit_time_matches
     {
         return Ok(false);
     }
@@ -2283,6 +2292,28 @@ fn normalize_latest_reflog_message(
     let mut reflog = repository.reflog(reference)?;
     reflog.remove(0, false)?;
     reflog.append(commit, signature, Some(GIT_COMMIT_REFLOG_MESSAGE))?;
+    reflog.write()?;
+    Ok(())
+}
+
+fn replace_latest_reflog_signature(
+    repository: &Repository,
+    reference: &str,
+    signature: &Signature<'_>,
+) -> EvalResult {
+    let mut reflog = repository.reflog(reference)?;
+    let latest = reflog
+        .get(0)
+        .ok_or_else(|| io::Error::other("the Git fixture reflog has no latest entry"))?;
+    let commit = latest.id_new();
+    let message = latest
+        .message()
+        .ok()
+        .flatten()
+        .ok_or_else(|| io::Error::other("the Git fixture reflog message is not valid UTF-8"))?
+        .to_owned();
+    reflog.remove(0, false)?;
+    reflog.append(commit, signature, Some(&message))?;
     reflog.write()?;
     Ok(())
 }
@@ -4812,6 +4843,35 @@ fn git_natural_state_rejects_a_missing_branch_reflog_record() -> EvalResult {
 }
 
 #[test]
+fn git_natural_state_rejects_branch_reflog_timezone_drift() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (seed, seed_refs, seed_fixture) = seed_git_repository_with_refs(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    let repository = Repository::open(workspace.path())?;
+    let commit = repository.head()?.peel_to_commit()?;
+    let commit_time = commit.committer().when();
+    let altered_time = Time::new(
+        commit_time.seconds(),
+        commit_time.offset_minutes().saturating_add(1),
+    );
+    let altered_signature = Signature::new(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, &altered_time)?;
+    replace_latest_reflog_signature(
+        &repository,
+        &format!("refs/heads/{GIT_BASE_BRANCH}"),
+        &altered_signature,
+    )?;
+
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+        &seed_fixture,
+    )?);
+    Ok(())
+}
+
+#[test]
 fn git_natural_state_rejects_a_deleted_unrelated_fixture() -> EvalResult {
     let workspace = tempfile::tempdir()?;
     let (seed, seed_refs, seed_fixture) = seed_git_repository_with_refs(workspace.path())?;
@@ -5346,6 +5406,36 @@ fn forced_git_commit_verifier_rejects_a_missing_branch_reflog_record() -> EvalRe
     fs::write(&branch_log, &contents[..=previous_record_end])?;
     let result = serde_json::json!({
         "commit": head.to_string(),
+        "state_cleaned": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_commit_verifier_rejects_reflog_timestamp_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_CREATE_COMMIT_NAME)
+        .expect("the Git commit fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let message = arguments["message"]
+        .as_str()
+        .expect("the Git commit fixture has a message");
+    suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
+    commit_staged_paths(suite.workspace.path(), message)?;
+    let repository = Repository::open(suite.workspace.path())?;
+    let head = repository.head()?.peel_to_commit()?;
+    let commit_time = head.committer().when();
+    let altered_time = Time::new(commit_time.seconds() + 1, commit_time.offset_minutes());
+    let altered_signature = Signature::new(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, &altered_time)?;
+    replace_latest_reflog_signature(&repository, "HEAD", &altered_signature)?;
+    let result = serde_json::json!({
+        "commit": head.id().to_string(),
         "state_cleaned": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
