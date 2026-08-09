@@ -136,11 +136,17 @@ fn object_rooted_schema(mut value: serde_json::Value) -> serde_json::Value {
 
 /// Keywords a discriminating tag property may carry into the fold.
 ///
-/// `const` names the variant, `type` may restate that it is a string, and
-/// `description` is prose. The merged tag property is rebuilt from those and
-/// nothing else, so a branch stating more about its tag states something the
-/// fold would silently drop.
-const TAG_PROPERTY_KEYWORDS: [&str; 3] = ["const", "description", "type"];
+/// `const` names the variant and `type` may restate that it is a string.
+/// The merged tag property is rebuilt from exactly those: its description is
+/// generated from the variants' own documentation and the payloads each one
+/// requires. A `description` declared on the tag property itself is therefore
+/// replaced rather than merged, and model-facing guidance disappearing from
+/// the advertised schema is the failure this fold exists to refuse — so it is
+/// not admitted. Merging the two descriptions is expressible in principle;
+/// leaving it out keeps the decision for the declaration that first needs it,
+/// rather than inventing an attribution scheme for a case no argument type in
+/// the workspace presents.
+const TAG_PROPERTY_KEYWORDS: [&str; 2] = ["const", "type"];
 
 /// One internally-tagged union branch decomposed for merging.
 struct TaggedVariant<'schema> {
@@ -409,7 +415,18 @@ fn merged_property(
     let mut described: Vec<(Vec<String>, String)> = Vec::new();
     for (variant, tag_value) in variants.iter().zip(tag_values) {
         let Some(present) = variant.properties.get(name) else {
-            continue;
+            // Absence is skippable only from a closed branch, which forbids
+            // the name outright — the merged schema for it then constrains
+            // only objects that branch never admitted, and the lost pairing
+            // is the widening the fold is allowed. An open branch instead
+            // admits any value under that name, so letting another branch's
+            // object stand as the global constraint would refuse objects this
+            // one accepts. That is the narrowing an explicit `true` already
+            // declines, reached implicitly, and it declines the same way.
+            if variant.closed {
+                continue;
+            }
+            return None;
         };
         // Absent and present-but-boolean are different answers and only the
         // first is a skip. `true` and `false` are valid JSON Schemas — one
@@ -1211,6 +1228,63 @@ mod tests {
                 {
                     "properties": {"mode": {"const": "tenanted"}},
                     "required": ["mode", "tenant"],
+                    "type": "object"
+                }
+            ]
+        });
+
+        assert_eq!(object_rooted_schema(declared.clone()), declared);
+    }
+
+    /// A description declared on the tag property declines the fold rather
+    /// than being overwritten by the generated one.
+    ///
+    /// The merged tag carries prose built from the variants' documentation and
+    /// their required payloads, so guidance written on the tag property itself
+    /// has nowhere to go. Dropping it would take model-facing text out of the
+    /// advertised schema silently, which is the one loss this fold refuses
+    /// everywhere else.
+    #[test]
+    fn a_described_tag_property_declines_the_fold() {
+        let declared = serde_json::json!({
+            "oneOf": [
+                {
+                    "properties": {"mode": {"const": "bare", "description": "Bare mode."}},
+                    "required": ["mode"],
+                    "type": "object"
+                },
+                {
+                    "properties": {"mode": {"const": "full"}},
+                    "required": ["mode"],
+                    "type": "object"
+                }
+            ]
+        });
+
+        assert_eq!(object_rooted_schema(declared.clone()), declared);
+    }
+
+    /// An open branch that omits a property another branch declares declines
+    /// the fold, exactly as an explicit `true` does.
+    ///
+    /// Omitting a name from a branch that admits unknown members is not
+    /// silence about it — the branch accepts any value there. Skipping it
+    /// would let the declaring branch's schema become the constraint for every
+    /// variant, refusing objects the open branch accepted. Absence may only be
+    /// skipped from a closed branch, which genuinely forbids the name.
+    #[test]
+    fn an_open_branch_omitting_a_declared_property_declines_the_fold() {
+        let declared = serde_json::json!({
+            "oneOf": [
+                {
+                    "properties": {"mode": {"const": "open"}},
+                    "required": ["mode"],
+                    "type": "object"
+                },
+                {
+                    "additionalProperties": false,
+                    "properties": {"label": {"type": "string"}, "mode": {"const": "typed"}},
+                    "required": ["label", "mode"],
                     "type": "object"
                 }
             ]
