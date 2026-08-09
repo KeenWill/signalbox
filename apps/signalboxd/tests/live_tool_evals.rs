@@ -1030,7 +1030,7 @@ impl FamilySuite {
                 snapshot,
                 tracker,
             )? && tracker.final_response_reports_completion()),
-            EvalFamily::Exec => Ok(true),
+            EvalFamily::Exec => Ok(tracker.final_response_reports_completion()),
         }
     }
 
