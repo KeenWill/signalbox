@@ -33,52 +33,25 @@ than no harness, because it also reports that the ground is covered.
 No coverage run, no network call, and no GitHub API request happens here. Every
 document is synthetic and built in this file.
 
-Scope, and where hardening this reader stops
---------------------------------------------
+What this reader models, and what it refuses
+-------------------------------------------
 
 Reading a filter out of a workflow means modelling a little of the shell, and a
-partial shell model can always be shown wrong on some input it never meets. The
-owner's standing rule for scanner tooling applies: once a surface stops
-producing behavioural defects, further hardening findings against it are
-declined at the class level, and that decline is gated by a mechanical test
-rather than by judgement.
+partial shell model can always be shown wrong on some input it never meets. So
+this one refuses rather than guesses: `unreadable_invocations()` fails the suite
+on any invocation whose filter it cannot read, which makes an unmodelled
+construct cost a loud failure instead of a silent wrong pass.
 
-Here the mechanical test is whether the form occurs in these two workflows at
-all. A finding about how this reader parses shell is material only when both
-halves hold:
+`RECORDED_INVOCATION_FORMS` records the forms these two workflows actually use —
+every filter a single-quoted literal, reached either directly or through
+`gh api --jq` — and `test_the_workflows_reach_jq_only_in_the_recorded_forms`
+pins that inventory. A workflow reaching jq a new way fails it, so the reader is
+never quietly asked to parse a form nobody checked it against.
 
-    the form is one `coverage.yml` or `swift.yml` actually writes, and
-    this module accepts it while parsing it into something other than what the
-    shell hands jq.
-
-A form the module refuses is already safe: `unreadable_invocations()` fails the
-suite rather than testing a filter it could not read, so an unmodelled construct
-costs a loud failure, never a silent wrong pass. A construct the workflows never
-write costs nothing at all.
-
-`RECORDED_INVOCATION_FORMS` is that test made runnable. It pins the forms in
-use, so the decline is auditable and lapses by itself: a workflow reaching jq a
-new way fails that check, and the question reopens for exactly the form that
-arrived.
-
-The same judgement, applied to the whole module
------------------------------------------------
-
-This file was written to close four divergences that review caught and no test
-did, and it went on to find a category nobody had covered: the command around
-the filter, where a create branch sends no body, an empty comment page ends the
-selection, and a dropped `-e` turns a rejected baseline into an accepted one.
-Those are the production breaks it exists to catch, and they are caught.
-
-What follows from that is a bound on further work here, not a claim that the
-module is perfect. A finding is taken up when it is against the original
-submission, when it shows this module would miss a real break in the pipeline,
-or when it shows a test here asserts something false. A finding whose target is
-machinery a review round added, and whose only consequence is that this module
-could check more sharply, is declined: the pipeline behaves the same either
-way, and the measured history is that such findings arrive against code the
-reviewing itself created — none in the first wave against the original
-submission, and a third of them cumulatively since.
+Those two together bound what this reader has to model, which is why it does not
+grow to cover shell it never meets. How review findings against this module are
+triaged is a process rule and is not restated here; it lives with the pull
+request that introduced this file, which owns it.
 """
 
 from __future__ import annotations
@@ -1080,6 +1053,72 @@ def redirect_target_after(script: str, program: str) -> str | None:
     # Normalised the same way the command words are, so the file written and the
     # file read are compared as the same name rather than as two spellings of it.
     return substitute_shell_variables(target)
+
+
+# The scope a job needs to write a pull-request comment. Both publishing jobs
+# continue on error, so losing it fails no workflow: the comment simply stops
+# updating, or is never created, and nothing says so.
+COMMENT_WRITE_SCOPE = "pull-requests"
+COMMENT_WRITE_LEVEL = "write"
+
+
+def job_permissions(workflow: Path) -> dict[str, dict[str, str]]:
+    """Each job's declared permissions, outside test bodies."""
+    declared: dict[str, dict[str, str]] = {}
+    job: str | None = None
+    reading = False
+    for line in workflow.read_text(encoding="utf-8").splitlines():
+        heading = JOB_HEADING.match(line)
+        if heading:
+            job = heading.group("name")
+            declared.setdefault(job, {})
+            reading = False
+            continue
+        if job is None:
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped == "permissions:":
+            reading = True
+            continue
+        if reading:
+            if not line.startswith("      "):
+                reading = False
+                continue
+            scope, _, level = stripped.partition(":")
+            declared[job][scope.strip()] = level.strip()
+    return declared
+
+
+def jobs_missing_comment_write_permission() -> list[str]:
+    """Publishing jobs that could not write the comment they build.
+
+    Runs outside test bodies. The filter and the request can both be perfect and
+    the comment still never appear, because the job was not granted the scope
+    that lets it write one. Both publishing jobs continue on error, so the
+    failure is silent: the sticky comment goes stale, or a first one is never
+    created, and the workflow still reports success.
+    """
+    problems: list[str] = []
+    for identifier, workflow in (
+        (RUST_COMMENT_PAYLOAD, COVERAGE_WORKFLOW),
+        (NATIVE_COMMENT_PAYLOAD, SWIFT_WORKFLOW),
+    ):
+        program = one_program_for(identifier)
+        declared = job_permissions(workflow)
+        for block in read_run_blocks(workflow):
+            if program not in block.script:
+                continue
+            granted = declared.get(block.job, {})
+            if granted.get(COMMENT_WRITE_SCOPE) != COMMENT_WRITE_LEVEL:
+                problems.append(
+                    f"{workflow.name}/{block.job} builds a comment payload but declares "
+                    f"{COMMENT_WRITE_SCOPE}: {granted.get(COMMENT_WRITE_SCOPE)!r} rather than "
+                    f"{COMMENT_WRITE_LEVEL!r}; both requests would be refused and the job "
+                    "continues on error, so nothing would report it"
+                )
+    return problems
 
 
 def unreadable_invocations() -> list[str]:
@@ -2775,6 +2814,14 @@ class WorkflowReadingTests(unittest.TestCase):
         uploaded directory and the publishing job reports that the run measured
         nothing."""
         self.assertEqual(report_producer_path_problems(), [])
+
+    def test_the_publishing_jobs_can_write_the_comment(self) -> None:
+        """The filter and the request can both be right and the comment still
+        never appear, because the job was never granted the scope that lets it
+        write one. Both publishing jobs continue on error, so that failure is
+        silent — the sticky comment goes stale, or a first one is never
+        created, and the workflow still reports success."""
+        self.assertEqual(jobs_missing_comment_write_permission(), [])
 
     def test_every_jq_invocation_in_the_workflows_is_readable(self) -> None:
         """The exhaustiveness check is only worth as much as the scan beneath
