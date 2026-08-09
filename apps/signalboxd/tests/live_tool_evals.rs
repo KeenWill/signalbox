@@ -13877,6 +13877,14 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         report.family.model(),
     );
     for outcome in &report.forced {
+        for result in &outcome.tool_results {
+            if exec_result_is_infrastructure(result) {
+                eprintln!(
+                    "structured Exec infrastructure evidence: {}",
+                    result.content
+                );
+            }
+        }
         let target = outcome.target.as_deref().unwrap_or("missing target");
         let result = outcome.forced_disposition().label();
         let turn = outcome.snapshot.turn_disposition.label();
@@ -13892,7 +13900,7 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         .natural_loop_disposition(report.family)
         .and(report.natural_state);
     markdown.push_str(&format!(
-        "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | `{}` |\n\nModel outcomes are report-only; a model miss does not fail this workflow. An exact forced executor failure fails after this summary is written.\n",
+        "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | `{}` |\n\nModel outcomes are report-only; a model miss does not fail this workflow. An exact forced or natural executor failure fails after this summary is written.\n",
         natural.label(),
         report.natural.snapshot.called_names(),
         report.natural.round_tripped_result_count(),
