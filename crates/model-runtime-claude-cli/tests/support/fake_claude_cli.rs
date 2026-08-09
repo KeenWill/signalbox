@@ -85,6 +85,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         return Ok(());
     }
+    if scenario == "hook_progress_events" {
+        hook_event("hook_started")?;
+        hook_event("hook_progress")?;
+        hook_event("hook_response")?;
+        system_init(&arguments)?;
+        assistant_text(fixtures::ANSWER)?;
+        success("end_turn", Some(fixtures::ANSWER))?;
+        return Ok(());
+    }
     system_init(&arguments)?;
     match scenario.as_str() {
         "normal_completion" => {
@@ -202,6 +211,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn system_init(arguments: &[String]) -> std::io::Result<()> {
     system_init_with_identity(arguments, fixtures::SESSION_ID, fixtures::MODEL)
+}
+
+fn hook_event(subtype: &str) -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "system",
+        "subtype": subtype,
+        "hook_id": "synthetic-readiness-hook",
+    }))
 }
 
 fn system_init_with_identity(

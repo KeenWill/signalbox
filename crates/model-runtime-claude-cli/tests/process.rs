@@ -61,6 +61,16 @@ async fn normal_completion_requires_typed_terminal_result() {
 }
 
 #[tokio::test]
+async fn hook_progress_events_do_not_replace_the_init_handshake() {
+    let result = execute_scenario("hook_progress_events", OperationShape::Text).await;
+    let completion = completed(&result.evidence);
+
+    assert_eq!(completion.finish, CompletionFinish::EndTurn);
+    assert_eq!(completion.usage, expected_usage());
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn inv_035_harmless_terminal_credential_prefix_remains_byte_exact() {
     let result = execute_scenario("safe_terminal_prefix", OperationShape::Text).await;
 
