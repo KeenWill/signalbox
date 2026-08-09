@@ -612,6 +612,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "lifecycle_item_id_marker" => {
+            // A bare lifecycle event is dropped whole after its identity is
+            // validated as nonempty. The id ends in a credential-marker prefix
+            // and the final text opens with the continuation.
+            emit(r#"{"type":"item.started","item":{"id":"trace-api_","type":"future_item"}}"#);
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "lifecycle_item_type_marker" => {
+            // The same boundary one field over: the lifecycle event's item
+            // `type` matched no arm of the adapter's, so it is provider text
+            // ending in the marker prefix.
+            emit(r#"{"type":"item.updated","item":{"id":"item_7","type":"future_api_"}}"#);
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "unsupported_item_type_marker" => {
+            // An unmodeled item's `type` is provider-chosen (it selected the
+            // catch-all arm rather than one of the adapter's literals) and the
+            // whole item is dropped.
+            emit(r#"{"type":"item.completed","item":{"id":"item_7","type":"future_api_"}}"#);
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "reasoning_item_id_marker" => {
+            // A modeled reasoning item: its `type` is the adapter's own
+            // literal and its text is interpreted, but the id is dropped.
+            // Chronologically the provider wrote `api_` (id), `key=` (text)
+            // and the value (final text).
+            emit(
+                r#"{"type":"item.completed","item":{"id":"trace-api_","type":"reasoning","text":"key="}}"#,
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "error_item_id_marker" => {
+            // The same shape on the dropped error item, whose message is
+            // interpreted while its id is not.
+            emit(
+                r#"{"type":"item.completed","item":{"id":"trace-api_","type":"error","message":"key="}}"#,
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
+            ));
+            completed();
+        }
+        "benign_item_identity_before_answer" => {
+            // Ordinary identity metadata around an unmodeled item: an id
+            // ending in a digit and a real Codex item type. `todo_list` ends
+            // in bytes the lookbehind holds conservatively (a name that could
+            // still grow into `token`), so this is the control that folding
+            // the identity does not turn routine metadata into suppression —
+            // the answer must still reach the caller byte-verbatim.
+            emit(r#"{"type":"item.started","item":{"id":"item_7","type":"todo_list"}}"#);
+            emit(
+                r#"{"type":"item.completed","item":{"id":"item_7","type":"todo_list","text":"update the plan"}}"#,
+            );
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+        }
         "duplicate_unknown_event_member" => {
             // Repeated members are ambiguous provider input even on an
             // otherwise additively tolerated unknown event. The adapter must
