@@ -192,6 +192,8 @@ const WORKSPACE_DRIFTED_SEED: &str = "alpha\nbeta fixturE\nalpha\n";
 #[cfg(unix)]
 const USER_EXECUTE_MODE_BIT: u32 = 0o100;
 #[cfg(unix)]
+const GROUP_WRITE_MODE_BIT: u32 = 0o020;
+#[cfg(unix)]
 const WORKSPACE_CREATED_FILE_MODE: Option<u32> = Some(0o600);
 #[cfg(not(unix))]
 const WORKSPACE_CREATED_FILE_MODE: Option<u32> = None;
@@ -628,8 +630,8 @@ struct FamilySuite {
     family: EvalFamily,
     workspace: TempDir,
     git_seed: Option<Oid>,
-    git_seed_refs: BTreeMap<String, Oid>,
-    git_stage_seed_worktree_mode: Option<u32>,
+    git_seed_refs: GitReferenceInventory,
+    git_seed_fixture_modes: BTreeMap<PathBuf, Option<u32>>,
     catalog: MergedCatalog,
     executor: SharedFamilyExecutor,
     workspace_seed_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
@@ -637,26 +639,26 @@ struct FamilySuite {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum WorkspaceEntrySnapshot {
-    Directory,
+    Directory { mode: Option<u32> },
     File { content: Vec<u8>, mode: Option<u32> },
     Symlink,
     Other,
+}
+
+type GitReferenceInventory = BTreeMap<Vec<u8>, GitReferenceTarget>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum GitReferenceTarget {
+    Direct(Oid),
+    Symbolic(Vec<u8>),
 }
 
 impl FamilySuite {
     fn git() -> EvalResult<Self> {
         let workspace = tempfile::tempdir()?;
         let git_seed = seed_git_repository(workspace.path())?;
-        let git_seed_refs = git_local_branch_targets(&Repository::open(workspace.path())?)?;
-        #[cfg(unix)]
-        let git_stage_seed_worktree_mode = Some(
-            fs::metadata(workspace.path().join(GIT_STAGE_PATH))?
-                .permissions()
-                .mode()
-                & 0o7777,
-        );
-        #[cfg(not(unix))]
-        let git_stage_seed_worktree_mode = None;
+        let git_seed_refs = git_reference_inventory(&Repository::open(workspace.path())?)?;
+        let git_seed_fixture_modes = git_fixture_modes(workspace.path())?;
         let tools = LocalGitTools::try_new(
             LocalWorkspaceFileSystem,
             workspace.path(),
@@ -668,7 +670,7 @@ impl FamilySuite {
             workspace,
             git_seed: Some(git_seed),
             git_seed_refs,
-            git_stage_seed_worktree_mode,
+            git_seed_fixture_modes,
             catalog: MergedCatalog::try_new([catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Git(executor)),
             workspace_seed_entries: BTreeMap::new(),
@@ -720,7 +722,7 @@ impl FamilySuite {
             workspace,
             git_seed: None,
             git_seed_refs: BTreeMap::new(),
-            git_stage_seed_worktree_mode: None,
+            git_seed_fixture_modes: BTreeMap::new(),
             catalog: MergedCatalog::try_new([read_catalog, mutation_catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Workspace {
                 read: read_executor,
@@ -748,7 +750,7 @@ impl FamilySuite {
             workspace,
             git_seed: None,
             git_seed_refs: BTreeMap::new(),
-            git_stage_seed_worktree_mode: None,
+            git_seed_fixture_modes: BTreeMap::new(),
             catalog: MergedCatalog::try_new([fetch_catalog, search_catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Web {
                 fetch: fetch_executor,
@@ -776,7 +778,7 @@ impl FamilySuite {
             workspace,
             git_seed: None,
             git_seed_refs: BTreeMap::new(),
-            git_stage_seed_worktree_mode: None,
+            git_seed_fixture_modes: BTreeMap::new(),
             catalog: MergedCatalog::try_new([
                 sandboxed_catalog,
                 unsandboxed_catalog,
@@ -945,7 +947,7 @@ impl FamilySuite {
                     self.workspace.path(),
                     seed,
                     &self.git_seed_refs,
-                    self.git_stage_seed_worktree_mode,
+                    &self.git_seed_fixture_modes,
                     case.name,
                     &arguments,
                     &result,
@@ -969,10 +971,12 @@ impl FamilySuite {
                 let seed = self.git_seed.ok_or_else(|| {
                     io::Error::other("the Git eval suite has no captured seed identity")
                 })?;
-                Ok(
-                    git_natural_state_passed(self.workspace.path(), seed, &self.git_seed_refs)?
-                        && snapshot.git_natural_requests_passed()?,
-                )
+                Ok(git_natural_state_passed(
+                    self.workspace.path(),
+                    seed,
+                    &self.git_seed_refs,
+                    &self.git_seed_fixture_modes,
+                )? && snapshot.git_natural_requests_passed()?)
             }
             EvalFamily::Workspace => {
                 let bytes_match = self.workspace_answer_matches()?;
@@ -1041,13 +1045,15 @@ fn workspace_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntry
                 .to_path_buf();
             if file_type.is_dir() {
                 pending.push(entry.path());
-                entries.insert(relative, WorkspaceEntrySnapshot::Directory);
+                entries.insert(
+                    relative,
+                    WorkspaceEntrySnapshot::Directory {
+                        mode: worktree_mode(&entry.path())?,
+                    },
+                );
             } else if file_type.is_file() {
                 let content = fs::read(entry.path())?;
-                #[cfg(unix)]
-                let mode = Some(entry.metadata()?.permissions().mode() & 0o7777);
-                #[cfg(not(unix))]
-                let mode = None;
+                let mode = worktree_mode(&entry.path())?;
                 entries.insert(relative, WorkspaceEntrySnapshot::File { content, mode });
             } else if file_type.is_symlink() {
                 entries.insert(relative, WorkspaceEntrySnapshot::Symlink);
@@ -1074,8 +1080,8 @@ fn seed_exec_workspace(root: &Path) -> EvalResult {
 fn git_forced_case_passed(
     root: &Path,
     seed: Oid,
-    seed_refs: &BTreeMap<String, Oid>,
-    git_stage_seed_worktree_mode: Option<u32>,
+    seed_refs: &GitReferenceInventory,
+    seed_fixture_modes: &BTreeMap<PathBuf, Option<u32>>,
     name: &str,
     arguments: &serde_json::Value,
     result: &serde_json::Value,
@@ -1094,7 +1100,10 @@ fn git_forced_case_passed(
             };
             let expected = log_target.id();
             let mut expected_refs = seed_refs.clone();
-            expected_refs.insert(branch_name.to_owned(), expected);
+            expected_refs.insert(
+                format!("refs/heads/{branch_name}").into_bytes(),
+                GitReferenceTarget::Direct(expected),
+            );
             let branch = repository.find_branch(branch_name, BranchType::Local)?;
             let start_branch = repository.find_branch("log-target", BranchType::Local)?;
             let base = repository
@@ -1110,7 +1119,7 @@ fn git_forced_case_passed(
                 && base.id() == seed
                 && fs::read_to_string(root.join(GIT_SEED_PATH))? == GIT_BASE_CONTENT
                 && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
-                && git_local_branch_targets(&repository)? == expected_refs
+                && git_reference_inventory(&repository)? == expected_refs
                 && git_base_status_fixture_unchanged(root, &repository)?
                 && git_status_path_states(&repository)? == expected_base_git_statuses()
         }
@@ -1129,14 +1138,17 @@ fn git_forced_case_passed(
                 && repository.head()?.shorthand().ok() == Some(branch_name)
                 && fs::read_to_string(root.join(GIT_SEED_PATH))? == GIT_SWITCH_CONTENT
                 && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
-                && git_local_branch_targets(&repository)? == *seed_refs
+                && git_reference_inventory(&repository)? == *seed_refs
                 && git_untracked_fixtures_unchanged(root, &repository)?
                 && git_status_path_states(&repository)? == expected_base_git_statuses()
         }
         GIT_CREATE_COMMIT_NAME => {
             let base = repository.find_branch(GIT_BASE_BRANCH, BranchType::Local)?;
             let mut expected_refs = seed_refs.clone();
-            expected_refs.insert(String::from(GIT_BASE_BRANCH), head.id());
+            expected_refs.insert(
+                format!("refs/heads/{GIT_BASE_BRANCH}").into_bytes(),
+                GitReferenceTarget::Direct(head.id()),
+            );
             result["commit"] == head.id().to_string()
                 && result["state_cleaned"] == true
                 && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
@@ -1168,7 +1180,7 @@ fn git_forced_case_passed(
                     GIT_NATURAL_PATH,
                     GIT_NATURAL_CONTENT.as_bytes(),
                 )?
-                && git_local_branch_targets(&repository)? == expected_refs
+                && git_reference_inventory(&repository)? == expected_refs
                 && git_status_path_states(&repository)? == expected_commit_git_statuses()
         }
         GIT_DIFF_NAME => {
@@ -1177,7 +1189,7 @@ fn git_forced_case_passed(
                 && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
                 && head.id() == seed
                 && git_diff_fixture_unchanged(root, &repository)?
-                && git_local_branch_targets(&repository)? == *seed_refs
+                && git_reference_inventory(&repository)? == *seed_refs
                 && git_status_path_states(&repository)? == expected_diff_git_statuses()
         }
         GIT_LOG_NAME => {
@@ -1206,7 +1218,7 @@ fn git_forced_case_passed(
                 && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
                 && head.id() == seed
                 && git_base_status_fixture_unchanged(root, &repository)?
-                && git_local_branch_targets(&repository)? == *seed_refs
+                && git_reference_inventory(&repository)? == *seed_refs
                 && git_status_path_states(&repository)? == expected_base_git_statuses()
         }
         GIT_STAGE_NAME => {
@@ -1225,7 +1237,10 @@ fn git_forced_case_passed(
                     &repository,
                     GIT_STAGE_PATH,
                     GIT_STAGE_CONTENT.as_bytes(),
-                    git_stage_seed_worktree_mode,
+                    seed_fixture_modes
+                        .get(Path::new(GIT_STAGE_PATH))
+                        .copied()
+                        .flatten(),
                 )?
                 && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
                 && head.id() == seed
@@ -1244,7 +1259,7 @@ fn git_forced_case_passed(
                     GIT_NATURAL_PATH,
                     GIT_NATURAL_CONTENT.as_bytes(),
                 )?
-                && git_local_branch_targets(&repository)? == *seed_refs
+                && git_reference_inventory(&repository)? == *seed_refs
                 && git_status_path_states(&repository)? == expected_staged_git_statuses()
         }
         GIT_STATUS_NAME => {
@@ -1256,12 +1271,12 @@ fn git_forced_case_passed(
                 && git_status_entries_match(&result["entries"])
                 && result["truncated"] == true
                 && git_status_fixture_unchanged(root, &repository)?
-                && git_local_branch_targets(&repository)? == *seed_refs
+                && git_reference_inventory(&repository)? == *seed_refs
                 && git_status_path_states(&repository)? == expected_status_git_statuses()
         }
         _ => false,
     };
-    Ok(passed)
+    Ok(passed && git_fixture_modes_match(root, seed_fixture_modes)?)
 }
 
 fn commit_adds_exact_fixture(
@@ -1516,16 +1531,16 @@ fn staged_blob_matches_fixture(
 }
 
 fn worktree_file_mode_matches(path: &Path, expected: Option<u32>) -> EvalResult<bool> {
+    Ok(worktree_mode(path)? == expected)
+}
+
+fn worktree_mode(path: &Path) -> EvalResult<Option<u32>> {
     #[cfg(unix)]
-    return Ok(expected.is_some_and(|expected| {
-        fs::metadata(path)
-            .ok()
-            .is_some_and(|metadata| metadata.permissions().mode() & 0o7777 == expected)
-    }));
+    return Ok(Some(fs::metadata(path)?.permissions().mode() & 0o7777));
     #[cfg(not(unix))]
     {
         let _ = path;
-        Ok(expected.is_none())
+        Ok(None)
     }
 }
 
@@ -1839,26 +1854,55 @@ fn seed_git_repository(root: &Path) -> EvalResult<Oid> {
     Ok(third.id())
 }
 
-fn seed_git_repository_with_refs(root: &Path) -> EvalResult<(Oid, BTreeMap<String, Oid>)> {
+fn seed_git_repository_with_refs(
+    root: &Path,
+) -> EvalResult<(Oid, GitReferenceInventory, BTreeMap<PathBuf, Option<u32>>)> {
     let seed = seed_git_repository(root)?;
-    let refs = git_local_branch_targets(&Repository::open(root)?)?;
-    Ok((seed, refs))
+    let refs = git_reference_inventory(&Repository::open(root)?)?;
+    let fixture_modes = git_fixture_modes(root)?;
+    Ok((seed, refs, fixture_modes))
 }
 
-fn git_local_branch_targets(repository: &Repository) -> EvalResult<BTreeMap<String, Oid>> {
+fn git_reference_inventory(repository: &Repository) -> EvalResult<GitReferenceInventory> {
     let mut targets = BTreeMap::new();
-    for branch in repository.branches(Some(BranchType::Local))? {
-        let (branch, _) = branch?;
-        let name = branch
-            .name()?
-            .ok_or_else(|| io::Error::other("a local Git branch name is not valid UTF-8"))?;
-        let target = branch
-            .get()
-            .target()
-            .ok_or_else(|| io::Error::other("a local Git branch has no direct target"))?;
-        targets.insert(name.to_owned(), target);
+    for reference in repository.references()? {
+        let reference = reference?;
+        let target = match (reference.target(), reference.symbolic_target_bytes()) {
+            (Some(target), None) => GitReferenceTarget::Direct(target),
+            (None, Some(target)) => GitReferenceTarget::Symbolic(target.to_vec()),
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(io::Error::other("a Git reference has an invalid target shape").into());
+            }
+        };
+        targets.insert(reference.name_bytes().to_vec(), target);
     }
     Ok(targets)
+}
+
+fn git_fixture_modes(root: &Path) -> EvalResult<BTreeMap<PathBuf, Option<u32>>> {
+    let mut modes = BTreeMap::new();
+    for path in [
+        GIT_SEED_PATH,
+        GIT_STAGE_PATH,
+        GIT_COMMIT_PATH,
+        GIT_NATURAL_PATH,
+    ] {
+        modes.insert(PathBuf::from(path), worktree_mode(&root.join(path))?);
+    }
+    Ok(modes)
+}
+
+fn git_fixture_modes_match(
+    root: &Path,
+    expected: &BTreeMap<PathBuf, Option<u32>>,
+) -> EvalResult<bool> {
+    for (path, expected_mode) in expected {
+        let path = root.join(path);
+        if !path.is_file() || worktree_mode(&path)? != *expected_mode {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn commit_git_seed_revision<'repository>(
@@ -1961,7 +2005,8 @@ fn commit_staged_paths_with_identity(
 fn git_natural_state_passed(
     root: &Path,
     seed: Oid,
-    seed_refs: &BTreeMap<String, Oid>,
+    seed_refs: &GitReferenceInventory,
+    seed_fixture_modes: &BTreeMap<PathBuf, Option<u32>>,
 ) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let head_reference = repository.head()?;
@@ -2017,8 +2062,12 @@ fn git_natural_state_passed(
     let complete_status_matches = git_natural_status_matches(&repository)?;
     let operation_state_is_clean = git_operation_state_is_clean(&repository);
     let mut expected_refs = seed_refs.clone();
-    expected_refs.insert(String::from(GIT_BASE_BRANCH), head.id());
-    let complete_ref_inventory_matches = git_local_branch_targets(&repository)? == expected_refs;
+    expected_refs.insert(
+        format!("refs/heads/{GIT_BASE_BRANCH}").into_bytes(),
+        GitReferenceTarget::Direct(head.id()),
+    );
+    let complete_ref_inventory_matches = git_reference_inventory(&repository)? == expected_refs;
+    let fixture_modes_match = git_fixture_modes_match(root, seed_fixture_modes)?;
     Ok(head_remains_on_seeded_branch
         && seeded_branch_advanced
         && message_matches
@@ -2031,7 +2080,8 @@ fn git_natural_state_passed(
         && unrelated_fixtures_unchanged
         && complete_status_matches
         && operation_state_is_clean
-        && complete_ref_inventory_matches)
+        && complete_ref_inventory_matches
+        && fixture_modes_match)
 }
 
 fn git_natural_status_matches(repository: &Repository) -> EvalResult<bool> {
@@ -4771,7 +4821,7 @@ fn unforced_git_tier_requires_both_task_tools() {
 #[test]
 fn git_natural_state_rejects_a_commit_with_an_unrelated_fixture() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     stage_path(workspace.path(), GIT_STAGE_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
@@ -4780,6 +4830,7 @@ fn git_natural_state_rejects_a_commit_with_an_unrelated_fixture() -> EvalResult 
         workspace.path(),
         seed,
         &seed_refs,
+        &seed_fixture_modes,
     )?);
     Ok(())
 }
@@ -4787,7 +4838,7 @@ fn git_natural_state_rejects_a_commit_with_an_unrelated_fixture() -> EvalResult 
 #[test]
 fn git_natural_state_rejects_a_commit_with_drifted_bytes() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
     fs::write(
         workspace.path().join(GIT_NATURAL_PATH),
         GIT_DRIFTED_NATURAL_CONTENT,
@@ -4799,6 +4850,7 @@ fn git_natural_state_rejects_a_commit_with_drifted_bytes() -> EvalResult {
         workspace.path(),
         seed,
         &seed_refs,
+        &seed_fixture_modes,
     )?);
     Ok(())
 }
@@ -4807,7 +4859,7 @@ fn git_natural_state_rejects_a_commit_with_drifted_bytes() -> EvalResult {
 #[test]
 fn git_natural_state_rejects_an_executable_committed_fixture() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
     let path = workspace.path().join(GIT_NATURAL_PATH);
     let mut permissions = fs::metadata(&path)?.permissions();
     permissions.set_mode(permissions.mode() | USER_EXECUTE_MODE_BIT);
@@ -4819,6 +4871,7 @@ fn git_natural_state_rejects_an_executable_committed_fixture() -> EvalResult {
         workspace.path(),
         seed,
         &seed_refs,
+        &seed_fixture_modes,
     )?);
     Ok(())
 }
@@ -4826,7 +4879,7 @@ fn git_natural_state_rejects_an_executable_committed_fixture() -> EvalResult {
 #[test]
 fn git_natural_state_rejects_retained_operation_state() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
     fs::write(
@@ -4840,6 +4893,7 @@ fn git_natural_state_rejects_retained_operation_state() -> EvalResult {
         workspace.path(),
         seed,
         &seed_refs,
+        &seed_fixture_modes,
     )?);
     Ok(())
 }
@@ -4847,7 +4901,7 @@ fn git_natural_state_rejects_retained_operation_state() -> EvalResult {
 #[test]
 fn git_natural_state_rejects_extra_staging_after_the_target_commit() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
     stage_path(workspace.path(), GIT_STAGE_PATH)?;
@@ -4856,6 +4910,7 @@ fn git_natural_state_rejects_extra_staging_after_the_target_commit() -> EvalResu
         workspace.path(),
         seed,
         &seed_refs,
+        &seed_fixture_modes,
     )?);
     Ok(())
 }
@@ -4863,7 +4918,7 @@ fn git_natural_state_rejects_extra_staging_after_the_target_commit() -> EvalResu
 #[test]
 fn git_natural_state_rejects_a_deleted_unrelated_fixture() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
     fs::remove_file(workspace.path().join(GIT_STAGE_PATH))?;
@@ -4872,6 +4927,7 @@ fn git_natural_state_rejects_a_deleted_unrelated_fixture() -> EvalResult {
         workspace.path(),
         seed,
         &seed_refs,
+        &seed_fixture_modes,
     )?);
     Ok(())
 }
@@ -4879,7 +4935,7 @@ fn git_natural_state_rejects_a_deleted_unrelated_fixture() -> EvalResult {
 #[test]
 fn git_natural_state_rejects_a_collateral_untracked_file() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
     fs::write(
@@ -4891,6 +4947,7 @@ fn git_natural_state_rejects_a_collateral_untracked_file() -> EvalResult {
         workspace.path(),
         seed,
         &seed_refs,
+        &seed_fixture_modes,
     )?);
     Ok(())
 }
@@ -4898,7 +4955,7 @@ fn git_natural_state_rejects_a_collateral_untracked_file() -> EvalResult {
 #[test]
 fn git_natural_state_rejects_a_collateral_ref_update() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
     let repository = Repository::open(workspace.path())?;
@@ -4911,6 +4968,31 @@ fn git_natural_state_rejects_a_collateral_ref_update() -> EvalResult {
         workspace.path(),
         seed,
         &seed_refs,
+        &seed_fixture_modes,
+    )?);
+    Ok(())
+}
+
+#[test]
+fn git_natural_state_rejects_a_collateral_tag() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    let repository = Repository::open(workspace.path())?;
+    let head = repository.head()?.peel_to_commit()?;
+    repository.reference(
+        "refs/tags/collateral-eval-tag",
+        head.id(),
+        true,
+        "synthetic collateral tag",
+    )?;
+
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+        &seed_fixture_modes,
     )?);
     Ok(())
 }
@@ -4918,7 +5000,7 @@ fn git_natural_state_rejects_a_collateral_ref_update() -> EvalResult {
 #[test]
 fn git_natural_state_rejects_the_wrong_commit_identity() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths_with_identity(
         workspace.path(),
@@ -4931,6 +5013,7 @@ fn git_natural_state_rejects_the_wrong_commit_identity() -> EvalResult {
         workspace.path(),
         seed,
         &seed_refs,
+        &seed_fixture_modes,
     )?);
     Ok(())
 }
@@ -4938,7 +5021,7 @@ fn git_natural_state_rejects_the_wrong_commit_identity() -> EvalResult {
 #[test]
 fn git_natural_state_rejects_an_unrelated_earlier_commit() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_STAGE_PATH)?;
     commit_staged_paths(workspace.path(), "unrelated eval commit")?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
@@ -4948,6 +5031,7 @@ fn git_natural_state_rejects_an_unrelated_earlier_commit() -> EvalResult {
         workspace.path(),
         seed,
         &seed_refs,
+        &seed_fixture_modes,
     )?);
     Ok(())
 }
@@ -4955,12 +5039,13 @@ fn git_natural_state_rejects_an_unrelated_earlier_commit() -> EvalResult {
 #[test]
 fn git_natural_state_rejects_a_parentless_seed_commit() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
 
     assert!(!git_natural_state_passed(
         workspace.path(),
         seed,
         &seed_refs,
+        &seed_fixture_modes,
     )?);
     Ok(())
 }
@@ -4968,7 +5053,7 @@ fn git_natural_state_rejects_a_parentless_seed_commit() -> EvalResult {
 #[test]
 fn git_natural_state_rejects_a_commit_on_a_switched_branch() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let (seed, seed_refs, seed_fixture_modes) = seed_git_repository_with_refs(workspace.path())?;
     let repository = Repository::open(workspace.path())?;
     let head = repository.head()?.peel_to_commit()?;
     repository.branch("natural-target", &head, false)?;
@@ -4980,6 +5065,7 @@ fn git_natural_state_rejects_a_commit_on_a_switched_branch() -> EvalResult {
         workspace.path(),
         seed,
         &seed_refs,
+        &seed_fixture_modes,
     )?);
     Ok(())
 }
@@ -5050,7 +5136,14 @@ fn forced_git_stage_verifier_accepts_the_exact_staged_blob() -> EvalResult {
     .to_string();
 
     assert_eq!(entry.mode, GIT_REGULAR_INDEX_FILE_MODE);
-    assert_eq!(Some(worktree_mode), suite.git_stage_seed_worktree_mode);
+    assert_eq!(
+        Some(worktree_mode),
+        suite
+            .git_seed_fixture_modes
+            .get(Path::new(GIT_STAGE_PATH))
+            .copied()
+            .flatten()
+    );
     assert!(suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
@@ -5137,6 +5230,29 @@ fn forced_git_stage_verifier_rejects_mutated_unrelated_fixtures() -> EvalResult 
         suite.workspace.path().join(GIT_NATURAL_PATH),
         GIT_COMMIT_CONTENT,
     )?;
+    let result = serde_json::json!({
+        "staged_paths": 1,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_stage_verifier_rejects_mode_drift_in_an_unrelated_fixture() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STAGE_NAME)
+        .expect("the Git stage fixture exists");
+    let path = suite.workspace.path().join(GIT_COMMIT_PATH);
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(permissions.mode() | USER_EXECUTE_MODE_BIT);
+    fs::set_permissions(&path, permissions)?;
+    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
     let result = serde_json::json!({
         "staged_paths": 1,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -6387,6 +6503,35 @@ fn forced_workspace_read_verifier_rejects_collateral_mutation() -> EvalResult {
         suite.workspace.path().join(WORKSPACE_GLOB_NONMATCHING_PATH),
         WORKSPACE_DRIFTED_GLOB_CONTENT,
     )?;
+    let prefix = WORKSPACE_SEED
+        .get(..WORKSPACE_FORCED_READ_MAX_BYTES)
+        .expect("the workspace fixture covers the forced bound");
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "content": prefix,
+        "bytes_read": prefix.len(),
+        "total_bytes": WORKSPACE_SEED.len(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_workspace_read_verifier_rejects_directory_mode_drift() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == READ_FILE_NAME)
+        .expect("the workspace read fixture exists");
+    let path = suite.workspace.path().join(WORKSPACE_GLOB_DIRECTORY);
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(permissions.mode() ^ GROUP_WRITE_MODE_BIT);
+    fs::set_permissions(&path, permissions)?;
     let prefix = WORKSPACE_SEED
         .get(..WORKSPACE_FORCED_READ_MAX_BYTES)
         .expect("the workspace fixture covers the forced bound");
