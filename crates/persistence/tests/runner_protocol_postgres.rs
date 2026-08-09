@@ -6175,6 +6175,29 @@ async fn s32_inv009_inv044_runner_recovery_rejects_cross_wired_lease_runner()
     Ok(())
 }
 
+/// INV-009 / INV-044: the placement-loss fact itself cannot name an unrelated
+/// same-session attempt that has no lease on the lost runner and revision.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_loss_record_rejects_unleased_same_session_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    insert_physical_attempt(&pool, PROFILELESS_PHYSICAL_ATTEMPT).await?;
+    let unrelated_attempt = ToolAttemptId::from_uuid(uuid(PROFILELESS_PHYSICAL_ATTEMPT.attempt));
+    let rejected = append_runner_lost_with_interrupted_attempt_projection(
+        &pool,
+        pin.placement.session(),
+        unrelated_attempt,
+    )
+    .await
+    .expect_err("runner loss cannot retain an unleased same-session attempt");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-009 / INV-044: runner recovery may retain only an ambiguous physical
 /// attempt; a known terminal result cannot be reclassified as runner loss.
 #[tokio::test]

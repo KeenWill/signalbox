@@ -401,7 +401,12 @@ Representation rules, all enforced in the schema:
   and the runner persistence read boundary round-trips both nullable arms.
   **Committed unimplemented functionality.** No present adapter produces the
   phase: the dedicated runner-loss propagation transaction will install it under
-  the lock order below.
+  the lock order below. Independently of that future writer, a present
+  interrupted-attempt fact on the placement-loss record is admitted only when
+  the attempt is terminal and ambiguous and carries physical runner-lease
+  lineage to the record's exact lost runner and placement revision; a
+  same-session foreign attempt therefore cannot survive standalone placement
+  readback.
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.

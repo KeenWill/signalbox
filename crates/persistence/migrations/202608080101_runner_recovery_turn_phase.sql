@@ -12,6 +12,77 @@ ALTER TABLE runner_session_placement_record
         ON UPDATE RESTRICT ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED;
 
+CREATE FUNCTION assert_runner_placement_interrupted_attempt_complete(
+    checked_session_id uuid,
+    checked_event_ordinal numeric
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    placement runner_session_placement_record%ROWTYPE;
+BEGIN
+    SELECT * INTO placement
+      FROM runner_session_placement_record
+     WHERE session_id = checked_session_id
+       AND event_ordinal = checked_event_ordinal;
+    IF NOT FOUND OR placement.interrupted_tool_attempt_id IS NULL THEN
+        RETURN;
+    END IF;
+    IF placement.event_kind <> 'runner_lost'
+       OR NOT EXISTS (
+            SELECT 1
+              FROM tool_attempt AS attempt
+              JOIN runner_physical_attempt_lease_binding AS binding
+                ON binding.attempt_id = attempt.attempt_id
+              JOIN runner_lease_generation AS lease
+                ON lease.lease_id = binding.lease_id
+               AND lease.attempt_id = attempt.attempt_id
+               AND lease.session_id = attempt.session_id
+              JOIN runner_session_placement_record AS leased_placement
+                ON leased_placement.session_id = lease.session_id
+               AND leased_placement.event_ordinal =
+                    lease.placement_event_ordinal
+             WHERE attempt.attempt_id =
+                    placement.interrupted_tool_attempt_id
+               AND attempt.session_id = placement.session_id
+               AND attempt.state_kind = 'terminal'
+               AND attempt.terminal_disposition_kind = 'ambiguous'
+               AND lease.runner_id = placement.lost_runner_id
+               AND leased_placement.event_ordinal < placement.event_ordinal
+               AND leased_placement.placement_revision =
+                    placement.placement_revision
+               AND leased_placement.state_kind = 'pinned'
+               AND leased_placement.pinned_runner_id =
+                    placement.lost_runner_id
+       )
+    THEN
+        RAISE EXCEPTION
+            'runner placement loss lacks exact interrupted lease lineage'
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION require_runner_placement_interrupted_attempt_complete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM assert_runner_placement_interrupted_attempt_complete(
+        NEW.session_id,
+        NEW.event_ordinal
+    );
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER runner_placement_interrupted_attempt_is_complete
+AFTER INSERT ON runner_session_placement_record
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_runner_placement_interrupted_attempt_complete();
+
 ALTER TABLE turn_lifecycle
     ADD COLUMN runner_recovery_runner_id uuid,
     ADD COLUMN runner_recovery_placement_revision numeric(20, 0),
