@@ -274,6 +274,8 @@ const SYNTHETIC_EXECUTOR_FAILURE: &str = "synthetic executor failure";
 const DRIFTED_APPLY_PATCH_ARGUMENTS: &str =
     r#"{"patch":"*** Begin Patch\n*** Add File: other.txt\n+drifted by eval\n*** End Patch"}"#;
 const SYNTHETIC_EVAL_RECEIPT: &str = "01988c5f-89c4-7000-8000-000000000001";
+const EXACT_FORCED_EXECUTOR_FAILURE: &str =
+    "an exact forced tool request reached its executor and failed";
 const SYNTHETIC_COMPLETION_REPORT: &str = "Completed the requested operation.";
 const SYNTHETIC_FAILURE_REPORT: &str = "Failed to complete the requested operation.";
 const SYNTHETIC_CROSS_CLAUSE_FAILURE_REPORT: &str =
@@ -286,6 +288,10 @@ const SYNTHETIC_APPLIED_COMPLETION_REPORT: &str = "The patch was applied success
 const SYNTHETIC_NOT_APPLIED_REPORT: &str = "The patch was not applied.";
 const SYNTHETIC_NO_ERRORS_COMPLETION_REPORT: &str =
     "Completed the requested operation with no errors.";
+const SYNTHETIC_LONG_NEGATED_ERRORS_COMPLETION_REPORT: &str =
+    "Completed successfully without encountering any errors.";
+const SYNTHETIC_NEGATED_ERRORS_THEN_FAILURE_REPORT: &str =
+    "Completed without errors but later failed.";
 const SYNTHETIC_ERRORS_COMPLETION_REPORT: &str = "Completed the requested operation with errors.";
 const SYNTHETIC_WITHOUT_FAILURE_COMPLETION_REPORT: &str =
     "Completed the requested operation without failure.";
@@ -394,6 +400,7 @@ async fn run_selected_family_if_enabled() -> EvalResult {
         natural_state: EvalDisposition::from_passed(natural_state),
     };
     write_report(&report)?;
+    reject_forced_executor_failures(&report.forced)?;
     Ok(())
 }
 
@@ -722,6 +729,7 @@ struct GitMetadataEntrySnapshot {
     mode: Option<u32>,
     links: Option<u64>,
     content: Option<Vec<u8>>,
+    modified: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3193,7 +3201,8 @@ fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetada
     let mut entries = BTreeMap::new();
     for entry in fs::read_dir(repository.path())? {
         let entry = entry?;
-        let file_type = entry.file_type()?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        let file_type = metadata.file_type();
         let kind = if file_type.is_dir() {
             GitMetadataEntryKind::Directory
         } else if file_type.is_file() {
@@ -3216,6 +3225,9 @@ fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetada
         } else {
             (None, None)
         };
+        let modified = (kind == GitMetadataEntryKind::File)
+            .then(|| metadata.modified())
+            .transpose()?;
         entries.insert(
             PathBuf::from(entry.file_name()),
             GitMetadataEntrySnapshot {
@@ -3223,6 +3235,7 @@ fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetada
                 mode,
                 links,
                 content,
+                modified,
             },
         );
     }
@@ -3299,8 +3312,12 @@ fn git_forced_metadata_top_level_matches(
         .unwrap_or_else(|| seed_fixture.metadata_top_level.clone());
     match case_name {
         GIT_BRANCH_SWITCH_NAME => {
-            if !admit_git_metadata_content(&actual, &mut expected, Path::new(GIT_HEAD_PATH))
-                || !admit_git_metadata_content(&actual, &mut expected, Path::new(GIT_INDEX_PATH))
+            if !admit_git_metadata_file_mutation(&actual, &mut expected, Path::new(GIT_HEAD_PATH))
+                || !admit_git_metadata_file_mutation(
+                    &actual,
+                    &mut expected,
+                    Path::new(GIT_INDEX_PATH),
+                )
             {
                 return Ok(false);
             }
@@ -3311,7 +3328,8 @@ fn git_forced_metadata_top_level_matches(
             expected.remove(Path::new(GIT_MERGE_MODE_PATH));
         }
         GIT_STAGE_NAME => {
-            if !admit_git_metadata_content(&actual, &mut expected, Path::new(GIT_INDEX_PATH)) {
+            if !admit_git_metadata_file_mutation(&actual, &mut expected, Path::new(GIT_INDEX_PATH))
+            {
                 return Ok(false);
             }
         }
@@ -3327,13 +3345,13 @@ fn git_natural_metadata_top_level_matches(
 ) -> EvalResult<bool> {
     let actual = git_metadata_top_level(root)?;
     let mut expected = seed_fixture.metadata_top_level.clone();
-    if !admit_git_metadata_content(&actual, &mut expected, Path::new(GIT_INDEX_PATH)) {
+    if !admit_git_metadata_file_mutation(&actual, &mut expected, Path::new(GIT_INDEX_PATH)) {
         return Ok(false);
     }
     Ok(actual == expected)
 }
 
-fn admit_git_metadata_content(
+fn admit_git_metadata_file_mutation(
     actual: &BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
     expected: &mut BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
     path: &Path,
@@ -3345,6 +3363,7 @@ fn admit_git_metadata_content(
         return false;
     };
     expected.content.clone_from(&actual.content);
+    expected.modified = actual.modified;
     true
 }
 
@@ -4526,12 +4545,7 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                     "unable",
                 ]
                 .contains(&word.as_str())
-                    && !clause[..index].iter().rev().take(2).any(|qualifier| {
-                        matches!(
-                            qualifier.as_str(),
-                            "never" | "no" | "not" | "nothing" | "without"
-                        )
-                    })
+                    && !failure_term_is_negated(&clause, index)
             })
         });
     let negative_no_objects = [
@@ -4667,6 +4681,24 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         || negative_nothing_claim
         || deferred_completion
         || scoped_negation
+}
+
+fn failure_term_is_negated(clause: &[String], failure_index: usize) -> bool {
+    let qualifier_scope = &clause[..failure_index];
+    qualifier_scope
+        .iter()
+        .rposition(|word| {
+            matches!(
+                word.as_str(),
+                "never" | "no" | "not" | "nothing" | "without"
+            )
+        })
+        .is_some_and(|negation| {
+            failure_index - negation <= 5
+                && !qualifier_scope[negation + 1..]
+                    .iter()
+                    .any(|word| matches!(word.as_str(), "and" | "but" | "however" | "then" | "yet"))
+        })
 }
 
 impl OperationTrackerState {
@@ -4892,6 +4924,22 @@ fn final_response_report_accepts_completion_with_no_errors() {
     tracker.observe_response_text(SYNTHETIC_NO_ERRORS_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_longer_negated_failure_phrases() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_LONG_NEGATED_ERRORS_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_a_failure_after_longer_negation() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NEGATED_ERRORS_THEN_FAILURE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
 }
 
 #[test]
@@ -5712,6 +5760,19 @@ struct CaseOutcome {
 }
 
 impl CaseOutcome {
+    fn exact_forced_executor_failed(&self) -> bool {
+        let Some(target) = self.target.as_deref() else {
+            return false;
+        };
+        let Some(expected_arguments) = self.expected_arguments.as_deref() else {
+            return false;
+        };
+        self.snapshot.requests.len() == 1
+            && self.snapshot.requests[0].name == target
+            && self.snapshot.requests[0].arguments_text == expected_arguments
+            && !self.snapshot.requests[0].attempt_succeeded
+    }
+
     fn forced_disposition(&self) -> EvalDisposition {
         if self.snapshot.turn_disposition.is_infrastructure() {
             return EvalDisposition::Infrastructure;
@@ -5722,11 +5783,7 @@ impl CaseOutcome {
         let Some(expected_arguments) = self.expected_arguments.as_deref() else {
             return EvalDisposition::Miss;
         };
-        if self.snapshot.requests.len() == 1
-            && self.snapshot.requests[0].name == target
-            && self.snapshot.requests[0].arguments_text == expected_arguments
-            && !self.snapshot.requests[0].attempt_succeeded
-        {
+        if self.exact_forced_executor_failed() {
             return EvalDisposition::Infrastructure;
         }
         EvalDisposition::from_passed(
@@ -5779,6 +5836,16 @@ impl CaseOutcome {
                     .all(|request| request.attempt_succeeded),
         )
     }
+}
+
+fn reject_forced_executor_failures(outcomes: &[CaseOutcome]) -> EvalResult {
+    if outcomes
+        .iter()
+        .any(CaseOutcome::exact_forced_executor_failed)
+    {
+        return Err(io::Error::other(EXACT_FORCED_EXECUTOR_FAILURE).into());
+    }
+    Ok(())
 }
 
 fn synthetic_tool_result(
@@ -5982,7 +6049,7 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
 }
 
 #[test]
-fn forced_tier_reports_infrastructure_for_an_exact_known_failed_attempt() {
+fn forced_tier_reports_and_rejects_an_exact_known_failed_attempt() {
     let target = GIT_STATUS_NAME;
     let outcome = CaseOutcome {
         target: Some(String::from(target)),
@@ -6009,6 +6076,7 @@ fn forced_tier_reports_infrastructure_for_an_exact_known_failed_attempt() {
         outcome.forced_disposition(),
         EvalDisposition::Infrastructure
     );
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
 }
 
 #[test]
@@ -8002,6 +8070,40 @@ fn forced_git_log_verifier_rejects_top_level_metadata_byte_drift() -> EvalResult
         repository.path().join(GIT_HEAD_PATH),
         format!("ref: refs/heads/{GIT_BASE_BRANCH}"),
     )?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_top_level_metadata_mtime_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    fs::File::open(repository.path().join(GIT_CONFIG_PATH))?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
     let result = serde_json::json!({
         "commits": [{
             "commit": target.id().to_string(),
@@ -10916,7 +11018,7 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         .natural_loop_disposition(report.family)
         .and(report.natural_state);
     markdown.push_str(&format!(
-        "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | `{}` |\n\nAll outcomes are report-only; a model miss does not fail this workflow.\n",
+        "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | `{}` |\n\nModel outcomes are report-only; a model miss does not fail this workflow. An exact forced executor failure fails after this summary is written.\n",
         natural.label(),
         report.natural.snapshot.called_names(),
         report.natural.result_round_trips,
