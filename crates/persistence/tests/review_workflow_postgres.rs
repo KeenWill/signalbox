@@ -7,7 +7,7 @@
 
 mod support;
 
-use std::error::Error;
+use std::{error::Error, future::Future};
 
 use signalbox_application::{
     AuthorizeModelCallOutcome, ModelCallCredentialReference, ReviewConcernClaim,
@@ -152,6 +152,66 @@ async fn migrated_postgres_in_configured_schema()
     migrate(&pool).await?;
     migrate(&pool).await?;
     Ok((container, pool))
+}
+
+/// Starts PostgreSQL with `pg_stat_statements` loaded so a test can count the
+/// statements one call issues.
+///
+/// The count is taken server-side rather than by instrumenting a call site,
+/// because the cost this guards against is spread across two crates: the
+/// orchestration loaders and the workflow store they delegate to. A server-side
+/// counter sees every statement either one issues, including any added later.
+async fn migrated_postgres_counting_statements()
+-> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_fsync_enabled()
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .with_cmd(vec![
+            String::from("-c"),
+            String::from("shared_preload_libraries=pg_stat_statements"),
+            String::from("-c"),
+            String::from("pg_stat_statements.track=all"),
+        ])
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
+        .execute(&pool)
+        .await?;
+    migrate(&pool).await?;
+    Ok((container, pool))
+}
+
+/// Runs `work` and reports how many statements PostgreSQL executed for it.
+///
+/// The reset and the reading query are both excluded by name, and the reading
+/// query has not yet been recorded when it computes its own sum.
+async fn statements_executed<Work: Future<Output = Output>, Output>(
+    pool: &PgPool,
+    work: Work,
+) -> Result<(Output, i64), Box<dyn Error>> {
+    sqlx::query("SELECT pg_stat_statements_reset()")
+        .execute(pool)
+        .await?;
+    let output = work.await;
+    let executed = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(sum(calls), 0)::bigint
+           FROM pg_stat_statements
+          WHERE query NOT LIKE '%pg_stat_statements%'",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok((output, executed))
 }
 
 fn uuid(value: u128) -> Uuid {
@@ -8929,12 +8989,26 @@ struct PreparedOrchestrationFixture {
 async fn prepare_orchestration_fixture(
     pool: &PgPool,
 ) -> Result<PreparedOrchestrationFixture, Box<dyn Error>> {
+    prepare_orchestration_fixture_with_findings(pool, 1).await
+}
+
+/// Prepares one sealed attempt carrying `findings` findings on a single target.
+///
+/// Every finding shares the fixture's target, which is what makes the count a
+/// meaningful load parameter: the workflow store reconstructs findings by whole
+/// target graph, so a loader that reaches for one finding at a time scales with
+/// the product of the claim's members and the target's.
+async fn prepare_orchestration_fixture_with_findings(
+    pool: &PgPool,
+    findings: usize,
+) -> Result<PreparedOrchestrationFixture, Box<dyn Error>> {
     const IMPORT_PASS_IDENTITY: u128 = 0x7a0;
     const ANALYSIS_PASS_IDENTITY: u128 = 0x7a1;
     const EFFECT_PASS_IDENTITY: u128 = 0x7a2;
     const FIX_PASS_IDENTITY: u128 = 0x7a3;
     const FINDING_IDENTITY: u128 = 0x7a4;
     const ATTEMPT_IDENTITY: u128 = 0x7a5;
+    const ADDITIONAL_FINDING_IDENTITY_BASE: u128 = 0x7c0;
 
     let fixture = insert_review_pass_fixture(pool).await;
     let import_pass = insert_fixture_pass(
@@ -8960,21 +9034,35 @@ async fn prepare_orchestration_fixture(
         ],
     )
     .await;
-    let finding_ref = ReviewFindingRef::new(
-        fixture.pass,
-        ReviewFindingId::from_uuid(uuid(FINDING_IDENTITY)),
-    );
-    let producer = pass_with_produced_findings(vec![finding_ref], evidence[0].clone());
-    let proposed = finding(finding_ref, producer.clone(), &fixture.target_snapshot);
-    fixture
-        .store
-        .insert_findings(&producer, std::slice::from_ref(&proposed))
-        .await?;
-    let canonical_finding = fixture
-        .store
-        .load_finding(finding_ref.finding())
-        .await?
-        .expect("canonical finding exists");
+    let finding_refs = (0..findings)
+        .map(|index| {
+            let identity = if index == 0 {
+                FINDING_IDENTITY
+            } else {
+                ADDITIONAL_FINDING_IDENTITY_BASE + u128::try_from(index).unwrap_or_default()
+            };
+            ReviewFindingRef::new(fixture.pass, ReviewFindingId::from_uuid(uuid(identity)))
+        })
+        .collect::<Vec<_>>();
+    let finding_ref = *finding_refs
+        .first()
+        .expect("the fixture carries at least one finding");
+    let producer = pass_with_produced_findings(finding_refs.clone(), evidence[0].clone());
+    let proposed = finding_refs
+        .iter()
+        .map(|reference| finding(*reference, producer.clone(), &fixture.target_snapshot))
+        .collect::<Vec<_>>();
+    fixture.store.insert_findings(&producer, &proposed).await?;
+    let mut canonical_findings = Vec::with_capacity(finding_refs.len());
+    for reference in &finding_refs {
+        canonical_findings.push(
+            fixture
+                .store
+                .load_finding(reference.finding())
+                .await?
+                .expect("canonical finding exists"),
+        );
+    }
 
     let attempt_id = ReviewOrchestrationAttemptId::from_uuid(uuid(ATTEMPT_IDENTITY));
     let attempt = ReviewOrchestrationAttempt::try_new(
@@ -9007,17 +9095,19 @@ async fn prepare_orchestration_fixture(
             producer,
             run_evidence_for_pass(evidence[0].clone()),
             ReviewTemplateDigest::new([5; 32]),
-            vec![canonical_finding],
+            canonical_findings,
         ))),
     );
     let plan = ReviewJudgmentPlan::new(
         evidence[2].clone(),
         run_evidence_for_pass(evidence[2].clone()),
         ReviewTemplateDigest::new([2; 32]),
-        vec![ReviewJudgmentPlanMember::new(
-            finding_ref,
-            ReviewPlannedDisposition::Accepted,
-        )],
+        finding_refs
+            .iter()
+            .map(|reference| {
+                ReviewJudgmentPlanMember::new(*reference, ReviewPlannedDisposition::Accepted)
+            })
+            .collect(),
     );
     let mut store = PostgresReviewOrchestrationStore::new(pool.clone());
     assert_eq!(
@@ -9082,6 +9172,62 @@ async fn incomplete_judgment_result(
             .await?
             .expect("planned judgment has durable progress"),
     })
+}
+
+/// Snapshot cost grows linearly, not quadratically, in an attempt's findings.
+///
+/// Two independent defects once made it quadratic. The stage ladder
+/// independently re-ran nearly every loader the snapshot ran again on the next
+/// line, and each concern finding was fetched with a loader that reconstructs
+/// the whole target finding graph in order to return a single row — so the
+/// claim's members multiplied the target's. The wire contract admits 1,024
+/// findings, where a quadratic is not a constant factor.
+///
+/// The marginal assertion is the load-bearing one: an absolute ceiling can be
+/// met by a quadratic on a small fixture, but a per-finding bound cannot. Under
+/// either defect the marginal cost is itself proportional to the finding count,
+/// so it fails whichever one returns.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_snapshot_cost_is_linear_in_findings() -> Result<(), Box<dyn Error>> {
+    /// Statements one additional finding on the attempt may add.
+    ///
+    /// A finding costs one projection plus its event and external-link reads.
+    /// Measured marginal cost is 8; the budget carries headroom over that and
+    /// stays far below what a per-finding target-graph reconstruction needs.
+    /// For scale, the same two fixtures measured 77 and 125 statements here
+    /// against 172 and 1,180 before this shape was fixed.
+    const STATEMENTS_PER_ADDITIONAL_FINDING: i64 = 10;
+    const FEW_FINDINGS: usize = 2;
+    const MANY_FINDINGS: usize = 8;
+
+    let (_small_container, small_pool) = migrated_postgres_counting_statements().await?;
+    let small = prepare_orchestration_fixture_with_findings(&small_pool, FEW_FINDINGS).await?;
+    let (small_snapshot, small_statements) =
+        statements_executed(&small_pool, small.store.load_snapshot(small.attempt_id)).await?;
+    assert!(
+        small_snapshot?.is_some(),
+        "the sealed attempt must produce a snapshot"
+    );
+
+    let (_large_container, large_pool) = migrated_postgres_counting_statements().await?;
+    let large = prepare_orchestration_fixture_with_findings(&large_pool, MANY_FINDINGS).await?;
+    let (large_snapshot, large_statements) =
+        statements_executed(&large_pool, large.store.load_snapshot(large.attempt_id)).await?;
+    assert!(
+        large_snapshot?.is_some(),
+        "the sealed attempt must produce a snapshot"
+    );
+
+    let additional_findings = i64::try_from(MANY_FINDINGS - FEW_FINDINGS)?;
+    let budget = small_statements + additional_findings * STATEMENTS_PER_ADDITIONAL_FINDING;
+    assert!(
+        large_statements <= budget,
+        "a {MANY_FINDINGS}-finding snapshot executed {large_statements} statements against a \
+         {FEW_FINDINGS}-finding baseline of {small_statements}, over the linear budget of \
+         {budget}; the snapshot is scaling faster than its findings"
+    );
+    Ok(())
 }
 
 /// Complete stage seals reconstruct one coherent orchestration snapshot.
