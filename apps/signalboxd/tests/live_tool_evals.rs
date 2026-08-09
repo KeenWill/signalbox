@@ -178,6 +178,11 @@ const GIT_REGULAR_FILE_MODE: i32 = 0o100644;
 const GIT_REGULAR_INDEX_FILE_MODE: u32 = 0o100644;
 const GIT_INDEX_EXTENDED_FLAG: u16 = 0x4000;
 const GIT_INDEX_SKIP_WORKTREE_FLAG: u16 = 0x4000;
+const SYNTHETIC_GIT_EXECUTION_STARTED_SECONDS: i64 = 1_700_000_000;
+const SYNTHETIC_GIT_EXECUTION_FINISHED_SECONDS: i64 = 1_700_000_002;
+const SYNTHETIC_GIT_EXECUTION_RECORDED_SECONDS: i64 = 1_700_000_001;
+const SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET: i32 = -300;
+const SYNTHETIC_OTHER_GIT_TIMEZONE_OFFSET: i32 = 60;
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
 const WORKSPACE_SEED: &str = "alpha\nbeta fixture\nalpha\n";
 const WORKSPACE_EDITED_SEED: &str = "beta\nbeta fixture\nbeta\n";
@@ -281,6 +286,8 @@ const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
     "Done; I did not create any other files.";
 const SYNTHETIC_SCOPED_CONJUNCTION_NEGATION_COMPLETION_REPORT: &str =
     "Done; I did not create or modify any other files.";
+const SYNTHETIC_NOT_ONLY_COMPLETION_REPORT: &str =
+    "I not only created the requested file, but also verified it.";
 const SYNTHETIC_SEPARATE_COLLATERAL_CLAUSE_DENIAL_REPORT: &str =
     "The requested file was not created; other files were untouched.";
 const EVAL_RECEIPT_FIELD: &str = "eval_receipt";
@@ -689,6 +696,99 @@ struct GitIndexEntrySnapshot {
     flags_extended: u16,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GitRecordedTime {
+    seconds: i64,
+    offset_minutes: i32,
+}
+
+impl From<Time> for GitRecordedTime {
+    fn from(time: Time) -> Self {
+        Self {
+            seconds: time.seconds(),
+            offset_minutes: time.offset_minutes(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GitExecutionTimeWindow {
+    started: GitRecordedTime,
+    finished: GitRecordedTime,
+}
+
+impl GitExecutionTimeWindow {
+    fn contains(self, time: Time) -> bool {
+        let time = GitRecordedTime::from(time);
+        (self.started.seconds..=self.finished.seconds).contains(&time.seconds)
+            && matches!(
+                time.offset_minutes,
+                offset if offset == self.started.offset_minutes || offset == self.finished.offset_minutes
+            )
+    }
+}
+
+fn current_git_recorded_time() -> Result<GitRecordedTime, git2::Error> {
+    Signature::now(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL).map(|signature| signature.when().into())
+}
+
+#[test]
+fn git_execution_window_accepts_a_recorded_time_within_its_bounds() {
+    let window = GitExecutionTimeWindow {
+        started: GitRecordedTime {
+            seconds: SYNTHETIC_GIT_EXECUTION_STARTED_SECONDS,
+            offset_minutes: SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+        },
+        finished: GitRecordedTime {
+            seconds: SYNTHETIC_GIT_EXECUTION_FINISHED_SECONDS,
+            offset_minutes: SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+        },
+    };
+
+    assert!(window.contains(Time::new(
+        SYNTHETIC_GIT_EXECUTION_RECORDED_SECONDS,
+        SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+    )));
+}
+
+#[test]
+fn git_execution_window_rejects_a_timestamp_before_its_bounds() {
+    let window = GitExecutionTimeWindow {
+        started: GitRecordedTime {
+            seconds: SYNTHETIC_GIT_EXECUTION_STARTED_SECONDS,
+            offset_minutes: SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+        },
+        finished: GitRecordedTime {
+            seconds: SYNTHETIC_GIT_EXECUTION_FINISHED_SECONDS,
+            offset_minutes: SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+        },
+    };
+
+    assert!(!window.contains(Time::new(
+        SYNTHETIC_GIT_EXECUTION_STARTED_SECONDS - 1,
+        SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+    )));
+}
+
+#[test]
+fn git_execution_window_rejects_a_timezone_outside_its_bounds() {
+    let window = GitExecutionTimeWindow {
+        started: GitRecordedTime {
+            seconds: SYNTHETIC_GIT_EXECUTION_STARTED_SECONDS,
+            offset_minutes: SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+        },
+        finished: GitRecordedTime {
+            seconds: SYNTHETIC_GIT_EXECUTION_FINISHED_SECONDS,
+            offset_minutes: SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+        },
+    };
+
+    assert!(!window.contains(Time::new(
+        SYNTHETIC_GIT_EXECUTION_RECORDED_SECONDS,
+        SYNTHETIC_OTHER_GIT_TIMEZONE_OFFSET,
+    )));
+}
+
 type GitReferenceInventory = BTreeMap<Vec<u8>, GitReferenceTarget>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -987,6 +1087,7 @@ impl FamilySuite {
                         pre_execution_worktree_entries: pre_execution_worktree_entries.as_ref(),
                         pre_execution_objects: pre_execution_objects.as_ref(),
                         pre_execution_object_entries: pre_execution_object_entries.as_ref(),
+                        execution_window: self.executor.git_execution_window(case.name),
                     },
                     case.name,
                     &arguments,
@@ -1133,6 +1234,7 @@ struct GitForcedVerification<'a> {
     pre_execution_worktree_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
     pre_execution_objects: Option<&'a GitObjectInventory>,
     pre_execution_object_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
+    execution_window: Option<GitExecutionTimeWindow>,
 }
 
 fn git_forced_case_passed(
@@ -1149,6 +1251,7 @@ fn git_forced_case_passed(
         pre_execution_worktree_entries,
         pre_execution_objects,
         pre_execution_object_entries,
+        execution_window,
     } = verification;
     let repository = Repository::open(root)?;
     let head = repository.head()?.peel_to_commit()?;
@@ -1389,7 +1492,7 @@ fn git_forced_case_passed(
             pre_execution_object_entries,
         )?
         && git_forced_reference_entries_match(root, name, arguments, &head, seed_fixture)?
-        && git_forced_reflogs_match(root, name, seed, head.id(), seed_fixture)?
+        && git_forced_reflogs_match(root, name, seed, head.id(), seed_fixture, execution_window)?
         && git_forced_worktree_matches(root, name, seed_fixture, pre_execution_worktree_entries)?)
 }
 
@@ -2370,6 +2473,7 @@ fn git_forced_reflogs_match(
     seed: Oid,
     head: Oid,
     seed_fixture: &GitFixtureSnapshot,
+    execution_window: Option<GitExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     match case_name {
         GIT_CREATE_COMMIT_NAME => {
@@ -2381,6 +2485,7 @@ fn git_forced_reflogs_match(
                 GIT_COMMIT_REFLOG_MESSAGE,
                 &["HEAD", branch_reference.as_str()],
                 &seed_fixture.reflog_entries,
+                None,
             )
         }
         GIT_BRANCH_SWITCH_NAME => {
@@ -2397,6 +2502,7 @@ fn git_forced_reflogs_match(
                 GIT_SWITCH_REFLOG_MESSAGE,
                 &["HEAD"],
                 &seed_fixture.reflog_entries,
+                execution_window,
             )
         }
         _ => Ok(git_reflog_entries(root)? == seed_fixture.reflog_entries),
@@ -2410,19 +2516,24 @@ fn git_reflog_updates_match(
     message: &str,
     references: &[&str],
     seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    execution_window: Option<GitExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let actual_entries = git_reflog_entries(root)?;
     let mut expected_entries = seed_entries.clone();
+    let expectation = GitReflogUpdateExpectation {
+        old,
+        new,
+        message,
+        execution_window,
+    };
     for reference in references {
         if !replace_expected_reflog_update(
             &repository,
             &actual_entries,
             &mut expected_entries,
             reference,
-            old,
-            new,
-            message,
+            expectation,
         )? {
             return Ok(false);
         }
@@ -2430,15 +2541,27 @@ fn git_reflog_updates_match(
     Ok(actual_entries == expected_entries)
 }
 
+#[derive(Clone, Copy)]
+struct GitReflogUpdateExpectation<'a> {
+    old: Oid,
+    new: Oid,
+    message: &'a str,
+    execution_window: Option<GitExecutionTimeWindow>,
+}
+
 fn replace_expected_reflog_update(
     repository: &Repository,
     actual_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     expected_entries: &mut BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reference: &str,
-    old: Oid,
-    new: Oid,
-    message: &str,
+    expectation: GitReflogUpdateExpectation<'_>,
 ) -> EvalResult<bool> {
+    let GitReflogUpdateExpectation {
+        old,
+        new,
+        message,
+        execution_window,
+    } = expectation;
     let path = Path::new(reference);
     let Some(WorkspaceEntrySnapshot::File {
         content: seed_content,
@@ -2475,10 +2598,12 @@ fn replace_expected_reflog_update(
     };
     let committer = latest.committer();
     let committer_time = committer.when();
-    let commit_time_matches = if message == GIT_COMMIT_REFLOG_MESSAGE {
+    let recorded_time_matches = if message == GIT_COMMIT_REFLOG_MESSAGE {
         let commit_time = repository.find_commit(new)?.committer().when();
         committer_time.seconds() == commit_time.seconds()
             && committer_time.offset_minutes() == commit_time.offset_minutes()
+    } else if message == GIT_SWITCH_REFLOG_MESSAGE {
+        execution_window.is_some_and(|window| window.contains(committer_time))
     } else {
         true
     };
@@ -2487,7 +2612,7 @@ fn replace_expected_reflog_update(
         || latest.message().ok().flatten() != Some(message)
         || committer.name().ok() != Some(GIT_AUTHOR_NAME)
         || committer.email().ok() != Some(GIT_AUTHOR_EMAIL)
-        || !commit_time_matches
+        || !recorded_time_matches
     {
         return Ok(false);
     }
@@ -2890,6 +3015,7 @@ fn git_natural_state_passed(
         GIT_COMMIT_REFLOG_MESSAGE,
         &["HEAD", format!("refs/heads/{GIT_BASE_BRANCH}").as_str()],
         &seed_fixture.reflog_entries,
+        None,
     )?;
     let complete_worktree_inventory_matches =
         git_worktree_entries(root)? == seed_fixture.worktree_entries;
@@ -3128,13 +3254,23 @@ enum FamilyExecutor {
 #[derive(Clone)]
 struct SharedFamilyExecutor {
     inner: Arc<Mutex<FamilyExecutor>>,
+    git_execution_windows: Arc<StdMutex<BTreeMap<String, GitExecutionTimeWindow>>>,
 }
 
 impl SharedFamilyExecutor {
     fn new(inner: FamilyExecutor) -> Self {
         Self {
             inner: Arc::new(Mutex::new(inner)),
+            git_execution_windows: Arc::new(StdMutex::new(BTreeMap::new())),
         }
+    }
+
+    fn git_execution_window(&self, name: &str) -> Option<GitExecutionTimeWindow> {
+        self.git_execution_windows
+            .lock()
+            .expect("Git execution-window lock is available")
+            .get(name)
+            .copied()
     }
 }
 
@@ -3187,6 +3323,10 @@ impl ToolExecutor for SharedFamilyExecutor {
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
         let name = invocation.request().name().as_str().to_owned();
+        let git_execution_started = (name == GIT_BRANCH_SWITCH_NAME)
+            .then(current_git_recorded_time)
+            .transpose()
+            .map_err(FamilyExecutorError::new)?;
         let receipt_binding = invocation.clone();
         let mut inner = self.inner.lock().await;
         let evidence = match &mut *inner {
@@ -3217,6 +3357,13 @@ impl ToolExecutor for SharedFamilyExecutor {
                 .await
                 .map_err(FamilyExecutorError::new),
         }?;
+        if let Some(started) = git_execution_started {
+            let finished = current_git_recorded_time().map_err(FamilyExecutorError::new)?;
+            self.git_execution_windows
+                .lock()
+                .expect("Git execution-window lock is available")
+                .insert(name, GitExecutionTimeWindow { started, finished });
+        }
         if evidence.correlation() != receipt_binding.correlation() {
             return Err(FamilyExecutorError::new(io::Error::other(
                 "the eval executor returned mismatched correlation",
@@ -3691,6 +3838,8 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
                 let outcome = scope
                     .iter()
                     .position(|word| negative_outcomes.contains(&word.as_str()));
+                let affirmative_not_only =
+                    word == "not" && scope.first().is_some_and(|qualifier| qualifier == "only");
                 let collateral_only = outcome.is_some_and(|outcome| {
                     let predicate_tail = &scope[outcome + 1..];
                     predicate_tail
@@ -3718,7 +3867,10 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
                             })
                         })
                 });
-                matches!(word.as_str(), "never" | "not") && outcome.is_some() && !collateral_only
+                matches!(word.as_str(), "never" | "not")
+                    && outcome.is_some()
+                    && !affirmative_not_only
+                    && !collateral_only
             })
         });
     explicit_failure
@@ -3988,6 +4140,14 @@ fn final_response_report_accepts_completion_with_a_collateral_conjunction() {
         SYNTHETIC_SCOPED_CONJUNCTION_NEGATION_COMPLETION_REPORT,
         false,
     );
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_an_affirmative_not_only_construction() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_ONLY_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
 }
