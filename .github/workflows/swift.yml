@@ -523,7 +523,14 @@ jobs:
                   def maxcounter: 9007199254740991;
                   ((.targets | type) == "array")
                   and ([.targets[]
-                    | select(((.name // "") | endswith(".xctest")) | not)
+                    # `tostring` because the loader converts: `is_test_bundle`
+                    # reads `str(target.get("name", ""))`, so a non-string name
+                    # is a product target to it. Bare `endswith` *errors* on a
+                    # non-string, which failed the whole predicate and discarded
+                    # a report the summarizer reads without complaint — the same
+                    # divergence class as the absent `files` key, and in the same
+                    # costly direction.
+                    | select(((.name // "") | tostring | endswith(".xctest")) | not)
                   ] as $products
                   | ($products | length) > 0
                   and all($products[];
@@ -563,10 +570,18 @@ jobs:
           # described a set that was never scanned, even though the count was
           # right.
           examined="$(printf '%s' "$candidates" | grep -c '[^[:space:]]')"
-          if [ "$(printf '%s' "$candidates" | head -n 1 | cut -f1)" = base ]; then
-            scope="the base commit's own run and the $((examined - 1)) most recent completed \`main\` runs"
-          else
+          others=$((examined - 1))
+          if [ "$(printf '%s' "$candidates" | head -n 1 | cut -f1)" != base ]; then
             scope="the $examined most recent completed \`main\` runs"
+          elif [ "$others" -eq 0 ]; then
+            # The base run can be the only candidate — it is reserved before the
+            # fallback scan, so a repository with no other completed `main` run
+            # leaves nothing for that scan to add. Subtracting one unconditionally
+            # then claimed that zero recent runs were examined *alongside* the base
+            # run, which reads as a scan that did nothing.
+            scope="the base commit's own run"
+          else
+            scope="the base commit's own run and the $others most recent completed \`main\` runs"
           fi
           unavailable "$reason ($scope were examined)"
       # Report only, and structurally incapable of gating: it never fails the

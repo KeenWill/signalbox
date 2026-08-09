@@ -513,10 +513,18 @@ jobs:
           # described a set that was never scanned, even though the count was
           # right.
           examined="$(printf '%s' "$candidates" | grep -c '[^[:space:]]')"
-          if [ "$(printf '%s' "$candidates" | head -n 1 | cut -f1)" = base ]; then
-            scope="the base commit's own run and the $((examined - 1)) most recent successful \`main\` runs"
-          else
+          others=$((examined - 1))
+          if [ "$(printf '%s' "$candidates" | head -n 1 | cut -f1)" != base ]; then
             scope="the $examined most recent successful \`main\` runs"
+          elif [ "$others" -eq 0 ]; then
+            # The base run can be the only candidate — it is reserved before the
+            # fallback scan, so a repository with no other successful `main` run
+            # leaves nothing for that scan to add. Subtracting one unconditionally
+            # then claimed that zero recent runs were examined *alongside* the base
+            # run, which reads as a scan that did nothing.
+            scope="the base commit's own run"
+          else
+            scope="the base commit's own run and the $others most recent successful \`main\` runs"
           fi
           unavailable "$reason ($scope were examined)"
       - name: Report the numbers
