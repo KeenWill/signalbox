@@ -26,3 +26,57 @@ pub use runtime::{
     ClaudeCliConstructionError, ClaudeCliPreparedRequest, ClaudeCliRuntime,
     DISABLED_CLAUDE_CLI_BUILTIN_TOOLS, SUPPORTED_CLAUDE_CLI_VERSION, validate_model_settings,
 };
+
+/// Why a provider-neutral tool catalog could not become the exact MCP support
+/// document supplied to Claude Code.
+#[derive(Debug)]
+pub enum ClaudeCliMcpCatalogError {
+    /// The declarations cannot be represented by the Claude MCP adapter.
+    Unsupported(signalbox_model_runtime::PreparationFailure),
+    /// Adapter-owned translation reached a defective state.
+    Defect(signalbox_model_runtime::PreparationDefect),
+    /// The translated catalog could not be serialized.
+    Serialization(serde_json::Error),
+}
+
+impl std::fmt::Display for ClaudeCliMcpCatalogError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported(_) => formatter.write_str("Claude MCP catalog is unsupported"),
+            Self::Defect(_) => formatter.write_str("Claude MCP catalog translation is defective"),
+            Self::Serialization(_) => {
+                formatter.write_str("Claude MCP catalog serialization failed")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ClaudeCliMcpCatalogError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Serialization(error) => Some(error),
+            Self::Unsupported(_) | Self::Defect(_) => None,
+        }
+    }
+}
+
+/// Translates provider-neutral tool declarations into the exact MCP catalog
+/// bytes written into a prepared Claude CLI request's support directory.
+///
+/// This offline projection lets callers assert adapter-to-bridge conformance
+/// without spawning Claude Code or touching subscription credentials.
+pub fn serialize_mcp_catalog(
+    tools: &[signalbox_model_runtime::ToolDefinition],
+) -> Result<Vec<u8>, ClaudeCliMcpCatalogError> {
+    let catalog = translate::tool_catalog(tools).map_err(|error| match error {
+        translate::TranslationError::Failure(failure) => {
+            ClaudeCliMcpCatalogError::Unsupported(failure)
+        }
+        translate::TranslationError::Defect(defect) => ClaudeCliMcpCatalogError::Defect(defect),
+    })?;
+    serialize_catalog(&catalog).map_err(ClaudeCliMcpCatalogError::Serialization)
+}
+
+fn serialize_catalog(catalog: &bridge::Catalog) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(catalog)
+}

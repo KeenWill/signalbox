@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::value::RawValue;
 use signalbox_model_runtime::{
     ConversationMessage, ConversationRole, MessagePart, ModelOperation, PreparationDefect,
-    PreparationFailure, ToolChoice,
+    PreparationFailure, ToolChoice, ToolDefinition,
 };
 
 use crate::bridge::{Catalog, CatalogTool, TOOL_PREFIX, valid_mcp_tool_name};
@@ -102,29 +102,14 @@ pub(crate) fn translate<C>(
         .iter()
         .map(render_message)
         .collect::<Result<Vec<_>, _>>()?;
-    let mut catalog_tools = operation
-        .tools
-        .iter()
-        .map(|tool| {
-            validate_tool_name(tool.name.as_str())?;
-            parse_object_schema(
-                &tool.input_schema,
-                &format!("tool `{}` input schema", tool.name.as_str()),
-            )?;
-            Ok(CatalogTool {
-                name: tool.name.as_str().to_string(),
-                description: tool.description.clone(),
-                input_schema: tool.input_schema.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, TranslationError>>()?;
+    let mut catalog = tool_catalog(&operation.tools)?;
     if let Some(contract) = &operation.output_contract {
         validate_tool_name(contract.name.as_str())?;
         parse_object_schema(
             &contract.schema,
             &format!("structured output `{}` schema", contract.name.as_str()),
         )?;
-        catalog_tools.push(CatalogTool {
+        catalog.tools.push(CatalogTool {
             name: contract.name.as_str().to_string(),
             description: contract.description.clone(),
             input_schema: contract.schema.clone(),
@@ -192,11 +177,28 @@ pub(crate) fn translate<C>(
 
     Ok(TranslatedOperation {
         prompt,
-        catalog: Catalog {
-            tools: catalog_tools,
-        },
+        catalog,
         tool_requirement,
     })
+}
+
+pub(crate) fn tool_catalog(tools: &[ToolDefinition]) -> Result<Catalog, TranslationError> {
+    let tools = tools
+        .iter()
+        .map(|tool| {
+            validate_tool_name(tool.name.as_str())?;
+            parse_object_schema(
+                &tool.input_schema,
+                &format!("tool `{}` input schema", tool.name.as_str()),
+            )?;
+            Ok(CatalogTool {
+                name: tool.name.as_str().to_string(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, TranslationError>>()?;
+    Ok(Catalog { tools })
 }
 
 pub(crate) fn qualified_tool_name(name: &str) -> String {

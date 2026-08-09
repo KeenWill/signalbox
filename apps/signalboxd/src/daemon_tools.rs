@@ -1139,6 +1139,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use std::os::unix::ffi::OsStrExt;
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     use std::{
@@ -1157,7 +1159,7 @@ mod tests {
     };
 
     use expect_test::expect;
-    use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
+    use serde::{Deserialize, Deserializer, de::IgnoredAny};
     use serde_json::value::RawValue;
     use signalbox_application::ToolCatalog;
     use signalbox_application::ToolInputSchema;
@@ -1471,45 +1473,27 @@ mod tests {
         let actual_definitions = catalog.definitions();
         let actual_names = definition_names(&actual_definitions);
 
+        assert_eq!(actual_definitions, expected_definitions);
         assert_eq!(actual_names, expected_names);
         assert!(actual_names.contains(&GOAL_DECLARE_NAME));
     }
 
     /// Renders the bridge catalog document from the daemon registry through the
-    /// production projection every adapter receives.
+    /// production projection and Claude adapter translation used by prepared
+    /// support files.
     ///
     /// Routing the bridge's input through `runtime_tool_definitions` means a
-    /// projection that drops or alters a daemon tool changes what the bridge is
-    /// given, while `expected_bridge_tools` derives the expectation straight
-    /// from the registry. The listing assertion therefore classifies the
-    /// daemon-to-bridge path rather than comparing one helper with itself.
+    /// projection or Claude translation that drops or alters a daemon tool
+    /// changes what the bridge is given, while `expected_bridge_tools` derives
+    /// the expectation straight from the registry. The listing assertion
+    /// therefore classifies the daemon-to-Claude-to-bridge path rather than
+    /// comparing one helper with itself.
     #[track_caller]
     fn bridge_catalog(definitions: &[ToolDefinition]) -> Vec<u8> {
         let projected = signalbox_model_provider_runtime::runtime_tool_definitions(definitions)
             .expect("daemon tool schemas project into runtime definitions");
-        let tools = projected
-            .iter()
-            .map(|definition| SerializedBridgeTool {
-                name: definition.name.as_str(),
-                description: &definition.description,
-                input_schema: &definition.input_schema,
-            })
-            .collect::<Vec<_>>();
-        serde_json::to_vec(&SerializedBridgeCatalog { tools })
-            .expect("projected bridge catalog serializes")
-    }
-
-    #[derive(Serialize)]
-    struct SerializedBridgeCatalog<'a> {
-        tools: Vec<SerializedBridgeTool<'a>>,
-    }
-
-    #[derive(Serialize)]
-    struct SerializedBridgeTool<'a> {
-        name: &'a str,
-        description: &'a str,
-        #[serde(rename = "inputSchema")]
-        input_schema: &'a RawValue,
+        signalbox_model_runtime_claude_cli::serialize_mcp_catalog(&projected)
+            .expect("Claude adapter translates the projected bridge catalog")
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1668,6 +1652,19 @@ mod tests {
     const CLAUDE_MCP_BRIDGE_BINARY: &str = "signalbox-claude-mcp-bridge";
     const CARGO_TARGET_DIRECTORY_MARKER_FILENAME: &str = "CACHEDIR.TAG";
     const CARGO_TEST_PROFILE: &str = "test";
+    const CARGO_DEV_PROFILE: &str = "dev";
+    const CARGO_RELEASE_PROFILE: &str = "release";
+    const CARGO_TEST_SUBCOMMAND: &str = "test";
+    const CARGO_PROGRAM_STEM: &str = "cargo";
+    const CARGO_PROFILE_OPTION: &str = "--profile";
+    const CARGO_PROFILE_OPTION_PREFIX: &str = "--profile=";
+    const CARGO_RELEASE_OPTION: &str = "--release";
+    #[cfg(target_os = "linux")]
+    const PROC_FILESYSTEM_ROOT: &str = "/proc";
+    #[cfg(target_os = "linux")]
+    const PROC_COMMAND_LINE_FILENAME: &str = "cmdline";
+    #[cfg(target_os = "linux")]
+    const MAX_CARGO_COMMAND_LINE_BYTES: u64 = 64 * 1024;
     const SYNTHETIC_GOAL_DATABASE_URL: &str =
         "postgresql://signalbox:synthetic@127.0.0.1/signalbox";
     const SYNTHETIC_WEB_SEARCH_CREDENTIAL_PATH: &str = "web-search";
@@ -1680,6 +1677,7 @@ mod tests {
     #[track_caller]
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
+        let debug_profile = current_cargo_test_profile();
         let known_targets = rustc_target_names();
         let configured_target_dir = configured_cargo_target_dir(&current, &known_targets);
         let default_target_dir = configured_target_dir
@@ -1695,12 +1693,73 @@ mod tests {
         });
         claude_mcp_bridge_artifact_selection_for(BridgeArtifactSelectionInput {
             current_executable: &current,
-            debug_profile: CARGO_TEST_PROFILE,
+            debug_profile: debug_profile
+                .to_str()
+                .expect("Cargo profile names are valid UTF-8"),
             configured_target_dir: configured_target_dir.as_deref(),
             default_target_dir: &default_target_dir,
             artifact_target_dir: artifact_target_dir.as_deref(),
             known_targets: &known_targets,
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    #[track_caller]
+    fn current_cargo_test_profile() -> OsString {
+        let parent = rustix::process::getppid().expect("the test process has a parent");
+        let command_line_path = Path::new(PROC_FILESYSTEM_ROOT)
+            .join(parent.as_raw_nonzero().get().to_string())
+            .join(PROC_COMMAND_LINE_FILENAME);
+        let mut command_line = Vec::new();
+        fs::File::open(command_line_path)
+            .expect("the parent process command line is readable")
+            .take(MAX_CARGO_COMMAND_LINE_BYTES + 1)
+            .read_to_end(&mut command_line)
+            .expect("the parent process command line can be read");
+        assert!(
+            command_line.len() as u64 <= MAX_CARGO_COMMAND_LINE_BYTES,
+            "the parent Cargo command line stays within its inspection bound"
+        );
+        let arguments = command_line
+            .split(|byte| *byte == 0)
+            .filter(|argument| !argument.is_empty())
+            .map(OsStr::from_bytes)
+            .collect::<Vec<_>>();
+        cargo_test_profile_from_arguments(&arguments)
+            .expect("the daemon-tools suite retains its parent Cargo test invocation")
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn current_cargo_test_profile() -> OsString {
+        OsString::from(CARGO_TEST_PROFILE)
+    }
+
+    fn cargo_test_profile_from_arguments(arguments: &[&OsStr]) -> Option<OsString> {
+        if Path::new(arguments.first()?).file_stem()? != OsStr::new(CARGO_PROGRAM_STEM) {
+            return None;
+        }
+        if !arguments
+            .iter()
+            .any(|argument| *argument == OsStr::new(CARGO_TEST_SUBCOMMAND))
+        {
+            return None;
+        }
+        let mut arguments = arguments.iter().copied();
+        while let Some(argument) = arguments.next() {
+            if argument == OsStr::new(CARGO_PROFILE_OPTION) {
+                return arguments.next().map(OsStr::to_os_string);
+            }
+            if let Some(profile) = argument
+                .to_str()
+                .and_then(|argument| argument.strip_prefix(CARGO_PROFILE_OPTION_PREFIX))
+            {
+                return Some(OsString::from(profile));
+            }
+            if argument == OsStr::new(CARGO_RELEASE_OPTION) {
+                return Some(OsString::from(CARGO_RELEASE_PROFILE));
+            }
+        }
+        Some(OsString::from(CARGO_TEST_PROFILE))
     }
 
     #[track_caller]
@@ -2168,6 +2227,32 @@ mod tests {
             default_target_dir: Path::new("synthetic-target"),
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: None,
+        });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_preserves_an_explicit_dev_profile() {
+        let arguments = [
+            OsStr::new("cargo"),
+            OsStr::new(CARGO_TEST_SUBCOMMAND),
+            OsStr::new(CARGO_PROFILE_OPTION),
+            OsStr::new(CARGO_DEV_PROFILE),
+        ];
+        let profile = cargo_test_profile_from_arguments(&arguments)
+            .expect("the synthetic Cargo test invocation names a profile");
+        let executable = Path::new("synthetic-target/debug/deps/daemon-tools-test");
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable,
+            target_dir: Path::new("synthetic-target"),
+            configured_target_dir: None,
+            default_target_dir: Path::new("synthetic-target"),
+            debug_profile: profile
+                .to_str()
+                .expect("the synthetic Cargo profile is valid UTF-8"),
+            expected_profile: CARGO_DEV_PROFILE,
             expected_target: None,
             recognized_target: None,
         });

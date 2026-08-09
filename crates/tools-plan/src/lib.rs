@@ -891,6 +891,7 @@ pub trait SessionPlanPort: Send {
 /// Typed append arguments. Each invocation appends exactly one event.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[schemars(transform = declare_plan_write_object_root)]
 pub enum PlanWriteArguments {
     /// Creates a pending entry.
     Create {
@@ -924,6 +925,10 @@ pub enum PlanWriteArguments {
         #[schemars(range(min = 1))]
         dependency_id: u64,
     },
+}
+
+fn declare_plan_write_object_root(schema: &mut schemars::Schema) {
+    schema.insert("type".to_owned(), serde_json::json!("object"));
 }
 
 /// Typed read arguments.
