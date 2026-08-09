@@ -10199,7 +10199,7 @@ async fn s32_inv032_inv044_runner_lost_outbox_round_trips() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-032 / INV-044: pre-pin owner replacement dispatches the successor
+/// INV-032 / INV-044: pre-pin user replacement dispatches the successor
 /// identity and successor placement revision without fabricating pinned facts.
 #[tokio::test]
 #[ignore = "requires Docker"]
