@@ -308,16 +308,17 @@ Representation rules, all enforced in the schema:
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
 - Migration `202608080100` closes runner placement history over
   `runner_lost_before_pin`, `pre_pin_replaced`, sourced `runner_lost`, and
-  `abandoned` records. Every state retains its complete selector, request,
-  pinned, registration, grant-lineage, workspace, tool, and permission facts;
-  pre-pin reconstitution reads the exact replacement and lost predecessor
-  records instead of inferring history from a revision. The generic placement
-  snapshot writer refuses loss, either replacement, and abandonment because
-  those transitions require connection/loss, durable-command, scheduler, and
-  outbox authority outside the placement aggregate. **Committed unimplemented
-  functionality.** No present adapter installs those transitions; their
-  dedicated orchestration transactions will install these same checked records,
-  and direct snapshot storage cannot stand in for those transactions.
+  `abandoned` records. Each event retains the complete facts required by its
+  state shape: pre-pin records retain exact request history without pinned or
+  registration facts, while pinned loss and abandonment retain the complete
+  pinned snapshot. Pre-pin reconstitution reads the exact replacement and lost
+  predecessor records instead of inferring history from a revision. The generic
+  placement snapshot writer refuses loss, either replacement, and abandonment
+  because those transitions require connection/loss, durable-command, scheduler,
+  and outbox authority outside the placement aggregate. **Committed
+  unimplemented functionality.** No present adapter installs those transitions;
+  their dedicated orchestration transactions will install these same checked
+  records, and direct snapshot storage cannot stand in for those transactions.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,

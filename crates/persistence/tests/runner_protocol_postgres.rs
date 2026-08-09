@@ -6963,6 +6963,46 @@ async fn s32_inv009_inv044_runner_recovery_rejects_non_ambiguous_tool_attempt()
     Ok(())
 }
 
+/// INV-009 / INV-044: a completed lease cannot be reclassified as the
+/// physical execution interrupted by a later runner loss.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rejects_completed_lease_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the exact fixture lease correlation claims");
+    store.store_lease(&claimed).await?;
+    let completed = claimed
+        .complete(pin.lease.correlation())
+        .expect("the exact claimed lease correlation completes");
+    store.store_lease(&completed).await?;
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session: pin.placement.session(),
+            turn: TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await
+    .expect_err("runner recovery cannot retain an attempt whose lease completed");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-009 / INV-044: an older ambiguous attempt under the same placement
 /// revision cannot impersonate the operation interrupted at a later loss.
 #[tokio::test]
