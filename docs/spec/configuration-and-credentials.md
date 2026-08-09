@@ -576,27 +576,43 @@ inside the configured root would be readable, writable, and executable by every
 session still bound to the configured root.
 
 Provisioning that directory is deployment work: creating a direct main worktree
-there is what makes a session use it. A session whose derived directory does not
-exist binds the configured root, exactly as every session did before this
-derivation, so an unprovisioned deployment is unchanged.
+there is what makes a session use it. Only a reported absence at the derived
+path is unprovisioned, and such a session binds the configured root exactly as
+every session did before this derivation, so an unprovisioned deployment is
+unchanged. A present non-directory, a symlink, or a path the daemon cannot
+classify at all is a misprovisioned session rather than an unprovisioned one and
+fails closed.
+
+Which root a session bound is recorded the first time it invokes a
+workspace-root-bound tool and does not change for the process's lifetime. A
+session that bound the configured root is not moved onto a directory provisioned
+later, and a session that bound a derived root is never returned to the
+configured root by that directory's removal: its next request fails closed
+instead. The record holds one session identity and one discriminant, so it is
+kept apart from the descriptor-holding composition and is never evicted. A
+daemon restart clears it, after which a removed directory again reads as
+unprovisioned.
 
 A derived root is opened, layout-checked, and supervisor-bound the first time
 that session invokes a workspace-root-bound tool, not at startup, because no
-session exists at startup. The composed executors are retained per session under
-a fixed bound of eight, the least recently used entry released first, which is
-what keeps open descriptors and pinned repositories finite. A retained binding
-is preferred over the derivation, so removing a derived directory under a live
-session produces that root's own typed failures rather than returning the
-session to the configured root. Failure to compose a derived root — an
-unopenable directory, a rejected repository layout, or a repository whose object
-format disagrees with the one the process-lifetime catalog compiled — closes
-that tool request as a known failure carrying sanitized detail and records a
-telemetry event naming the session and a closed reason. It never falls back to
-another root. The GitHub policy admits exactly `https://api.github.com:443` for
-authenticated requests. The code-host `change_request_ci_job_log` operation
-retains the tool-loop-owned exception for one credential-free download from its
-validated, pinned, bounded public HTTPS redirect destination; the pull-request
-suite has no such exception. Model arguments cannot widen either admission rule.
+session exists at startup. Every family in one composition resolves the same
+pathname, so the root's filesystem identity is captured on both sides of the
+composition and compared: a pathname that did not resolve to one directory
+throughout rejects the whole composition rather than leaving one family bound to
+a directory and another to its replacement. The composed executors are retained
+per session under a fixed bound of eight, the least recently used entry released
+first, which is what keeps open descriptors and pinned repositories finite.
+Failure to compose a derived root — an unopenable directory, a rejected
+repository layout, a root replaced during composition, or a repository whose
+object format disagrees with the one the process-lifetime catalog compiled —
+closes that tool request as a known failure carrying sanitized detail and
+records a telemetry event naming the session and a closed reason. It never falls
+back to another root. The GitHub policy admits exactly
+`https://api.github.com:443` for authenticated requests. The code-host
+`change_request_ci_job_log` operation retains the tool-loop-owned exception for
+one credential-free download from its validated, pinned, bounded public HTTPS
+redirect destination; the pull-request suite has no such exception. Model
+arguments cannot widen either admission rule.
 
 The optional `[tool_approval_postures]` table maps an exact composed tool name
 to one of `auto`, `delegated`, or `human`. The parser rejects non-string or
