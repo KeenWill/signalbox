@@ -96,6 +96,16 @@ jobs:
         run: python3 scripts/test_postgres_integration_suites.py
       - name: Test the built-executable resolver
         run: python3 tooling/test_resolve_cargo_bin.py
+      # Runs here rather than in coverage.yml or swift.yml because it reads
+      # both of them: it extracts the jq programs those workflows embed and
+      # checks each against the Python summarizer that reads the same
+      # documents. Landing it in either workflow would leave the other's
+      # predicates tested only when that workflow happened to trigger, and
+      # neither triggers on a change to the summarizers alone. The runner image
+      # provides jq, which is also what lets those two workflows invoke it with
+      # no install step of their own.
+      - name: Test the coverage workflow predicates
+        run: python3 tooling/test_coverage_workflow_predicates.py
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check Markdown formatting
@@ -273,7 +283,7 @@ jobs:
           cache-on-failure: true
           key: postgres-integration
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -382,7 +392,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive
