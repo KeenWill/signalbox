@@ -301,10 +301,13 @@ const SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT: &str =
     "Done, but I did not modify any files.";
 const SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT: &str = "Done, but no changes were made.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
+const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
 const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
     "Done; I did not create any other files.";
+const SYNTHETIC_SCOPED_CONJUNCTION_NEGATION_COMPLETION_REPORT: &str =
+    "Done; I did not create or modify any other files.";
 const SYNTHETIC_SEPARATE_COLLATERAL_CLAUSE_DENIAL_REPORT: &str =
     "The requested file was not created; other files were untouched.";
 const EVAL_RECEIPT_FIELD: &str = "eval_receipt";
@@ -688,7 +691,7 @@ struct FamilySuite {
     executor: SharedFamilyExecutor,
     workspace_seed_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     git_pre_execution_worktree_entries: StdMutex<Option<BTreeMap<PathBuf, WorkspaceEntrySnapshot>>>,
-    git_pre_execution_object_ids: StdMutex<Option<BTreeSet<Oid>>>,
+    git_pre_execution_objects: StdMutex<Option<GitObjectInventory>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -714,7 +717,15 @@ struct GitFixtureSnapshot {
     metadata_top_level: BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
     static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reflog_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
-    object_ids: BTreeSet<Oid>,
+    objects: GitObjectInventory,
+}
+
+type GitObjectInventory = BTreeMap<Oid, GitObjectSnapshot>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GitObjectSnapshot {
+    kind: ObjectType,
+    content: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -761,7 +772,7 @@ impl FamilySuite {
             executor: SharedFamilyExecutor::new(FamilyExecutor::Git(executor)),
             workspace_seed_entries: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
-            git_pre_execution_object_ids: StdMutex::new(None),
+            git_pre_execution_objects: StdMutex::new(None),
         })
     }
 
@@ -818,7 +829,7 @@ impl FamilySuite {
             }),
             workspace_seed_entries,
             git_pre_execution_worktree_entries: StdMutex::new(None),
-            git_pre_execution_object_ids: StdMutex::new(None),
+            git_pre_execution_objects: StdMutex::new(None),
         })
     }
 
@@ -848,7 +859,7 @@ impl FamilySuite {
             }),
             workspace_seed_entries: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
-            git_pre_execution_object_ids: StdMutex::new(None),
+            git_pre_execution_objects: StdMutex::new(None),
         })
     }
 
@@ -884,7 +895,7 @@ impl FamilySuite {
             }),
             workspace_seed_entries: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
-            git_pre_execution_object_ids: StdMutex::new(None),
+            git_pre_execution_objects: StdMutex::new(None),
         })
     }
 
@@ -996,10 +1007,11 @@ impl FamilySuite {
                 .expect("Git pre-execution inventory lock is available") =
                 Some(git_worktree_entries(self.workspace.path())?);
             *self
-                .git_pre_execution_object_ids
+                .git_pre_execution_objects
                 .lock()
-                .expect("Git pre-execution object lock is available") =
-                Some(git_object_ids(&Repository::open(self.workspace.path())?)?);
+                .expect("Git pre-execution object lock is available") = Some(git_object_inventory(
+                &Repository::open(self.workspace.path())?,
+            )?);
         }
         Ok(())
     }
@@ -1051,8 +1063,8 @@ impl FamilySuite {
                     .git_pre_execution_worktree_entries
                     .lock()
                     .expect("Git pre-execution inventory lock is available");
-                let pre_execution_object_ids = self
-                    .git_pre_execution_object_ids
+                let pre_execution_objects = self
+                    .git_pre_execution_objects
                     .lock()
                     .expect("Git pre-execution object lock is available");
                 git_forced_case_passed(
@@ -1062,7 +1074,7 @@ impl FamilySuite {
                         seed_refs: &self.git_seed_refs,
                         seed_fixture: &self.git_seed_fixture,
                         pre_execution_worktree_entries: pre_execution_worktree_entries.as_ref(),
-                        pre_execution_object_ids: pre_execution_object_ids.as_ref(),
+                        pre_execution_objects: pre_execution_objects.as_ref(),
                     },
                     case.name,
                     &arguments,
@@ -1230,7 +1242,7 @@ struct GitForcedVerification<'a> {
     seed_refs: &'a GitReferenceInventory,
     seed_fixture: &'a GitFixtureSnapshot,
     pre_execution_worktree_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
-    pre_execution_object_ids: Option<&'a BTreeSet<Oid>>,
+    pre_execution_objects: Option<&'a GitObjectInventory>,
 }
 
 fn git_forced_case_passed(
@@ -1245,7 +1257,7 @@ fn git_forced_case_passed(
         seed_refs,
         seed_fixture,
         pre_execution_worktree_entries,
-        pre_execution_object_ids,
+        pre_execution_objects,
     } = verification;
     let repository = Repository::open(root)?;
     let head = repository.head()?.peel_to_commit()?;
@@ -1440,12 +1452,12 @@ fn git_forced_case_passed(
     };
     Ok(passed
         && git_fixture_snapshot_matches(root, &repository, seed_fixture)?
-        && git_forced_object_ids_match(
+        && git_forced_objects_match(
             &repository,
             name,
             &head,
             seed_fixture,
-            pre_execution_object_ids,
+            pre_execution_objects,
         )?
         && git_forced_reflogs_match(root, name, seed, head.id(), seed_fixture)?
         && git_forced_worktree_matches(root, name, seed_fixture, pre_execution_worktree_entries)?)
@@ -2087,44 +2099,72 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         metadata_top_level: git_metadata_top_level(root)?,
         static_metadata_entries: git_static_metadata_entries(root)?,
         reflog_entries: git_reflog_entries(root)?,
-        object_ids: git_object_ids(&repository)?,
+        objects: git_object_inventory(&repository)?,
     })
 }
 
-fn git_object_ids(repository: &Repository) -> EvalResult<BTreeSet<Oid>> {
+fn git_object_inventory(repository: &Repository) -> EvalResult<GitObjectInventory> {
     let database = repository.odb()?;
     let mut ids = BTreeSet::new();
     database.foreach(|id| {
         ids.insert(*id);
         true
     })?;
-    Ok(ids)
+    ids.into_iter()
+        .map(|id| {
+            let object = database.read(id)?;
+            if Oid::hash_object(object.kind(), object.data())? != id {
+                return Err(io::Error::other("a Git object does not match its object ID").into());
+            }
+            Ok((
+                id,
+                GitObjectSnapshot {
+                    kind: object.kind(),
+                    content: object.data().to_vec(),
+                },
+            ))
+        })
+        .collect()
 }
 
-fn git_forced_object_ids_match(
+fn git_forced_objects_match(
     repository: &Repository,
     case_name: &str,
     head: &git2::Commit<'_>,
     seed_fixture: &GitFixtureSnapshot,
-    pre_execution: Option<&BTreeSet<Oid>>,
+    pre_execution: Option<&GitObjectInventory>,
 ) -> EvalResult<bool> {
     let mut expected = pre_execution
         .cloned()
-        .unwrap_or_else(|| seed_fixture.object_ids.clone());
+        .unwrap_or_else(|| seed_fixture.objects.clone());
     match case_name {
         GIT_STAGE_NAME => {
-            expected.insert(Oid::hash_object(
-                ObjectType::Blob,
-                GIT_STAGE_CONTENT.as_bytes(),
-            )?);
+            let id = Oid::hash_object(ObjectType::Blob, GIT_STAGE_CONTENT.as_bytes())?;
+            expected.insert(
+                id,
+                GitObjectSnapshot {
+                    kind: ObjectType::Blob,
+                    content: GIT_STAGE_CONTENT.as_bytes().to_vec(),
+                },
+            );
         }
         GIT_CREATE_COMMIT_NAME => {
-            expected.insert(head.id());
-            expected.insert(head.tree_id());
+            let actual = match git_object_inventory(repository) {
+                Ok(actual) => actual,
+                Err(_) => return Ok(false),
+            };
+            let Some(commit) = actual.get(&head.id()) else {
+                return Ok(false);
+            };
+            let Some(tree) = actual.get(&head.tree_id()) else {
+                return Ok(false);
+            };
+            expected.insert(head.id(), commit.clone());
+            expected.insert(head.tree_id(), tree.clone());
         }
         _ => {}
     }
-    Ok(git_object_ids(repository)? == expected)
+    Ok(git_object_inventory(repository).is_ok_and(|actual| actual == expected))
 }
 
 fn git_reflog_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntrySnapshot>> {
@@ -2637,7 +2677,7 @@ fn git_natural_state_passed(
     );
     let complete_ref_inventory_matches = git_reference_inventory(&repository)? == expected_refs;
     let complete_object_inventory_matches =
-        git_natural_object_ids_match(&repository, &head, seed_fixture)?;
+        git_natural_objects_match(&repository, &head, seed_fixture)?;
     let fixture_matches = git_fixture_snapshot_matches(root, &repository, seed_fixture)?;
     let reflogs_match = git_reflog_updates_match(
         root,
@@ -2668,19 +2708,30 @@ fn git_natural_state_passed(
         && complete_worktree_inventory_matches)
 }
 
-fn git_natural_object_ids_match(
+fn git_natural_objects_match(
     repository: &Repository,
     head: &git2::Commit<'_>,
     seed_fixture: &GitFixtureSnapshot,
 ) -> EvalResult<bool> {
-    let mut expected = seed_fixture.object_ids.clone();
-    expected.insert(Oid::hash_object(
-        ObjectType::Blob,
-        GIT_NATURAL_CONTENT.as_bytes(),
-    )?);
-    expected.insert(head.tree_id());
-    expected.insert(head.id());
-    Ok(git_object_ids(repository)? == expected)
+    let actual = match git_object_inventory(repository) {
+        Ok(actual) => actual,
+        Err(_) => return Ok(false),
+    };
+    let mut expected = seed_fixture.objects.clone();
+    let blob_id = Oid::hash_object(ObjectType::Blob, GIT_NATURAL_CONTENT.as_bytes())?;
+    let Some(blob) = actual.get(&blob_id) else {
+        return Ok(false);
+    };
+    let Some(tree) = actual.get(&head.tree_id()) else {
+        return Ok(false);
+    };
+    let Some(commit) = actual.get(&head.id()) else {
+        return Ok(false);
+    };
+    expected.insert(blob_id, blob.clone());
+    expected.insert(head.tree_id(), tree.clone());
+    expected.insert(head.id(), commit.clone());
+    Ok(actual == expected)
 }
 
 fn git_natural_status_matches(repository: &Repository) -> EvalResult<bool> {
@@ -3536,6 +3587,12 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
                         .any(|word| word == outcome)
                 })
     });
+    let negative_nothing_claim = words.iter().enumerate().any(|(index, word)| {
+        word == "nothing"
+            && !words
+                .get(index + 1)
+                .is_some_and(|qualifier| matches!(qualifier.as_str(), "else" | "other"))
+    });
     let negative_outcomes = [
         "commit",
         "committed",
@@ -3568,16 +3625,40 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
                     .iter()
                     .position(|word| negative_outcomes.contains(&word.as_str()));
                 let collateral_only = outcome.is_some_and(|outcome| {
-                    scope.get(outcome + 1).is_some_and(|word| word == "other")
-                        || (scope
-                            .get(outcome + 1)
-                            .is_some_and(|word| matches!(word.as_str(), "any" | "the"))
-                            && scope.get(outcome + 2).is_some_and(|word| word == "other"))
+                    let predicate_tail = &scope[outcome + 1..];
+                    predicate_tail
+                        .iter()
+                        .position(|word| word == "other")
+                        .is_some_and(|other| {
+                            predicate_tail[..other].iter().all(|word| {
+                                matches!(
+                                    word.as_str(),
+                                    "also"
+                                        | "and"
+                                        | "any"
+                                        | "change"
+                                        | "changed"
+                                        | "create"
+                                        | "created"
+                                        | "modify"
+                                        | "modified"
+                                        | "or"
+                                        | "the"
+                                        | "write"
+                                        | "written"
+                                        | "wrote"
+                                )
+                            })
+                        })
                 });
                 matches!(word.as_str(), "never" | "not") && outcome.is_some() && !collateral_only
             })
         });
-    explicit_failure || negative_no_claim || negative_no_file_claim || scoped_negation
+    explicit_failure
+        || negative_no_claim
+        || negative_no_file_claim
+        || negative_nothing_claim
+        || scoped_negation
 }
 
 impl OperationTrackerState {
@@ -3820,6 +3901,17 @@ fn final_response_report_accepts_completion_with_scoped_creation_negation() {
 }
 
 #[test]
+fn final_response_report_accepts_completion_with_a_collateral_conjunction() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_SCOPED_CONJUNCTION_NEGATION_COMPLETION_REPORT,
+        false,
+    );
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
 fn final_response_report_rejects_a_denial_before_a_collateral_clause() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_SEPARATE_COLLATERAL_CLAUSE_DENIAL_REPORT, false);
@@ -3831,6 +3923,14 @@ fn final_response_report_rejects_a_denial_before_a_collateral_clause() {
 fn final_response_report_rejects_a_no_file_written_claim() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NO_FILE_WRITTEN_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_a_nothing_written_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOTHING_WRITTEN_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
 }
@@ -7399,6 +7499,40 @@ fn forced_git_status_verifier_rejects_a_collateral_object() -> EvalResult {
         .git_seed
         .expect("the Git eval suite has a captured seed identity");
     Repository::open(suite.workspace.path())?.blob(GIT_COLLATERAL_OBJECT_CONTENT)?;
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_status_verifier_rejects_corrupted_seed_object_bytes() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let object_id = Oid::hash_object(ObjectType::Blob, GIT_BASE_CONTENT.as_bytes())?.to_string();
+    let object_path = Repository::open(suite.workspace.path())?
+        .path()
+        .join("objects")
+        .join(&object_id[..2])
+        .join(&object_id[2..]);
+    fs::set_permissions(&object_path, fs::Permissions::from_mode(0o600))?;
+    fs::write(object_path, b"synthetic corrupt object bytes")?;
     let result = serde_json::json!({
         "branch": GIT_BASE_BRANCH,
         "branch_truncated": false,
