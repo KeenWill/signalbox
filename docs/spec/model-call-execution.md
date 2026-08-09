@@ -11,14 +11,18 @@ against the implementing stack through PR #201 (`agent/tool-loop-proof`):
 rendering a context frontier into provider messages, the staged prepare /
 authorize-send / commit-observation effects, assistant content, intra-turn tool
 rounds and final turn completion, provider failure classification into physical
-dispositions, and the retry prohibition. Tool requests, approvals, attempts, and
-continuation are owned by [tool-loop](tool-loop.md). Turn and attempt lifecycle
-law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
-semantic entries and frontiers in
-[sessions-and-transcript](sessions-and-transcript.md); storage protocol and the
-outbox in [persistence-protocol](persistence-protocol.md); the typed
-model-runtime layer in [runtime-substrate](runtime-substrate.md); daemon
-startup, scheduling, and shutdown composition in
+dispositions, and the retry prohibition. What a credential-pool selection
+attempt can end as, and every projection of each ending, is owned by
+[credential availability](credential-availability.md); this page owns the
+terminal-evidence-and-cause column of that table and the successor call's own
+mechanics. Tool requests, approvals, attempts, and continuation are owned by
+[tool-loop](tool-loop.md). Turn and attempt lifecycle law lives in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
+entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
+storage protocol and the outbox in
+[persistence-protocol](persistence-protocol.md); the typed model-runtime layer
+in [runtime-substrate](runtime-substrate.md); daemon startup, scheduling, and
+shutdown composition in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); and model
 configuration and credentials in
 [configuration-and-credentials](configuration-and-credentials.md). The
@@ -564,24 +568,33 @@ most one call row per attempt against any buggy or racing writer. There is no
 automatic retry after a known failure and no automatic retry of an ambiguous
 outcome (INV-025, INV-026); a known failure fails the attempt and turn unless
 its pool authorizes an availability successor against a *different* eligible
-profile ([availability successor calls](#availability-successor-calls)), and
-ambiguity parks the turn for recovery. That exception is substitution, never
-repetition: no path re-issues a call against the profile that failed. A later
-scheduler pass never treats an issued unclassified call as fresh authorization.
-Why: a lost acknowledgement cannot prove the provider did not act, so repetition
-risks undisclosed duplicate provider effects and spend; honest ambiguity is
-preferred to an invented exactly-once claim.
+profile ([availability successor calls](#availability-successor-calls)) — the
+`terminal` and `successor` rows of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+which states the four disjoint reasons a failure reaches the first rather than
+the second — and ambiguity parks the turn for recovery. That exception is
+substitution, never repetition: no path re-issues a call against the profile
+that failed. A later scheduler pass never treats an issued unclassified call as
+fresh authorization. Why: a lost acknowledgement cannot prove the provider did
+not act, so repetition risks undisclosed duplicate provider effects and spend;
+honest ambiguity is preferred to an invented exactly-once claim.
 
 ### Availability successor calls
 
 The rule above governs repetition: one durable authorization never reaches the
-provider twice. It does not govern substitution of the credential that failed. A
-`KnownFailed` call whose cause is one of the three availability causes —
+provider twice. It does not govern substitution of the credential that failed,
+which is the `successor` ending of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
+A `KnownFailed` call whose cause is one of the three availability causes —
 `provider_quota_exhausted`, `provider_rate_limited`, or `provider_overloaded` —
 and whose pool configures `switch_now` for that cause may be followed by a
 *successor call*: a distinct model call, on a successor turn attempt, against
 the next admitted member of the same credential pool
 ([configuration-and-credentials](configuration-and-credentials.md#credential-pools-and-selection)).
+This is the `successor` row of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+which owns every other projection of it; this section owns the call's own
+mechanics.
 
 That framing is what makes this compatible with the accepted rules rather than
 an exception to them. The predecessor stays terminal and stays `KnownFailed`;
@@ -651,20 +664,23 @@ decision, and repeated clears would defeat this bound. When no member remains,
 the turn takes the exhaustion path below rather than calling a failed member
 again.
 
-When no member remains admissible, the pool's `on_pool_exhausted` decides. If
-the chain observed a qualifying provider failure, `fail` fails the turn as a
-known failure carrying the last observed cause. A turn that reaches an already
-exhausted pool before issuing any call instead fails with the distinct
-`credential_pool_exhausted` preparation cause and the frozen policy's durable
-member-exclusion evidence; it never fabricates provider evidence or borrows a
-stale provider cause. `park` parks the turn in a durable wait carrying every
-excluded member's evidence and optional reset, plus the earliest reset as its
-deadline. Entering that wait atomically ends the call-free current attempt as
-`WithoutStop(YieldedToDurableWait)`; it never leaves a live attempt behind. The
-scheduler releases it when that deadline passes. If no member reported a reset,
-the wait has no deadline and only a durable member-availability update wakes it.
-A parked turn holds its session slot, appends no failure entry, and is not a
-terminal outcome.
+When no member remains admissible, which ending the attempt reaches is decided
+by the pool's `on_pool_exhausted` value together with whether this turn has
+already issued a call. All four such endings, and every projection of each, are
+stated once by
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
+
+This page owns one column of
+[that table](credential-availability.md#the-credential-availability-machine) —
+terminal evidence and cause — and states only that column here. A chain that
+already observed a qualifying provider failure carries that last observed cause
+and its `ProviderError` evidence. A turn that reached an exhausted pool before
+issuing any call instead carries the distinct `credential_pool_exhausted`
+preparation cause together with the frozen policy's durable member-exclusion
+evidence; it never fabricates provider evidence and never borrows a stale
+provider cause, because no provider request was issued for it to have observed.
+A parked turn carries no terminal evidence at all: it has not terminalized, and
+is not one of this page's terminal outcomes.
 
 **Committed unimplemented functionality — pre-call pool-exhaustion failure.** No
 present domain transition, repository shape, or process event can produce this
@@ -984,9 +1000,11 @@ prints the semantic transcript; it is deliberately not the client protocol.
   implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,
   but no later reconciliation workflow is implemented.
 - **Committed unimplemented functionality.** An
-  [availability successor call](#availability-successor-calls) is designed as
-  durable evidence, but no present migration, repository operation, or
-  reconstitution path stores or recovers one, as
+  [availability successor call](#availability-successor-calls) — the `successor`
+  ending of
+  [the credential-availability machine](credential-availability.md#the-credential-availability-machine)
+  — is designed as durable evidence, but no present migration, repository
+  operation, or reconstitution path stores or recovers one, as
   [persistence protocol](persistence-protocol.md) states under its
   availability-successor storage contract, so predecessor lineage is not
   presently recoverable. Once its implementing child lands that storage, the

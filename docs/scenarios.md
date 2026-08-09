@@ -89,7 +89,8 @@ INV-tagged test names and attached doc comments.
   selects `switch_now`, a proven availability failure may create the S22
   successor on a new attempt against the same target and a different credential
   profile, under
-  [availability successor calls](spec/model-call-execution.md#availability-successor-calls)
+  [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
+  [the credential-availability machine](spec/credential-availability.md#the-credential-availability-machine),
   and
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
   No partial draft becomes final content. A later authorized call must retain
@@ -713,7 +714,8 @@ INV-tagged test names and attached doc comments.
   the session-pinned pool policy; create a distinct successor attempt and model
   call that pin the same target, a different eligible profile from that pool,
   the predecessor call, and the qualifying cause, as owned by
-  [availability successor calls](spec/model-call-execution.md#availability-successor-calls)
+  [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
+  [the credential-availability machine](spec/credential-availability.md#the-credential-availability-machine),
   and
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
 - **State transitions:** Predecessor call → known availability failure and

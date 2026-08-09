@@ -1544,29 +1544,33 @@ active/cleared state an operator command touches.
 The turn-local fact is insert-only and never cleared. It is what the execution
 contract means when it says nothing readmits a failed member within its turn, so
 an operator clear during a parked turn marks the clearable state inactive, wakes
-a matching indefinite availability wait, and still leaves the member excluded
-for the remainder of that turn — the clear takes effect from the next turn. It
-invents no provider evidence either way. Without the split there would be one
-row to both retain and clear, and a clear mid-turn would either readmit the
-failed profile or make the turn unable to record why it stayed excluded.
+a matching indefinite availability wait
+([credential availability](credential-availability.md#the-credential-availability-machine)),
+and still leaves the member excluded for the remainder of that turn — the clear
+takes effect from the next turn. It invents no provider evidence either way.
+Without the split there would be one row to both retain and clear, and a clear
+mid-turn would either readmit the failed profile or make the turn unable to
+record why it stayed excluded.
 
-Pre-call exhaustion uses one turn-correlated failure header with cause exactly
-`credential_pool_exhausted`, the current attempt, and the immutable policy
-identity, plus contiguous member rows in policy order carrying the closed
-exclusion kind, correlated record generation or predecessor observation, and
-optional reset. Deferred constraints require the complete policy membership, no
-model call for the attempt, `KnownFailure` attempt end, `Failed` turn, exact
-`TurnFailed` marker and terminal frontier, and one typed preparation-failure
-outbox row in the same commit. Reconstitution rejects a missing, duplicate,
-reordered, or foreign evidence row and any correlation with no durable basis at
-that failure commit. A chain exclusion's basis is its turn-local fact, which no
-clear removes, so a member excluded by a predecessor failure supplies complete
-evidence even when an operator cleared its clearable state while the turn was
-parked. Every other exclusion kind uses its active-at-commit record, and
-reconstitution accepts one later marked inactive by an authorized clear; the
-immutable generation or predecessor observation and its active-at-failure fact
-remain historical evidence. This paragraph constrains the future schema; no
-present storage surface provides it.
+Pre-call exhaustion — the `pre-call fail` ending of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+whose durable-records column this page owns — uses one turn-correlated failure
+header with cause exactly `credential_pool_exhausted`, the current attempt, and
+the immutable policy identity, plus contiguous member rows in policy order
+carrying the closed exclusion kind, correlated record generation or predecessor
+observation, and optional reset. Deferred constraints require the complete
+policy membership, no model call for the attempt, `KnownFailure` attempt end,
+`Failed` turn, exact `TurnFailed` marker and terminal frontier, and one typed
+preparation-failure outbox row in the same commit. Reconstitution rejects a
+missing, duplicate, reordered, or foreign evidence row and any correlation with
+no durable basis at that failure commit. A chain exclusion's basis is its
+turn-local fact, which no clear removes, so a member excluded by a predecessor
+failure supplies complete evidence even when an operator cleared its clearable
+state while the turn was parked. Every other exclusion kind uses its
+active-at-commit record, and reconstitution accepts one later marked inactive by
+an authorized clear; the immutable generation or predecessor observation and its
+active-at-failure fact remain historical evidence. This paragraph constrains the
+future schema; no present storage surface provides it.
 
 **Committed unimplemented functionality — availability-successor storage.** No
 present migration, repository operation, or reconstitution path stores an
@@ -1579,51 +1583,67 @@ predecessor call. A wait entered before any call was issued — because a bounde
 member was full, or because every member was already excluded — has no such
 predecessor, so releasing it needs a second closed origin: a wait-release origin
 carrying the exact consumed wait and the call-free attempt that ended
-`WithoutStop(YieldedToDurableWait)`, and no predecessor call, cause, or proof.
-It is distinct from both the tool-loop and successor origins, so every
-continuation still names exactly one origin and the unique continuation chain
-stays total. The successor's call remains subject to `model_call_attempt_once`,
-pins the same target and a different profile, and cannot exist without that
-complete predecessor proof. A credential-availability wait must atomically
-retain the active turn slot and store a closed `exhausted`/`contended`
-discriminator plus the immutable pool-policy identity. The exhausted form stores
-every policy member's exclusion evidence and optional reset plus the optional
-earliest-reset deadline. The contended form stores every durable exclusion in
-the selection snapshot, the complete nonempty set of otherwise-admissible
-bounded members with their exact invocation-reservation identities, and the same
-optional earliest-reset deadline over those durable exclusions. A reservation
-identity is the whole of that evidence: it is allocated once with the
-reservation row, never reused, and never versioned, so reconstitution compares
-identities alone and needs no separate generation. One shared capacity row per
-bounded profile serializes reservation admission across sessions and pools.
-Preparation locks all candidate capacity rows in profile-reference byte order,
-counts their live reservation rows under those locks, and inserts the selected
-reservation with the `Prepared` call. Every `codex_home` invocation inserts a
-reservation regardless of whether its profile currently declares a bound; the
-bound decides only whether preparation takes that capacity lock and counts, so
-an unbounded profile records the same supervision evidence without serializing.
-A deferred constraint rejects a committed live count above the bound the
-profile's current registration declares; the bound is a live profile property
-rather than a frozen policy field, so it governs the next admission and never
-retroactively invalidates a committed reservation. Because every invocation is
-recorded, a bound newly lowered from unbounded is still enforced against
-complete startup fencing evidence rather than against only the invocations that
-were bounded when they started. Invocation completion releases its reservation
-and writes the wake signal atomically, holding that profile's capacity row
-`FOR UPDATE` across both so a release and its wake are never visible apart. One
-release can wake several waits while admitting one, so each woken transaction
-reruns admission under the same capacity locks. The one that acquires the freed
-reservation releases its wait; a transaction finding no admissible member
-instead atomically rewrites its own wait's evidence to the current snapshot
-under those locks — the live reservation identities now holding the bound, or
-the complete exclusion snapshot when the pool has become exhausted — and stays
-parked. Because the rewrite holds the capacity rows of every bounded member it
-names, a concurrent completion cannot release one of them between the read and
-the commit. A deferred constraint therefore never has to reject a losing
-waiter's call, and no stored wait names a released reservation or misses the
-only wake that concerned it. Entering either wait ends the call-free current
-attempt as `WithoutStop(YieldedToDurableWait)` in the same transaction. Release
-atomically consumes the wait and creates its fresh `Prepared` successor attempt;
+`WithoutStop(YieldedToDurableWait)`. That origin's predecessor evidence is
+optional and is present exactly when the released wait was entered after a
+qualifying provider failure this turn had already observed — a chain that failed
+and then found no member it could yet substitute to. In that case the same
+origin additionally carries the predecessor model call, its qualifying
+availability cause, and the typed non-acceptance proof, which is what lets the
+eventual successor record its authorizing predecessor as the model-call contract
+requires. Splitting these across two origins instead would make the continuation
+chain non-total for the common post-failure wait, which fails reconstitution
+closed and loses acknowledged work at restart. It is distinct from both the
+tool-loop and successor origins, so every continuation still names exactly one
+origin and the unique continuation chain stays total. The successor's call
+remains subject to `model_call_attempt_once`, pins the same target and a
+different profile, and cannot exist without that complete predecessor proof. A
+credential-availability wait must atomically retain the active turn slot and
+store a closed `exhausted`/`contended` discriminator plus the immutable
+pool-policy identity. The exhausted form stores every policy member's exclusion
+evidence and optional reset plus the optional earliest-reset deadline. The
+contended form stores every durable exclusion in the selection snapshot, the
+complete nonempty set of otherwise-admissible bounded members with their exact
+invocation-reservation identities, and the same optional earliest-reset deadline
+over those durable exclusions. A reservation identity is the whole of that
+evidence: it is allocated once with the reservation row, never reused, and never
+versioned, so reconstitution compares identities alone and needs no separate
+generation. One shared capacity row per bounded profile serializes reservation
+admission across sessions and pools. Preparation locks all candidate capacity
+rows in profile-reference byte order, counts their live reservation rows under
+those locks, and inserts the selected reservation with the `Prepared` call.
+Every `codex_home` invocation inserts a reservation regardless of whether its
+profile currently declares a bound; the bound decides only whether preparation
+takes that capacity lock and counts, so an unbounded profile records the same
+supervision evidence without serializing. A deferred constraint rejects a
+committed live count above the bound the profile's current registration
+declares; the bound is a live profile property rather than a frozen policy
+field, so it governs the next admission and never retroactively invalidates a
+committed reservation. Because every invocation is recorded, a bound newly
+lowered from unbounded is still enforced against complete startup fencing
+evidence rather than against only the invocations that were bounded when they
+started. Invocation completion releases its reservation and writes the wake
+signal atomically, holding that profile's capacity row `FOR UPDATE` across both
+so a release and its wake are never visible apart. One release can wake several
+waits while admitting one, so each woken transaction reruns admission under the
+same capacity locks. The one that acquires the freed reservation releases its
+wait. A transaction finding no admissible member instead re-derives its ending
+from
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine)
+under those locks and stores whatever that row requires: where a bounded member
+still holds the pool it atomically rewrites its own wait's evidence to the live
+reservation identities now holding the bound and stays parked; where every
+formerly bounded member has become durably excluded, contention is over and the
+pool's `on_pool_exhausted` value decides, so the wait is rewritten to the
+exhausted form under `park` and **no wait is stored at all under `fail`**, which
+instead terminalizes the turn with the cause that table gives its row. Storage
+never keeps a turn parked under a policy that says to fail it. Because the
+rewrite holds the capacity rows of every bounded member it names, a concurrent
+completion cannot release one of them between the read and the commit. A
+deferred constraint therefore never has to reject a losing waiter's call, and no
+stored wait names a released reservation or misses the only wake that concerned
+it. Entering either wait ends the call-free current attempt as
+`WithoutStop(YieldedToDurableWait)` in the same transaction. Release atomically
+consumes the wait and creates its fresh `Prepared` successor attempt;
 `stop_turn` instead atomically consumes it, creates the fresh
 immediate-successor attempt, applies the interrupt proof, ends that attempt
 `AfterCancellation(Cancelled)`, and terminalizes the turn. Each reservation has

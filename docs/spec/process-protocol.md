@@ -2600,7 +2600,10 @@ harness, not a protocol client.
 ### Credential-pool preparation failure
 
 **Committed unimplemented functionality.** No present event or transcript state
-admits this shape. The implementing wire slice must add
+admits this shape. This section is the wire-projection column of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine)
+for its `pre-call fail` ending; that table states which endings project to a
+terminal state and which to an active one. The implementing wire slice must add
 `failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
 as a distinct `transcript_turn.state` variant and
 `turn_credential_pool_exhausted { turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id, pool_policy_id, policy_members, members }`
@@ -2657,20 +2660,22 @@ producer may terminalize a turn for this pre-call cause.
 
 **Committed unimplemented functionality — credential-availability projection.**
 No present request, event, transcript message, or closed turn-state object
-exposes an availability-successor chain or credential-availability wait. The
-predecessor, authorizing cause, selected profile, and wait evidence are
-themselves committed future storage — no present migration, repository
-operation, or reconstitution path supplies them — so a wire slice cannot project
-them until that storage child lands, and must then add a version-one shape
-together with its daemon and client consumers. That future slice must project a
-wait as an active state retaining the same turn and session slot, and must
-expose a completed successor chain without requiring a client to infer it from
-usage-row order. The runtime-and-storage child that first makes either wait
-reachable must include this coordinated wire slice; admitting `park` in static
-configuration alone does not make the state reachable. Until then, transcript
-snapshots continue to expose the existing per-call usage rows and final turn
-state only; no current client-visible claim is made for the committed storage
-evidence.
+exposes an availability-successor chain or credential-availability wait — the
+`successor`, `contended-wait`, and `exhausted-wait` endings of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+whose wire-projection column this section owns. The predecessor, authorizing
+cause, selected profile, and wait evidence are themselves committed future
+storage — no present migration, repository operation, or reconstitution path
+supplies them — so a wire slice cannot project them until that storage child
+lands, and must then add a version-one shape together with its daemon and client
+consumers. That future slice must project a wait as an active state retaining
+the same turn and session slot, and must expose a completed successor chain
+without requiring a client to infer it from usage-row order. The
+runtime-and-storage child that first makes either wait reachable must include
+this coordinated wire slice; admitting `park` in static configuration alone does
+not make the state reachable. Until then, transcript snapshots continue to
+expose the existing per-call usage rows and final turn state only; no current
+client-visible claim is made for the committed storage evidence.
 
 ## Open edges
 

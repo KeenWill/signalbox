@@ -236,8 +236,10 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
 ## Model fallback and provenance
 
-- **Automatic fallback.** Decided and specified: qualifying causes, the
-  successor-call shape, and pool exhaustion are owned by
+- **Automatic fallback.** Decided and specified: what a selection attempt can
+  end as, and every projection of each ending, by
+  [the credential-availability machine](spec/credential-availability.md#the-credential-availability-machine);
+  the qualifying causes and the successor-call shape by
   [availability successor calls](spec/model-call-execution.md#availability-successor-calls);
   the pool grammar, per-membership ranking, and closed action vocabulary by
   [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).

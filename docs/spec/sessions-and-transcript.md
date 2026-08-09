@@ -859,15 +859,30 @@ commit boundaries are this page's own material, and update-event delivery is
 [persistence-protocol](persistence-protocol.md).
 
 **Committed unimplemented functionality — pre-call pool exhaustion.** The
-credential-pool implementing child adds a third `TurnFailed` producer when an
-active turn exhausts its frozen pool before any model call is prepared and that
-policy selects `on_pool_exhausted = "fail"`. Its single transaction ends the
-current attempt `KnownFailure`, appends the marker after the attempt's starting
-frontier, terminalizes the turn `Failed`, and emits both the ordinary
+credential-pool implementing child adds a third `TurnFailed` producer for the
+`pre-call fail` ending of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine):
+an active turn exhausts its frozen pool before any model call is prepared and
+that policy selects `on_pool_exhausted = "fail"`. Its single transaction ends
+the current attempt `KnownFailure`, appends the marker after the attempt's
+starting frontier, terminalizes the turn `Failed`, and emits both the ordinary
 `turn_failed` update and the typed `turn_credential_pool_exhausted` event. The
 sealed failure and complete member evidence are owned by
 [model-call execution](model-call-execution.md#availability-successor-calls). No
 present transcript writer can produce this shape.
+
+That third producer serves exactly one ending. This page owns the
+transcript-producer column of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+and that column is total over all seven endings: `pre-call fail` uses this new
+producer; `post-failure fail` and `terminal` use the existing model-call
+known-failure closure, because their turn did issue a call and that closure is
+already the writer which commits one; and `selected`, `contended-wait`,
+`exhausted-wait`, and `successor` have no producer and append no entry, because
+none of them terminalizes a turn. A turn that observed a qualifying provider
+failure and only then exhausted its pool therefore already has a commit shape,
+and needs no fourth producer — which is what keeps this inventory closed at
+three.
 
 ## User content
 

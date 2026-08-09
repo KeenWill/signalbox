@@ -102,43 +102,42 @@ the earliest reset as its optional deadline. The contended form carries every
 durable exclusion in the selection snapshot and the complete nonempty set of
 otherwise-admissible bounded members with exact invocation-reservation
 identities. Startup may reconstitute either only from that complete evidence.
-The pool outcome rule is owned by
-[configuration and credentials](configuration-and-credentials.md#credential-pools-and-selection):
-capacity contention enters `contended`; complete exclusion under
-`on_pool_exhausted = "park"` enters `exhausted`; and complete exclusion under
-`on_pool_exhausted = "fail"` stores no wait and instead produces the typed
-pre-call failure and `TurnFailed`. Startup reconstitutes the persisted choice
-without reclassifying it, and release consumes only a stored wait. Entering
-either wait form atomically ends the call-free current attempt as
-`WithoutStop(YieldedToDurableWait)` and stores the wait, leaving no live
-attempt. A reservation is `pending_spawn` from its atomic acquisition with the
-`Prepared` call until successful spawn durably attaches the child process
-group's reuse-safe host identity as `spawned { process_group_identity }`.
-Startup retains live-process `spawned` reservations, whose observation path this
-daemon still owns, and must resolve every fenced prior-process reservation
-before scheduling — proving that exact process group absent, or terminating it
-and then proving absence — before closing it as lost. It is never retained for a
-later death notice, since the observation that would release it died with its
-daemon. A prior-process `pending_spawn` reservation is ambiguous and fails
-startup before scheduling. The scheduler makes a reached deadline, an exact
-reservation release, or a durable member-availability update eligible. Because a
-capacity bound is a live configuration value rather than a frozen one, startup
-additionally re-evaluates every retained `contended` wait against the current
-registrations before enabling scheduling. Each wait names a complete nonempty
-bounded-member set, so every member is evaluated and any one of them suffices: a
-member the current registration leaves unbounded makes the wait eligible
-outright, and a member still bounded makes it eligible when that profile's
-surviving reservation count is below the current bound. Without that pass a
-raised or removed bound would not admit work until an unrelated old invocation
-happened to finish, since a configuration edit produces neither a release nor an
-availability update. Release atomically consumes the wait, creates a fresh
-`Prepared` successor attempt, and returns the same turn to `Running` with a
-fresh availability chain. It carries forward every exclusion that qualified a
-member out: every durable membership exclusion, every profile quarantine, and
-every predecessor exclusion earned by a qualifying failure in this turn. Nothing
-readmits such a member within this turn — not a reset passing, not an operator
-clear of its exact predecessor correlation, and not any other durable
-availability update
+Which ending a selection attempt reaches — and therefore whether a wait is
+stored at all, and in which form — is owned by
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
+This page owns two of that table's columns, turn phase with attempt disposition
+and wake conditions, and states no rule about which row is reached. Startup
+reconstitutes the persisted choice without reclassifying it, and release
+consumes only a stored wait. Entering either wait form atomically ends the
+call-free current attempt as `WithoutStop(YieldedToDurableWait)` and stores the
+wait, leaving no live attempt. A reservation is `pending_spawn` from its atomic
+acquisition with the `Prepared` call until successful spawn durably attaches the
+child process group's reuse-safe host identity as
+`spawned { process_group_identity }`. Startup retains live-process `spawned`
+reservations, whose observation path this daemon still owns, and must resolve
+every fenced prior-process reservation before scheduling — proving that exact
+process group absent, or terminating it and then proving absence — before
+closing it as lost. It is never retained for a later death notice, since the
+observation that would release it died with its daemon. A prior-process
+`pending_spawn` reservation is ambiguous and fails startup before scheduling.
+The scheduler makes a reached deadline, an exact reservation release, or a
+durable member-availability update eligible. Because a capacity bound is a live
+configuration value rather than a frozen one, startup additionally re-evaluates
+every retained `contended` wait against the current registrations before
+enabling scheduling. Each wait names a complete nonempty bounded-member set, so
+every member is evaluated and any one of them suffices: a member the current
+registration leaves unbounded makes the wait eligible outright, and a member
+still bounded makes it eligible when that profile's surviving reservation count
+is below the current bound. Without that pass a raised or removed bound would
+not admit work until an unrelated old invocation happened to finish, since a
+configuration edit produces neither a release nor an availability update.
+Release atomically consumes the wait, creates a fresh `Prepared` successor
+attempt, and returns the same turn to `Running` with a fresh availability chain.
+It carries forward every exclusion that qualified a member out: every durable
+membership exclusion, every profile quarantine, and every predecessor exclusion
+earned by a qualifying failure in this turn. Nothing readmits such a member
+within this turn — not a reset passing, not an operator clear of its exact
+predecessor correlation, and not any other durable availability update
 ([model-call execution](model-call-execution.md#availability-successor-calls)).
 Without that, waking a one-member `switch_now` pool on its own reported reset
 would call the same profile again without bound.
@@ -153,23 +152,19 @@ under those locks it atomically replaces the wait's evidence with the live
 reservation identities now holding the bound, and the turn stays parked in the
 contended form. If no bounded member remains — every former one is now durably
 excluded — the contention is over and the transaction re-runs the pool's
-exhaustion policy rather than assuming a wait. `park` rewrites the wait into the
-exhausted form with the complete exclusion snapshot. `fail` stores no wait at
-all and fails the turn, taking the same terminal outcome the owning contract
-gives an exhausted chain: a turn whose chain already observed a qualifying
-provider failure fails with that last observed provider cause, and only a turn
-that reached exhaustion before issuing any call takes the typed pre-call
-`credential_pool_exhausted` cause
-([model-call execution](model-call-execution.md#availability-successor-calls)).
-Releasing a contended wait does not change which of those two a turn is. A
-`fail` pool therefore cannot be left parked indefinitely by having entered
-contention first, and cannot acquire a pre-call cause it never earned. Releasing
-a bounded reservation holds that profile's capacity row across the atomic
-release-and-wake commit, and a rewrite holds the capacity rows of every bounded
-member its evidence names, so a completion cannot slip between a loser's read
-and its commit. A reservation identity therefore never outlives the wait that
-names it, and losing a race costs a re-park rather than a failed turn, a missed
-wake, or an admission above the bound.
+exhaustion policy rather than assuming a wait. Which ending that re-run reaches
+is the contended-to-exhausted rule of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+and this page adds nothing to it: the turn moves to whichever row that table
+names, and releasing a contended wait does not change which one. A `fail` pool
+therefore cannot be left parked indefinitely by having entered contention first,
+and cannot acquire a pre-call cause it never earned. Releasing a bounded
+reservation holds that profile's capacity row across the atomic release-and-wake
+commit, and a rewrite holds the capacity rows of every bounded member its
+evidence names, so a completion cannot slip between a loser's read and its
+commit. A reservation identity therefore never outlives the wait that names it,
+and losing a race costs a re-park rather than a failed turn, a missed wake, or
+an admission above the bound.
 
 The wait has an exact occupied-slot control matrix. `steer` is accepted as
 ordinary pending steering bound to this source turn and remains pending until a

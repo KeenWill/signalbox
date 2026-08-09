@@ -243,11 +243,14 @@ strings appear only as retained detail inside already-classified variants:
 **Committed unimplemented functionality — provider non-acceptance evidence.** No
 present `TerminalEvidence` variant or `ProviderErrorEvidence` field proves that
 a provider rejected a request before accepting it, and no current adapter can
-authorize an availability successor. The implementing child must add a sealed
-typed proof alongside `ProviderError` for the exact quota-exhausted,
-rate-limited, and overloaded provider responses whose protocol semantics
-establish non-acceptance. Each adapter owns its exhaustive native mapping; the
-provider bridge preserves the proof without deriving it from
+authorize an availability successor. This proof is what separates the
+`successor` and `terminal` endings of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine);
+this page owns the evidence algebra that carries it. The implementing child must
+add a sealed typed proof alongside `ProviderError` for the exact
+quota-exhausted, rate-limited, and overloaded provider responses whose protocol
+semantics establish non-acceptance. Each adapter owns its exhaustive native
+mapping; the provider bridge preserves the proof without deriving it from
 `ProviderErrorKind`, status retryability, or native prose. Classification alone
 remains insufficient, and absence of the proof keeps the known failure terminal.
 This constraint adds no proof to the implemented evidence vocabulary above.

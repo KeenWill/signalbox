@@ -1145,45 +1145,51 @@ not which the turn must wait for, and waiting for the preferred account while
 another is idle would trade throughput for a preference the deployment did not
 ask to be enforced that way.
 
-Contention arises only when that traversal selects nothing. If at least one
-member was skipped solely because it was at its bound, the turn waits for any
-such member to free rather than consulting `on_pool_exhausted` — contention is
-not exhaustion. This includes a mixed pool whose other members carry durable
-exclusions. A bounded member has reported no failure and carries no reset time;
-its invocation completion wakes the waiter. Exhaustion means the traversal
-selected nothing and no member was skipped merely for its bound, which is a
-durable condition; contention resolves on its own.
+Contention arises only when that traversal selects nothing. Whether that lands
+the attempt in contention or in exhaustion is the first branch of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine)
+— it asks whether any member was skipped solely for its bound, and a mixed pool
+whose other members carry durable exclusions still counts as contention — and
+this section adds only the reason that branch exists. A bounded member has
+reported no failure and carries no reset time, so its own invocation completion
+wakes the waiter, whereas exhaustion is a durable condition that nothing inside
+the pool will resolve. Collapsing the two would either fail a turn that had only
+to wait for a running invocation to finish, or park one indefinitely against
+members that will never free.
 
-The wait records which case it represents. An exhausted wait carries the
-complete policy-member exclusion snapshot described below. A contended wait
-carries that same frozen policy identity, every durable exclusion that removed a
-member, and the complete nonempty set of otherwise-admissible bounded members
-with their exact invocation-reservation identities. A contended wait also
-carries the earliest unelapsed reset among those durable exclusions as its
-deadline, exactly as an exhausted wait does, and the scheduler makes it eligible
-when that deadline passes. Without it a turn contending on a bounded member
-would stay parked past the moment an excluded member became admissible again —
-visibly so for a chain-local reset, whose passage produces no separate durable
-availability update. A contended wait whose exclusions report no reset has no
-deadline, and its bounded members' completions remain its wake. A member's
-admission first locks the shared capacity rows for every bounded profile the
-preparation may select, in profile-reference byte order. The rows are
-profile-scoped rather than session- or pool-scoped, so concurrent sessions and
-distinct pools serialize against the same bound without a lock-order cycle.
-Under those locks the transaction counts live reservations, chooses the member,
-and acquires its `pending_spawn` reservation together with the call's `Prepared`
-record; a database constraint rejects a live count above the configured bound.
-That bound is read from the profile's current registration and is never frozen
-into a pool policy, because `max_concurrent_invocations` guards a live refresh
-race the operator is adjusting now: a session pinned to an older policy must not
-keep running against a limit the operator has since tightened. A raised bound
-therefore admits more work at the next preparation, and a lowered one restricts
-the next admission without revoking a reservation already committed — a live
-count above a freshly lowered bound drains as those invocations complete rather
-than terminating them. A turn already parked in a contended wait is not left
-behind by a raise: a configuration edit produces neither a reservation release
-nor an availability update, so startup re-evaluates the retained contended waits
-themselves against the current registrations
+The wait records which case it represents — the `contended-wait` and
+`exhausted-wait` endings of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine).
+An exhausted wait carries the complete policy-member exclusion snapshot
+described below. A contended wait carries that same frozen policy identity,
+every durable exclusion that removed a member, and the complete nonempty set of
+otherwise-admissible bounded members with their exact invocation-reservation
+identities. A contended wait also carries the earliest unelapsed reset among
+those durable exclusions as its deadline, exactly as an exhausted wait does, and
+the scheduler makes it eligible when that deadline passes. Without it a turn
+contending on a bounded member would stay parked past the moment an excluded
+member became admissible again — visibly so for a chain-local reset, whose
+passage produces no separate durable availability update. A contended wait whose
+exclusions report no reset has no deadline, and its bounded members' completions
+remain its wake. A member's admission first locks the shared capacity rows for
+every bounded profile the preparation may select, in profile-reference byte
+order. The rows are profile-scoped rather than session- or pool-scoped, so
+concurrent sessions and distinct pools serialize against the same bound without
+a lock-order cycle. Under those locks the transaction counts live reservations,
+chooses the member, and acquires its `pending_spawn` reservation together with
+the call's `Prepared` record; a database constraint rejects a live count above
+the configured bound. That bound is read from the profile's current registration
+and is never frozen into a pool policy, because `max_concurrent_invocations`
+guards a live refresh race the operator is adjusting now: a session pinned to an
+older policy must not keep running against a limit the operator has since
+tightened. A raised bound therefore admits more work at the next preparation,
+and a lowered one restricts the next admission without revoking a reservation
+already committed — a live count above a freshly lowered bound drains as those
+invocations complete rather than terminating them. A turn already parked in a
+contended wait is not left behind by a raise: a configuration edit produces
+neither a reservation release nor an availability update, so startup
+re-evaluates the retained contended waits themselves against the current
+registrations
 ([turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot)).
 A wait whose profile is now unbounded becomes eligible outright; one whose
 profile is still bounded becomes eligible when that profile's surviving
@@ -1194,11 +1200,13 @@ until some unrelated older invocation happened to finish. Spawn failure or
 another pre-send closure releases that pending reservation.
 
 Every `codex_home` invocation acquires a reservation, whether or not the profile
-currently declares a bound. The bound decides only whether preparation takes the
-capacity lock and counts: an unbounded profile inserts its reservation without
-locking or counting, so the unbounded path stays free of contention it does not
-need. What it must not stay free of is supervision evidence. A bound is a live
-setting, so the deployment that runs unbounded today can declare
+currently declares a bound; that reservation is the identity
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine)
+names as a contended wait's wake. The bound decides only whether preparation
+takes the capacity lock and counts: an unbounded profile inserts its reservation
+without locking or counting, so the unbounded path stays free of contention it
+does not need. What it must not stay free of is supervision evidence. A bound is
+a live setting, so the deployment that runs unbounded today can declare
 `max_concurrent_invocations = 1` tomorrow, and if unbounded invocations left no
 reservation and no process-group identity, a child that survived a daemon crash
 would be invisible to the startup fencing below. Startup would admit a
@@ -1457,7 +1465,11 @@ protocol's 8 MiB frame limit even under worst-case JSON escaping. Each
   value for that member alone.
 - `tie_break` — one closed value resolving equal priorities: `first_listed`,
   `round_robin`, or `least_used`.
-- `on_pool_exhausted` — one closed value, `park` or `fail`.
+- `on_pool_exhausted` — one closed value, `park` or `fail`. This grammar admits
+  the value and nothing more; what each one does is owned by
+  [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+  where `park` selects between the two wait endings and `fail` between the two
+  failure endings.
 - `headroom_reserve_percent` — an optional pool-wide integer from 0 through 99.
 - the five closed trigger keys `on_quota_exhausted`, `on_rate_limited`,
   `on_overloaded`, `on_credential_rejected`, and `on_headroom_low`, each
@@ -1669,12 +1681,10 @@ tie-break and do not advance it. Stickiness needs no separate durable state:
 preparation prefers the member the session's most recent `Prepared` call on that
 pool pinned, including a call that later failed under `stay`, so a session stays
 on one account until a trigger displaces it. When the pool admits no member,
-`on_pool_exhausted` decides — `park` parks the turn in the durable wait carrying
-the earliest reset the pool's members reported. When no excluded member reports
-a reset, `park` records an indefinite durable wait with no deadline; only an
-operator clear, a zero-cost no-model availability probe, or another durable
-member-availability update wakes it. A restart alone does not. `fail` instead
-fails the turn as a known failure. Quarantine is durable and scoped to the
+which ending the attempt reaches — and what every page must then say about it —
+is owned by
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+and this section restates none of it. Quarantine is durable and scoped to the
 profile rather than to the pool that observed it, because a rejected credential
 is a property of the account: a profile ranked in two pools is excluded from
 both. It is cleared only by an explicit operator command, or by a probe that
@@ -2063,13 +2073,14 @@ deployment-side rules that code cannot enforce are stated in
   what it must be: an upgrade may not change which credential an existing
   session resolves. Each existing entry therefore becomes a **singleton policy
   retaining exactly the stored reference** — one member at priority 1, no
-  headroom reserve, `first_listed`, `on_pool_exhausted = "fail"`, and `stay` for
-  every trigger — which reproduces the one-account, no-failover behavior that
-  entry already had. Expanding the entry to whatever pool the document now maps
-  that family to is the one thing it must not do: that would grant a historical
-  session members it never had, which is precisely the silent re-resolution the
-  replay rule forbids, and choosing any other policy would discard the reference
-  the session pinned.
+  headroom reserve, `first_listed`,
+  [`on_pool_exhausted = "fail"`](credential-availability.md#the-credential-availability-machine),
+  and `stay` for every trigger — which reproduces the one-account, no-failover
+  behavior that entry already had. Expanding the entry to whatever pool the
+  document now maps that family to is the one thing it must not do: that would
+  grant a historical session members it never had, which is precisely the silent
+  re-resolution the replay rule forbids, and choosing any other policy would
+  discard the reference the session pinned.
 
   The two profile-owned fields that frozen membership needs — adapter and
   delivery kind — come from the validated registration of the profile the entry
