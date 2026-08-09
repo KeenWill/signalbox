@@ -303,6 +303,7 @@ const SYNTHETIC_WITHOUT_SUCCESS_COMPLETION_REPORT: &str = "Completed without any
 const SYNTHETIC_UNSUCCESSFUL_COMPLETION_REPORT: &str = "Completed unsuccessfully.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
+const SYNTHETIC_NO_FILES_WRITTEN_REPORT: &str = "Done; no files were written.";
 const SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT: &str = "Read completed; no file was created.";
 const SYNTHETIC_READ_COMPLETION_REPORT: &str = "brief.txt was read successfully.";
 const SYNTHETIC_SWITCH_COMPLETION_REPORT: &str = "The branch was switched successfully.";
@@ -3225,9 +3226,12 @@ fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetada
         } else {
             (None, None)
         };
-        let modified = (kind == GitMetadataEntryKind::File)
-            .then(|| metadata.modified())
-            .transpose()?;
+        let modified = matches!(
+            kind,
+            GitMetadataEntryKind::Directory | GitMetadataEntryKind::File
+        )
+        .then(|| metadata.modified())
+        .transpose()?;
         entries.insert(
             PathBuf::from(entry.file_name()),
             GitMetadataEntrySnapshot {
@@ -3323,12 +3327,28 @@ fn git_forced_metadata_top_level_matches(
             }
         }
         GIT_CREATE_COMMIT_NAME => {
+            if !admit_git_metadata_modified_time(
+                &actual,
+                &mut expected,
+                Path::new(GIT_OBJECTS_DIRECTORY),
+            ) || !admit_git_metadata_modified_time(
+                &actual,
+                &mut expected,
+                Path::new(GIT_LOGS_DIRECTORY),
+            ) {
+                return Ok(false);
+            }
             expected.remove(Path::new(GIT_MERGE_HEAD_PATH));
             expected.remove(Path::new(GIT_MERGE_MESSAGE_PATH));
             expected.remove(Path::new(GIT_MERGE_MODE_PATH));
         }
         GIT_STAGE_NAME => {
             if !admit_git_metadata_file_mutation(&actual, &mut expected, Path::new(GIT_INDEX_PATH))
+                || !admit_git_metadata_modified_time(
+                    &actual,
+                    &mut expected,
+                    Path::new(GIT_OBJECTS_DIRECTORY),
+                )
             {
                 return Ok(false);
             }
@@ -3348,6 +3368,12 @@ fn git_natural_metadata_top_level_matches(
     if !admit_git_metadata_file_mutation(&actual, &mut expected, Path::new(GIT_INDEX_PATH)) {
         return Ok(false);
     }
+    if !admit_git_metadata_modified_time(&actual, &mut expected, Path::new(GIT_OBJECTS_DIRECTORY)) {
+        return Ok(false);
+    }
+    if !admit_git_metadata_modified_time(&actual, &mut expected, Path::new(GIT_LOGS_DIRECTORY)) {
+        return Ok(false);
+    }
     Ok(actual == expected)
 }
 
@@ -3363,6 +3389,21 @@ fn admit_git_metadata_file_mutation(
         return false;
     };
     expected.content.clone_from(&actual.content);
+    expected.modified = actual.modified;
+    true
+}
+
+fn admit_git_metadata_modified_time(
+    actual: &BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
+    expected: &mut BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
+    path: &Path,
+) -> bool {
+    let Some(actual) = actual.get(path) else {
+        return false;
+    };
+    let Some(expected) = expected.get_mut(path) else {
+        return false;
+    };
     expected.modified = actual.modified;
     true
 }
@@ -4571,7 +4612,9 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
     let negative_no_file_claim = file_creation_required
         && words.iter().enumerate().any(|(index, word)| {
             word == "no"
-                && words.get(index + 1).is_some_and(|object| object == "file")
+                && words
+                    .get(index + 1)
+                    .is_some_and(|object| matches!(object.as_str(), "file" | "files"))
                 && ["created", "exists", "found", "written"]
                     .iter()
                     .any(|outcome| {
@@ -5061,6 +5104,14 @@ fn final_response_report_rejects_a_denial_before_a_collateral_clause() {
 fn final_response_report_rejects_a_no_file_written_claim() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NO_FILE_WRITTEN_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion_with_file_creation(true));
+}
+
+#[test]
+fn final_response_report_rejects_a_no_files_written_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_FILES_WRITTEN_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion_with_file_creation(true));
 }
@@ -8103,6 +8154,40 @@ fn forced_git_log_verifier_rejects_top_level_metadata_mtime_drift() -> EvalResul
         .into_reference()
         .peel_to_commit()?;
     fs::File::open(repository.path().join(GIT_CONFIG_PATH))?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_metadata_directory_mtime_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    fs::File::open(repository.path().join(GIT_HOOKS_DIRECTORY))?
         .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
     let result = serde_json::json!({
         "commits": [{
