@@ -135,6 +135,10 @@ const GIT_DIFF_OVERFLOW_PATH: &str = "zz-diff-overflow.txt";
 const GIT_DIFF_OVERFLOW_BYTE: char = 'x';
 const EXPECTED_GIT_DIFF_MAX_BYTES: usize = 128 * 1024;
 const GIT_DIFF_OVERFLOW_CONTENT_BYTES: usize = EXPECTED_GIT_DIFF_MAX_BYTES + 1;
+const GIT_STATUS_OVERFLOW_DIRECTORY: &str = "status-overflow";
+const GIT_STATUS_OVERFLOW_CONTENT: &str = "status overflow fixture\n";
+const EXPECTED_GIT_STATUS_MAX_ENTRIES: usize = 128;
+const GIT_STATUS_OVERFLOW_ENTRY_COUNT: usize = EXPECTED_GIT_STATUS_MAX_ENTRIES - 2;
 const GIT_NATURAL_PATH: &str = "eval.txt";
 const GIT_NATURAL_CONTENT: &str = "natural eval\n";
 const GIT_DRIFTED_NATURAL_CONTENT: &str = "drifted eval\n";
@@ -153,6 +157,9 @@ const WORKSPACE_GLOB_DIRECTORY: &str = "glob-scope";
 const WORKSPACE_GLOB_PATH: &str = "glob-scope/zz-glob.txt";
 const WORKSPACE_GLOB_CONTENT: &str = "beta glob fixture\n";
 const WORKSPACE_GLOB_OVERFLOW_PATH: &str = "glob-scope/zz-overflow.txt";
+const WORKSPACE_GLOB_NONMATCHING_PATH: &str = "glob-scope/aa-nonmatching.md";
+const WORKSPACE_GLOB_NONMATCHING_CONTENT: &str = "nonmatching glob fixture\n";
+const WORKSPACE_DRIFTED_GLOB_CONTENT: &str = "drifted glob fixture\n";
 const WORKSPACE_SEARCH_DIRECTORY: &str = "search-scope";
 const WORKSPACE_SEARCH_PATH: &str = "search-scope/match.txt";
 const WORKSPACE_SEARCH_CONTENT: &str =
@@ -555,6 +562,10 @@ impl FamilySuite {
             workspace.path().join(WORKSPACE_GLOB_OVERFLOW_PATH),
             WORKSPACE_GLOB_CONTENT,
         )?;
+        fs::write(
+            workspace.path().join(WORKSPACE_GLOB_NONMATCHING_PATH),
+            WORKSPACE_GLOB_NONMATCHING_CONTENT,
+        )?;
         fs::create_dir(workspace.path().join(WORKSPACE_SEARCH_DIRECTORY))?;
         fs::write(
             workspace.path().join(WORKSPACE_SEARCH_PATH),
@@ -697,6 +708,15 @@ impl FamilySuite {
                         self.workspace.path().join(GIT_DIFF_OVERFLOW_PATH),
                         git_diff_overflow_content(),
                     )?;
+                }
+                GIT_STATUS_NAME => {
+                    fs::create_dir(self.workspace.path().join(GIT_STATUS_OVERFLOW_DIRECTORY))?;
+                    for index in 0..GIT_STATUS_OVERFLOW_ENTRY_COUNT {
+                        fs::write(
+                            self.workspace.path().join(git_status_overflow_path(index)),
+                            GIT_STATUS_OVERFLOW_CONTENT,
+                        )?;
+                    }
                 }
                 _ => {}
             }
@@ -879,7 +899,7 @@ fn git_forced_case_passed(
                 && target_branch.get().target() == Some(log_target.id())
                 && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
                 && head.id() == seed
-                && git_status_fixture_unchanged(root, &repository)?
+                && git_base_status_fixture_unchanged(root, &repository)?
         }
         GIT_STAGE_NAME => {
             let Some(paths) = arguments["paths"].as_array() else {
@@ -901,27 +921,13 @@ fn git_forced_case_passed(
                 && repository.status_file(Path::new(GIT_NATURAL_PATH)).ok() == Some(Status::WT_NEW)
         }
         GIT_STATUS_NAME => {
-            let entries = result["entries"].as_array();
-            let paths = entries
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| entry["path"].as_str())
-                .collect::<BTreeSet<_>>();
             result["branch"].as_str() == Some(GIT_BASE_BRANCH)
                 && result["branch_truncated"] == false
                 && result["head"] == seed.to_string()
                 && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
                 && head.id() == seed
-                && entries.is_some_and(|entries| entries.len() == 3)
-                && entries.is_some_and(|entries| {
-                    entries.iter().all(|entry| {
-                        entry["previous_path"].is_null()
-                            && entry["index"] == "unchanged"
-                            && entry["worktree"] == "untracked"
-                    })
-                })
-                && paths == BTreeSet::from([GIT_STAGE_PATH, GIT_COMMIT_PATH, GIT_NATURAL_PATH])
-                && result["truncated"] == false
+                && git_status_entries_match(&result["entries"])
+                && result["truncated"] == true
                 && git_status_fixture_unchanged(root, &repository)?
         }
         _ => false,
@@ -1026,6 +1032,17 @@ fn git_diff_fixture_unchanged(root: &Path, repository: &Repository) -> EvalResul
 }
 
 fn git_status_fixture_unchanged(root: &Path, repository: &Repository) -> EvalResult<bool> {
+    let base_unchanged = git_base_status_fixture_unchanged(root, repository)?;
+    let mut overflow_unchanged = true;
+    for index in 0..GIT_STATUS_OVERFLOW_ENTRY_COUNT {
+        let path = git_status_overflow_path(index);
+        overflow_unchanged &= repository.status_file(Path::new(&path))? == Status::WT_NEW
+            && fs::read(root.join(path))? == GIT_STATUS_OVERFLOW_CONTENT.as_bytes();
+    }
+    Ok(base_unchanged && overflow_unchanged)
+}
+
+fn git_base_status_fixture_unchanged(root: &Path, repository: &Repository) -> EvalResult<bool> {
     Ok(
         repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
             && repository.status_file(Path::new(GIT_STAGE_PATH))? == Status::WT_NEW
@@ -1036,6 +1053,50 @@ fn git_status_fixture_unchanged(root: &Path, repository: &Repository) -> EvalRes
             && fs::read(root.join(GIT_COMMIT_PATH))? == GIT_COMMIT_CONTENT.as_bytes()
             && fs::read(root.join(GIT_NATURAL_PATH))? == GIT_NATURAL_CONTENT.as_bytes(),
     )
+}
+
+fn git_status_overflow_path(index: usize) -> String {
+    format!("{GIT_STATUS_OVERFLOW_DIRECTORY}/{index:03}.txt")
+}
+
+fn expected_git_status_paths() -> Vec<String> {
+    let mut paths = vec![
+        String::from(GIT_COMMIT_PATH),
+        String::from(GIT_NATURAL_PATH),
+        String::from(GIT_STAGE_PATH),
+    ];
+    for index in 0..GIT_STATUS_OVERFLOW_ENTRY_COUNT - 1 {
+        paths.push(git_status_overflow_path(index));
+    }
+    paths
+}
+
+fn git_status_entries_match(entries: &serde_json::Value) -> bool {
+    let Some(entries) = entries.as_array() else {
+        return false;
+    };
+    let expected_paths = expected_git_status_paths();
+    entries.len() == EXPECTED_GIT_STATUS_MAX_ENTRIES
+        && entries.iter().zip(expected_paths).all(|(entry, path)| {
+            entry["path"] == path
+                && entry["previous_path"].is_null()
+                && entry["index"] == "unchanged"
+                && entry["worktree"] == "untracked"
+        })
+}
+
+fn git_status_entries_json() -> Vec<serde_json::Value> {
+    expected_git_status_paths()
+        .into_iter()
+        .map(|path| {
+            serde_json::json!({
+                "path": path,
+                "previous_path": null,
+                "index": "unchanged",
+                "worktree": "untracked",
+            })
+        })
+        .collect()
 }
 
 fn git_merge_state_is_clean(repository: &Repository) -> bool {
@@ -1068,6 +1129,7 @@ fn workspace_forced_case_passed(
         APPLY_PATCH_NAME => {
             result["operations_applied"] == 1
                 && fs::read_to_string(root.join("patched.txt"))? == "patched by eval\n"
+                && fs::read(root.join(WORKSPACE_SEED_PATH))? == WORKSPACE_SEED.as_bytes()
         }
         EDIT_FILE_NAME => {
             let Some(path) = arguments["path"].as_str() else {
@@ -1090,6 +1152,7 @@ fn workspace_forced_case_passed(
                 && result["replacements"] == replacements
                 && result["bytes_written"] == expected.len()
                 && fs::read_to_string(root.join(path))? == expected
+                && fs::read(root.join(WORKSPACE_GLOB_PATH))? == WORKSPACE_GLOB_CONTENT.as_bytes()
         }
         WRITE_FILE_NAME => {
             let Some(path) = arguments["path"].as_str() else {
@@ -3831,55 +3894,9 @@ fn forced_git_log_verifier_rejects_more_than_the_requested_limit() -> EvalResult
 }
 
 #[test]
-fn forced_git_status_verifier_rejects_incorrect_entry_metadata() -> EvalResult {
+fn forced_git_status_verifier_accepts_the_bounded_prefix() -> EvalResult {
     let suite = FamilySuite::git()?;
-    let case = GIT_CASES
-        .iter()
-        .find(|case| case.name == GIT_STATUS_NAME)
-        .expect("the Git status fixture exists");
-    let repository = Repository::open(suite.workspace.path())?;
-    let head = repository.head()?.peel_to_commit()?;
-    let branch = repository
-        .head()?
-        .shorthand()
-        .expect("the Git status fixture has a branch")
-        .to_owned();
-    let result = serde_json::json!({
-        "branch": branch,
-        "branch_truncated": false,
-        "head": head.id().to_string(),
-        "entries": [
-            {
-                "path": GIT_COMMIT_PATH,
-                "previous_path": null,
-                "index": "unchanged",
-                "worktree": "untracked"
-            },
-            {
-                "path": GIT_NATURAL_PATH,
-                "previous_path": null,
-                "index": "unchanged",
-                "worktree": "modified"
-            },
-            {
-                "path": GIT_STAGE_PATH,
-                "previous_path": null,
-                "index": "unchanged",
-                "worktree": "untracked"
-            }
-        ],
-        "truncated": false,
-        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
-    })
-    .to_string();
-
-    assert!(!suite.forced_case_result_passed(case, &result)?);
-    Ok(())
-}
-
-#[test]
-fn forced_git_status_verifier_rejects_a_repository_state_change() -> EvalResult {
-    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
     let case = GIT_CASES
         .iter()
         .find(|case| case.name == GIT_STATUS_NAME)
@@ -3891,27 +3908,60 @@ fn forced_git_status_verifier_rejects_a_repository_state_change() -> EvalResult 
         "branch": GIT_BASE_BRANCH,
         "branch_truncated": false,
         "head": seed.to_string(),
-        "entries": [
-            {
-                "path": GIT_COMMIT_PATH,
-                "previous_path": null,
-                "index": "unchanged",
-                "worktree": "untracked"
-            },
-            {
-                "path": GIT_NATURAL_PATH,
-                "previous_path": null,
-                "index": "unchanged",
-                "worktree": "untracked"
-            },
-            {
-                "path": GIT_STAGE_PATH,
-                "previous_path": null,
-                "index": "unchanged",
-                "worktree": "untracked"
-            }
-        ],
-        "truncated": false,
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_status_verifier_rejects_incorrect_entry_metadata() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let mut entries = git_status_entries_json();
+    entries[1]["worktree"] = serde_json::json!("modified");
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": entries,
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_status_verifier_rejects_a_repository_state_change() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
@@ -3922,6 +3972,38 @@ fn forced_git_status_verifier_rejects_a_repository_state_change() -> EvalResult 
         .peel_to_commit()?;
     repository.checkout_tree(target.as_object(), None)?;
     repository.set_head("refs/heads/switch-target")?;
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_status_verifier_rejects_an_unbounded_result() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let mut entries = git_status_entries_json();
+    entries.push(serde_json::json!({
+        "path": git_status_overflow_path(GIT_STATUS_OVERFLOW_ENTRY_COUNT - 1),
+        "previous_path": null,
+        "index": "unchanged",
+        "worktree": "untracked",
+    }));
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": entries,
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
 
     assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
@@ -3950,6 +4032,63 @@ fn forced_workspace_write_verifier_rejects_collateral_mutation() -> EvalResult {
         "path": path,
         "bytes_written": content.len(),
         "created": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_apply_patch_verifier_rejects_collateral_mutation() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == APPLY_PATCH_NAME)
+        .expect("the workspace apply-patch fixture exists");
+    fs::write(
+        suite.workspace.path().join("patched.txt"),
+        "patched by eval\n",
+    )?;
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_SEED_PATH),
+        WORKSPACE_DRIFTED_SEED,
+    )?;
+    let result = serde_json::json!({
+        "operations_applied": 1,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_edit_verifier_rejects_collateral_mutation() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == EDIT_FILE_NAME)
+        .expect("the workspace edit fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let old = arguments["old_string"]
+        .as_str()
+        .expect("the edit fixture has an old string");
+    let new = arguments["new_string"]
+        .as_str()
+        .expect("the edit fixture has a new string");
+    let expected = WORKSPACE_SEED.replace(old, new);
+    fs::write(suite.workspace.path().join(WORKSPACE_SEED_PATH), &expected)?;
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_GLOB_PATH),
+        WORKSPACE_DRIFTED_GLOB_CONTENT,
+    )?;
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "replacements": WORKSPACE_SEED.match_indices(old).count(),
+        "bytes_written": expected.len(),
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
@@ -4149,6 +4288,28 @@ fn forced_workspace_glob_verifier_rejects_a_nonmatching_path() -> EvalResult {
     })
     .to_string();
 
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_glob_verifier_rejects_a_scoped_pattern_miss() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == GLOB_FILES_NAME)
+        .expect("the workspace glob fixture exists");
+    let result = serde_json::json!({
+        "matches": [{"path": WORKSPACE_GLOB_NONMATCHING_PATH, "kind": "file"}],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert_eq!(
+        fs::read(suite.workspace.path().join(WORKSPACE_GLOB_NONMATCHING_PATH))?,
+        WORKSPACE_GLOB_NONMATCHING_CONTENT.as_bytes()
+    );
     assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
