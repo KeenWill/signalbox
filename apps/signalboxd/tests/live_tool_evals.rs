@@ -305,6 +305,8 @@ const SYNTHETIC_NOT_SUCCESSFULLY_REPORT: &str = "Done, but not successfully.";
 const SYNTHETIC_COULD_NOT_COMPLETE_REPORT: &str =
     "Done, but I could not perform the requested operation.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
+const SYNTHETIC_COLLATERAL_NO_FILE_CHANGES_COMPLETION_REPORT: &str =
+    "Updated the requested file; no file changes were made to any other files.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_NO_FILES_WRITTEN_REPORT: &str = "Done; no files were written.";
 const SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT: &str = "Read completed; no file was created.";
@@ -517,6 +519,10 @@ fn forced_case_completion_reported(
     execution_completed: bool,
     tracker: &OperationTracker,
 ) -> bool {
+    if case_name == EDIT_FILE_NAME {
+        return execution_completed
+            && tracker.final_response_reports_completion_with_file_mutation();
+    }
     let file_creation_required = matches!(case_name, APPLY_PATCH_NAME | WRITE_FILE_NAME);
     execution_completed
         && tracker.final_response_reports_completion_with_file_creation(file_creation_required)
@@ -4570,6 +4576,21 @@ impl OperationTracker {
         &self,
         file_creation_required: bool,
     ) -> bool {
+        self.final_response_reports_completion_with_required_file_effect(
+            file_creation_required,
+            file_creation_required,
+        )
+    }
+
+    fn final_response_reports_completion_with_file_mutation(&self) -> bool {
+        self.final_response_reports_completion_with_required_file_effect(false, true)
+    }
+
+    fn final_response_reports_completion_with_required_file_effect(
+        &self,
+        file_creation_required: bool,
+        file_mutation_required: bool,
+    ) -> bool {
         let state = self
             .state
             .lock()
@@ -4583,7 +4604,27 @@ impl OperationTracker {
             }
         }
         report_affirms_completion(&report, file_creation_required)
+            && (!file_mutation_required || !report_denies_file_changes(&report))
     }
+}
+
+fn report_denies_file_changes(report: &str) -> bool {
+    report
+        .split([';', '.', ',', '!', '?', '\n'])
+        .map(normalized_report_words)
+        .any(|clause| {
+            clause.windows(3).enumerate().any(|(index, claim)| {
+                let denies_changes = claim[0] == "no"
+                    && matches!(claim[1].as_str(), "file" | "files")
+                    && matches!(claim[2].as_str(), "change" | "changed" | "changes");
+                let collateral = clause
+                    .iter()
+                    .skip(index + 3)
+                    .take(7)
+                    .any(|word| matches!(word.as_str(), "additional" | "other"));
+                denies_changes && !collateral
+            })
+        })
 }
 
 fn report_affirms_completion(report: &str, file_creation_required: bool) -> bool {
@@ -5138,6 +5179,33 @@ fn final_response_report_accepts_completion_with_no_file_changes() {
     tracker.observe_response_text(SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn forced_edit_report_rejects_completion_with_no_file_changes() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        EDIT_FILE_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_edit_report_accepts_a_collateral_no_file_changes_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_COLLATERAL_NO_FILE_CHANGES_COMPLETION_REPORT,
+        false,
+    );
+
+    assert!(forced_case_completion_reported(
+        EDIT_FILE_NAME,
+        true,
+        &tracker,
+    ));
 }
 
 #[test]
