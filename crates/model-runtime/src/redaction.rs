@@ -811,7 +811,7 @@ fn lossy_truncated(body: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use crate::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
@@ -1934,10 +1934,18 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     struct Subject<'a>(&'a str);
 
-    /// Every completed JSON string token in `raw`, already decoded.
+    /// Every string a JSON consumer could read out of `raw`, already decoded.
     ///
-    /// Scans for completed string *tokens* rather than parsing the enclosing
-    /// value, which matters three ways:
+    /// Every quote is treated as a potential string start rather than trusting
+    /// one left-to-right pairing: a stray quote in malformed text otherwise
+    /// shifts the scan out of phase and hides an encoded credential behind it.
+    /// Each candidate is still bounded by its own closing quote, so nothing is
+    /// decoded across a boundary — unescaping the whole buffer would report
+    /// `{"line\n":0}` as leaking the credential `line\n":0`, which no consumer
+    /// recovers.
+    ///
+    /// Scanning string spans rather than parsing the enclosing value matters
+    /// three further ways:
     ///
     /// - A streamed argument can end after a complete string but before its
     ///   document — `{"k":"\u0066ixture/secret"` with no closing brace. A
@@ -1956,39 +1964,28 @@ mod tests {
     /// The scan itself finds boundaries only. Every decode is `serde_json`'s,
     /// deliberately, so this stays an independent oracle rather than a second
     /// copy of the escape semantics under test.
-    fn decoded_json_strings(raw: &str) -> Vec<String> {
-        let mut decoded = Vec::new();
-        let units = raw.as_bytes();
-        let mut at = 0;
-        while at < units.len() {
-            if units[at] != b'"' {
-                at += 1;
-                continue;
-            }
-            match completed_string_token(raw, at) {
+    fn decoded_json_strings(raw: &str) -> BTreeSet<String> {
+        raw.char_indices()
+            .filter(|(_, unit)| *unit == '"')
+            .map(|(at, _)| match completed_string_token(raw, at) {
                 Some(after) => {
                     let token = &raw[at..after];
                     match serde_json::from_str::<String>(token) {
-                        Ok(text) => decoded.push(text),
+                        Ok(text) => text,
                         // A token `serde_json` rejects is not discarded. One
                         // invalid escape before an encoded credential would
                         // otherwise hide the whole token, and production
                         // decodes malformed fragments rather than trusting
                         // them.
-                        Err(_) => decoded.push(decoded_escapes(&token[1..token.len() - 1])),
+                        Err(_) => decoded_escapes(&token[1..token.len() - 1]),
                     }
-                    at = after;
                 }
                 // A token the text never closes still carries content the
                 // stream would recover once it continues, so its interior is
                 // inspected rather than assumed safe.
-                None => {
-                    decoded.push(decoded_escapes(&raw[at + 1..]));
-                    break;
-                }
-            }
-        }
-        decoded
+                None => decoded_escapes(&raw[at + 1..]),
+            })
+            .collect()
     }
 
     /// The decoded contents of a span `serde_json` will not accept whole.
@@ -2210,6 +2207,22 @@ mod tests {
             emitted_text(&ObservationFact::FinishReported(FinishReason::EndTurn)),
             EmittedText::Complete(Vec::new())
         );
+        // Pinned rather than left to exhaustiveness: a match arm forces the
+        // variant to be handled, not the right encoding to be chosen, and
+        // flipping `arguments_json` to `Plain` would stop the check decoding
+        // escaped credentials in complete proposals with nothing failing.
+        assert_eq!(
+            emitted_text(&ObservationFact::ToolCallProposed(ToolCallProposal {
+                id: ToolCallId::new("id-1"),
+                name: ToolName::new("tool"),
+                arguments_json: String::from("{}"),
+            })),
+            EmittedText::Complete(vec![
+                ("id-1", TextEncoding::Plain),
+                ("tool", TextEncoding::Plain),
+                ("{}", TextEncoding::Json),
+            ])
+        );
         assert_eq!(
             emitted_text(&ObservationFact::SendCommenced),
             EmittedText::Absent
@@ -2407,68 +2420,149 @@ mod tests {
     /// A JSON consumer recovers the credential from every representative
     /// disguise, so the absence check sees what that consumer would.
     ///
-    /// Straight-line per spelling: each is its own claim and names itself.
+    /// Straight-line per spelling, and destructured by position so each name
+    /// binds the disguise it claims: a partial slice pattern would silently
+    /// bind the last entry to every name.
     #[test]
     fn every_representative_disguise_decodes_to_the_credential() {
         let [fully, solidus, partial, uppercase, tail] = &REPRESENTATIVE_DISGUISES;
 
-        assert_eq!(
-            decoded_json_strings(&disguised_document(fully)),
-            vec![String::from("k"), String::from("fixture/secret")],
+        assert!(
+            decoded_json_strings(&disguised_document(fully)).contains("fixture/secret"),
             "{}",
             fully.label
         );
-        assert_eq!(
-            decoded_json_strings(&disguised_document(solidus)),
-            vec![String::from("k"), String::from("fixture/secret")],
+        assert!(
+            decoded_json_strings(&disguised_document(solidus)).contains("fixture/secret"),
             "{}",
             solidus.label
         );
-        assert_eq!(
-            decoded_json_strings(&disguised_document(partial)),
-            vec![String::from("k"), String::from("fixture/secret")],
+        assert!(
+            decoded_json_strings(&disguised_document(partial)).contains("fixture/secret"),
             "{}",
             partial.label
         );
-        assert_eq!(
-            decoded_json_strings(&disguised_document(uppercase)),
-            vec![String::from("k"), String::from("fixture/secret")],
+        assert!(
+            decoded_json_strings(&disguised_document(uppercase)).contains("fixture/secret"),
             "{}",
             uppercase.label
         );
-        assert_eq!(
-            decoded_json_strings(&disguised_document(tail)),
-            vec![String::from("k"), String::from("fixture/secret")],
+        assert!(
+            decoded_json_strings(&disguised_document(tail)).contains("fixture/secret"),
             "{}",
             tail.label
         );
     }
 
-    /// Only string tokens are decoded, so escape-shaped bytes outside a string
-    /// never become a leak that no consumer can recover.
+    /// Only string spans are decoded, so bytes outside one never become a leak
+    /// no consumer can recover.
     #[test]
-    fn only_json_string_tokens_are_decoded() {
+    fn only_json_string_spans_are_decoded() {
         assert_eq!(
             decoded_json_strings(r#"{"line\n":0}"#),
-            vec![String::from("line\n")]
-        );
-        assert_eq!(
-            decoded_json_strings(r#"{"a":["x",1,null,true]}"#),
-            vec![String::from("a"), String::from("x")]
+            BTreeSet::from([String::from("line\n"), String::from(":0}")])
         );
     }
 
-    /// A string that completes is recovered even though its document never
-    /// does, which is the shape a truncated argument stream actually takes.
+    /// Text carrying no string span yields nothing.
     #[test]
-    fn completed_tokens_survive_an_unfinished_document() {
-        let [.., partial] = &REPRESENTATIVE_DISGUISES;
-        let truncated = format!(r#"{{"k":"{}""#, partial.spelling);
+    fn text_without_a_span_yields_nothing() {
+        assert_eq!(decoded_json_strings("plain text"), BTreeSet::new());
+    }
 
-        assert_eq!(
-            decoded_json_strings(&truncated),
-            vec![String::from("k"), String::from("fixture/secret")]
+    /// A span the stream never closed is still inspected: its contents are
+    /// what a consumer recovers once the stream continues, and production
+    /// redacts such a fragment rather than trusting it.
+    #[test]
+    fn an_unfinished_span_is_still_inspected() {
+        let [_, _, partial, ..] = &REPRESENTATIVE_DISGUISES;
+
+        assert!(
+            decoded_json_strings(&format!(r#"{{"k":"{}"#, partial.spelling))
+                .contains("fixture/secret"),
+            "{}",
+            partial.label
         );
+        assert!(decoded_json_strings(r#"{"k":"fixture"#).contains("fixture"));
+    }
+
+    /// One invalid escape does not hide the rest of its span.
+    ///
+    /// `serde_json` rejects `\q`, so a strict decode would drop the whole span
+    /// and with it the encoded credential behind it.
+    #[test]
+    fn a_malformed_escape_does_not_hide_the_rest_of_a_span() {
+        let [_, _, partial, ..] = &REPRESENTATIVE_DISGUISES;
+
+        assert!(
+            decoded_json_strings(&format!(r#"{{"k":"\q{}"}}"#, partial.spelling))
+                .contains("\\qfixture/secret"),
+            "{}",
+            partial.label
+        );
+    }
+
+    /// A stray quote does not shift the scan out of phase.
+    ///
+    /// Trusting one left-to-right pairing let `{"k":bad","j":"…"}` consume the
+    /// real opening quote of `j` as a closing delimiter, so an encoded
+    /// credential after it was never read.
+    #[test]
+    fn a_stray_quote_does_not_desynchronise_the_scan() {
+        let [_, _, partial, ..] = &REPRESENTATIVE_DISGUISES;
+
+        assert!(
+            decoded_json_strings(&format!(r#"{{"k":bad","j":"{}"}}"#, partial.spelling))
+                .contains("fixture/secret"),
+            "{}",
+            partial.label
+        );
+    }
+
+    /// Every member is inspected, including one a map would drop.
+    ///
+    /// Deserializing `{"k":"…","k":"safe"}` keeps only the last `k`, so a
+    /// credential spelled in the shadowed member would vanish before any check
+    /// saw it.
+    #[test]
+    fn duplicate_members_are_all_inspected() {
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
+        let shadowed = decoded_json_strings(&format!(r#"{{"k":"{}","k":"safe"}}"#, fully.spelling));
+
+        assert!(shadowed.contains("fixture/secret"));
+        assert!(shadowed.contains("safe"));
+    }
+
+    /// An escaped quote does not end a span, so the scan cannot be walked out
+    /// of a string and made to miss what follows.
+    #[test]
+    fn an_escaped_quote_does_not_end_a_span() {
+        let read = decoded_json_strings(r#"{"k":"a\"b","j":"fixture/secret"}"#);
+
+        assert!(read.contains("a\"b"));
+        assert!(read.contains("fixture/secret"));
+    }
+
+    /// A surrogate pair decodes to its single character, which is the case a
+    /// credential containing an astral character depends on.
+    #[test]
+    fn surrogate_pairs_decode_to_one_character() {
+        assert!(decoded_json_strings(r#"{"k":"\ud83d\ude00"}"#).contains("\u{1f600}"));
+    }
+
+    /// A raw comparison declares a disguised leak safe; the JSON-aware check
+    /// does not. This is the regression the check exists to catch, pinned as a
+    /// difference between the two rather than described in prose.
+    #[test]
+    fn a_raw_match_would_miss_what_the_json_aware_check_catches() {
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
+        let leaked = disguised_document(fully);
+
+        assert!(
+            !leaked.contains("fixture/secret"),
+            "the disguised spelling contains no literal credential, which is the point"
+        );
+        assert!(decoded_json_strings(&leaked).contains("fixture/secret"));
     }
 
     /// The best-effort decoder is what the two salvage paths rely on, so its
@@ -2491,142 +2585,6 @@ mod tests {
     fn a_rejected_spelling_does_not_consume_what_follows() {
         assert_eq!(decoded_escapes(r"\q\u0066"), "\\qf");
         assert_eq!(decoded_escapes(r"\ud83d"), "\\ud83d");
-    }
-
-    /// A token the stream never closed is still inspected: its contents are
-    /// what a consumer recovers once the stream continues, and production
-    /// redacts such a fragment rather than trusting it.
-    #[test]
-    fn an_unfinished_token_is_still_inspected() {
-        let [.., partial] = &REPRESENTATIVE_DISGUISES;
-
-        assert_eq!(
-            decoded_json_strings(&format!(r#"{{"k":"{}"#, partial.spelling)),
-            vec![String::from("k"), String::from("fixture/secret")]
-        );
-        assert_eq!(
-            decoded_json_strings(r#"{"k":"fixture"#),
-            vec![String::from("k"), String::from("fixture")]
-        );
-    }
-
-    /// Text carrying no string token yields nothing, so plain prose is never
-    /// rewritten into a decoded value.
-    #[test]
-    fn text_without_a_token_yields_nothing() {
-        assert_eq!(decoded_json_strings("plain text"), Vec::<String>::new());
-    }
-
-    /// One invalid escape does not hide the rest of its token.
-    ///
-    /// `serde_json` rejects `\q`, so a strict decode would drop the whole
-    /// token and with it the encoded credential behind it.
-    #[test]
-    fn a_malformed_escape_does_not_hide_the_rest_of_a_token() {
-        let [.., partial] = &REPRESENTATIVE_DISGUISES;
-
-        assert_eq!(
-            decoded_json_strings(&format!(r#"{{"k":"\q{}"}}"#, partial.spelling)),
-            vec![String::from("k"), String::from("\\qfixture/secret")]
-        );
-    }
-
-    /// Every member is inspected, including one a map would drop.
-    ///
-    /// Deserializing `{"k":"…","k":"safe"}` keeps only the last `k`, so a
-    /// credential spelled in the shadowed member would vanish before any
-    /// check saw it.
-    #[test]
-    fn duplicate_members_are_all_inspected() {
-        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
-        let shadowed = format!(r#"{{"k":"{}","k":"safe"}}"#, fully.spelling);
-
-        assert_eq!(
-            decoded_json_strings(&shadowed),
-            vec![
-                String::from("k"),
-                String::from("fixture/secret"),
-                String::from("k"),
-                String::from("safe"),
-            ]
-        );
-    }
-
-    /// An escaped quote does not end a token, so the scan cannot be walked
-    /// out of a string and made to miss what follows.
-    #[test]
-    fn an_escaped_quote_does_not_end_a_token() {
-        assert_eq!(
-            decoded_json_strings(r#"{"k":"a\"b","j":"fixture/secret"}"#),
-            vec![
-                String::from("k"),
-                String::from("a\"b"),
-                String::from("j"),
-                String::from("fixture/secret"),
-            ]
-        );
-    }
-
-    /// INV-035: a credential spelled in a member a map would shadow is still
-    /// caught.
-    #[test]
-    #[should_panic(expected = "must not be recoverable")]
-    fn disguised_credential_in_a_shadowed_member_is_caught() {
-        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
-        let observed = vec![Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::ToolArgumentsDelta {
-                index: 0,
-                fragment: format!(r#"{{"k":"{}","k":"safe"}}"#, fully.spelling),
-            },
-        }];
-
-        assert_no_stream_carries(&observed, "fixture/secret");
-    }
-
-    /// INV-035: a credential in a stream that stops before closing its
-    /// document is still caught.
-    #[test]
-    #[should_panic(expected = "must not be recoverable")]
-    fn disguised_credential_in_an_unfinished_document_is_caught() {
-        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
-        let observed = vec![Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::ToolArgumentsDelta {
-                index: 0,
-                fragment: format!(r#"{{"k":"{}""#, fully.spelling),
-            },
-        }];
-
-        assert_no_stream_carries(&observed, "fixture/secret");
-    }
-
-    /// A surrogate pair decodes to its single character, which is the case a
-    /// credential containing an astral character depends on.
-    #[test]
-    fn surrogate_pairs_decode_to_one_character() {
-        assert_eq!(
-            decoded_json_strings(r#"{"k":"\ud83d\ude00"}"#),
-            vec![String::from("k"), String::from("\u{1f600}")]
-        );
-    }
-
-    /// A raw comparison declares a disguised leak safe; the JSON-aware check
-    /// does not. This is the regression the check exists to catch, pinned as a
-    /// difference between the two rather than described in prose.
-    #[test]
-    fn a_raw_match_would_miss_what_the_json_aware_check_catches() {
-        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
-        let leaked = disguised_document(fully);
-
-        assert!(
-            !leaked.contains("fixture/secret"),
-            "the disguised spelling contains no literal credential, which is the point"
-        );
-        assert!(
-            decoded_json_strings(&leaked).contains(&String::from("fixture/secret")),
-            "a JSON consumer recovers it"
-        );
     }
 
     /// INV-035: a disguised credential emitted on a stream the intended-stream
@@ -2682,6 +2640,78 @@ mod tests {
             }]
         );
         assert_no_stream_carries(&observed, "fixture/secret");
+    }
+
+    /// INV-035: the sink scrubs a disguised credential from a stream that
+    /// stops before closing its document, pinned to the exact forwarded value.
+    ///
+    /// Driven through production rather than from an already-leaked fact: a
+    /// case that only feeds the absence helper proves the helper works and
+    /// nothing about `redact_json_stream_fragment`, so a regression requiring
+    /// a complete document before redacting would not reach it.
+    #[test]
+    fn inv_035_sink_scrubs_a_disguise_in_an_unfinished_document() {
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
+
+        assert_eq!(
+            forwarded_arguments(&format!(r#"{{"k":"{}""#, fully.spelling)),
+            r#"{"k":"[redacted]""#
+        );
+    }
+
+    /// INV-035: the same holds for a token the stream never closed.
+    #[test]
+    fn inv_035_sink_scrubs_a_disguise_in_an_unclosed_token() {
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
+
+        assert_eq!(
+            forwarded_arguments(&format!(r#"{{"k":"{}"#, fully.spelling)),
+            r#"{"k":"[redacted]"#
+        );
+    }
+
+    /// INV-035: and for a disguise behind an invalid escape, which production
+    /// redacts through its malformed-fragment path.
+    #[test]
+    fn inv_035_sink_scrubs_a_disguise_behind_a_malformed_escape() {
+        let [_, _, partial, ..] = &REPRESENTATIVE_DISGUISES;
+
+        assert_eq!(
+            forwarded_arguments(&format!(r#"{{"k":"\q{}"}}"#, partial.spelling)),
+            "[redacted]"
+        );
+    }
+
+    /// The arguments the sink forwards for one tool-argument fragment.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the sink forwards exactly one tool-argument delta, which
+    /// is what these fixtures emit.
+    fn forwarded_arguments(fragment: &str) -> String {
+        let key = credential("fixture/secret");
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: fragment.to_string(),
+            },
+        });
+        sink.flush();
+        drop(sink);
+        assert_no_stream_carries(&observed, "fixture/secret");
+        let [
+            Observation {
+                fact: ObservationFact::ToolArgumentsDelta { fragment, .. },
+                ..
+            },
+        ] = observed.as_slice()
+        else {
+            panic!("the fixture forwards exactly one tool-argument delta, got {observed:?}")
+        };
+        fragment.clone()
     }
 
     /// INV-035: a disguised credential in a token the stream never closed is
