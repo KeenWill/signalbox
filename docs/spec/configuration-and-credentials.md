@@ -460,12 +460,10 @@ fail-closed:
   a single operator who edits it; carrying a second decoder would preserve a
   shape no deployment is entitled to keep working. The rejection is typed and
   names the missing field, so the edit an operator must make is the error
-  message. The checked-in `config/signalboxd.example.toml` is not yet an example
-  of this grammar — it still declares profiles without `adapter` and `delivery`,
-  maps families through `credential_profile`, and has no `[[credential_pools]]`
-  — because the child that installs this grammar in the parser updates it in the
-  same change. Until then it documents the shape this build's parser actually
-  accepts, and an operator writing for the new grammar follows the rules here.
+  message, and `config/signalboxd.example.toml` is the worked example: this
+  branch installs the grammar in the parser and updates that file in the same
+  change, so it declares `adapter` and `delivery` on every profile and maps each
+  family through a `[[credential_pools]]` entry.
 - At least one `[[models]]` entry is required: an absent, mistyped, or empty
   models array is rejected (`MissingModels`), so a document containing only
   `version = 1` fails startup.

@@ -5846,30 +5846,66 @@ scopes = ["model:invoke"]"#,
         );
     }
 
-    #[test]
-    fn configuration_rejects_oauth_scopes_outside_the_scope_token_set() {
-        // Single-quoted TOML literals pass these bytes through verbatim. A
-        // space would become two scopes on the wire; the quote, backslash, and
-        // non-ASCII bytes are outside RFC 6749 `scope-token` entirely. Control
-        // bytes are excluded too, but TOML's own lexer rejects them first.
-        for scope in ["read write", "read\"quoted", "read\\slash", "r\u{e9}ad"] {
-            let oauth = CONFIGURATION.replace(
-                "delivery = \"ambient\"",
-                &format!(
-                    "delivery = \"oauth\"\n\
-                     client_id = \"synthetic-client\"\n\
-                     token_url = \"https://example.test/token\"\n\
-                     device_authorization_url = \"https://example.test/device\"\n\
-                     scopes = ['{scope}']"
-                ),
-            );
+    /// Asserts one OAuth scope element is refused by the scope-token byte set.
+    ///
+    /// Single-quoted TOML literals pass the byte through verbatim, which is
+    /// what lets a space, quote, or backslash reach the check at all.
+    #[track_caller]
+    fn assert_oauth_scope_rejected(scope: &str) {
+        let oauth = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                "delivery = \"oauth\"\n\
+                 client_id = \"synthetic-client\"\n\
+                 token_url = \"https://example.test/token\"\n\
+                 device_authorization_url = \"https://example.test/device\"\n\
+                 scopes = ['{scope}']"
+            ),
+        );
 
-            assert_eq!(
-                HubModelConfiguration::parse(&oauth).err(),
-                Some(HubModelConfigurationError::InvalidCredentialDelivery),
-                "scope {scope:?} is outside the admitted byte set"
-            );
-        }
+        assert_eq!(
+            HubModelConfiguration::parse(&oauth).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_scope_holding_a_space() {
+        // A space would become two scopes on the wire.
+        assert_oauth_scope_rejected("read write");
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_scope_holding_a_quote() {
+        assert_oauth_scope_rejected("read\"quoted");
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_scope_holding_a_backslash() {
+        assert_oauth_scope_rejected("read\\slash");
+    }
+
+    #[test]
+    fn configuration_rejects_a_non_ascii_oauth_scope() {
+        // Control bytes are outside the set too, but TOML rejects them first.
+        assert_oauth_scope_rejected("r\u{e9}ad");
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_endpoint_holding_a_fragment() {
+        let oauth = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "https://example.test/token#stale"
+device_authorization_url = "https://example.test/device"
+scopes = ["model:invoke"]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&oauth).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
     }
 
     #[test]

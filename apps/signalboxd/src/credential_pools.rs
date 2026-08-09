@@ -284,7 +284,9 @@ const fn is_oauth_scope_token_byte(byte: u8) -> bool {
 fn validate_https_url(value: &str) -> Result<(), HubModelConfigurationError> {
     let parsed =
         Url::parse(value).map_err(|_| HubModelConfigurationError::InvalidCredentialDelivery)?;
-    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+    // A fragment is never transmitted, so admitting one would give a single wire
+    // endpoint several stored provisioning-tuple identities.
+    if parsed.scheme() != "https" || parsed.host_str().is_none() || parsed.fragment().is_some() {
         return Err(HubModelConfigurationError::InvalidCredentialDelivery);
     }
     Ok(())
