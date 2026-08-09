@@ -1117,18 +1117,30 @@ pub enum RepoWatchDispatchContextShape {
 }
 
 impl RepoWatchEventKindNameV1 {
-    /// Every event-kind name, in an inventory the compiler keeps complete.
+    /// Every event-kind name, in an inventory the compiler forces to be
+    /// revisited and [`Self::inventory_predecessor`] forces to stay linked.
     ///
-    /// The chain below is the guard: each arm names its successor, so adding a
-    /// variant makes the `match` non-exhaustive and the crate stops compiling
-    /// until the new name is slotted into it — at which point it is in the
-    /// returned list, and any test driven from that list gains its case.
+    /// The chain below is the first guard: each arm names its successor, so
+    /// adding a variant makes the `match` non-exhaustive and the crate stops
+    /// compiling until the new name is slotted into it.
     ///
-    /// This is the repository's idiom for inventories over owned enums, and it
-    /// is deliberately dependency-free: no `strum`, no `EnumIter` derive. A
-    /// hand-written `vec![..]` is what `docs/style.md` forbids, because it goes
-    /// stale silently; this cannot, because the list is produced *by* the
-    /// exhaustive match rather than kept alongside it.
+    /// Exhaustiveness alone constrains the *arms*, not reachability from the
+    /// head: a variant added as `NewKind => None` that no arm points at
+    /// compiles while never appearing in the returned list. The paired
+    /// `inventory_predecessor` match is the second guard — it is exhaustive
+    /// for the same reason, and `every_event_kind_is_linked_into_the_inventory`
+    /// checks the two are mutual inverses, so a link written in one direction
+    /// only fails rather than silently shortening the inventory.
+    ///
+    /// The residual limit is recorded rather than papered over: a variant
+    /// orphaned in *both* directions still cannot be detected here, because
+    /// safe Rust offers no way to enumerate an enum's variants without a
+    /// derive, and this crate deliberately takes no `strum`/`EnumIter`
+    /// dependency. Closing that last case is a dependency decision, not a
+    /// code change. A hand-written `vec![..]` is what `docs/style.md` forbids
+    /// and would be strictly worse: it goes stale with no compiler signal at
+    /// all, whereas this cannot change shape without the author editing two
+    /// exhaustive matches.
     #[must_use]
     pub fn all() -> Vec<Self> {
         let mut names = Vec::new();
@@ -1154,6 +1166,33 @@ impl RepoWatchEventKindNameV1 {
             names.push(current);
         }
         names
+    }
+
+    /// The inventory predecessor of `self`, or `None` for the head.
+    ///
+    /// Paired with the successor chain in [`Self::all`] so linkage is checked
+    /// rather than assumed. Exhaustive for the same reason that one is, and
+    /// test-gated because checking the pairing is its only purpose — CI always
+    /// compiles the tests, so a new variant still cannot skip this match.
+    #[cfg(test)]
+    const fn inventory_predecessor(self) -> Option<Self> {
+        match self {
+            Self::PullRequestOpened => None,
+            Self::PullRequestClosed => Some(Self::PullRequestOpened),
+            Self::PullRequestMerged => Some(Self::PullRequestClosed),
+            Self::HeadChanged => Some(Self::PullRequestMerged),
+            Self::MergeableStateChanged => Some(Self::HeadChanged),
+            Self::ChecksCompleted => Some(Self::MergeableStateChanged),
+            Self::CheckRunCompleted => Some(Self::ChecksCompleted),
+            Self::BranchWorkflowRunCompleted => Some(Self::CheckRunCompleted),
+            Self::ReviewSubmitted => Some(Self::BranchWorkflowRunCompleted),
+            Self::ThreadOpened => Some(Self::ReviewSubmitted),
+            Self::ThreadResolved => Some(Self::ThreadOpened),
+            Self::Labeled => Some(Self::ThreadResolved),
+            Self::Unlabeled => Some(Self::Labeled),
+            Self::BaseAdvanced => Some(Self::Unlabeled),
+            Self::ReactionChanged => Some(Self::BaseAdvanced),
+        }
     }
 
     const fn dispatch_context_shape(self) -> RepoWatchDispatchContextShape {
@@ -1782,6 +1821,33 @@ const fn check_conclusion_name(conclusion: CheckConclusion) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    /// The successor chain and its predecessor pair must stay mutual
+    /// inverses, so a link written in one direction only shortens nothing
+    /// silently. Exhaustiveness forces the arms to exist; this forces them to
+    /// agree.
+    #[test]
+    fn every_event_kind_is_linked_into_the_inventory() {
+        let all = RepoWatchEventKindNameV1::all();
+
+        assert_eq!(
+            all.first().and_then(|head| head.inventory_predecessor()),
+            None,
+            "the inventory head has no predecessor"
+        );
+        for (current, next) in all.iter().zip(all.iter().skip(1)) {
+            assert_eq!(
+                next.inventory_predecessor(),
+                Some(*current),
+                "{next:?} must name {current:?} as its predecessor"
+            );
+        }
+        let unique = all
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), all.len(), "the inventory lists no kind twice");
+    }
     use std::{error::Error, num::NonZeroU64, time::Duration};
 
     use uuid::Uuid;

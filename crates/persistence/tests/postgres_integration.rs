@@ -10171,6 +10171,14 @@ const AMBIGUITY_FIXTURE_TOOL: &str = "external-tool";
 /// the `ToolCatalog` port makes the declaration the single source of that
 /// fact, so a declaration changed to `EffectFree` fails the recovery
 /// assertions instead of quietly disagreeing with them.
+///
+/// The permission default has to agree with the fixture's durable approval
+/// history for the same reason. `checkpoint_confirmed_tool_round` records an
+/// `InitialToolApproval::Confirm` round closed by a user decision, and
+/// `initial_tool_approval` maps an `Auto` declaration to `PolicyAuto`, so
+/// declaring `Auto` here would describe a batch no application composes: the
+/// recovery test would stay green while the auto-approved path it appeared to
+/// cover was broken.
 fn ambiguity_fixture_catalog() -> CompiledToolCatalog {
     let definition = ToolDefinition::new(
         ToolName::try_new(String::from(AMBIGUITY_FIXTURE_TOOL))
@@ -10178,7 +10186,7 @@ fn ambiguity_fixture_catalog() -> CompiledToolCatalog {
         String::from("Synthetic external-effect tool for ambiguity fixtures"),
         ToolInputSchema::try_new(String::from(r#"{"type":"object"}"#))
             .expect("the fixture input schema is admitted"),
-        ToolPermissionDefault::Auto,
+        ToolPermissionDefault::Confirm,
         ToolEffectClass::ExternalEffect,
     );
     CompiledToolCatalog::try_new([CompiledTool::new(
