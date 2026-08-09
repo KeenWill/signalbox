@@ -1055,13 +1055,20 @@ request the same authorization while the exact-duplicate rule and the persisted
 provisioning tuple treat them as different values. Declared order is request
 order, exact duplicate strings are rejected, and no trimming, case folding,
 sorting, or other normalization occurs. Both endpoint values must be absolute
-`https` URLs carrying no fragment. A fragment is rejected rather than stripped
-because it is never transmitted: two endpoints differing only after `#` are the
-same request, yet the provisioning tuple compares the configured string byte for
-byte, so accepting them would let an edit that changes nothing on the wire
-quarantine a working authorization, and would give one wire endpoint two stored
-identities. Startup rejects every other scheme and provides no plaintext or
-local-host exception.
+`https` URLs carrying no fragment and no user information — an empty username
+and an empty password component. Both are rejected rather than stripped, and for
+the same reason: neither reaches the request target the daemon compares against,
+so two endpoints differing only after `#`, or only in a `user:secret@` prefix,
+are one wire endpoint, yet the provisioning tuple compares the configured string
+byte for byte. Accepting either would let an edit that changes nothing on the
+wire quarantine a working authorization, and would give one wire endpoint
+several stored identities. User information carries a second objection of its
+own: a URL is logged, persisted in the provisioning tuple, and echoed in
+diagnostics, so a password embedded there is a credential smuggled outside the
+daemon-owned boundary this delivery exists to establish — and on an HTTP stack
+that does honor it, it becomes an undeclared authentication credential the
+contract never admitted. Startup rejects every other scheme and provides no
+plaintext or local-host exception.
 
 **Committed unimplemented functionality — OAuth delivery and administration.**
 No present configuration composition, runtime path, API, process message, CLI
@@ -1646,6 +1653,26 @@ deployment-side rules that code cannot enforce are stated in
   what the replay rule above promises cannot happen. A disagreeing or absent
   registration must block scheduling the same way a missing historical
   registration does.
+
+  That child also owes a deterministic migration for the family-to-reference
+  history this build has already written, and the replay guarantee above fixes
+  what it must be: an upgrade may not change which credential an existing
+  session resolves. Each existing entry therefore becomes a **singleton policy
+  retaining exactly the stored reference** — one member at priority 1, no
+  headroom reserve, `first_listed`, `on_pool_exhausted = "fail"`, and `stay` for
+  every trigger — which reproduces the one-account, no-failover behavior that
+  entry already had. Expanding the entry to whatever pool the document now maps
+  that family to is the one thing it must not do: that would grant a historical
+  session members it never had, which is precisely the silent re-resolution the
+  replay rule forbids, and choosing any other policy would discard the reference
+  the session pinned.
+
+  The two profile-owned fields that frozen membership needs — adapter and
+  delivery kind — come from the validated registration of the profile the entry
+  names, and from nowhere else: not from the document's current family mapping,
+  and not from its pool table. A reference naming no current registration cannot
+  be migrated, and blocks scheduling rather than being guessed at or dropped —
+  the same failure the freeze rule above produces, for the same reason.
 
 - **Resolution timing.** Each direct HTTP adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
