@@ -151,6 +151,11 @@ const GIT_DRIFTED_NATURAL_CONTENT: &str = "drifted eval\n";
 const GIT_COLLATERAL_PATH: &str = "collateral.txt";
 const GIT_COLLATERAL_CONTENT: &str = "collateral\n";
 const GIT_COLLATERAL_DIRECTORY: &str = "collateral-directory";
+const GIT_HOOKS_DIRECTORY: &str = "hooks";
+const GIT_INFO_DIRECTORY: &str = "info";
+const GIT_DESCRIPTION_PATH: &str = "description";
+const GIT_PRE_COMMIT_HOOK_PATH: &str = "hooks/pre-commit";
+const GIT_PRE_COMMIT_HOOK_CONTENT: &str = "#!/bin/sh\nexit 1\n";
 const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
 const GIT_SWITCH_CONTENT: &str = "seed two\n";
 const GIT_BASE_CONTENT: &str = "seed three\n";
@@ -251,6 +256,8 @@ const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
+const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
+    "Done; I did not create any other files.";
 const EVAL_RECEIPT_FIELD: &str = "eval_receipt";
 const RESULT_RECEIPT_INSTRUCTION: &str =
     "In your final answer, include every exact eval_receipt value returned by the tools.";
@@ -605,6 +612,16 @@ struct GitFixtureSnapshot {
     modes: BTreeMap<PathBuf, Option<u32>>,
     config: Vec<u8>,
     worktree_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    metadata_top_level: BTreeMap<PathBuf, GitMetadataEntryKind>,
+    static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GitMetadataEntryKind {
+    Directory,
+    File,
+    Symlink,
+    Other,
 }
 
 type GitReferenceInventory = BTreeMap<Vec<u8>, GitReferenceTarget>;
@@ -1823,7 +1840,51 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         modes: git_fixture_modes(root)?,
         config: fs::read(repository.path().join(GIT_CONFIG_PATH))?,
         worktree_entries: git_worktree_entries(root)?,
+        metadata_top_level: git_metadata_top_level(root)?,
+        static_metadata_entries: git_static_metadata_entries(root)?,
     })
+}
+
+fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetadataEntryKind>> {
+    let repository = Repository::open(root)?;
+    let mut entries = BTreeMap::new();
+    for entry in fs::read_dir(repository.path())? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let kind = if file_type.is_dir() {
+            GitMetadataEntryKind::Directory
+        } else if file_type.is_file() {
+            GitMetadataEntryKind::File
+        } else if file_type.is_symlink() {
+            GitMetadataEntryKind::Symlink
+        } else {
+            GitMetadataEntryKind::Other
+        };
+        entries.insert(PathBuf::from(entry.file_name()), kind);
+    }
+    Ok(entries)
+}
+
+fn git_static_metadata_entries(
+    root: &Path,
+) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntrySnapshot>> {
+    let repository = Repository::open(root)?;
+    let metadata_root = repository.path();
+    let mut entries = BTreeMap::new();
+    for directory in [GIT_HOOKS_DIRECTORY, GIT_INFO_DIRECTORY] {
+        for (relative, snapshot) in filesystem_entries(&metadata_root.join(directory), None)? {
+            entries.insert(Path::new(directory).join(relative), snapshot);
+        }
+    }
+    let description = metadata_root.join(GIT_DESCRIPTION_PATH);
+    entries.insert(
+        PathBuf::from(GIT_DESCRIPTION_PATH),
+        WorkspaceEntrySnapshot::File {
+            content: fs::read(&description)?,
+            mode: worktree_mode(&description)?,
+        },
+    );
+    Ok(entries)
 }
 
 fn git_fixture_modes_match(
@@ -1854,7 +1915,10 @@ fn git_fixture_snapshot_matches(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.into()),
     };
-    Ok(git_fixture_modes_match(root, &expected.modes)? && config == expected.config)
+    Ok(git_fixture_modes_match(root, &expected.modes)?
+        && config == expected.config
+        && git_metadata_top_level(root)? == expected.metadata_top_level
+        && git_static_metadata_entries(root)? == expected.static_metadata_entries)
 }
 
 fn git_forced_worktree_matches(
@@ -2802,11 +2866,11 @@ fn report_words_deny_success(words: &[String]) -> bool {
         "wrote",
     ];
     let scoped_negation = words.iter().enumerate().any(|(index, word)| {
+        let scope = &words[index + 1..words.len().min(index + 7)];
         matches!(word.as_str(), "never" | "not")
-            && words
+            && !scope.iter().any(|word| word == "other")
+            && scope
                 .iter()
-                .skip(index + 1)
-                .take(3)
                 .any(|word| negative_outcomes.contains(&word.as_str()))
     });
     explicit_failure || negative_no_claim || negative_no_file_claim || scoped_negation
@@ -2991,6 +3055,14 @@ fn final_response_report_accepts_completion_with_no_file_changes() {
 fn final_response_report_accepts_completion_with_scoped_negation() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_completion_with_scoped_creation_negation() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
 }
@@ -4609,6 +4681,30 @@ fn git_natural_state_rejects_a_collateral_empty_directory() -> EvalResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn git_natural_state_rejects_a_collateral_pre_commit_hook() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (seed, seed_refs, seed_fixture) = seed_git_repository_with_refs(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    let hook = Repository::open(workspace.path())?
+        .path()
+        .join(GIT_PRE_COMMIT_HOOK_PATH);
+    fs::write(&hook, GIT_PRE_COMMIT_HOOK_CONTENT)?;
+    let mut permissions = fs::metadata(&hook)?.permissions();
+    permissions.set_mode(permissions.mode() | USER_EXECUTE_MODE_BIT);
+    fs::set_permissions(&hook, permissions)?;
+
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+        &seed_fixture,
+    )?);
+    Ok(())
+}
+
 #[test]
 fn git_natural_state_rejects_a_collateral_ref_update() -> EvalResult {
     let workspace = tempfile::tempdir()?;
@@ -5586,6 +5682,43 @@ fn forced_git_log_verifier_rejects_a_collateral_empty_directory() -> EvalResult 
     })
     .to_string();
     fs::create_dir(suite.workspace.path().join(GIT_COLLATERAL_DIRECTORY))?;
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_log_verifier_rejects_a_collateral_pre_commit_hook() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+    let hook = repository.path().join(GIT_PRE_COMMIT_HOOK_PATH);
+    fs::write(&hook, GIT_PRE_COMMIT_HOOK_CONTENT)?;
+    let mut permissions = fs::metadata(&hook)?.permissions();
+    permissions.set_mode(permissions.mode() | USER_EXECUTE_MODE_BIT);
+    fs::set_permissions(&hook, permissions)?;
 
     assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
