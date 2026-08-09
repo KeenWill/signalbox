@@ -40,9 +40,9 @@ records, and wire messages remain distinct representations. The path-scoped
 session-placement wire and terminal-client surface were verified through PR #400
 (`agent/scoped-visibility-wiring`).
 
-The snapshot-reader admission inventory — which reads reserve application-pool
-capacity, and which hold a connection for only one statement — is verified
-against this PR (`fix/review-read-snapshot-permit`).
+The session-metadata last-writer actor inventory, its native and terminal-client
+projections, and the totality of the daemon projection that produces it are
+verified against this PR (`fix/review-read-snapshot-permit`).
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
@@ -1081,10 +1081,14 @@ and the value-bearing forms retain the unsupported value.
 unwritten snapshot has the empty non-archived metadata object and a null
 `last_writer`; an applied replacement always has a non-null last writer. A
 last-writer object has `updated_at_unix_micros` (canonical nonnegative decimal
-microseconds since the Unix epoch) and the closed actor object `user`. No
-non-user metadata writer is constructible through this boundary; additional
-actor variants require the later slice that introduces their constructing
-authority. Actor is provenance, not wire authentication or authorization.
+microseconds since the Unix epoch) and one closed actor object: `user`,
+`model { turn_id }`, `recovery`, or `tool { tool_request_id }`. That inventory
+is exactly the durable actor inventory, because the projection is total over
+what storage admits: `replace_session_metadata` on this boundary always writes
+the user actor, but the tool-facing replacement constructor writes a tool actor
+for the session-status tool, and a writer with no wire form would fail an
+otherwise valid read as an encode invariant rather than degrade a field. Actor
+is provenance, not wire authentication or authorization.
 
 `session_defaults_replaced` is the successful defaults write receipt. It echoes
 the complete installed defaults and names the exact successor epoch. An equal
@@ -2133,20 +2137,21 @@ usage errors before socket I/O, so every metadata-filter bound this page states
 reaches the user as a named diagnostic rather than a generic local encode
 failure. Each result is one line carrying the summary's session identity,
 archive state, defaults version, model selection, dangerous-tool posture,
-last-writer actor and timestamp, sorted comma-joined tags, and title. An
-unwritten metadata snapshot prints `last_writer=none`,
-`updated_at_unix_micros=none`, and empty tag and title values, which a present
-tag or title never is. A tag may itself contain the space that ends its field,
-the comma that separates it from a sibling, or the backslash that introduces an
-escape, so all three are escaped inside a tag exactly as a control code point
-is; every backslash in the tag field therefore opens an escape the client wrote,
-and the field decodes back to the exact tag set. The title is the line's last
-field, keeps its spaces, and is rendered to be read rather than decoded. When
-the page end names a continuation cursor, the client prints
-`next_after_session_id=<uuid>` to standard error after the results; a page is
-therefore never silently truncated, and that value is the next invocation's
-`--after`. The client also validates that a page never exceeds its requested
-limit.
+last-writer actor and timestamp, sorted comma-joined tags, and title. The actor
+prints as its wire kind — `user`, `model`, `recovery`, or `tool` — without the
+reference the kind carries, which the line has no field for. An unwritten
+metadata snapshot prints `last_writer=none`, `updated_at_unix_micros=none`, and
+empty tag and title values, which a present tag or title never is. A tag may
+itself contain the space that ends its field, the comma that separates it from a
+sibling, or the backslash that introduces an escape, so all three are escaped
+inside a tag exactly as a control code point is; every backslash in the tag
+field therefore opens an escape the client wrote, and the field decodes back to
+the exact tag set. The title is the line's last field, keeps its spaces, and is
+rendered to be read rather than decoded. When the page end names a continuation
+cursor, the client prints `next_after_session_id=<uuid>` to standard error after
+the results; a page is therefore never silently truncated, and that value is the
+next invocation's `--after`. The client also validates that a page never exceeds
+its requested limit.
 
 `conversations` is the separate verb for `list_conversations` and follows the
 same one-request, one-page discipline as `search`. `--title` is the exact

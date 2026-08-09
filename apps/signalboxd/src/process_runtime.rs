@@ -11916,10 +11916,7 @@ fn wire_system_prompt(
 fn wire_list_metadata(
     item: &SessionMetadataListItem,
 ) -> Option<(Option<String>, Vec<String>, Option<MetadataLastWriter>)> {
-    let last_writer = match item.last_writer() {
-        Some(writer) => Some(wire_metadata_last_writer(writer)?),
-        None => None,
-    };
+    let last_writer = item.last_writer().map(wire_metadata_last_writer);
     Some((
         item.title().map(str::to_owned),
         item.tags().map(str::to_owned).collect(),
@@ -11941,22 +11938,25 @@ fn wire_metadata_snapshot(
         content.archived(),
     )
     .ok()?;
-    let last_writer = match snapshot.last_writer() {
-        Some(writer) => Some(wire_metadata_last_writer(writer)?),
-        None => None,
-    };
+    let last_writer = snapshot.last_writer().map(wire_metadata_last_writer);
     Some((metadata, last_writer))
 }
 
-fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> Option<MetadataLastWriter> {
+fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> MetadataLastWriter {
     let actor = match writer.actor() {
         Actor::User => MetadataActor::User {},
-        Actor::Recovery | Actor::Model { .. } | Actor::Tool { .. } => return None,
+        Actor::Model { turn } => MetadataActor::Model {
+            turn_id: wire_uuid(turn.into_uuid()),
+        },
+        Actor::Recovery => MetadataActor::Recovery {},
+        Actor::Tool { request } => MetadataActor::Tool {
+            tool_request_id: wire_uuid(request.into_uuid()),
+        },
     };
-    Some(MetadataLastWriter::new(
+    MetadataLastWriter::new(
         CanonicalU64::new(writer.updated_at().as_unix_micros()),
         actor,
-    ))
+    )
 }
 
 const fn wire_imported_source_speaker(
@@ -13868,7 +13868,7 @@ mod tests {
     use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConversionFailure;
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
     use signalbox_domain::{
-        AcceptedInputId, ContextFrontierId, DelegationMessageId, DirectModelSelection,
+        AcceptedInputId, Actor, ContextFrontierId, DelegationMessageId, DirectModelSelection,
         DurableCommandId, FastModeOverlay, FastModeSupport, FrozenAliasDefinition,
         FrozenModelSelection, Goal, GoalStatement, GoalUserProvenance, ImportedConversation,
         ImportedConversationFormat, ImportedConversationId, ImportedTranscriptEntryId, ModelAlias,
@@ -13878,15 +13878,16 @@ mod tests {
         ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
         ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
         ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion,
-        SessionId, SessionInputPosition, SessionModelSettingsChanged, SettingOverlay,
-        SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, ToolRequestId,
-        TurnAttemptId, TurnId, TurnModelSettingsResolved, ValidatedModelSettings,
+        SessionId, SessionInputPosition, SessionMetadataLastWriter, SessionMetadataUpdatedAt,
+        SessionModelSettingsChanged, SettingOverlay, SubmitInputRejectedResult,
+        ToolApprovalDecision, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+        TurnModelSettingsResolved, ValidatedModelSettings,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
         DelegationToolRequestState as WireDelegationToolRequestState, ErrorCode, ErrorDetail,
         FrameEncodeError, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
-        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, ProtocolVersion,
+        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor, ProtocolVersion,
         RejectionDetail, ReviewFindingInput, ReviewSeverity, ServerFrame, ServerMessage,
         SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
         TurnState, decode_server_line, encode_server_line,
@@ -13928,9 +13929,9 @@ mod tests {
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
         submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
-        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
-        write_context_compaction_repository_error, write_delegation_port_error,
-        write_snapshot_spool_error, write_transcript_entry,
+        wire_metadata_last_writer, wire_model_call_state, wire_tool_decision, wire_turn_state,
+        wire_uuid, write_content, write_context_compaction_repository_error,
+        write_delegation_port_error, write_snapshot_spool_error, write_transcript_entry,
     };
 
     macro_rules! assert_import_failure_ordinal {
@@ -14483,6 +14484,52 @@ mod tests {
             Err(ProcessConnectionError::EncodeInvariant)
         ));
         Ok(())
+    }
+
+    /// The post-lock statement time every metadata projection fixture carries.
+    /// No projection depends on the value, only on its passing through.
+    const METADATA_WRITE_UNIX_MICROS: u64 = 17;
+
+    /// Projects one domain agency and pins both members against the fixture it
+    /// came from. A failure names the agency at the call site.
+    #[track_caller]
+    fn assert_metadata_last_writer_projects(actor: Actor, expected_actor: MetadataActor) {
+        let writer = SessionMetadataLastWriter::new(
+            SessionMetadataUpdatedAt::from_unix_micros(METADATA_WRITE_UNIX_MICROS),
+            actor,
+        );
+        let projected = wire_metadata_last_writer(writer);
+        assert_eq!(projected.actor(), expected_actor);
+        assert_eq!(
+            projected.updated_at_unix_micros().value(),
+            writer.updated_at().as_unix_micros()
+        );
+    }
+
+    /// INV-033: the metadata last-writer projection is total over the domain
+    /// agencies durable metadata records, and each carried reference lands in
+    /// its own member. A projection gap here is not a degraded field: both
+    /// callers propagate it as an encode invariant, which is fatal to the
+    /// daemon and re-fires on every read of the durable row.
+    #[test]
+    fn inv033_metadata_last_writer_projects_every_domain_agency() {
+        let turn = TurnId::from_uuid(Uuid::from_u128(2));
+        let request = ToolRequestId::from_uuid(Uuid::from_u128(3));
+
+        assert_metadata_last_writer_projects(Actor::User, MetadataActor::User {});
+        assert_metadata_last_writer_projects(
+            Actor::Model { turn },
+            MetadataActor::Model {
+                turn_id: wire_uuid(turn.into_uuid()),
+            },
+        );
+        assert_metadata_last_writer_projects(Actor::Recovery, MetadataActor::Recovery {});
+        assert_metadata_last_writer_projects(
+            Actor::Tool { request },
+            MetadataActor::Tool {
+                tool_request_id: wire_uuid(request.into_uuid()),
+            },
+        );
     }
 
     fn compaction_session() -> SessionId {
