@@ -2118,8 +2118,37 @@ mod tests {
         sink.flush();
         drop(sink);
 
-        assert_no_stream_carries(&observed, "fixture/secret");
-        assert_eq!(observed.len(), 3, "every observed fact is forwarded");
+        // Pinned exactly rather than by credential absence and a count. Those
+        // two hold just as well when redaction replaces the *whole* value, so
+        // a regression that scrubbed `model-` and `-v1` away with the
+        // credential would satisfy them while losing the safe bytes INV-035
+        // preserves. Comparing the forwarded facts states both halves at once:
+        // the credential is gone, the surrounding bytes and the non-credential
+        // `http_status` are untouched, and each variant is still itself.
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
+                        "model-[redacted]-v1"
+                    )),
+                },
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ExchangeEstablished(ExchangeFacts {
+                        provider_request_id: Some(ProviderRequestId::new("req-[redacted]")),
+                        http_status: Some(200),
+                    }),
+                },
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::FinishReported(FinishReason::Unrecognized {
+                        provider_token: String::from("stop-[redacted]"),
+                    }),
+                },
+            ]
+        );
     }
 
     /// INV-035: a credential spelled as a surrogate pair survives a boundary
