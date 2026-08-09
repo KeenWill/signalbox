@@ -2,9 +2,11 @@
 //! primitives (`LocalWorkspaceFileSystem`) that back the read and mutation
 //! tool catalogs.
 //!
-//! Rejects absolute paths, parent traversal, and symlinks before any
-//! filesystem access (`WorkspacePathRejection`), and roots every operation at
-//! a validated `WorkspaceRoot`.
+//! Rejects absolute paths and parent traversal lexically, before any
+//! filesystem access; a symlink is rejected component-by-component during
+//! resolution instead, through descriptor-relative, no-follow `statat`/
+//! `openat` calls that never traverse one (`WorkspacePathRejection`). Every
+//! operation is rooted at a validated `WorkspaceRoot`.
 
 use std::{
     collections::BinaryHeap,

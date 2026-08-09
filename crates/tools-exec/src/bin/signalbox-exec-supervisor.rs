@@ -1,6 +1,10 @@
 //! Standalone supervisor binary that runs a target process under Linux
-//! process-tree tracking, guaranteeing descendant reaping even when the
-//! target itself spawns and detaches children.
+//! process-tree tracking, reaping every descendant it can observe within
+//! `REAP_DEADLINE` even when the target itself spawns and detaches children.
+//! Cleanup is bounded, not unconditional: it reports a typed
+//! `CleanupStatus::Failed` or `ProcessTreeUnsupported` outcome, rather than
+//! claiming completion, when the deadline is reached or descendant
+//! observation or signaling fails.
 //!
 //! Selects behavior by leading argument: `--dispatch` and `--launch` run
 //! inside the sandbox and report `supervisor_protocol` status on stdout;
