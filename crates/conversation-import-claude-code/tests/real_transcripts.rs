@@ -1,3 +1,11 @@
+//! Opt-in validation that real, locally supplied Claude Code JSONL transcripts
+//! convert through `ClaudeCodeJsonlConverter` without failure and without
+//! writing any transcript content to test output.
+//!
+//! Ignored by default; set `SIGNALBOX_RUN_REAL_CLAUDE_IMPORT=1` and point
+//! `SIGNALBOX_REAL_CLAUDE_TRANSCRIPTS` at one or more transcript roots to run
+//! it.
+
 use std::{
     env, fs,
     path::{Path, PathBuf},

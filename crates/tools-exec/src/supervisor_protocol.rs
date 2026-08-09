@@ -1,3 +1,11 @@
+//! Wire status types shared, via `include!`, between `process.rs` (the
+//! supervising caller) and the `signalbox-exec-supervisor` binary (the
+//! supervised process) that emits them on its stdout trailer.
+//!
+//! `LauncherStatus` and `SupervisorStatus` report exit code, timeout,
+//! cancellation, spawn failure, or supervision failure, each carrying
+//! `SupervisorCaptureCompleteness` for stdout and stderr independently.
+
 pub(crate) const LAUNCH_STATUS_TRAILER: &[u8] = b"\n\0signalbox-exec-launch-status:";
 pub(crate) const LAUNCH_STATUS_TAIL_BYTES: usize = 1024;
 

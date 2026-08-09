@@ -1,3 +1,11 @@
+//! Workspace-rooted path resolution and the `rustix`-backed local filesystem
+//! primitives (`LocalWorkspaceFileSystem`) that back the read and mutation
+//! tool catalogs.
+//!
+//! Rejects absolute paths, parent traversal, and symlinks before any
+//! filesystem access (`WorkspacePathRejection`), and roots every operation at
+//! a validated `WorkspaceRoot`.
+
 use std::{
     collections::BinaryHeap,
     error::Error,

@@ -1,3 +1,8 @@
+//! `read_file`, `list_directory`, `glob_files`, and `search_files`: the
+//! read-only workspace tool catalog (`WorkspaceReadTools`), each bounded by
+//! byte, entry, and result-count limits enforced against the injected
+//! `WorkspaceFileSystem`.
+
 use std::{
     error::Error,
     fmt,

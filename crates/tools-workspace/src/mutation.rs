@@ -1,3 +1,8 @@
+//! `write_file`, `edit_file`, and `apply_patch`: the workspace mutation tool
+//! catalog (`WorkspaceMutationTools`), plus the snapshot-then-commit machinery
+//! that stages each proposed change and rejects it before writing if the
+//! on-disk file no longer matches what the model observed.
+
 use std::{
     collections::BTreeMap,
     error::Error,

@@ -1,3 +1,13 @@
+//! Corpus-driven and exhaustive-split regression coverage for
+//! `redact_text`/`redact_json` in `cli_redaction.rs`, included there via
+//! `#[path]` as `redaction_corpus_tests`.
+//!
+//! Pins the fixed classification of `testdata/redaction-corpus.txt` against
+//! `testdata/redaction-corpus.classifications`, then exhaustively splits each
+//! corpus line at every one- and two-boundary UTF-8 offset to prove the
+//! stateful streaming redactor matches the same-input non-streamed result; the
+//! remaining `KNOWN_FAILING_SPLITS` ledger records exact, tracked exceptions.
+
 use std::collections::BTreeSet;
 
 use crate::{Observation, ObservationFact, ObservationSink, TokenUsage};

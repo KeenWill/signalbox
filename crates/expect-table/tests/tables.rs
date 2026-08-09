@@ -1,6 +1,6 @@
 //! Self-hosted renderer expect-tests: each snapshot is the rendered table
 //! itself, so the crate's output contract is reviewed as literal bytes
-//! (`docs/agents/testing-style.md`, rules 9, 11, 12, 15).
+//! (TS-9, TS-11, TS-12, TS-15).
 
 #![allow(
     dead_code,

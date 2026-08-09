@@ -1,3 +1,8 @@
+//! Binary entrypoint for `signalbox-runner`: connects to the daemon socket,
+//! establishes and re-establishes `RunnerConnection` with exponential
+//! reconnect backoff on either the socket or the enrollment handshake, and
+//! exits cleanly on `SIGTERM`/`SIGINT`.
+
 use std::{cmp, env, error::Error, ffi::OsString, fmt, io, process::ExitCode, time::Duration};
 
 use signalbox_runner::{

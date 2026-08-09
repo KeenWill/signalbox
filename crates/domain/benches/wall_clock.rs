@@ -1,3 +1,10 @@
+//! Divan wall-clock benchmarks for the same six domain microbenchmark targets
+//! as `instruction_counts.rs` (see `targets` and `README.md`).
+//!
+//! Local-only: runs only when `SIGNALBOX_DOMAIN_WALL_CLOCK_BENCHMARK` is set
+//! and refuses to run under a debug-assertions profile. Do not add this suite
+//! to CI; shared-runner load obscures the regressions it investigates.
+
 mod targets;
 
 use divan::{Bencher, black_box};

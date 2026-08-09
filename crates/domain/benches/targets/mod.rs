@@ -1,3 +1,13 @@
+//! Fixed-input fixtures and measured functions shared by `instruction_counts.rs`
+//! and `wall_clock.rs`.
+//!
+//! Each pair (a `*_fixture` constructor and its measured function) supplies one
+//! deterministic, pure-CPU domain workload — scheduling reconstruction, deep
+//! frontier construction, shared-prefix proof, interrupt total ordering,
+//! compaction frontier projection, and tool-argument canonicalization. Exact
+//! shapes and counts are documented beside each constructor; see `README.md`
+//! for how a change here shifts the baseline.
+
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputQueueWork, AcceptedInputSchedulingProjection,
