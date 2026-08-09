@@ -896,13 +896,16 @@ impl FamilySuite {
     ) -> EvalResult<bool> {
         match self.family {
             EvalFamily::Workspace => {
-                Ok(workspace_natural_result_payloads_passed(snapshot, tracker))
+                Ok(workspace_natural_result_payloads_passed(snapshot, tracker)
+                    && tracker.final_response_reports_completion())
             }
             EvalFamily::Web => Ok(web_natural_result_payloads_passed(snapshot, tracker)
                 && tracker.final_response_reports(WEB_FETCH_BODY)),
-            EvalFamily::Git => {
-                git_natural_result_payloads_passed(self.workspace.path(), snapshot, tracker)
-            }
+            EvalFamily::Git => Ok(git_natural_result_payloads_passed(
+                self.workspace.path(),
+                snapshot,
+                tracker,
+            )? && tracker.final_response_reports_completion()),
         }
     }
 }
@@ -2506,6 +2509,22 @@ impl OperationTracker {
             .as_deref()
             .is_some_and(|text| text.contains(expected))
     }
+
+    fn final_response_reports_completion(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("operation-tracker lock is available");
+        let Some(mut report) = state.final_response_text.clone() else {
+            return false;
+        };
+        for content in state.result_contents.values() {
+            if let Some(receipt) = eval_receipt(content) {
+                report = report.replace(&receipt, "");
+            }
+        }
+        report.chars().any(char::is_alphabetic)
+    }
 }
 
 impl OperationTrackerState {
@@ -2585,18 +2604,28 @@ fn intermediate_text_with_a_tool_call_does_not_count_a_result_round_trip() {
 #[test]
 fn final_response_report_rejects_a_receipt_only_answer() {
     let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &synthetic_result_with_receipt(),
+    );
     tracker.observe_response_text(SYNTHETIC_EVAL_RECEIPT, false);
 
     assert!(!tracker.final_response_reports(WEB_FETCH_BODY));
+    assert!(!tracker.final_response_reports_completion());
 }
 
 #[test]
 fn final_response_report_accepts_the_fetched_fixture() {
     let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &synthetic_result_with_receipt(),
+    );
     let response = format!("{WEB_FETCH_BODY} {SYNTHETIC_EVAL_RECEIPT}");
     tracker.observe_response_text(&response, false);
 
     assert!(tracker.final_response_reports(WEB_FETCH_BODY));
+    assert!(tracker.final_response_reports_completion());
 }
 
 struct EvalDatabase {
