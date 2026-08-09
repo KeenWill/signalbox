@@ -47,6 +47,7 @@ pub use catalog::LocalGitTools;
 pub use construction::LocalGitToolsConstructionError;
 pub use executor::{LocalGitExecutor, LocalGitExecutorError};
 pub use identity::{GitIdentity, InvalidGitIdentity};
+pub use limits::{MAX_DIFF_BYTES, MAX_STATUS_ENTRIES};
 pub use names::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
     GIT_LOG_NAME, GIT_PUSH_CONFIGURED_NAME, GIT_STAGE_NAME, GIT_STATUS_NAME, LOCAL_GIT_TOOL_NAMES,
