@@ -3241,6 +3241,13 @@ impl ActivatedTurn {
         &self,
         entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     ) -> Option<Vec<SemanticTranscriptEntry>>;
+    pub fn apply_interrupt_to_runner_recovery(
+        self,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
     // accessors: session(), turn(), configuration(), configuration_provenance(),
     // start(), phase(), pending_steering(), consumed_steering()
 }

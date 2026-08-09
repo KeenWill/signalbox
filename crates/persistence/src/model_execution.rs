@@ -3051,6 +3051,17 @@ fn pending_reclassification_candidates_for_active(
     )
 }
 
+fn pending_reclassification_candidates_for_activated(
+    active_turn: &signalbox_domain::ActivatedTurn,
+    next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
+) -> Result<Vec<PendingSteeringReclassificationIdentity>, ModelCallRepositoryError> {
+    pending_reclassification_candidates_from_parts(
+        active_turn.turn(),
+        active_turn.pending_steering(),
+        next_turn,
+    )
+}
+
 fn pending_reclassification_candidates_from_parts(
     source_turn: TurnId,
     pending_steering: &[signalbox_domain::PendingSteeringInput],
@@ -3089,6 +3100,16 @@ pub(crate) fn attach_interrupt_reclassification_candidates_for_active(
 ) -> Result<signalbox_domain::CancelledModelCallTurnIdentities, ModelCallRepositoryError> {
     Ok(identities.with_pending_steering_reclassifications(
         pending_reclassification_candidates_for_active(active_turn, next_turn)?,
+    ))
+}
+
+pub(crate) fn attach_interrupt_reclassification_candidates_for_activated(
+    identities: signalbox_domain::CancelledModelCallTurnIdentities,
+    active_turn: &signalbox_domain::ActivatedTurn,
+    next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
+) -> Result<signalbox_domain::CancelledModelCallTurnIdentities, ModelCallRepositoryError> {
+    Ok(identities.with_pending_steering_reclassifications(
+        pending_reclassification_candidates_for_activated(active_turn, next_turn)?,
     ))
 }
 
@@ -3264,6 +3285,39 @@ pub(crate) async fn require_live_execution_for_restart(
     require_live_execution_with_targets(connection, requested_session, None, None, None).await
 }
 
+pub(crate) async fn load_delegated_runner_recovery_for_interrupt(
+    connection: &mut PgConnection,
+    requested_session: SessionId,
+) -> Result<
+    Option<(
+        signalbox_domain::ActivatedTurn,
+        ResolvedContextFrontierSnapshot,
+    )>,
+    ModelCallRepositoryError,
+> {
+    let session = match load_session_from_connection(connection, requested_session).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return Ok(None),
+        Err(SessionRepositoryError::Database(error)) => return Err(error.into()),
+        Err(SessionRepositoryError::Corruption(error)) => {
+            return Err(ModelCallCorruption::CurrentSession(error).into());
+        }
+    };
+    let scheduling = load_scheduling_projection(connection, session)
+        .await
+        .map_err(map_scheduling_error)?;
+    Ok(
+        load_delegated_live_turn(connection, requested_session, &scheduling)
+            .await?
+            .filter(|(active, _)| {
+                matches!(
+                    active.phase(),
+                    signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+                )
+            }),
+    )
+}
+
 async fn require_live_execution_with_targets(
     connection: &mut PgConnection,
     requested_session: SessionId,
@@ -3411,8 +3465,12 @@ async fn load_delegated_live_turn(
             relation.parent_session_id,
             relation.parent_turn_id,
             lifecycle.starting_frontier_id,
-            lifecycle.current_attempt_id,
+            attempt.turn_attempt_id AS projection_attempt_id,
             attempt.state_kind AS attempt_state_kind,
+            lifecycle.active_phase_kind,
+            lifecycle.runner_recovery_runner_id,
+            lifecycle.runner_recovery_placement_revision,
+            lifecycle.runner_recovery_tool_attempt_id,
             defaults.session_id AS goal_defaults_session_id,
             task.defaults_version AS queued_defaults_version,
             defaults.version AS goal_defaults_version,
@@ -3437,16 +3495,38 @@ async fn load_delegated_live_turn(
            ON relation.spawning_tool_request_id = task.spawning_tool_request_id
           AND relation.child_session_id = task.child_session_id
          JOIN turn_attempt AS attempt
-           ON attempt.turn_attempt_id = lifecycle.current_attempt_id
-          AND attempt.turn_id = lifecycle.turn_id
+           ON attempt.turn_id = lifecycle.turn_id
           AND attempt.session_id = lifecycle.session_id
+          AND (
+                (
+                    lifecycle.active_phase_kind = 'running'
+                    AND attempt.turn_attempt_id = lifecycle.current_attempt_id
+                )
+                OR (
+                    lifecycle.active_phase_kind = 'awaiting_runner_recovery'
+                    AND attempt.state_kind = 'ended'
+                    AND attempt.end_variant = 'without_stop'
+                    AND attempt.end_disposition = 'yielded_to_durable_wait'
+                    AND attempt.interrupt_command_id IS NULL
+                    AND attempt.interrupt_predecessor_turn_id IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM turn_attempt AS continuation
+                         WHERE continuation.continued_from_attempt_id =
+                                attempt.turn_attempt_id
+                    )
+                )
+          )
          JOIN session_defaults_version AS defaults
            ON defaults.session_id = task.child_session_id
           AND defaults.version = task.defaults_version
         WHERE lifecycle.session_id = $1
           AND lifecycle.origin_kind = 'delegation'
           AND lifecycle.state_kind = 'active'
-          AND lifecycle.active_phase_kind = 'running'
+          AND NOT lifecycle.delegation_runtime_terminal
+          AND lifecycle.active_phase_kind IN (
+                'running', 'awaiting_runner_recovery'
+          )
           AND goal_turn_is_runtime_relevant(
                 lifecycle.session_id, lifecycle.turn_id
           )",
@@ -3467,7 +3547,7 @@ async fn load_delegated_live_turn(
     let starting_frontier =
         signalbox_domain::ContextFrontierId::from_uuid(required(&row, "starting_frontier_id")?);
     let initial_attempt =
-        signalbox_domain::TurnAttemptId::from_uuid(required(&row, "current_attempt_id")?);
+        signalbox_domain::TurnAttemptId::from_uuid(required(&row, "projection_attempt_id")?);
     let task_entry = SemanticTranscriptEntryReconstitutionInput::new(
         SemanticTranscriptEntryId::from_uuid(required(&row, "semantic_entry_id")?),
         session,
@@ -3491,17 +3571,7 @@ async fn load_delegated_live_turn(
     .ok_or(ModelCallCorruption::Inconsistent(
         "delegated live-turn projection",
     ))?;
-    let phase = match required::<String>(&row, "attempt_state_kind")?.as_str() {
-        "prepared" => ActiveTurnSchedulingReconstitutionInput::prepared(turn, initial_attempt),
-        "running" => ActiveTurnSchedulingReconstitutionInput::running(turn, initial_attempt),
-        value => {
-            return Err(ModelCallCorruption::Unsupported {
-                field: "delegated turn attempt state",
-                value: value.to_owned(),
-            }
-            .into());
-        }
-    };
+    let phase = decode_delegated_active_phase(&row, turn, initial_attempt)?;
     let (active, _, prepared_snapshot) =
         prepared
             .with_reconstituted_phase(phase)
@@ -3530,6 +3600,55 @@ async fn load_delegated_live_turn(
     Ok(Some((active.into(), stored_snapshot)))
 }
 
+fn decode_delegated_active_phase(
+    row: &PgRow,
+    turn: TurnId,
+    projection_attempt: signalbox_domain::TurnAttemptId,
+) -> Result<ActiveTurnSchedulingReconstitutionInput, ModelCallRepositoryError> {
+    match required::<String>(row, "active_phase_kind")?.as_str() {
+        "running" => match required::<String>(row, "attempt_state_kind")?.as_str() {
+            "prepared" => Ok(ActiveTurnSchedulingReconstitutionInput::prepared(
+                turn,
+                projection_attempt,
+            )),
+            "running" => Ok(ActiveTurnSchedulingReconstitutionInput::running(
+                turn,
+                projection_attempt,
+            )),
+            value => Err(ModelCallCorruption::Unsupported {
+                field: "delegated turn attempt state",
+                value: value.to_owned(),
+            }
+            .into()),
+        },
+        "awaiting_runner_recovery" => {
+            let runner =
+                signalbox_domain::RunnerId::from_uuid(required(row, "runner_recovery_runner_id")?);
+            let revision =
+                positive_u64_from_numeric(required(row, "runner_recovery_placement_revision")?)
+                    .ok()
+                    .and_then(signalbox_domain::RunnerGeneration::try_from_u64)
+                    .ok_or(ModelCallCorruption::Inconsistent(
+                        "delegated runner recovery placement revision",
+                    ))?;
+            Ok(
+                ActiveTurnSchedulingReconstitutionInput::awaiting_runner_recovery(
+                    turn,
+                    runner,
+                    revision,
+                    row.try_get::<Option<Uuid>, _>("runner_recovery_tool_attempt_id")?
+                        .map(signalbox_domain::ToolAttemptId::from_uuid),
+                ),
+            )
+        }
+        value => Err(ModelCallCorruption::Unsupported {
+            field: "delegated active phase",
+            value: value.to_owned(),
+        }
+        .into()),
+    }
+}
+
 async fn load_delegated_live_wake_turn(
     connection: &mut PgConnection,
     session: SessionId,
@@ -3551,8 +3670,12 @@ async fn load_delegated_live_wake_turn(
                 predecessor.session_id, predecessor.turn_id
             ) AS predecessor_frontier_id,
             lifecycle.starting_frontier_id,
-            lifecycle.current_attempt_id,
+            attempt.turn_attempt_id AS projection_attempt_id,
             attempt.state_kind AS attempt_state_kind,
+            lifecycle.active_phase_kind,
+            lifecycle.runner_recovery_runner_id,
+            lifecycle.runner_recovery_placement_revision,
+            lifecycle.runner_recovery_tool_attempt_id,
             defaults.session_id AS goal_defaults_session_id,
             wake.defaults_version AS queued_defaults_version,
             defaults.version AS goal_defaults_version,
@@ -3575,7 +3698,10 @@ async fn load_delegated_live_wake_turn(
           AND lifecycle.acceptance_position = wake.admission_position
           AND lifecycle.origin_kind = 'delegation'
           AND lifecycle.state_kind = 'active'
-          AND lifecycle.active_phase_kind = 'running'
+          AND NOT lifecycle.delegation_runtime_terminal
+          AND lifecycle.active_phase_kind IN (
+                'running', 'awaiting_runner_recovery'
+          )
          JOIN turn_lifecycle AS predecessor
            ON predecessor.turn_id = lifecycle.immediate_predecessor_turn_id
           AND predecessor.session_id = lifecycle.session_id
@@ -3590,9 +3716,28 @@ async fn load_delegated_live_wake_turn(
                 )
           )
          JOIN turn_attempt AS attempt
-           ON attempt.turn_attempt_id = lifecycle.current_attempt_id
-          AND attempt.turn_id = lifecycle.turn_id
+           ON attempt.turn_id = lifecycle.turn_id
           AND attempt.session_id = lifecycle.session_id
+          AND (
+                (
+                    lifecycle.active_phase_kind = 'running'
+                    AND attempt.turn_attempt_id = lifecycle.current_attempt_id
+                )
+                OR (
+                    lifecycle.active_phase_kind = 'awaiting_runner_recovery'
+                    AND attempt.state_kind = 'ended'
+                    AND attempt.end_variant = 'without_stop'
+                    AND attempt.end_disposition = 'yielded_to_durable_wait'
+                    AND attempt.interrupt_command_id IS NULL
+                    AND attempt.interrupt_predecessor_turn_id IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM turn_attempt AS continuation
+                         WHERE continuation.continued_from_attempt_id =
+                                attempt.turn_attempt_id
+                    )
+                )
+          )
          JOIN session_defaults_version AS defaults
            ON defaults.session_id = wake.recipient_session_id
           AND defaults.version = wake.defaults_version
@@ -3659,7 +3804,7 @@ async fn load_delegated_live_wake_turn(
     let starting_frontier =
         signalbox_domain::ContextFrontierId::from_uuid(required(&row, "starting_frontier_id")?);
     let initial_attempt =
-        signalbox_domain::TurnAttemptId::from_uuid(required(&row, "current_attempt_id")?);
+        signalbox_domain::TurnAttemptId::from_uuid(required(&row, "projection_attempt_id")?);
     let prepared =
         PreparedDelegatedTurnActivation::prepare_wake(DelegatedWakeTurnActivationInput {
             session,
@@ -3676,17 +3821,7 @@ async fn load_delegated_live_wake_turn(
         .ok_or(ModelCallCorruption::Inconsistent(
             "delegated wake live-turn projection",
         ))?;
-    let phase = match required::<String>(&row, "attempt_state_kind")?.as_str() {
-        "prepared" => ActiveTurnSchedulingReconstitutionInput::prepared(turn, initial_attempt),
-        "running" => ActiveTurnSchedulingReconstitutionInput::running(turn, initial_attempt),
-        value => {
-            return Err(ModelCallCorruption::Unsupported {
-                field: "delegated wake turn attempt state",
-                value: value.to_owned(),
-            }
-            .into());
-        }
-    };
+    let phase = decode_delegated_active_phase(&row, turn, initial_attempt)?;
     let (active, _, prepared_snapshot) =
         prepared
             .with_reconstituted_phase(phase)

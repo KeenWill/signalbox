@@ -1422,6 +1422,191 @@ async fn insert_running_turn(
     Ok((session, turn, attempt))
 }
 
+async fn convert_running_turn_to_delegated_runner_recovery(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    attempt: TurnAttemptId,
+    runner: RunnerId,
+    placement_revision: RunnerGeneration,
+) -> Result<ContextFrontierId, sqlx::Error> {
+    let spawning_request = uuid(0xa130);
+    let parent_session = uuid(FOREIGN_SESSION);
+    let parent_turn = uuid(0xa132);
+    let task_entry = uuid(0xa133);
+    let starting_frontier = ContextFrontierId::from_uuid(uuid(0xa134));
+    let selection = uuid(0xa101);
+    insert_session_for(pool, parent_session).await?;
+    let accepted_starting_frontier: Uuid = sqlx::query_scalar(
+        "SELECT starting_frontier_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_initial_task DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;
+         ALTER TABLE queued_input_origin DISABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta DISABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "DELETE FROM context_frontier_delta
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(accepted_starting_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "DELETE FROM context_frontier
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(accepted_starting_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "DELETE FROM semantic_transcript_entry
+          WHERE source_session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ($1, 1, 'spawned', 'tool_request', $2, $3, $1)",
+    )
+    .bind(spawning_request)
+    .bind(parent_session)
+    .bind(parent_turn)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind,
+             on_parent_stopped, on_parent_cancelled)
+         VALUES ($1, $2, $3, $4, 'background', NULL, NULL)",
+    )
+    .bind(spawning_request)
+    .bind(parent_session)
+    .bind(parent_turn)
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegated_task_spawning_tool_request_id)
+         VALUES ($1, $2, 'delegated_task', $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(task_entry)
+    .bind(spawning_request)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(starting_frontier.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(starting_frontier.into_uuid())
+    .bind(task_entry)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET origin_kind = 'delegation', origin_accepted_input_id = NULL,
+                starting_frontier_id = $1,
+                active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3
+          WHERE turn_id = $4 AND session_id = $5",
+    )
+    .bind(starting_frontier.into_uuid())
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement_revision.get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "DELETE FROM queued_input_origin
+          WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_initial_task
+            (spawning_tool_request_id, child_session_id, turn_id,
+             semantic_entry_id, admission_position, defaults_version,
+             requested_model_kind, requested_direct_model_selection_id,
+             frozen_model_kind, frozen_direct_model_selection_id, task_content)
+         VALUES ($1, $2, $3, $4, 1, 1,
+                 'direct', $5, 'direct', $5, $6)",
+    )
+    .bind(spawning_request)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(task_entry)
+    .bind(selection)
+    .bind("delegated runner recovery fixture")
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE queued_input_origin ENABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_initial_task ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation ENABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta ENABLE TRIGGER ALL;
+         ALTER TABLE context_frontier ENABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(starting_frontier)
+}
+
 async fn append_runner_registration_loss_projection(
     pool: &PgPool,
     session: SessionId,
@@ -4866,6 +5051,112 @@ async fn s32_inv029_inv044_stop_terminalizes_runner_recovery_wait() -> Result<()
             runner.into_uuid(),
             Decimal::from(placement.revision().get()),
             turn_attempt.into_uuid(),
+        )
+    );
+    assert_eq!(store.load_runner_recovery_wait(session).await?, None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-029 / INV-044: an interrupt terminalizes a delegated runner-loss wait
+/// through its delegation projection and retains the exact loss evidence.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv029_inv044_stop_terminalizes_delegated_runner_recovery_wait()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let starting_frontier = convert_running_turn_to_delegated_runner_recovery(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        runner,
+        placement.revision(),
+    )
+    .await?;
+    let command = DurableCommandId::from_uuid(uuid(0xa135));
+    let interrupt = SubmitInput::new(
+        command,
+        session,
+        UserContent::try_text(String::from("stop delegated runner recovery"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            interrupt,
+            AcceptedInputId::from_uuid(uuid(0xa136)),
+            Some(TurnId::from_uuid(uuid(0xa137))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa138)),
+                ContextFrontierId::from_uuid(uuid(0xa139)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xa13a)),
+            |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xa13b))),
+        )
+        .await?;
+    let terminal: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind,
+                runner_recovery_runner_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let retained_loss: String = sqlx::query_scalar(
+        "SELECT record.state_kind
+           FROM runner_current_session_placement AS head
+           JOIN runner_session_placement_record AS record
+             ON record.session_id = head.session_id
+            AND record.event_ordinal = head.event_ordinal
+          WHERE head.session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let persisted_effect: (Uuid, Uuid, Decimal, Uuid, Uuid) = sqlx::query_as(
+        "SELECT turn_id, runner_id, placement_revision,
+                yielded_turn_attempt_id, source_frontier_id
+           FROM turn_runner_recovery_interrupt_effect
+          WHERE command_id = $1",
+    )
+    .bind(command.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        terminal,
+        (
+            String::from("terminal"),
+            Some(String::from("cancelled")),
+            None
+        )
+    );
+    assert_eq!(retained_loss, "runner_lost_before_pin");
+    assert_eq!(
+        persisted_effect,
+        (
+            turn.into_uuid(),
+            runner.into_uuid(),
+            Decimal::from(placement.revision().get()),
+            turn_attempt.into_uuid(),
+            starting_frontier.into_uuid(),
         )
     );
     assert_eq!(store.load_runner_recovery_wait(session).await?, None);

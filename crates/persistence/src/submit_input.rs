@@ -75,10 +75,12 @@ use crate::{
     },
     model_execution::{
         ModelCallRepositoryError, attach_interrupt_reclassification_candidates,
+        attach_interrupt_reclassification_candidates_for_activated,
         attach_interrupt_reclassification_candidates_for_active,
         attach_recovery_interrupt_reclassification_candidates,
-        lock_delegated_child_endpoint_sessions, persist_stop_requested, persist_terminal_outcome,
-        persist_tool_reconciliation_required, require_live_execution_for_restart,
+        load_delegated_runner_recovery_for_interrupt, lock_delegated_child_endpoint_sessions,
+        persist_stop_requested, persist_terminal_outcome, persist_tool_reconciliation_required,
+        require_live_execution_for_restart,
     },
     model_settings_resolution,
     outbox::{self, OutboxEvent},
@@ -1167,6 +1169,47 @@ where
                     .map_err(|_| {
                         SubmitInputCorruption::Inconsistent(
                             "applied interrupt does not match runner recovery wait",
+                        )
+                    })?;
+                persist_runner_recovery_interrupt_effect(
+                    connection,
+                    command,
+                    cancelled.session(),
+                    cancelled.turn(),
+                    source_frontier,
+                )
+                .await?;
+                Some(ModelCallInterruptOutcome::Cancelled(cancelled))
+            } else if let Some((active_turn, starting_snapshot)) =
+                load_delegated_runner_recovery_for_interrupt(connection, interrupt.session())
+                    .await?
+            {
+                let source_snapshot = match active_tool_batch {
+                    Some(batch) => batch.yielded_snapshot().clone(),
+                    None => starting_snapshot.clone(),
+                };
+                let identities = attach_interrupt_reclassification_candidates_for_activated(
+                    cancellation_identities,
+                    &active_turn,
+                    &mut next_reclassified_turn,
+                )
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent(
+                        "delegated runner recovery interrupt reclassification candidates",
+                    )
+                })?;
+                let source_frontier = source_snapshot.frontier().snapshot();
+                let command = interrupt.proof().command();
+                let cancelled = active_turn
+                    .apply_interrupt_to_runner_recovery(
+                        starting_snapshot,
+                        source_snapshot,
+                        interrupt,
+                        identities,
+                    )
+                    .map_err(|_| {
+                        SubmitInputCorruption::Inconsistent(
+                            "applied interrupt does not match delegated runner recovery wait",
                         )
                     })?;
                 persist_runner_recovery_interrupt_effect(

@@ -2452,8 +2452,7 @@ impl AcceptedInputSchedulingProjection {
             .get(&active_turn.start().frontier().snapshot())
             .cloned()
             .ok_or(crate::ModelCallClosureError::FrontierDerivationFailed)?;
-        crate::model_execution::apply_interrupt_to_runner_recovery_wait(
-            active_turn.into(),
+        ActivatedTurn::from(active_turn).apply_interrupt_to_runner_recovery(
             starting_snapshot,
             source_snapshot,
             interrupt,
@@ -3042,6 +3041,23 @@ impl ActivatedTurn {
             Self::Accepted(turn) => turn.consumed_steering(),
             Self::Delegated(turn) => turn.consumed_steering(),
         }
+    }
+
+    /// Cancels this turn while it is parked on exact runner-loss evidence.
+    pub fn apply_interrupt_to_runner_recovery(
+        self,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::CancelledModelCallTurnIdentities,
+    ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_interrupt_to_runner_recovery_wait(
+            self,
+            starting_snapshot,
+            source_snapshot,
+            interrupt,
+            identities,
+        )
     }
 
     #[cfg(test)]
