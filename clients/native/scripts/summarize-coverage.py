@@ -263,7 +263,8 @@ def baseline_note(baseline: Baseline, measurement_incomplete: bool = False) -> l
         ]
     else:
         provenance = [
-            "Compared against the most recent `main` push this workflow measured:",
+            "Compared against the most recent usable `main` baseline this",
+            "workflow found:",
             measured,
             "That is **not** the base this pull request is open against, so the",
             "delta above carries every difference between that commit and the",

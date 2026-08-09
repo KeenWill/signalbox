@@ -712,6 +712,27 @@ class BaselineLoadingTests(unittest.TestCase):
         self.assertIn("not in baseline", row)
         self.assertNotIn(" pp", row)
 
+    def test_an_incomplete_baseline_counter_gets_no_delta(self) -> None:
+        """A counter block reporting `count` but never `covered` is
+        truncated, not the toolchain-omitted case `read_counter` already
+        tolerates: llvm-cov emits both members together whenever it emits the
+        counter at all. Defaulting the missing `covered` to zero would render
+        a current 60% as a fabricated `+60.00 pp` gain against a baseline
+        that never reported a covered figure at all."""
+        baseline_document = export(
+            {
+                "filename": "/repo/crates/domain/src/session.rs",
+                "summary": {"lines": {"count": 100}},
+            }
+        )
+        summaries = [summary for _, summary in read_file_summaries(baseline_document)]
+        total = total_of(summaries)
+
+        row = measure_row("Lines", Counter(count=100, covered=60), total.lines)
+
+        self.assertIn("not in baseline", row)
+        self.assertNotIn(" pp", row)
+
     def test_a_wholly_measured_baseline_counter_still_gets_its_delta(self) -> None:
         """The guard: presence tracking must not start suppressing the deltas
         the report exists to show."""

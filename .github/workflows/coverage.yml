@@ -403,8 +403,17 @@ jobs:
             #
             # A counter that is absent, or not an object, stays acceptable:
             # `read_counter` defaults those to empty on purpose so the report
-            # survives a toolchain that grows a counter. Only values that are
-            # present are required to be ones `int()` accepts — a number, or a
+            # survives a toolchain that grows a counter. A counter present as
+            # an object is a different case: llvm-cov emits `count` and
+            # `covered` together whenever it emits the counter at all, so a
+            # block carrying only one of the two — `{"count": 100}` — is
+            # truncated, not merely from an older toolchain. `read_counter`
+            # refuses that shape rather than defaulting the missing member to
+            # zero, because zero is a real answer ("nothing covered") and this
+            # block never gave one; accepting it here would select this
+            # candidate and stop the scan on an artifact the render path can
+            # only turn into a fabricated delta. Values that are present are
+            # further required to be ones `int()` accepts — a number, or a
             # string of digits. `tonumber` is deliberately not the test: it
             # accepts "5.5", which `int()` rejects.
             #
@@ -440,7 +449,6 @@ jobs:
                   # double stops representing integers exactly, which is also
                   # where the comparisons below stop being trustworthy.
                   def maxcounter: 9007199254740991;
-                  def okfield($k): (has($k) | not) or (.[$k] | okint);
                   def counted($k): (.[$k] // 0) | tonumber | trunc;
                   # A counter cannot be negative, and cannot report more
                   # covered than exist. A corrupt artifact saying
@@ -460,8 +468,20 @@ jobs:
                     and (counted("count") <= maxcounter)
                     and (counted("covered") <= maxcounter)
                     and (counted("covered") <= counted("count"));
+                  # Both required members, not one alone — and not neither: an
+                  # empty `{"lines": {}}` is refused here too, matching
+                  # `read_counter`, which now treats a block missing either
+                  # member as absent rather than as a real zero. This is still
+                  # narrower than the object check above it: the counter *key*
+                  # being missing entirely, or present with a non-object
+                  # value, remains tolerated by `type != "object"`, because
+                  # `read_counter` tolerates that shape too — a toolchain that
+                  # never emitted the counter at all. Only an object present
+                  # and incomplete is new here.
                   def okcounter: (type != "object")
-                    or (okfield("count") and okfield("covered") and sane);
+                    or ((has("count") and has("covered"))
+                        and (.count | okint) and (.covered | okint)
+                        and sane);
                   .type == "llvm.coverage.json.export"
                   and ((.data | type) == "array")
                   # An absent `files` key is an empty element, because that is

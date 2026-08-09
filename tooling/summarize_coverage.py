@@ -132,11 +132,20 @@ def read_counter(summary: dict, name: str) -> Counter:
     llvm-cov has grown counters over releases (branches, then MCDC). Reading
     only the three this report renders, and defaulting a missing one to empty,
     keeps the tool working across the toolchain upgrades the repository takes.
+
+    A counter object missing either required member is not that case, and is
+    refused the same way rather than defaulted. llvm-cov emits `count` and
+    `covered` together whenever it emits the counter at all, so a block like
+    `{"count": 100}` is truncated, not merely from an older toolchain — and
+    defaulting the missing `covered` to zero would turn it into a real
+    measurement of "nothing covered" rather than the absent one it actually
+    is, which is exactly the fabricated delta `Counter.present` exists to
+    refuse.
     """
     block = summary.get(name)
-    if not isinstance(block, dict):
+    if not isinstance(block, dict) or "count" not in block or "covered" not in block:
         return Counter(present=False)
-    return Counter(count=int(block.get("count", 0)), covered=int(block.get("covered", 0)))
+    return Counter(count=int(block["count"]), covered=int(block["covered"]))
 
 
 def read_file_summaries(document: dict) -> list[tuple[str, Summary]]:
@@ -351,7 +360,8 @@ def baseline_note(baseline: Baseline) -> list[str]:
         ]
     else:
         provenance = [
-            "Compared against the most recent `main` push this workflow measured:",
+            "Compared against the most recent usable `main` baseline this",
+            "workflow found:",
             measured,
             "That is **not** the base this pull request is open against, so the",
             "deltas below carry every difference between that commit and the",

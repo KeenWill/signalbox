@@ -1587,6 +1587,32 @@ def line_counter_export(count) -> dict:
     }
 
 
+def incomplete_lines_counter_export() -> dict:
+    """An export whose one file reports `count` for lines but never `covered`.
+
+    Written the same narrow way as `line_counter_export()`, for the same
+    reason: the missing member is the whole point, so nothing else about the
+    file varies. llvm-cov emits both together whenever it emits the counter
+    at all, so this shape is not a toolchain that omitted the counter — it is
+    a truncated one, and `{"count": 100}` alone must not be read as "0
+    covered."
+    """
+    return {
+        "type": EXPORT_TYPE,
+        "version": "2.0.1",
+        "data": [
+            {
+                "files": [
+                    {
+                        "filename": HEALTHY_FILE,
+                        "summary": {"lines": {"count": HEALTHY_LINES}},
+                    }
+                ]
+            }
+        ],
+    }
+
+
 def healthy_export() -> dict:
     """The export every rejection fixture is a one-change edit of."""
     return export(coverage_file(HEALTHY_FILE, lines=HEALTHY_LINES, covered=HEALTHY_COVERED))
@@ -2056,6 +2082,17 @@ RUST_DOCUMENTS: tuple[RecordedDocument, ...] = (
         loader_reads=False,
         predicate_accepts=False,
         divergence=AGREEMENT_REQUIRED,
+    ),
+    RecordedDocument(
+        name="a lines counter reporting count but never covered",
+        document=incomplete_lines_counter_export(),
+        loader_reads=True,
+        predicate_accepts=False,
+        divergence=(
+            "the loader treats a counter missing either required member as absent, so "
+            "rendering degrades that row to \"not in baseline\" rather than fail; the "
+            f"predicate refuses the candidate outright and keeps scanning. {STRICTER_BY_DESIGN}"
+        ),
     ),
     RecordedDocument(
         name="impossible counters",
@@ -2678,8 +2715,16 @@ NATIVE_ARTIFACT_NAME = "native-coverage"
 NATIVE_TEST_STEP = "Run native unit-test bundles"
 
 
-def workflow_run(identifier: int, head_sha: str, created_at: str) -> dict:
-    """One entry of the runs listing the candidate filter orders."""
+def workflow_run(identifier: int, *, head_sha: str, created_at: str) -> dict:
+    """One entry of the runs listing the candidate filter orders.
+
+    `head_sha` and `created_at` are keyword-only. They are two adjacent
+    strings, so a positional call lets a transposition read as valid Python
+    and swap which commit a candidate names for when it ran — the same
+    provenance mistake `load_baseline()`'s keyword-only arguments exist to
+    refuse in the production path. `identifier` keeps its position, being the
+    one argument whose type states it.
+    """
     return {"id": identifier, "head_sha": head_sha, "created_at": created_at}
 
 
@@ -2730,16 +2775,22 @@ class CandidateCase:
     expected: tuple[str, ...]
 
 
-def tsv(label: str, identifier: int, head_sha: str, created_at: str) -> str:
+def tsv(label: str, identifier: int, *, head_sha: str, created_at: str) -> str:
+    """The line the candidate filter emits for one chosen run.
+
+    `head_sha` and `created_at` are keyword-only for the same reason as in
+    `workflow_run()` above: the same positional run of adjacent strings, on
+    the expected side of the same fixtures.
+    """
     return "\t".join((label, str(identifier), head_sha, created_at))
 
 
 RECENT_RUNS = (
-    workflow_run(901, "aaaaaaa", "2026-08-01T00:00:00Z"),
-    workflow_run(902, "bbbbbbb", "2026-07-01T00:00:00Z"),
-    workflow_run(903, "ccccccc", "2026-06-01T00:00:00Z"),
+    workflow_run(901, head_sha="aaaaaaa", created_at="2026-08-01T00:00:00Z"),
+    workflow_run(902, head_sha="bbbbbbb", created_at="2026-07-01T00:00:00Z"),
+    workflow_run(903, head_sha="ccccccc", created_at="2026-06-01T00:00:00Z"),
 )
-BASE_RUN = workflow_run(500, "basesha", "2026-01-01T00:00:00Z")
+BASE_RUN = workflow_run(500, head_sha="basesha", created_at="2026-01-01T00:00:00Z")
 
 # One table for both copies: the two filters are the same program in two
 # workflows, so a case that exists for one and not the other would be exactly
@@ -2751,10 +2802,10 @@ CANDIDATE_CASES: tuple[CandidateCase, ...] = (
         runs=runs_page(*RECENT_RUNS),
         cap=10,
         expected=(
-            tsv("base", 500, "basesha", "2026-01-01T00:00:00Z"),
-            tsv("latest-main", 901, "aaaaaaa", "2026-08-01T00:00:00Z"),
-            tsv("latest-main", 902, "bbbbbbb", "2026-07-01T00:00:00Z"),
-            tsv("latest-main", 903, "ccccccc", "2026-06-01T00:00:00Z"),
+            tsv("base", 500, head_sha="basesha", created_at="2026-01-01T00:00:00Z"),
+            tsv("latest-main", 901, head_sha="aaaaaaa", created_at="2026-08-01T00:00:00Z"),
+            tsv("latest-main", 902, head_sha="bbbbbbb", created_at="2026-07-01T00:00:00Z"),
+            tsv("latest-main", 903, head_sha="ccccccc", created_at="2026-06-01T00:00:00Z"),
         ),
     ),
     CandidateCase(
@@ -2763,8 +2814,8 @@ CANDIDATE_CASES: tuple[CandidateCase, ...] = (
         runs=runs_page(*RECENT_RUNS),
         cap=2,
         expected=(
-            tsv("latest-main", 901, "aaaaaaa", "2026-08-01T00:00:00Z"),
-            tsv("latest-main", 902, "bbbbbbb", "2026-07-01T00:00:00Z"),
+            tsv("latest-main", 901, head_sha="aaaaaaa", created_at="2026-08-01T00:00:00Z"),
+            tsv("latest-main", 902, head_sha="bbbbbbb", created_at="2026-07-01T00:00:00Z"),
         ),
     ),
     CandidateCase(
@@ -2773,8 +2824,8 @@ CANDIDATE_CASES: tuple[CandidateCase, ...] = (
         runs=runs_page(*RECENT_RUNS[:2]),
         cap=10,
         expected=(
-            tsv("base", 901, "aaaaaaa", "2026-08-01T00:00:00Z"),
-            tsv("latest-main", 902, "bbbbbbb", "2026-07-01T00:00:00Z"),
+            tsv("base", 901, head_sha="aaaaaaa", created_at="2026-08-01T00:00:00Z"),
+            tsv("latest-main", 902, head_sha="bbbbbbb", created_at="2026-07-01T00:00:00Z"),
         ),
     ),
     CandidateCase(
@@ -2783,9 +2834,9 @@ CANDIDATE_CASES: tuple[CandidateCase, ...] = (
         runs=runs_page(*RECENT_RUNS),
         cap=3,
         expected=(
-            tsv("base", 500, "basesha", "2026-01-01T00:00:00Z"),
-            tsv("latest-main", 901, "aaaaaaa", "2026-08-01T00:00:00Z"),
-            tsv("latest-main", 902, "bbbbbbb", "2026-07-01T00:00:00Z"),
+            tsv("base", 500, head_sha="basesha", created_at="2026-01-01T00:00:00Z"),
+            tsv("latest-main", 901, head_sha="aaaaaaa", created_at="2026-08-01T00:00:00Z"),
+            tsv("latest-main", 902, head_sha="bbbbbbb", created_at="2026-07-01T00:00:00Z"),
         ),
     ),
 )
