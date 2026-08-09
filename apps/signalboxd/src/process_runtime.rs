@@ -13856,10 +13856,11 @@ impl Error for ProcessRuntimeError {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::RefCell,
         collections::{BTreeSet, VecDeque},
         error::Error,
         io::{self, Write},
-        sync::{Arc, Mutex, mpsc},
+        sync::{Arc, Mutex, OnceLock, mpsc},
         thread,
     };
 
@@ -14070,27 +14071,18 @@ mod tests {
     }
     struct PendingResponseWriter;
 
-    #[derive(Clone, Default)]
-    struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
-
-    impl CapturedTelemetry {
-        fn text(&self) -> String {
-            String::from_utf8(
-                self.0
-                    .lock()
-                    .expect("captured telemetry lock is available")
-                    .clone(),
-            )
-            .expect("captured telemetry is UTF-8")
-        }
+    thread_local! {
+        /// Telemetry captured on this thread alone.
+        static CAPTURED_TELEMETRY: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     }
+
+    /// Appends every formatted event to the emitting thread's own buffer.
+    #[derive(Clone, Copy, Default)]
+    struct CapturedTelemetry;
 
     impl Write for CapturedTelemetry {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("captured telemetry lock is available")
-                .extend_from_slice(buffer);
+            CAPTURED_TELEMETRY.with(|captured| captured.borrow_mut().extend_from_slice(buffer));
             Ok(buffer.len())
         }
 
@@ -14103,19 +14095,40 @@ mod tests {
         type Writer = Self;
 
         fn make_writer(&'writer self) -> Self::Writer {
-            self.clone()
+            *self
         }
     }
 
+    /// Records the telemetry `record` emits on this thread.
+    ///
+    /// The subscriber is installed once for the whole test process rather than
+    /// scoped to this thread. `tracing` caches each callsite's interest
+    /// process-wide, but `set_default` binds a subscriber to one thread, so a
+    /// sibling test that reaches a callsite first on another thread registers
+    /// it against no subscriber at all -- recording it as uninteresting for
+    /// every thread, including the one that installed a capture. The event then
+    /// is not merely written late; it is never emitted, and the assertion reads
+    /// an empty buffer.
+    ///
+    /// Writes are routed per thread so concurrent tests never read each other's
+    /// events, which keeps assertions on both presence and absence honest.
     fn capture_telemetry(record: impl FnOnce()) -> String {
-        let output = CapturedTelemetry::default();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(output.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, record);
-        output.text()
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+
+        INSTALLED.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(CapturedTelemetry)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other global telemetry subscriber is installed");
+        });
+        CAPTURED_TELEMETRY.with(|captured| captured.borrow_mut().clear());
+        record();
+        CAPTURED_TELEMETRY
+            .with(|captured| String::from_utf8(captured.borrow().clone()))
+            .expect("captured telemetry is UTF-8")
     }
 
     fn capture_internal_diagnostic(session_id: Uuid, diagnostic: InternalDiagnostic) -> String {

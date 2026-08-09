@@ -225,12 +225,7 @@ async fn web_search_rejects_executor_debug_before_injected_transport() {
 /// checked before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_fixed_credential_debug_before_injected_transport() {
-    let output = CapturedTelemetry::default();
-    let subscriber = tracing_subscriber::fmt()
-        .compact()
-        .with_writer(output.clone())
-        .finish();
-    let _subscriber = tracing::subscriber::set_default(subscriber);
+    capture_telemetry_for_this_thread();
     let searches = Arc::new(AtomicUsize::new(0));
     let credentials = StaticCredentials {
         value: CREDENTIAL_DEBUG_COLLISION_KEY,
@@ -255,19 +250,14 @@ async fn web_search_rejects_fixed_credential_debug_before_injected_transport() {
 
     assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
     assert_eq!(searches.load(Ordering::Relaxed), 0);
-    assert!(output.text().is_empty());
+    assert!(captured_telemetry().is_empty());
 }
 
 /// INV-035: the result's fixed redacted Debug representation is checked
 /// before an injected transport can emit it as telemetry.
 #[tokio::test]
 async fn web_search_rejects_fixed_result_debug_before_injected_transport() {
-    let output = CapturedTelemetry::default();
-    let subscriber = tracing_subscriber::fmt()
-        .compact()
-        .with_writer(output.clone())
-        .finish();
-    let _subscriber = tracing::subscriber::set_default(subscriber);
+    capture_telemetry_for_this_thread();
     let searches = Arc::new(AtomicUsize::new(0));
     let credentials = StaticCredentials {
         value: RESULT_DEBUG_COLLISION_KEY,
@@ -288,19 +278,14 @@ async fn web_search_rejects_fixed_result_debug_before_injected_transport() {
 
     assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
     assert_eq!(searches.load(Ordering::Relaxed), 0);
-    assert!(!output.text().contains(RESULT_DEBUG_COLLISION_KEY));
+    assert!(!captured_telemetry().contains(RESULT_DEBUG_COLLISION_KEY));
 }
 
 /// INV-035: diagnostic framing that combines the request and credential
 /// Debug values is checked before the injected transport boundary.
 #[tokio::test]
 async fn web_search_rejects_combined_request_credential_debug_before_transport() {
-    let output = CapturedTelemetry::default();
-    let subscriber = tracing_subscriber::fmt()
-        .compact()
-        .with_writer(output.clone())
-        .finish();
-    let _subscriber = tracing::subscriber::set_default(subscriber);
+    capture_telemetry_for_this_thread();
     let searches = Arc::new(AtomicUsize::new(0));
     let credentials = StaticCredentials {
         value: REQUEST_CREDENTIAL_DEBUG_COLLISION_KEY,
@@ -321,7 +306,7 @@ async fn web_search_rejects_combined_request_credential_debug_before_transport()
 
     assert!(matches!(evidence, ToolExecutorEvidence::KnownFailed { .. }));
     assert_eq!(searches.load(Ordering::Relaxed), 0);
-    assert!(output.text().is_empty());
+    assert!(captured_telemetry().is_empty());
 }
 
 /// A field removed from the credential-opaque response Debug representation
