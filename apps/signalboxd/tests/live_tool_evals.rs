@@ -55,7 +55,8 @@ use signalbox_model_runtime::{
 };
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiPreparedRequest, OpenAiRuntime};
 use signalbox_persistence::{
-    SessionCredentialPin, SessionModelCredential, local_test_connection_options, migrate,
+    ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
+    local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
     process_read::{
         ProcessFailedModelCallDisposition, ProcessProviderModelCallFailureCause,
@@ -134,9 +135,12 @@ const MAX_NATURAL_MODEL_CALLS: i64 = MAX_NATURAL_TOOL_EXCHANGES as i64 + 1;
 const LIVE_EVAL_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 const GIT_AUTHOR_NAME: &str = "Signalbox Tool Eval";
 const GIT_AUTHOR_EMAIL: &str = "signalbox-tool-eval@example.test";
+const SYNTHETIC_OTHER_GIT_AUTHOR_NAME: &str = "Synthetic Other Author";
+const SYNTHETIC_OTHER_GIT_AUTHOR_EMAIL: &str = "other-author@example.test";
 const GIT_SEED_PATH: &str = "seed.txt";
 const GIT_STAGE_PATH: &str = "stage-me.txt";
 const GIT_STAGE_CONTENT: &str = "stage me\n";
+const GIT_WRONG_STAGE_CONTENT: &str = "wrong staged bytes\n";
 const GIT_COMMIT_PATH: &str = "commit-me.txt";
 const GIT_COMMIT_CONTENT: &str = "commit me\n";
 const GIT_NATURAL_PATH: &str = "eval.txt";
@@ -179,7 +183,9 @@ const WEB_QUERY: &str = "Signalbox tool evaluation";
 const WEB_FETCH_BODY: &str = "Signalbox tool evaluation fixture";
 const WEB_SEARCH_TITLE: &str = "Synthetic Signalbox result";
 const WEB_SEARCH_SNIPPET: &str = "Synthetic result for model-in-the-loop evaluation.";
-const EXPECTED_OPENAI_CREDENTIAL_REFERENCE: &str = "openai-tool-eval";
+const OPENAI_MODEL_FAMILY: &str = "openai";
+const OPENAI_FALLBACK_CREDENTIAL_REFERENCE: &str = "openai-tool-eval";
+const EXPECTED_OPENAI_CREDENTIAL_REFERENCE: &str = "openai-primary";
 const EXPECTED_WEB_CREDENTIAL_REFERENCE: &str = "brave-search-primary";
 const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
 const ARBITRARY_EVAL_SELECTION_ID: u128 = 0x9101;
@@ -317,8 +323,9 @@ async fn run_case(
         PostgresModelCallRepository::new(
             database.pool.clone(),
             database.targets.clone(),
-            ModelCallCredentialReference::new("openai-tool-eval"),
-        ),
+            ModelCallCredentialReference::new(OPENAI_FALLBACK_CREDENTIAL_REFERENCE),
+        )
+        .with_session_credentials(database.credential_families.clone()),
         InProcessAttemptDispatchGate::default(),
         provider,
     )
@@ -915,6 +922,10 @@ fn git_forced_case_passed(
             result["commit"] == head.id().to_string()
                 && result["state_cleaned"] == true
                 && head.message().ok() == arguments["message"].as_str()
+                && head.author().name().ok() == Some(GIT_AUTHOR_NAME)
+                && head.author().email().ok() == Some(GIT_AUTHOR_EMAIL)
+                && head.committer().name().ok() == Some(GIT_AUTHOR_NAME)
+                && head.committer().email().ok() == Some(GIT_AUTHOR_EMAIL)
                 && commit_adds_exact_fixture(
                     &repository,
                     &head,
@@ -959,6 +970,12 @@ fn git_forced_case_passed(
                         repository.status_file(Path::new(path)).ok() == Some(Status::INDEX_NEW)
                     })
                 })
+                && staged_blob_matches_fixture(
+                    root,
+                    &repository,
+                    GIT_STAGE_PATH,
+                    GIT_STAGE_CONTENT.as_bytes(),
+                )?
                 && repository.status_file(Path::new(GIT_COMMIT_PATH)).ok() == Some(Status::WT_NEW)
                 && repository.status_file(Path::new(GIT_NATURAL_PATH)).ok() == Some(Status::WT_NEW)
         }
@@ -1062,6 +1079,20 @@ fn git_diff_fixture_unchanged(root: &Path, repository: &Repository) -> EvalResul
             && fs::read(root.join(GIT_COMMIT_PATH))? == GIT_COMMIT_CONTENT.as_bytes()
             && fs::read(root.join(GIT_NATURAL_PATH))? == GIT_NATURAL_CONTENT.as_bytes(),
     )
+}
+
+fn staged_blob_matches_fixture(
+    root: &Path,
+    repository: &Repository,
+    path: &str,
+    expected: &[u8],
+) -> EvalResult<bool> {
+    let index = repository.index()?;
+    let Some(entry) = index.get_path(Path::new(path), 0) else {
+        return Ok(false);
+    };
+    let blob = repository.find_blob(entry.id)?;
+    Ok(blob.content() == expected && fs::read(root.join(path))? == expected)
 }
 
 fn workspace_forced_case_passed(
@@ -1330,12 +1361,21 @@ fn stage_path(root: &Path, path: &str) -> EvalResult {
 }
 
 fn commit_staged_paths(root: &Path, message: &str) -> EvalResult {
+    commit_staged_paths_with_identity(root, message, GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL)
+}
+
+fn commit_staged_paths_with_identity(
+    root: &Path,
+    message: &str,
+    author_name: &str,
+    author_email: &str,
+) -> EvalResult {
     let repository = Repository::open(root)?;
     let mut index = repository.index()?;
     let tree_id = index.write_tree()?;
     let tree = repository.find_tree(tree_id)?;
     let parent = repository.head()?.peel_to_commit()?;
-    let signature = Signature::now(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL)?;
+    let signature = Signature::now(author_name, author_email)?;
     repository.commit(
         Some("HEAD"),
         &signature,
@@ -2111,6 +2151,7 @@ struct EvalDatabase {
     pool: PgPool,
     selection: DirectModelSelection,
     targets: ModelTargetCatalog,
+    credential_families: ModelCredentialFamilyCatalog,
     runtime_models: RuntimeModelCatalog,
 }
 
@@ -2142,6 +2183,12 @@ impl EvalDatabase {
             selection, target,
         )])
         .map_err(|_| io::Error::other("the eval model target is duplicated"))?;
+        let credential_families = ModelCredentialFamilyCatalog::try_new([(
+            target,
+            Arc::<str>::from(OPENAI_MODEL_FAMILY),
+            None,
+        )])
+        .map_err(|_| io::Error::other("the eval credential family is duplicated"))?;
         let runtime_models =
             RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
                 target,
@@ -2154,6 +2201,7 @@ impl EvalDatabase {
             pool,
             selection,
             targets,
+            credential_families,
             runtime_models,
         })
     }
@@ -2298,8 +2346,8 @@ impl ExecApprovalState {
 
 fn eval_session_credential_pin() -> SessionCredentialPin {
     SessionCredentialPin::try_new(vec![SessionModelCredential::new(
-        "openai",
-        "openai-primary",
+        OPENAI_MODEL_FAMILY,
+        EXPECTED_OPENAI_CREDENTIAL_REFERENCE,
     )])
     .expect("the eval credential pin is valid")
 }
@@ -3907,6 +3955,50 @@ fn forced_git_stage_verifier_rejects_success_without_the_postcondition() -> Eval
 }
 
 #[test]
+fn forced_git_stage_verifier_accepts_the_exact_staged_blob() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STAGE_NAME)
+        .expect("the Git stage fixture exists");
+    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    let result = serde_json::json!({
+        "staged_paths": 1,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_stage_verifier_rejects_the_wrong_staged_blob() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STAGE_NAME)
+        .expect("the Git stage fixture exists");
+    fs::write(
+        suite.workspace.path().join(GIT_STAGE_PATH),
+        GIT_WRONG_STAGE_CONTENT,
+    )?;
+    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    fs::write(
+        suite.workspace.path().join(GIT_STAGE_PATH),
+        GIT_STAGE_CONTENT,
+    )?;
+    let result = serde_json::json!({
+        "staged_paths": 1,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_stage_verifier_rejects_an_extra_staged_fixture() -> EvalResult {
     let suite = FamilySuite::git()?;
     let case = GIT_CASES
@@ -3967,6 +4059,40 @@ fn forced_git_commit_verifier_rejects_the_wrong_fixture_tree() -> EvalResult {
         .expect("the Git commit fixture has a message");
     stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
     commit_staged_paths(suite.workspace.path(), message)?;
+    let head = Repository::open(suite.workspace.path())?
+        .head()?
+        .peel_to_commit()?
+        .id()
+        .to_string();
+    let result = serde_json::json!({
+        "commit": head,
+        "state_cleaned": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_commit_verifier_rejects_the_wrong_identity() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_CREATE_COMMIT_NAME)
+        .expect("the Git commit fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let message = arguments["message"]
+        .as_str()
+        .expect("the Git commit fixture has a message");
+    stage_path(suite.workspace.path(), GIT_COMMIT_PATH)?;
+    commit_staged_paths_with_identity(
+        suite.workspace.path(),
+        message,
+        SYNTHETIC_OTHER_GIT_AUTHOR_NAME,
+        SYNTHETIC_OTHER_GIT_AUTHOR_EMAIL,
+    )?;
     let head = Repository::open(suite.workspace.path())?
         .head()?
         .peel_to_commit()?
