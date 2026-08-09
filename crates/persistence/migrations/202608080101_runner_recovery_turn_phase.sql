@@ -581,6 +581,12 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_turn_runner_recovery_complete();
 
+CREATE CONSTRAINT TRIGGER tool_attempt_rechecks_turn_runner_recovery
+AFTER INSERT OR UPDATE OR DELETE ON tool_attempt
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_turn_runner_recovery_complete();
+
 CREATE FUNCTION recheck_session_turn_runner_recovery()
 RETURNS trigger
 LANGUAGE plpgsql
