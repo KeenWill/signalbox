@@ -104,7 +104,9 @@ one provider must be able to say so.
 The complete set of unconditional process settings, including the two
 integration credentials of which there is exactly one each, is below. Because
 the model-provider paths moved into the profile catalog, this list is the
-complete set of process settings the daemon reads.
+complete set of deployment values the daemon reads from the environment; `PATH`,
+`RUST_LOG`, and the telemetry variables are read for their own purposes and are
+stated where each is owned.
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -181,11 +183,10 @@ not survive to the log: `run_hub` collapses every catalog-parse and
 adapter-construction variant (and likewise connection and migration errors) into
 a generic `Infrastructure` class carrying only its phase, so an operator cannot
 distinguish an unreadable catalog from an unknown field, bad version, or invalid
-limit (see Open edges). The six unconditional deployment paths, and the
-conditional provider key-file path when a mapping selects that direct HTTP
-adapter, are accepted without I/O at environment parsing time; both catalogs and
-every template prompt file are read during startup. No credential file is read
-at startup (see credential lifecycle below).
+limit (see Open edges). The six unconditional deployment paths are accepted
+without I/O at environment parsing time; both catalogs and every template prompt
+file are read during startup. No credential file is read at startup (see
+credential lifecycle below).
 
 The deployed daemon supplies no Anthropic or OpenAI endpoint or timeout knob; it
 constructs each adapter with its defaults. The
@@ -468,12 +469,13 @@ fail-closed:
   once, and nothing here needs that. The catalog is a deployment-owned file with
   no in-place upgrade path, no installed base this build is compatible with, and
   a single operator who edits it; carrying a second decoder would preserve a
-  shape no deployment is entitled to keep working. The rejection is typed and
-  names the missing field, so the edit an operator must make is the error
-  message, and `config/signalboxd.example.toml` is the worked example: this
-  branch installs the grammar in the parser and updates that file in the same
-  change, so it declares `adapter` and `delivery` on every profile and maps each
-  family through a `[[credential_pools]]` entry.
+  shape no deployment is entitled to keep working. The rejection is typed —
+  `UnknownField` for a retired key, `InvalidField` for a missing or mistyped one
+  — but neither variant carries the offending field's name, so the operator's
+  guide to the edit is `config/signalboxd.example.toml` rather than the error:
+  this branch installs the grammar in the parser and updates that file in the
+  same change, so it declares `adapter` and `delivery` on every profile and maps
+  each family through a `[[credential_pools]]` entry.
 - At least one `[[models]]` entry is required: an absent, mistyped, or empty
   models array is rejected (`MissingModels`), so a document containing only
   `version = 1` fails startup.
@@ -532,18 +534,18 @@ and `context_window_tokens`. Every serving record states its family, and that
 family must name one declared `[[adapter_mappings]]` entry; the mapping, not the
 selectable record naming the target, supplies the serving record's adapter and
 credential pool, so nothing is inferred from the pointing model. At preparation
-the enabled call uses ordinary selection against that family's immutable pool
-policy from the session's credential history and pins the selected member on the
-call exactly like any other resolved target. A serving record omitting
-`model_family`, or naming an unmapped one, is a typed startup failure. Startup
-rejects a missing, selectable, cross-adapter, or otherwise conflicting alternate
-target. An enabled call uses that serving record's provider identity and
-output-token request limit, while the client's durable selection remains
-unchanged. Capability values are validated against the selected adapter's
-explicit mapping table during startup, so an adapter cannot silently drop a
-configured setting. Input guarding, output reservation, and post-response usage
-enforcement use the effective serving record's limits for that enabled call
-rather than the selectable source record's limits.
+the enabled call resolves that family's pinned reference from the session's
+credential history and pins it on the call exactly like any other resolved
+target; as everywhere else in this build, preparation consults no pool. A
+serving record omitting `model_family`, or naming an unmapped one, is a typed
+startup failure. Startup rejects a missing, selectable, cross-adapter, or
+otherwise conflicting alternate target. An enabled call uses that serving
+record's provider identity and output-token request limit, while the client's
+durable selection remains unchanged. Capability values are validated against the
+selected adapter's explicit mapping table during startup, so an adapter cannot
+silently drop a configured setting. Input guarding, output reservation, and
+post-response usage enforcement use the effective serving record's limits for
+that enabled call rather than the selectable source record's limits.
 
 The conversation-import bound was verified against PR #401
 (`agent/import-chunks-protocol`). The optional `[conversation_import]` table has
@@ -895,8 +897,9 @@ daemon establishes that where it can and requires it of the deployment where it
 cannot; this contract says which for every delivery, and there is no third case.
 
 - `ambient` — *the question does not arise.* At most one `ambient` profile
-  exists per CLI adapter, so no pool can hold two of them, and mixing `ambient`
-  with `codex_home` for one adapter is rejected because static configuration
+  exists per CLI adapter, so no pool can hold two of them, and this build admits
+  no `codex_home` profile for one to be mixed with. The child that delivers
+  `codex_home` owes the rule that keeps them apart, because static configuration
   cannot prove that the ambient login store and the named directory differ.
 - `file` — *required.* The daemon rejects only equal lexically normalized paths.
   An ordinary copy of the key file is admissible and indistinguishable from a
@@ -945,10 +948,10 @@ CLI adapter process environment exposes only one such authentication context, a
 document may declare at most one `ambient` profile for `claude_cli` and at most
 one for `codex_cli`, regardless of which pools contain it. Giving that same
 login two profile names would not make two credentials and could not authorize a
-successor call. A document that declares an `ambient` `codex_cli` profile may
-not also declare a `codex_home` profile: static configuration cannot prove that
-the ambient login store and the explicitly named directory differ, so admitting
-both could give one physical login two availability and capacity identities.
+successor call. No pairwise rule against declaring `codex_home` alongside it is
+needed here, because every `codex_home` profile is already refused on its own;
+[undelivered deliveries](#committed-unimplemented-functionality--undelivered-deliveries)
+states the separation that delivery will need.
 
 #### The `file` delivery
 
@@ -1038,6 +1041,14 @@ CLI owns, reads, and writes. That path is likewise 1 through 4,096 UTF-8 bytes
 and NUL-free, and malformed static input fails startup. Its only optional field
 is `max_concurrent_invocations`, a TOML integer from 1 through 4,294,967,295;
 zero, a negative or larger integer, and every non-integer value are rejected.
+
+The child that admits this delivery owes one separation rule the present refusal
+makes unnecessary: a document declaring an `ambient` `codex_cli` profile may not
+also declare a `codex_home` profile, because static configuration cannot prove
+that the ambient login store and the explicitly named directory differ, and
+admitting both would give one physical login two availability and capacity
+identities.
+
 Supplying the directory is necessary but not sufficient: the invocation must
 also force the CLI's file credential backend and disable its keyring, automatic,
 and every other external store, exactly as the OAuth delivery already does.
