@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Fixture construction for provider-adapter executor tests. Enabled by those
+# crates' dev-dependencies only, so it never compiles into a production build.
+test-support = []
+
 [dependencies]
 signalbox-domain = { path = "../domain" }
 tokio = { version = "1.53.0", default-features = false, features = [

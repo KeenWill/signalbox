@@ -306,78 +306,8 @@ impl PostgresReviewOrchestrationStore {
         let Some(immutable) = self.load_attempt(attempt).await? else {
             return Ok(None);
         };
-        let Some(import) = self.load_import(attempt).await? else {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingImport));
-        };
-        if matches!(import, ReviewImportOutcome::Incomplete { .. }) {
-            return Ok(Some(ReviewOrchestrationCurrentStage::ImportIncomplete));
-        }
-        let claims = self.load_concern_claims(attempt).await?;
-        if claims.len() < immutable.concerns().len() {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingConcerns));
-        }
-        if claims
-            .iter()
-            .any(|claim| !matches!(claim.outcome(), ReviewConcernOutcome::Succeeded(_)))
-        {
-            return Ok(Some(ReviewOrchestrationCurrentStage::FanoutIncomplete));
-        }
-        let Some(plan) = self.load_judgment_plan(attempt).await? else {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingJudgment));
-        };
-        let effects = self.load_applied_judgment_effects(attempt).await?;
-        if effects.len() < plan.members().len() {
-            let interrupted: bool = sqlx::query_scalar(
-                "SELECT EXISTS (
-                    SELECT 1 FROM review_orchestration_command
-                     WHERE attempt_id = $1
-                       AND result_stage = 'judgment_incomplete'
-                       AND judgment_effect_count = $2
-                    UNION ALL
-                    SELECT 1 FROM review_orchestration_command_recovery
-                     WHERE attempt_id = $1
-                       AND result_stage = 'judgment_incomplete'
-                       AND judgment_effect_count = $2
-                )",
-            )
-            .bind(attempt.as_uuid())
-            .bind(count_i64(effects.len())?)
-            .fetch_one(&self.pool)
-            .await?;
-            return Ok(Some(if interrupted {
-                ReviewOrchestrationCurrentStage::JudgmentIncomplete
-            } else {
-                ReviewOrchestrationCurrentStage::AwaitingJudgmentEffects
-            }));
-        }
-        let Some(_) = load_finding_inventory(self, attempt, "repair").await? else {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingRepair));
-        };
-        let Some(repairs) = load_repairs(self, attempt).await? else {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingRepair));
-        };
-        if repairs
-            .iter()
-            .any(|outcome| matches!(outcome, ReviewRepairMemberOutcome::Blocked(_)))
-        {
-            return Ok(Some(ReviewOrchestrationCurrentStage::RepairIncomplete));
-        }
-        let Some(_) = load_finding_inventory(self, attempt, "publication").await? else {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingPublication));
-        };
-        let Some(publications) = load_publications(self, attempt).await? else {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingPublication));
-        };
-        Ok(Some(
-            if publications
-                .iter()
-                .all(|outcome| matches!(outcome, ReviewPublicationMemberOutcome::Published(_)))
-            {
-                ReviewOrchestrationCurrentStage::Complete
-            } else {
-                ReviewOrchestrationCurrentStage::PublicationIncomplete
-            },
-        ))
+        let mut facts = AttemptFacts::new(self, attempt, immutable);
+        Ok(Some(facts.current_stage().await?))
     }
 
     /// Loads every daemon adapter fact from one coherently locked database view.
@@ -444,19 +374,249 @@ impl PostgresReviewOrchestrationStore {
         let Some(immutable) = self.load_attempt(attempt).await? else {
             return Ok(None);
         };
-        let current_stage = self
-            .current_stage(attempt)
+        // The stage ladder consults almost every fact the snapshot carries, so
+        // one memo serves both: the ladder decides from it, and the remaining
+        // fields are then forced through the same memo rather than reloaded.
+        // Deriving the stage from the very facts the snapshot reports also
+        // makes the projection internally consistent by construction.
+        let mut facts = AttemptFacts::new(self, attempt, immutable);
+        let current_stage = facts.current_stage().await?;
+        Ok(Some(facts.into_snapshot_facts(current_stage).await?))
+    }
+}
+
+/// Every durable fact one attempt's stage and snapshot consult, loaded at most
+/// once each.
+///
+/// The stage ladder short-circuits at the earliest stage it can prove, so it
+/// reads a prefix of these facts; the snapshot needs a fixed set of them
+/// whatever the stage turns out to be. Holding both behind one memo keeps the
+/// ladder's laziness while charging the snapshot for each loader exactly once.
+struct AttemptFacts<'store> {
+    store: &'store PostgresReviewOrchestrationStore,
+    attempt: ReviewOrchestrationAttemptId,
+    immutable: ReviewOrchestrationAttempt,
+    import: Option<Option<ReviewImportOutcome>>,
+    concern_claims: Option<Vec<ReviewConcernClaim>>,
+    judgment_plan: Option<Option<ReviewJudgmentPlan>>,
+    applied_judgment_effects: Option<Vec<ReviewJudgmentEffectId>>,
+    repair_inventory_sealed: Option<bool>,
+    repair_outcomes: Option<Option<Vec<ReviewRepairMemberOutcome>>>,
+    publication_inventory_sealed: Option<bool>,
+    publication_outcomes: Option<Option<Vec<ReviewPublicationMemberOutcome>>>,
+}
+
+impl<'store> AttemptFacts<'store> {
+    const fn new(
+        store: &'store PostgresReviewOrchestrationStore,
+        attempt: ReviewOrchestrationAttemptId,
+        immutable: ReviewOrchestrationAttempt,
+    ) -> Self {
+        Self {
+            store,
+            attempt,
+            immutable,
+            import: None,
+            concern_claims: None,
+            judgment_plan: None,
+            applied_judgment_effects: None,
+            repair_inventory_sealed: None,
+            repair_outcomes: None,
+            publication_inventory_sealed: None,
+            publication_outcomes: None,
+        }
+    }
+
+    /// Derives the deterministic daemon-visible stage, reading only the facts
+    /// each decision needs to reach the next one.
+    async fn current_stage(
+        &mut self,
+    ) -> Result<ReviewOrchestrationCurrentStage, ReviewOrchestrationStoreError> {
+        let Some(import) = self.import().await? else {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingImport);
+        };
+        if matches!(import, ReviewImportOutcome::Incomplete { .. }) {
+            return Ok(ReviewOrchestrationCurrentStage::ImportIncomplete);
+        }
+        let expected_concerns = self.immutable.concerns().len();
+        if self.concern_claims().await?.len() < expected_concerns {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingConcerns);
+        }
+        if self
+            .concern_claims()
             .await?
-            .ok_or_else(|| corruption("snapshot attempt disappeared"))?;
-        Ok(Some(ReviewOrchestrationSnapshotFacts {
-            attempt: immutable,
+            .iter()
+            .any(|claim| !matches!(claim.outcome(), ReviewConcernOutcome::Succeeded(_)))
+        {
+            return Ok(ReviewOrchestrationCurrentStage::FanoutIncomplete);
+        }
+        let Some(planned_members) = self.judgment_plan().await?.map(|plan| plan.members().len())
+        else {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingJudgment);
+        };
+        let applied = self.applied_judgment_effects().await?.len();
+        if applied < planned_members {
+            return Ok(if self.judgment_was_interrupted(applied).await? {
+                ReviewOrchestrationCurrentStage::JudgmentIncomplete
+            } else {
+                ReviewOrchestrationCurrentStage::AwaitingJudgmentEffects
+            });
+        }
+        if !self.repair_inventory_sealed().await? {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingRepair);
+        }
+        let Some(repairs) = self.repair_outcomes().await? else {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingRepair);
+        };
+        if repairs
+            .iter()
+            .any(|outcome| matches!(outcome, ReviewRepairMemberOutcome::Blocked(_)))
+        {
+            return Ok(ReviewOrchestrationCurrentStage::RepairIncomplete);
+        }
+        if !self.publication_inventory_sealed().await? {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingPublication);
+        }
+        let Some(publications) = self.publication_outcomes().await? else {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingPublication);
+        };
+        Ok(
+            if publications
+                .iter()
+                .all(|outcome| matches!(outcome, ReviewPublicationMemberOutcome::Published(_)))
+            {
+                ReviewOrchestrationCurrentStage::Complete
+            } else {
+                ReviewOrchestrationCurrentStage::PublicationIncomplete
+            },
+        )
+    }
+
+    /// Forces the facts the snapshot reports that the stage ladder may have
+    /// short-circuited before reaching, then assembles the projection.
+    async fn into_snapshot_facts(
+        mut self,
+        current_stage: ReviewOrchestrationCurrentStage,
+    ) -> Result<ReviewOrchestrationSnapshotFacts, ReviewOrchestrationStoreError> {
+        self.concern_claims().await?;
+        self.judgment_plan().await?;
+        self.applied_judgment_effects().await?;
+        self.repair_outcomes().await?;
+        self.publication_outcomes().await?;
+        Ok(ReviewOrchestrationSnapshotFacts {
+            attempt: self.immutable,
             current_stage,
-            concern_claims: self.load_concern_claims(attempt).await?,
-            judgment_plan: self.load_judgment_plan(attempt).await?,
-            applied_judgment_effects: self.load_applied_judgment_effects(attempt).await?,
-            repair_outcomes: self.load_repair_outcomes(attempt).await?,
-            publication_outcomes: self.load_publication_outcomes(attempt).await?,
-        }))
+            concern_claims: self.concern_claims.unwrap_or_default(),
+            judgment_plan: self.judgment_plan.flatten(),
+            applied_judgment_effects: self.applied_judgment_effects.unwrap_or_default(),
+            repair_outcomes: self.repair_outcomes.flatten(),
+            publication_outcomes: self.publication_outcomes.flatten(),
+        })
+    }
+
+    async fn import(
+        &mut self,
+    ) -> Result<Option<&ReviewImportOutcome>, ReviewOrchestrationStoreError> {
+        if self.import.is_none() {
+            self.import = Some(self.store.load_import(self.attempt).await?);
+        }
+        Ok(self.import.as_ref().and_then(Option::as_ref))
+    }
+
+    async fn concern_claims(
+        &mut self,
+    ) -> Result<&[ReviewConcernClaim], ReviewOrchestrationStoreError> {
+        if self.concern_claims.is_none() {
+            self.concern_claims = Some(self.store.load_concern_claims(self.attempt).await?);
+        }
+        Ok(self.concern_claims.as_deref().unwrap_or_default())
+    }
+
+    async fn judgment_plan(
+        &mut self,
+    ) -> Result<Option<&ReviewJudgmentPlan>, ReviewOrchestrationStoreError> {
+        if self.judgment_plan.is_none() {
+            self.judgment_plan = Some(load_judgment_plan_impl(self.store, self.attempt).await?);
+        }
+        Ok(self.judgment_plan.as_ref().and_then(Option::as_ref))
+    }
+
+    async fn applied_judgment_effects(
+        &mut self,
+    ) -> Result<&[ReviewJudgmentEffectId], ReviewOrchestrationStoreError> {
+        if self.applied_judgment_effects.is_none() {
+            self.applied_judgment_effects =
+                Some(load_applied_effects_impl(self.store, self.attempt).await?);
+        }
+        Ok(self.applied_judgment_effects.as_deref().unwrap_or_default())
+    }
+
+    async fn repair_inventory_sealed(&mut self) -> Result<bool, ReviewOrchestrationStoreError> {
+        if self.repair_inventory_sealed.is_none() {
+            self.repair_inventory_sealed = Some(
+                load_finding_inventory(self.store, self.attempt, "repair")
+                    .await?
+                    .is_some(),
+            );
+        }
+        Ok(self.repair_inventory_sealed.unwrap_or_default())
+    }
+
+    async fn repair_outcomes(
+        &mut self,
+    ) -> Result<Option<&[ReviewRepairMemberOutcome]>, ReviewOrchestrationStoreError> {
+        if self.repair_outcomes.is_none() {
+            self.repair_outcomes = Some(load_repairs(self.store, self.attempt).await?);
+        }
+        Ok(self.repair_outcomes.as_ref().and_then(Option::as_deref))
+    }
+
+    async fn publication_inventory_sealed(
+        &mut self,
+    ) -> Result<bool, ReviewOrchestrationStoreError> {
+        if self.publication_inventory_sealed.is_none() {
+            self.publication_inventory_sealed = Some(
+                load_finding_inventory(self.store, self.attempt, "publication")
+                    .await?
+                    .is_some(),
+            );
+        }
+        Ok(self.publication_inventory_sealed.unwrap_or_default())
+    }
+
+    async fn publication_outcomes(
+        &mut self,
+    ) -> Result<Option<&[ReviewPublicationMemberOutcome]>, ReviewOrchestrationStoreError> {
+        if self.publication_outcomes.is_none() {
+            self.publication_outcomes = Some(load_publications(self.store, self.attempt).await?);
+        }
+        Ok(self
+            .publication_outcomes
+            .as_ref()
+            .and_then(Option::as_deref))
+    }
+
+    async fn judgment_was_interrupted(
+        &self,
+        applied: usize,
+    ) -> Result<bool, ReviewOrchestrationStoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM review_orchestration_command
+                 WHERE attempt_id = $1
+                   AND result_stage = 'judgment_incomplete'
+                   AND judgment_effect_count = $2
+                UNION ALL
+                SELECT 1 FROM review_orchestration_command_recovery
+                 WHERE attempt_id = $1
+                   AND result_stage = 'judgment_incomplete'
+                   AND judgment_effect_count = $2
+            )",
+        )
+        .bind(self.attempt.as_uuid())
+        .bind(count_i64(applied)?)
+        .fetch_one(&self.store.pool)
+        .await?)
     }
 }
 
@@ -1201,16 +1361,20 @@ impl PostgresReviewOrchestrationStore {
         .bind(claim_ordinal)
         .fetch_all(&self.pool)
         .await?;
-        let mut findings = Vec::with_capacity(rows.len());
-        for row in rows {
-            let current = self
-                .workflow
-                .load_finding(ReviewFindingId::from_uuid(row.try_get("finding_id")?))
-                .await?
-                .ok_or_else(|| corruption("concern finding is missing"))?;
-            findings.push(ReviewFinding::new(current.proposal().clone()));
-        }
-        Ok(findings)
+        let identities = rows
+            .iter()
+            .map(|row| Ok(ReviewFindingId::from_uuid(row.try_get("finding_id")?)))
+            .collect::<Result<Vec<_>, ReviewOrchestrationStoreError>>()?;
+        let loaded = self.workflow.load_findings(&identities).await?;
+        identities
+            .iter()
+            .map(|identity| {
+                loaded
+                    .get(identity)
+                    .map(|finding| ReviewFinding::new(finding.proposal().clone()))
+                    .ok_or_else(|| corruption("concern finding is missing"))
+            })
+            .collect()
     }
 
     async fn verify_claim_evidence(
@@ -1224,13 +1388,17 @@ impl PostgresReviewOrchestrationStore {
                     "concern success differs from canonical pass evidence",
                 ));
             }
+            let identities = success
+                .findings()
+                .iter()
+                .map(|finding| finding.proposal().reference().finding())
+                .collect::<Vec<_>>();
+            let canonical = self.workflow.load_findings(&identities).await?;
             for finding in success.findings() {
-                let canonical = self
-                    .workflow
-                    .load_finding(finding.proposal().reference().finding())
-                    .await?
+                let loaded = canonical
+                    .get(&finding.proposal().reference().finding())
                     .ok_or_else(|| corruption("concern success finding is missing"))?;
-                if canonical != *finding {
+                if loaded != finding {
                     return Err(corruption("concern success differs from canonical finding"));
                 }
             }
@@ -1716,6 +1884,16 @@ async fn load_repairs(
     if rows.len() != inventory.len() {
         return Err(corruption("repair outcomes do not cover their inventory"));
     }
+    // Every fixed member reads its own event out of a complete finding, so the
+    // whole set is reconstructed once here rather than one target graph per
+    // member.
+    let mut fixed = Vec::new();
+    for row in &rows {
+        if row.try_get::<String, _>("outcome_kind")? == "fixed" {
+            fixed.push(ReviewFindingId::from_uuid(row.try_get("finding_id")?));
+        }
+    }
+    let repaired = store.workflow.load_findings(&fixed).await?;
     let mut outcomes = Vec::with_capacity(rows.len());
     for (row, finding_ref) in rows.iter().zip(inventory) {
         if ReviewFindingId::from_uuid(row.try_get("finding_id")?) != finding_ref.finding() {
@@ -1724,10 +1902,8 @@ async fn load_repairs(
         let kind: String = row.try_get("outcome_kind")?;
         outcomes.push(match kind.as_str() {
             "fixed" => {
-                let finding = store
-                    .workflow
-                    .load_finding(finding_ref.finding())
-                    .await?
+                let finding = repaired
+                    .get(&finding_ref.finding())
                     .ok_or_else(|| corruption("fixed finding is missing"))?;
                 let ordinal = usize::try_from(row.try_get::<i64, _>("event_ordinal")?)
                     .ok()
