@@ -73,6 +73,7 @@ use signalbox_persistence::{
 use signalbox_tools_git::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
     GIT_LOG_NAME, GIT_STAGE_NAME, GIT_STATUS_NAME, GitIdentity, LocalGitExecutor, LocalGitTools,
+    MAX_DIFF_BYTES, MAX_STATUS_ENTRIES,
 };
 use signalbox_tools_web::{
     WEB_FETCH_NAME, WEB_SEARCH_NAME, WebFetchBodyCompleteness, WebFetchEgressPolicy,
@@ -139,12 +140,10 @@ const GIT_COMMIT_PATH: &str = "commit-me.txt";
 const GIT_COMMIT_CONTENT: &str = "commit me\n";
 const GIT_DIFF_OVERFLOW_PATH: &str = "zz-diff-overflow.txt";
 const GIT_DIFF_OVERFLOW_BYTE: char = 'x';
-const EXPECTED_GIT_DIFF_MAX_BYTES: usize = 128 * 1024;
-const GIT_DIFF_OVERFLOW_CONTENT_BYTES: usize = EXPECTED_GIT_DIFF_MAX_BYTES + 1;
+const GIT_DIFF_OVERFLOW_CONTENT_BYTES: usize = MAX_DIFF_BYTES + 1;
 const GIT_STATUS_OVERFLOW_DIRECTORY: &str = "status-overflow";
 const GIT_STATUS_OVERFLOW_CONTENT: &str = "status overflow fixture\n";
-const EXPECTED_GIT_STATUS_MAX_ENTRIES: usize = 128;
-const GIT_STATUS_OVERFLOW_ENTRY_COUNT: usize = EXPECTED_GIT_STATUS_MAX_ENTRIES - 2;
+const GIT_STATUS_OVERFLOW_ENTRY_COUNT: usize = MAX_STATUS_ENTRIES - 2;
 const GIT_NATURAL_PATH: &str = "eval.txt";
 const GIT_NATURAL_CONTENT: &str = "natural eval\n";
 const GIT_NATURAL_STAGED_PATH_COUNT: usize = 1;
@@ -1877,7 +1876,7 @@ fn expected_git_worktree_patch(root: &Path) -> EvalResult<String> {
 
 fn expected_bounded_git_worktree_patch(root: &Path) -> EvalResult<String> {
     expected_git_worktree_patch(root)?
-        .get(..EXPECTED_GIT_DIFF_MAX_BYTES)
+        .get(..MAX_DIFF_BYTES)
         .map(str::to_owned)
         .ok_or_else(|| io::Error::other("the Git diff fixture does not exceed its bound").into())
 }
@@ -2007,7 +2006,7 @@ fn git_status_entries_match(entries: &serde_json::Value) -> bool {
         return false;
     };
     let expected_paths = expected_git_status_paths();
-    entries.len() == EXPECTED_GIT_STATUS_MAX_ENTRIES
+    entries.len() == MAX_STATUS_ENTRIES
         && entries.iter().zip(expected_paths).all(|(entry, path)| {
             json_object_has_exact_fields(entry, &["path", "previous_path", "index", "worktree"])
                 && entry["path"] == path
@@ -2500,20 +2499,42 @@ fn git_reference_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceE
 
 fn git_reference_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
     let repository = Repository::open(root)?;
-    filesystem_file_modified_times(&repository.path().join(GIT_REFS_DIRECTORY))
+    filesystem_file_and_directory_modified_times(&repository.path().join(GIT_REFS_DIRECTORY))
 }
 
-fn filesystem_file_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
+fn filesystem_file_and_directory_modified_times(
+    root: &Path,
+) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
     filesystem_entries(root, None)?
         .into_iter()
         .filter_map(|(relative, snapshot)| {
-            matches!(snapshot, WorkspaceEntrySnapshot::File { .. }).then_some(relative)
+            matches!(
+                snapshot,
+                WorkspaceEntrySnapshot::Directory { .. } | WorkspaceEntrySnapshot::File { .. }
+            )
+            .then_some(relative)
         })
         .map(|relative| {
             let modified = fs::symlink_metadata(root.join(&relative))?.modified()?;
             Ok((relative, modified))
         })
         .collect()
+}
+
+fn admit_modified_time_path_and_ancestors(
+    actual: &BTreeMap<PathBuf, SystemTime>,
+    expected: &mut BTreeMap<PathBuf, SystemTime>,
+    path: &Path,
+) -> bool {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        let Some(modified) = actual.get(candidate) else {
+            return false;
+        };
+        expected.insert(candidate.to_path_buf(), *modified);
+        current = candidate.parent();
+    }
+    true
 }
 
 fn direct_git_reference_entry(
@@ -2558,11 +2579,14 @@ fn git_forced_reference_entries_match(
                 return Ok(false);
             };
             let path = Path::new("heads").join(branch_name);
-            let Some(modified) = actual_modified_times.get(&path) else {
+            if !admit_modified_time_path_and_ancestors(
+                &actual_modified_times,
+                &mut expected_modified_times,
+                &path,
+            ) {
                 return Ok(false);
-            };
+            }
             expected.insert(path.clone(), entry);
-            expected_modified_times.insert(path, *modified);
         }
         GIT_CREATE_COMMIT_NAME => {
             let Some(template) = expected.get(&base_path) else {
@@ -2572,10 +2596,13 @@ fn git_forced_reference_entries_match(
                 return Ok(false);
             };
             expected.insert(base_path.clone(), entry);
-            let Some(modified) = actual_modified_times.get(&base_path) else {
+            if !admit_modified_time_path_and_ancestors(
+                &actual_modified_times,
+                &mut expected_modified_times,
+                &base_path,
+            ) {
                 return Ok(false);
-            };
-            expected_modified_times.insert(base_path, *modified);
+            }
         }
         _ => {}
     }
@@ -3091,7 +3118,7 @@ fn git_reflog_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntr
 
 fn git_reflog_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
     let repository = Repository::open(root)?;
-    filesystem_file_modified_times(&repository.path().join(GIT_LOGS_DIRECTORY))
+    filesystem_file_and_directory_modified_times(&repository.path().join(GIT_LOGS_DIRECTORY))
 }
 
 fn git_forced_reflogs_match(
@@ -3168,10 +3195,13 @@ fn git_reflog_updates_match(
             return Ok(false);
         }
         let path = Path::new(reference);
-        let Some(modified) = actual_modified_times.get(path) else {
+        if !admit_modified_time_path_and_ancestors(
+            &actual_modified_times,
+            &mut expected_modified_times,
+            path,
+        ) {
             return Ok(false);
-        };
-        expected_modified_times.insert(path.to_path_buf(), *modified);
+        }
     }
     Ok(actual_entries == expected_entries && actual_modified_times == expected_modified_times)
 }
@@ -3929,11 +3959,14 @@ fn git_natural_reference_entries_match(
     let Some(entry) = direct_git_reference_entry(template, head.id()) else {
         return Ok(false);
     };
-    let Some(modified) = actual_modified_times.get(&base_path) else {
+    if !admit_modified_time_path_and_ancestors(
+        &actual_modified_times,
+        &mut expected_modified_times,
+        &base_path,
+    ) {
         return Ok(false);
-    };
+    }
     expected.insert(base_path.clone(), entry);
-    expected_modified_times.insert(base_path, *modified);
     Ok(
         git_reference_entries(root)? == expected
             && actual_modified_times == expected_modified_times,
@@ -8380,6 +8413,40 @@ fn forced_git_log_verifier_rejects_nested_reference_mtime_drift() -> EvalResult 
             .join("log-target"),
     )?
     .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_nested_reference_directory_mtime_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    fs::File::open(repository.path().join(GIT_REFS_DIRECTORY).join("heads"))?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
     let result = serde_json::json!({
         "commits": [{
             "commit": target.id().to_string(),
