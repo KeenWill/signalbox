@@ -327,6 +327,23 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertNotIn("machine-owner-link", failure_categories(failures))
 
+    def test_image_destination_is_not_a_citation(self) -> None:
+        """An image renders a fetch, not a navigation.
+
+        The extractor returns image destinations because its other caller
+        checks that every destination resolves. Counted here, a broken image
+        would satisfy the guard while the page carries no way to reach the
+        owner.
+        """
+        self._write_machine_owner(
+            "This page owns the evidence algebra of "
+            "![the machine](credential-availability.md).\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertIn("machine-owner-link", failure_categories(failures))
+
     def test_unused_reference_definition_is_not_a_citation(self) -> None:
         """A definition nobody uses renders no link a reader can follow.
 

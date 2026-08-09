@@ -631,15 +631,22 @@ Locks per transaction, in acquisition order:
   repository operation stores pool state, capacity reservations, or availability
   waits, so the credential-pool locks described in the rest of this bullet are
   the protocol its implementing child must follow, not a guarantee this build
-  provides. This bullet states the acquisition order itself; which of these
-  locks each selection ending takes is the locks column of
-  [the credential-availability machine](credential-availability.md#the-credential-availability-machine).
-  Credential-pool call preparation additionally locks the action head of every
-  member of the pinned policy it may select, in profile-reference byte order,
-  immediately after the scheduler lock and before it reads any exclusion state.
-  The mode follows what the transaction does to that member and not which path
-  reached it: `FOR SHARE` for a member whose exclusion state it only reads, and
-  `FOR UPDATE` for one it writes — including the member whose pending
+  provides. This bullet is the whole of that protocol: which objects each
+  credential-pool transaction takes, in what order, and in which mode is stated
+  here and nowhere else.
+  [The credential-availability machine](credential-availability.md#the-credential-availability-machine)
+  names the transaction that commits each selection ending, which is how a
+  reader arrives at the right sentence below; it states no locks of its own and
+  must not be consulted for any. A transaction that admits a wait or proves
+  exhaustion without preparing a call takes the scheduler lock and the action
+  heads below and no cursor row, because it selects nothing; the admission that
+  creates a contended wait additionally holds capacity rows, as stated further
+  down. Credential-pool call preparation additionally locks the action head of
+  every member of the pinned policy it may select, in profile-reference byte
+  order, immediately after the scheduler lock and before it reads any exclusion
+  state. The mode follows what the transaction does to that member and not which
+  path reached it: `FOR SHARE` for a member whose exclusion state it only reads,
+  and `FOR UPDATE` for one it writes — including the member whose pending
   `switch_next_turn` displacement a successful preparation consumes, which is a
   write that reads like a read. This holds for every preparation alike,
   including the one that releases a credential-availability wait, so no path
@@ -1600,35 +1607,38 @@ predecessor, so releasing it needs a second closed origin: a wait-release origin
 carrying the exact consumed wait and the call-free attempt that ended
 `WithoutStop(YieldedToDurableWait)`. That origin's predecessor evidence is
 optional and is present exactly when the released wait was entered after a
-qualifying provider failure this turn had already observed — a chain that failed
-and then found no member it could yet substitute to. In that case the same
-origin additionally carries the predecessor model call, its qualifying
-availability cause, and the typed non-acceptance proof, which is what lets the
-eventual successor record its authorizing predecessor as the model-call contract
-requires. Splitting these across two origins instead would make the continuation
-chain non-total for the common post-failure wait, which fails reconstitution
-closed and loses acknowledged work at restart. It is distinct from both the
-tool-loop and successor origins, so every continuation still names exactly one
-origin and the unique continuation chain stays total. The successor's call
-remains subject to `model_call_attempt_once`, pins the same target and a
-different profile, and cannot exist without that complete predecessor proof. A
-credential-availability wait must atomically retain the active turn slot and
-store a closed `exhausted`/`contended` discriminator plus the immutable
-pool-policy identity. The exhausted form stores every policy member's exclusion
-evidence and optional reset plus the optional earliest-reset deadline. The
-contended form stores every durable exclusion in the selection snapshot, the
-complete nonempty set of otherwise-admissible bounded members with their exact
-invocation-reservation identities, and the same optional earliest-reset deadline
-over those durable exclusions. A reservation identity is the whole of that
-evidence: it is allocated once with the reservation row, never reused, and never
-versioned, so reconstitution compares identities alone and needs no separate
-generation. One shared capacity row per bounded profile serializes reservation
-admission across sessions and pools. Preparation locks all candidate capacity
-rows in profile-reference byte order, counts their live reservation rows under
-those locks, and inserts the selected reservation with the `Prepared` call.
-Every `codex_home` invocation inserts a reservation regardless of whether its
-profile currently declares a bound; the bound decides only whether preparation
-takes that capacity lock and counts, so an unbounded profile records the same
+qualifying provider failure **this availability chain** had already observed — a
+chain that failed and then found no member it could yet substitute to. The scope
+is the chain and not the turn: a later tool round opens a fresh chain, and
+attaching an earlier round's failure to it would link a new call to a failure it
+did not follow. In that case the same origin additionally carries the
+predecessor model call, its qualifying availability cause, and the typed
+non-acceptance proof, which is what lets the eventual successor record its
+authorizing predecessor as the model-call contract requires. Splitting these
+across two origins instead would make the continuation chain non-total for the
+common post-failure wait, which fails reconstitution closed and loses
+acknowledged work at restart. It is distinct from both the tool-loop and
+successor origins, so every continuation still names exactly one origin and the
+unique continuation chain stays total. The successor's call remains subject to
+`model_call_attempt_once`, pins the same target and a different profile, and
+cannot exist without that complete predecessor proof. A credential-availability
+wait must atomically retain the active turn slot and store a closed
+`exhausted`/`contended` discriminator plus the immutable pool-policy identity.
+The exhausted form stores every policy member's exclusion evidence and optional
+reset plus the optional earliest-reset deadline. The contended form stores every
+durable exclusion in the selection snapshot, the complete nonempty set of
+otherwise-admissible bounded members with their exact invocation-reservation
+identities, and the same optional earliest-reset deadline over those durable
+exclusions. A reservation identity is the whole of that evidence: it is
+allocated once with the reservation row, never reused, and never versioned, so
+reconstitution compares identities alone and needs no separate generation. One
+shared capacity row per bounded profile serializes reservation admission across
+sessions and pools. Preparation locks all candidate capacity rows in
+profile-reference byte order, counts their live reservation rows under those
+locks, and inserts the selected reservation with the `Prepared` call. Every
+`codex_home` invocation inserts a reservation regardless of whether its profile
+currently declares a bound; the bound decides only whether preparation takes
+that capacity lock and counts, so an unbounded profile records the same
 supervision evidence without serializing. A deferred constraint rejects a
 committed live count above the bound the profile's current registration
 declares; the bound is a live profile property rather than a frozen policy

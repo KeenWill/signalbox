@@ -925,15 +925,25 @@ cannot; this contract says which for every delivery, and there is no third case.
   deployment, because a home copied from another has its own device and inode
   while carrying the same refresh token, and the daemon cannot detect the
   sharing: the store's contents are exactly what it never reads.
-- `oauth` — *owed by the delivery, which this build does not admit.* Every
-  `oauth` profile is refused outright, so the parser retains no provisioning
-  tuple and never compares one profile's against another's. The delivery that
-  admits it owes the comparison over parsed canonical components — scheme,
-  lowercased host, effective port, path, and query — and never over the
-  configured bytes, so that two spellings a URL parser sends to the same request
-  target are one identity rather than two. What this build does supply is the
-  admission half of that rule: fragments and user information are rejected when
-  the endpoint is parsed, because neither reaches the request target at all.
+- `oauth` — *established by the delivery, which this build does not admit*, by
+  the provider account identity that provisioning harvests and stores alongside
+  the refresh token. That identity is what the provider meters, throttles, and
+  rejects against, so two members are independent exactly when their stored
+  account identities differ, and a pool rejects two members resolving to one
+  account however they were provisioned. The provisioning tuple is deliberately
+  **not** this relation, and it fails in both directions: two independently
+  metered accounts reached through one OAuth client, endpoints, and scopes have
+  identical tuples and are nonetheless independent, while two grants for one
+  account obtained under different clients or scopes have different tuples and
+  are nonetheless one authorization. The tuple keeps its own separate job —
+  binding a stored token to the configuration it was minted under, so an edited
+  endpoint cannot receive a token issued for another — and for that job it is
+  compared as parsed canonical components: scheme, lowercased host, effective
+  port, path, and query, never configured bytes, with fragments and user
+  information rejected at admission because neither reaches the request target
+  at all. That admission check is the one part of this the present parser
+  performs; every `oauth` profile is then refused outright, so no account
+  identity or tuple is ever stored and no two members are ever compared.
 
 Two exceptions, and only these two. `quarantine` excludes a member from every
 pool rather than from the one that observed it, so an authorization that turns
@@ -1428,22 +1438,24 @@ sorting, or other normalization occurs. Both endpoint values must be absolute
 `https` URLs carrying no fragment and no user information — an empty username
 and an empty password component. The tuple comparison is over parsed canonical
 components — scheme, lowercased host, effective port, path, and query — and
-never over the configured bytes, as
-[the identity property](#distinct-members-are-distinct-authorizations) requires
-of this delivery. Two spellings a URL parser sends to the same request target
-are therefore one stored identity, so respelling an endpoint as
-`https://issuer.example:443/token` where it was `https://ISSUER.example/token`
-does not quarantine a working authorization. Fragment and user information are
-rejected at admission rather than normalized away, and for a reason the
-canonical comparison does not supply: neither is a component of that comparison
-at all, so silently discarding them would accept a document whose text states
-something the daemon does not do. User information carries a second objection of
-its own: a URL is logged, persisted in the provisioning tuple, and echoed in
-diagnostics, so a password embedded there is a credential smuggled outside the
-daemon-owned boundary this delivery exists to establish — and on an HTTP stack
-that does honor it, it becomes an undeclared authentication credential the
-contract never admitted. Startup rejects every other scheme and provides no
-plaintext or local-host exception.
+never over the configured bytes. This comparison binds a stored token to the
+configuration it was minted under; the relation that decides whether two members
+are independent authorizations is the stored provider account identity, which
+[the identity property](#distinct-members-are-distinct-authorizations) owns and
+which this tuple is deliberately not. Two spellings a URL parser sends to the
+same request target are therefore one stored binding, so respelling an endpoint
+as `https://issuer.example:443/token` where it was
+`https://ISSUER.example/token` does not quarantine a working authorization.
+Fragment and user information are rejected at admission rather than normalized
+away, and for a reason the canonical comparison does not supply: neither is a
+component of that comparison at all, so silently discarding them would accept a
+document whose text states something the daemon does not do. User information
+carries a second objection of its own: a URL is logged, persisted in the
+provisioning tuple, and echoed in diagnostics, so a password embedded there is a
+credential smuggled outside the daemon-owned boundary this delivery exists to
+establish — and on an HTTP stack that does honor it, it becomes an undeclared
+authentication credential the contract never admitted. Startup rejects every
+other scheme and provides no plaintext or local-host exception.
 
 ##### OAuth delivery and administration
 
