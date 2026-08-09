@@ -12103,54 +12103,57 @@ mod tests {
         Ok(())
     }
 
+    /// Pins one actor's exact bytes on both frames that carry a last writer.
+    /// A failure names the actor at the call site rather than a loop position.
+    #[track_caller]
+    fn assert_metadata_actor_round_trips(
+        actor: MetadataActor,
+        expected_actor_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let writer = MetadataLastWriter::new(CanonicalU64::new(1), actor);
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::SessionMetadataReplaced {
+                session_id: uuid(1),
+                metadata: SessionMetadata::empty(),
+                last_writer: writer,
+            },
+            &format!(
+                r#"{{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{{"title":null,"tags":[],"attributes":{{}},"archived":false}},"last_writer":{{"updated_at_unix_micros":"1","actor":{expected_actor_json}}}}}"#
+            ),
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::SessionMetadata {
+                session_id: uuid(1),
+                metadata: SessionMetadata::empty(),
+                last_writer: Some(writer),
+            },
+            &format!(
+                r#"{{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{{"title":null,"tags":[],"attributes":{{}},"archived":false}},"last_writer":{{"updated_at_unix_micros":"1","actor":{expected_actor_json}}}}}"#
+            ),
+        )?;
+        Ok(())
+    }
+
     /// INV-033: the last-writer actor projects every agency durable metadata can
-    /// record, and nothing else. The match is exhaustive so a later variant
-    /// cannot reach the wire without its own pinned bytes.
+    /// record. The domain projection this pins is total by type, so a later
+    /// agency reaches the wire only through a variant added here.
     #[test]
     fn inv033_metadata_writer_actor_round_trips_every_agency()
     -> Result<(), Box<dyn std::error::Error>> {
-        for actor in [
-            MetadataActor::User {},
+        assert_metadata_actor_round_trips(MetadataActor::User {}, r#"{"type":"user"}"#)?;
+        assert_metadata_actor_round_trips(
             MetadataActor::Model { turn_id: uuid(2) },
-            MetadataActor::Recovery {},
+            r#"{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}"#,
+        )?;
+        assert_metadata_actor_round_trips(MetadataActor::Recovery {}, r#"{"type":"recovery"}"#)?;
+        assert_metadata_actor_round_trips(
             MetadataActor::Tool {
                 tool_request_id: uuid(3),
             },
-        ] {
-            let actor_json = match actor {
-                MetadataActor::User {} => r#"{"type":"user"}"#,
-                MetadataActor::Model { .. } => {
-                    r#"{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}"#
-                }
-                MetadataActor::Recovery {} => r#"{"type":"recovery"}"#,
-                MetadataActor::Tool { .. } => {
-                    r#"{"type":"tool","tool_request_id":"00000000-0000-0000-0000-000000000003"}"#
-                }
-            };
-            let writer = MetadataLastWriter::new(CanonicalU64::new(1), actor);
-            assert_server_message_round_trip(
-                request(1)?,
-                ServerMessage::SessionMetadataReplaced {
-                    session_id: uuid(1),
-                    metadata: SessionMetadata::empty(),
-                    last_writer: writer,
-                },
-                &format!(
-                    r#"{{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{{"title":null,"tags":[],"attributes":{{}},"archived":false}},"last_writer":{{"updated_at_unix_micros":"1","actor":{actor_json}}}}}"#
-                ),
-            )?;
-            assert_server_message_round_trip(
-                request(2)?,
-                ServerMessage::SessionMetadata {
-                    session_id: uuid(1),
-                    metadata: SessionMetadata::empty(),
-                    last_writer: Some(writer),
-                },
-                &format!(
-                    r#"{{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{{"title":null,"tags":[],"attributes":{{}},"archived":false}},"last_writer":{{"updated_at_unix_micros":"1","actor":{actor_json}}}}}"#
-                ),
-            )?;
-        }
+            r#"{"type":"tool","tool_request_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )?;
         Ok(())
     }
 

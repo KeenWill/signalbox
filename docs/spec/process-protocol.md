@@ -40,6 +40,10 @@ records, and wire messages remain distinct representations. The path-scoped
 session-placement wire and terminal-client surface were verified through PR #400
 (`agent/scoped-visibility-wiring`).
 
+The session-metadata last-writer actor inventory, its native and terminal-client
+projections, and the totality of the daemon projection that produces it are
+verified against this PR (`fix/metadata-actor-wire-variants`).
+
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
 implemented in this tree. The version field remains required on every frame and

@@ -3273,29 +3273,34 @@ mod tests {
         assert!(stderr.is_empty());
     }
 
+    /// One written last-writer stamp carrying the actor under test; the
+    /// timestamp is fixture plumbing the label never reads.
+    fn written_by(actor: MetadataActor) -> Option<MetadataLastWriter> {
+        Some(MetadataLastWriter::new(CanonicalU64::new(1), actor))
+    }
+
     #[test]
     fn search_names_every_last_writer_actor_the_wire_can_carry() {
-        for (actor, expected) in [
-            (MetadataActor::User {}, "user"),
-            (
-                MetadataActor::Model {
-                    turn_id: wire_uuid(2),
-                },
-                "model",
-            ),
-            (MetadataActor::Recovery {}, "recovery"),
-            (
-                MetadataActor::Tool {
-                    tool_request_id: wire_uuid(3),
-                },
-                "tool",
-            ),
-        ] {
-            assert_eq!(
-                last_writer_actor_label(Some(MetadataLastWriter::new(CanonicalU64::new(1), actor))),
-                expected
-            );
-        }
+        assert_eq!(
+            last_writer_actor_label(written_by(MetadataActor::User {})),
+            "user"
+        );
+        assert_eq!(
+            last_writer_actor_label(written_by(MetadataActor::Model {
+                turn_id: wire_uuid(2)
+            })),
+            "model"
+        );
+        assert_eq!(
+            last_writer_actor_label(written_by(MetadataActor::Recovery {})),
+            "recovery"
+        );
+        assert_eq!(
+            last_writer_actor_label(written_by(MetadataActor::Tool {
+                tool_request_id: wire_uuid(3)
+            })),
+            "tool"
+        );
         assert_eq!(last_writer_actor_label(None), "none");
     }
 

@@ -13733,10 +13733,10 @@ mod tests {
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
         DelegationToolRequestState as WireDelegationToolRequestState, ErrorCode, ErrorDetail,
         FrameEncodeError, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
-        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor,
-        MetadataLastWriter, ProtocolVersion, RejectionDetail, ReviewFindingInput, ReviewSeverity,
-        ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry,
-        TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
+        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor, ProtocolVersion,
+        RejectionDetail, ReviewFindingInput, ReviewSeverity, ServerFrame, ServerMessage,
+        SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+        TurnState, decode_server_line, encode_server_line,
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
@@ -14331,6 +14331,26 @@ mod tests {
         Ok(())
     }
 
+    /// The post-lock statement time every metadata projection fixture carries.
+    /// No projection depends on the value, only on its passing through.
+    const METADATA_WRITE_UNIX_MICROS: u64 = 17;
+
+    /// Projects one domain agency and pins both members against the fixture it
+    /// came from. A failure names the agency at the call site.
+    #[track_caller]
+    fn assert_metadata_last_writer_projects(actor: Actor, expected_actor: MetadataActor) {
+        let writer = SessionMetadataLastWriter::new(
+            SessionMetadataUpdatedAt::from_unix_micros(METADATA_WRITE_UNIX_MICROS),
+            actor,
+        );
+        let projected = wire_metadata_last_writer(writer);
+        assert_eq!(projected.actor(), expected_actor);
+        assert_eq!(
+            projected.updated_at_unix_micros().value(),
+            writer.updated_at().as_unix_micros()
+        );
+    }
+
     /// INV-033: the metadata last-writer projection is total over the domain
     /// agencies durable metadata records, and each carried reference lands in
     /// its own member. A projection gap here is not a degraded field: both
@@ -14338,30 +14358,23 @@ mod tests {
     /// daemon and re-fires on every read of the durable row.
     #[test]
     fn inv033_metadata_last_writer_projects_every_domain_agency() {
-        let updated_at = SessionMetadataUpdatedAt::from_unix_micros(17);
         let turn = TurnId::from_uuid(Uuid::from_u128(2));
         let request = ToolRequestId::from_uuid(Uuid::from_u128(3));
-        for (actor, expected) in [
-            (Actor::User, MetadataActor::User {}),
-            (
-                Actor::Model { turn },
-                MetadataActor::Model {
-                    turn_id: wire_uuid(turn.into_uuid()),
-                },
-            ),
-            (Actor::Recovery, MetadataActor::Recovery {}),
-            (
-                Actor::Tool { request },
-                MetadataActor::Tool {
-                    tool_request_id: wire_uuid(request.into_uuid()),
-                },
-            ),
-        ] {
-            assert_eq!(
-                wire_metadata_last_writer(SessionMetadataLastWriter::new(updated_at, actor)),
-                MetadataLastWriter::new(CanonicalU64::new(17), expected)
-            );
-        }
+
+        assert_metadata_last_writer_projects(Actor::User, MetadataActor::User {});
+        assert_metadata_last_writer_projects(
+            Actor::Model { turn },
+            MetadataActor::Model {
+                turn_id: wire_uuid(turn.into_uuid()),
+            },
+        );
+        assert_metadata_last_writer_projects(Actor::Recovery, MetadataActor::Recovery {});
+        assert_metadata_last_writer_projects(
+            Actor::Tool { request },
+            MetadataActor::Tool {
+                tool_request_id: wire_uuid(request.into_uuid()),
+            },
+        );
     }
 
     fn compaction_session() -> SessionId {
