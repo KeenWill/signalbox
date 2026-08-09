@@ -625,6 +625,7 @@ struct GitFixtureSnapshot {
     modes: BTreeMap<PathBuf, Option<u32>>,
     config: Vec<u8>,
     worktree_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    metadata_root_mode: Option<u32>,
     metadata_top_level: BTreeMap<PathBuf, GitMetadataEntryKind>,
     static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reflog_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
@@ -1877,6 +1878,7 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         modes: git_fixture_modes(root)?,
         config: fs::read(repository.path().join(GIT_CONFIG_PATH))?,
         worktree_entries: git_worktree_entries(root)?,
+        metadata_root_mode: worktree_mode(repository.path())?,
         metadata_top_level: git_metadata_top_level(root)?,
         static_metadata_entries: git_static_metadata_entries(root)?,
         reflog_entries: git_reflog_entries(root)?,
@@ -2092,6 +2094,7 @@ fn git_fixture_snapshot_matches(
     };
     Ok(git_fixture_modes_match(root, &expected.modes)?
         && config == expected.config
+        && worktree_mode(repository.path())? == expected.metadata_root_mode
         && git_metadata_top_level(root)? == expected.metadata_top_level
         && git_static_metadata_entries(root)? == expected.static_metadata_entries)
 }
@@ -4929,6 +4932,27 @@ fn git_natural_state_rejects_repository_config_drift() -> EvalResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn git_natural_state_rejects_metadata_root_mode_drift() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (seed, seed_refs, seed_fixture) = seed_git_repository_with_refs(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    let metadata_root = Repository::open(workspace.path())?.path().to_path_buf();
+    let mut permissions = fs::metadata(&metadata_root)?.permissions();
+    permissions.set_mode(permissions.mode() ^ GROUP_WRITE_MODE_BIT);
+    fs::set_permissions(&metadata_root, permissions)?;
+
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+        &seed_fixture,
+    )?);
+    Ok(())
+}
+
 #[test]
 fn git_natural_state_rejects_a_collateral_untracked_file() -> EvalResult {
     let workspace = tempfile::tempdir()?;
@@ -6257,6 +6281,38 @@ fn forced_git_status_verifier_rejects_post_seed_fixture_mode_drift() -> EvalResu
     let mut permissions = fs::metadata(&path)?.permissions();
     permissions.set_mode(permissions.mode() ^ USER_EXECUTE_MODE_BIT);
     fs::set_permissions(&path, permissions)?;
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_status_verifier_rejects_metadata_root_mode_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let metadata_root = Repository::open(suite.workspace.path())?
+        .path()
+        .to_path_buf();
+    let mut permissions = fs::metadata(&metadata_root)?.permissions();
+    permissions.set_mode(permissions.mode() ^ GROUP_WRITE_MODE_BIT);
+    fs::set_permissions(&metadata_root, permissions)?;
     let result = serde_json::json!({
         "branch": GIT_BASE_BRANCH,
         "branch_truncated": false,
