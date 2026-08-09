@@ -381,10 +381,13 @@ Representation rules, all enforced in the schema:
   session's current lost placement. A present tool attempt must also be terminal
   and ambiguous, be the attempt the loss recorded, and carry runner-lease
   lineage to that exact runner and placement revision; its issuing turn attempt
-  must be the same yielded chain-tip that authorizes the wait. Lifecycle-side
-  and placement-side checks lock the shared session-scheduler row before
-  evaluating the relationship, so a concurrent placement advance cannot validate
-  against a stale loss. The lifecycle transition matrix admits the phase from an
+  must be the same yielded chain-tip that authorizes the wait, and its producing
+  call must be the exact active tool-round boundary retained by that wait. A
+  nullable interrupted-attempt arm admits a retained tool round only when the
+  round contains no in-flight or ambiguous physical attempt. Lifecycle-side and
+  placement-side checks lock the shared session-scheduler row before evaluating
+  the relationship, so a concurrent placement advance cannot validate against a
+  stale loss. The lifecycle transition matrix admits the phase from an
   already-active running boundary only after that exact live attempt has ended
   by yielding to a durable wait, never directly from queued work, and restart
   reconstitutes it from those correlated facts rather than from the stored
@@ -404,9 +407,9 @@ Representation rules, all enforced in the schema:
   the lock order below. Independently of that future writer, a present
   interrupted-attempt fact on the placement-loss record is admitted only when
   the attempt is terminal and ambiguous and carries physical runner-lease
-  lineage to the record's exact lost runner and placement revision; a
-  same-session foreign attempt therefore cannot survive standalone placement
-  readback.
+  lineage to the record's exact lost runner and placement revision, and the same
+  active runner-recovery tool-round boundary names it. A same-session foreign or
+  older same-placement attempt therefore cannot survive placement readback.
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.

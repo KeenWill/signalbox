@@ -33,6 +33,10 @@ BEGIN
        OR NOT EXISTS (
             SELECT 1
               FROM tool_attempt AS attempt
+              JOIN tool_request AS request
+                ON request.request_id = attempt.request_id
+               AND request.turn_id = attempt.turn_id
+               AND request.session_id = attempt.session_id
               JOIN runner_physical_attempt_lease_binding AS binding
                 ON binding.attempt_id = attempt.attempt_id
               JOIN runner_lease_generation AS lease
@@ -55,6 +59,24 @@ BEGIN
                AND leased_placement.state_kind = 'pinned'
                AND leased_placement.pinned_runner_id =
                     placement.lost_runner_id
+               AND EXISTS (
+                    SELECT 1
+                      FROM turn_lifecycle AS lifecycle
+                     WHERE lifecycle.turn_id = attempt.turn_id
+                       AND lifecycle.session_id = attempt.session_id
+                       AND lifecycle.state_kind = 'active'
+                       AND lifecycle.active_phase_kind =
+                            'awaiting_runner_recovery'
+                       AND lifecycle.current_attempt_id IS NULL
+                       AND lifecycle.active_tool_round_call_id =
+                            request.producing_model_call_id
+                       AND lifecycle.runner_recovery_runner_id =
+                            placement.lost_runner_id
+                       AND lifecycle.runner_recovery_placement_revision =
+                            placement.placement_revision
+                       AND lifecycle.runner_recovery_tool_attempt_id =
+                            attempt.attempt_id
+               )
        )
     THEN
         RAISE EXCEPTION
@@ -237,30 +259,51 @@ BEGIN
     END IF;
     IF lifecycle.runner_recovery_tool_attempt_id IS NULL
        AND lifecycle.active_tool_round_call_id IS NOT NULL
-       AND NOT EXISTS (
-            SELECT 1
-              FROM model_call AS active_call
-              JOIN turn_attempt AS yielded_attempt
-                ON yielded_attempt.turn_attempt_id =
-                    active_call.turn_attempt_id
-               AND yielded_attempt.turn_id = active_call.turn_id
-               AND yielded_attempt.session_id = active_call.session_id
-             WHERE active_call.model_call_id =
-                    lifecycle.active_tool_round_call_id
-               AND active_call.turn_id = checked_turn_id
-               AND active_call.session_id = checked_session_id
-               AND yielded_attempt.state_kind = 'ended'
-               AND yielded_attempt.end_variant = 'without_stop'
-               AND yielded_attempt.end_disposition =
-                    'yielded_to_durable_wait'
-               AND yielded_attempt.interrupt_command_id IS NULL
-               AND yielded_attempt.interrupt_predecessor_turn_id IS NULL
-               AND NOT EXISTS (
-                    SELECT 1
-                      FROM turn_attempt AS continuation
-                     WHERE continuation.continued_from_attempt_id =
-                            yielded_attempt.turn_attempt_id
-               )
+       AND (
+            NOT EXISTS (
+                SELECT 1
+                  FROM model_call AS active_call
+                  JOIN turn_attempt AS yielded_attempt
+                    ON yielded_attempt.turn_attempt_id =
+                        active_call.turn_attempt_id
+                   AND yielded_attempt.turn_id = active_call.turn_id
+                   AND yielded_attempt.session_id = active_call.session_id
+                 WHERE active_call.model_call_id =
+                        lifecycle.active_tool_round_call_id
+                   AND active_call.turn_id = checked_turn_id
+                   AND active_call.session_id = checked_session_id
+                   AND yielded_attempt.state_kind = 'ended'
+                   AND yielded_attempt.end_variant = 'without_stop'
+                   AND yielded_attempt.end_disposition =
+                        'yielded_to_durable_wait'
+                   AND yielded_attempt.interrupt_command_id IS NULL
+                   AND yielded_attempt.interrupt_predecessor_turn_id IS NULL
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM turn_attempt AS continuation
+                         WHERE continuation.continued_from_attempt_id =
+                                yielded_attempt.turn_attempt_id
+                   )
+            )
+            OR EXISTS (
+                SELECT 1
+                  FROM tool_request AS request
+                  JOIN tool_attempt AS attempt
+                    ON attempt.request_id = request.request_id
+                   AND attempt.turn_id = request.turn_id
+                   AND attempt.session_id = request.session_id
+                 WHERE request.producing_model_call_id =
+                        lifecycle.active_tool_round_call_id
+                   AND request.turn_id = checked_turn_id
+                   AND request.session_id = checked_session_id
+                   AND (
+                        attempt.state_kind = 'in_flight'
+                        OR (
+                            attempt.state_kind = 'terminal'
+                            AND attempt.terminal_disposition_kind = 'ambiguous'
+                        )
+                   )
+            )
        )
     THEN
         RAISE EXCEPTION

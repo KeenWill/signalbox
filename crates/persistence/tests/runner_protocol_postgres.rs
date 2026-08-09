@@ -1273,9 +1273,8 @@ async fn append_runner_lost_projection(
     transaction.commit().await
 }
 
-async fn append_runner_lost_with_interrupted_attempt_projection(
+async fn mark_interrupted_attempt_ambiguous(
     pool: &PgPool,
-    session: SessionId,
     interrupted_tool_attempt: ToolAttemptId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
@@ -1284,7 +1283,7 @@ async fn append_runner_lost_with_interrupted_attempt_projection(
     sqlx::query(
         "UPDATE tool_attempt
             SET effect_class = 'external_effect', state_kind = 'terminal',
-                terminal_disposition_kind = 'ambiguous'
+                terminal_disposition_kind = 'ambiguous', error_kind = NULL
           WHERE attempt_id = $1",
     )
     .bind(interrupted_tool_attempt.into_uuid())
@@ -1293,24 +1292,7 @@ async fn append_runner_lost_with_interrupted_attempt_projection(
     sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
-    let mut transaction = pool.begin().await?;
-    append_runner_lost_without_advancing_head(
-        &mut transaction,
-        session,
-        Some("connection"),
-        None,
-        Some(interrupted_tool_attempt),
-    )
-    .await?;
-    sqlx::query(
-        "UPDATE runner_current_session_placement
-            SET event_ordinal = event_ordinal + 1
-          WHERE session_id = $1",
-    )
-    .bind(session.into_uuid())
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await
+    Ok(())
 }
 
 async fn insert_runner_recovery_turn(
@@ -1379,6 +1361,109 @@ async fn insert_runner_recovery_turn(
     .bind(yielded_attempt)
     .bind(turn.into_uuid())
     .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("ALTER TABLE turn_attempt ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+struct InterruptedLossRecoveryFacts {
+    session: SessionId,
+    turn: TurnId,
+    runner: RunnerId,
+    placement_revision: RunnerGeneration,
+    placement_interrupted_tool_attempt: ToolAttemptId,
+    recovery_interrupted_tool_attempt: Option<ToolAttemptId>,
+    active_tool_round_call: ModelCallId,
+}
+
+async fn insert_runner_recovery_turn_with_interrupted_loss(
+    pool: &PgPool,
+    facts: InterruptedLossRecoveryFacts,
+) -> Result<(), sqlx::Error> {
+    let starting_frontier = ContextFrontierId::from_uuid(uuid(
+        facts.turn.into_uuid().as_u128() + RELATED_IDENTITY_OFFSET,
+    ));
+    let yielded_attempt = uuid(facts.turn.into_uuid().as_u128() + RELATED_IDENTITY_OFFSET);
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(facts.session.into_uuid())
+    .bind(starting_frontier.into_uuid())
+    .execute(pool)
+    .await?;
+    let mut transaction = pool.begin().await?;
+    append_runner_lost_without_advancing_head(
+        &mut transaction,
+        facts.session,
+        Some("connection"),
+        None,
+        Some(facts.placement_interrupted_tool_attempt),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = $1",
+    )
+    .bind(facts.session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("ALTER TABLE turn_attempt DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+         ENABLE TRIGGER turn_lifecycle_runner_recovery_is_complete",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_kind, origin_accepted_input_id,
+             acceptance_position, state_kind, start_lineage_kind,
+             starting_frontier_id, active_phase_kind,
+             active_tool_round_call_id, runner_recovery_runner_id,
+             runner_recovery_placement_revision,
+             runner_recovery_tool_attempt_id)
+         VALUES ($1, $2, 'delegation', NULL, 1, 'active',
+                 'first_in_session', $3, 'awaiting_runner_recovery',
+                 $4, $5, $6, $7)",
+    )
+    .bind(facts.turn.into_uuid())
+    .bind(facts.session.into_uuid())
+    .bind(starting_frontier.into_uuid())
+    .bind(facts.active_tool_round_call.into_uuid())
+    .bind(facts.runner.into_uuid())
+    .bind(Decimal::from(facts.placement_revision.get()))
+    .bind(
+        facts
+            .recovery_interrupted_tool_attempt
+            .map(ToolAttemptId::into_uuid),
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'ended', 'without_stop',
+                 'yielded_to_durable_wait')",
+    )
+    .bind(yielded_attempt)
+    .bind(facts.turn.into_uuid())
+    .bind(facts.session.into_uuid())
     .execute(&mut *transaction)
     .await?;
     sqlx::query("ALTER TABLE turn_attempt ENABLE TRIGGER ALL")
@@ -5402,6 +5487,72 @@ async fn s32_inv009_inv044_runner_recovery_rejects_stale_tool_round_boundary()
     Ok(())
 }
 
+/// INV-009 / INV-044: a nullable runner-recovery wait cannot hide a live
+/// physical attempt in its retained tool round.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_nullable_runner_wait_rejects_unrecorded_physical_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+    ));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        ToolRequestId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.request)),
+        ContextFrontierId::from_uuid(uuid(0xa16e)),
+    )
+    .await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL, active_tool_round_call_id = $1,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3
+          WHERE turn_id = $4 AND session_id = $5",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    let rejected = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *malformed)
+        .await
+        .expect_err("nullable runner recovery cannot omit a live physical attempt");
+
+    assert_check_violation(rejected);
+    malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
 /// INV-029 / INV-044: an accepted-input interrupt terminalizes a runner-loss
 /// wait and leaves the placement's runner-effect evidence untouched.
 #[tokio::test]
@@ -5703,8 +5854,7 @@ async fn s32_inv029_inv044_runner_recovery_stop_preserves_tool_ambiguity()
         .expect("the external-effect fixture pins the placement");
     store.store_pin(&pin, &registration).await?;
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
-    append_runner_lost_with_interrupted_attempt_projection(&pool, session, interrupted_attempt)
-        .await?;
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
     let producing_call = ModelCallId::from_uuid(uuid(
         INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
     ));
@@ -5721,6 +5871,22 @@ async fn s32_inv029_inv044_runner_recovery_stop_preserves_tool_ambiguity()
     )
     .await?;
     let mut recovery = pool.begin().await?;
+    append_runner_lost_without_advancing_head(
+        &mut recovery,
+        session,
+        Some("connection"),
+        None,
+        Some(interrupted_attempt),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
     sqlx::query(
         "UPDATE turn_attempt
             SET state_kind = 'ended', end_variant = 'without_stop',
@@ -6139,8 +6305,7 @@ async fn s32_inv009_inv044_runner_recovery_rejects_cross_wired_lease_runner()
     let session = pin.placement.session();
     let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
-    append_runner_lost_with_interrupted_attempt_projection(&pool, session, interrupted_attempt)
-        .await?;
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
     sqlx::query("ALTER TABLE runner_lease_generation DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
@@ -6156,16 +6321,19 @@ async fn s32_inv009_inv044_runner_recovery_rejects_cross_wired_lease_runner()
     sqlx::query("ALTER TABLE runner_lease_generation ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    let rejected = insert_runner_recovery_turn(
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
         &pool,
-        session,
-        turn,
-        expected_enrollment.runner(),
-        pin.placement.revision(),
-        Some(interrupted_attempt),
-        Some(ModelCallId::from_uuid(uuid(
-            INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
-        ))),
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
     )
     .await
     .expect_err("runner recovery cannot claim another runner's leased attempt");
@@ -6185,10 +6353,20 @@ async fn s32_inv009_inv044_runner_loss_record_rejects_unleased_same_session_atte
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     insert_physical_attempt(&pool, PROFILELESS_PHYSICAL_ATTEMPT).await?;
     let unrelated_attempt = ToolAttemptId::from_uuid(uuid(PROFILELESS_PHYSICAL_ATTEMPT.attempt));
-    let rejected = append_runner_lost_with_interrupted_attempt_projection(
+    mark_interrupted_attempt_ambiguous(&pool, unrelated_attempt).await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
         &pool,
-        pin.placement.session(),
-        unrelated_attempt,
+        InterruptedLossRecoveryFacts {
+            session: pin.placement.session(),
+            turn: TurnId::from_uuid(uuid(PROFILELESS_PHYSICAL_ATTEMPT.turn)),
+            runner: pin.lease.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: unrelated_attempt,
+            recovery_interrupted_tool_attempt: Some(unrelated_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                PROFILELESS_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
     )
     .await
     .expect_err("runner loss cannot retain an unleased same-session attempt");
@@ -6209,14 +6387,13 @@ async fn s32_inv009_inv044_runner_recovery_rejects_non_ambiguous_tool_attempt()
     let session = pin.placement.session();
     let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
-    append_runner_lost_with_interrupted_attempt_projection(&pool, session, interrupted_attempt)
-        .await?;
     sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
     sqlx::query(
         "UPDATE tool_attempt
-            SET terminal_disposition_kind = 'known_failed',
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed',
                 error_kind = 'execution_failed'
           WHERE attempt_id = $1",
     )
@@ -6226,19 +6403,56 @@ async fn s32_inv009_inv044_runner_recovery_rejects_non_ambiguous_tool_attempt()
     sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
-    let rejected = insert_runner_recovery_turn(
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
         &pool,
-        session,
-        turn,
-        expected_enrollment.runner(),
-        pin.placement.revision(),
-        Some(interrupted_attempt),
-        Some(ModelCallId::from_uuid(uuid(
-            INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
-        ))),
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
     )
     .await
     .expect_err("runner recovery cannot retain a known terminal tool attempt");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: an older ambiguous attempt under the same placement
+/// revision cannot impersonate the operation interrupted at a later loss.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_loss_attempt_matches_exact_active_round()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin, later_lease) =
+        stored_later_lease_fixture(&pool).await?;
+    store.store_lease(&later_lease).await?;
+    let stale_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    mark_interrupted_attempt_ambiguous(&pool, stale_attempt).await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session: pin.placement.session(),
+            turn: TurnId::from_uuid(uuid(LATER_LEASE_PHYSICAL_ATTEMPT.turn)),
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: stale_attempt,
+            recovery_interrupted_tool_attempt: Some(stale_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                LATER_LEASE_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await
+    .expect_err("runner loss cannot retain an older round's ambiguous attempt");
 
     assert_check_violation(rejected);
     drop(pool);
@@ -6256,18 +6470,20 @@ async fn s32_inv009_inv044_pinned_runner_recovery_wait_round_trips_exact_loss()
     let session = pin.placement.session();
     let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
-    append_runner_lost_with_interrupted_attempt_projection(&pool, session, interrupted_attempt)
-        .await?;
-    insert_runner_recovery_turn(
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    insert_runner_recovery_turn_with_interrupted_loss(
         &pool,
-        session,
-        turn,
-        expected_enrollment.runner(),
-        pin.placement.revision(),
-        Some(interrupted_attempt),
-        Some(ModelCallId::from_uuid(uuid(
-            INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
-        ))),
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
     )
     .await?;
     let loaded_placement = store
@@ -6406,16 +6622,20 @@ async fn s32_inv009_inv044_runner_recovery_wait_requires_loss_recorded_attempt()
     let (_, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
-    append_runner_lost_with_interrupted_attempt_projection(&pool, session, interrupted_attempt)
-        .await?;
-    let rejected = insert_runner_recovery_turn(
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
         &pool,
-        session,
-        TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
-        expected_enrollment.runner(),
-        pin.placement.revision(),
-        None,
-        None,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn: TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: None,
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
     )
     .await
     .expect_err("runner recovery must retain the loss-recorded tool attempt");
