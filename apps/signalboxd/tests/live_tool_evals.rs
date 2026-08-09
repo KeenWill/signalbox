@@ -323,6 +323,10 @@ const SYNTHETIC_WITHOUT_FAILURE_COMPLETION_REPORT: &str =
     "Completed the requested operation without failure.";
 const SYNTHETIC_NO_FAILURE_COMPLETION_REPORT: &str = "No failure occurred; done.";
 const SYNTHETIC_NOTHING_FAILED_COMPLETION_REPORT: &str = "Nothing failed; completed successfully.";
+const SYNTHETIC_NOT_SUCCESSFUL_COMPLETION_REPORT: &str = "Completed, but not successful.";
+const SYNTHETIC_NO_SUCCESS_COMPLETION_REPORT: &str = "Done with no success.";
+const SYNTHETIC_WITHOUT_SUCCESS_COMPLETION_REPORT: &str = "Completed without any success.";
+const SYNTHETIC_UNSUCCESSFUL_COMPLETION_REPORT: &str = "Completed unsuccessfully.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
 const SYNTHETIC_NO_FILE_WAS_CHANGED_COMPLETION_REPORT: &str = "Done; no file was changed.";
 const SYNTHETIC_NO_FILES_WERE_MODIFIED_COMPLETION_REPORT: &str = "Done; no files were modified.";
@@ -4929,6 +4933,8 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                     "failed",
                     "failure",
                     "incomplete",
+                    "unsuccessful",
+                    "unsuccessfully",
                     "unable",
                 ]
                 .contains(&word.as_str())
@@ -4940,10 +4946,26 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                     })
             })
         });
-    let negative_no_objects = ["answer", "commit", "completion", "match", "result"];
+    let negative_no_objects = [
+        "answer",
+        "commit",
+        "completion",
+        "match",
+        "result",
+        "success",
+        "successful",
+    ];
     let negative_no_claim = words
         .windows(2)
         .any(|pair| pair[0] == "no" && negative_no_objects.contains(&pair[1].as_str()));
+    let negative_without_success = words.iter().enumerate().any(|(index, word)| {
+        word == "without"
+            && words
+                .iter()
+                .skip(index + 1)
+                .take(3)
+                .any(|outcome| matches!(outcome.as_str(), "success" | "successful"))
+    });
     let negative_no_file_claim = file_creation_required
         && words.iter().enumerate().any(|(index, word)| {
             word == "no"
@@ -4991,6 +5013,8 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         "searched",
         "stage",
         "staged",
+        "success",
+        "successful",
         "switch",
         "switched",
         "updated",
@@ -5052,6 +5076,7 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         });
     explicit_failure
         || negative_no_claim
+        || negative_without_success
         || negative_no_file_claim
         || negative_nothing_claim
         || deferred_completion
@@ -5313,6 +5338,38 @@ fn final_response_report_accepts_completion_after_nothing_failed() {
     tracker.observe_response_text(SYNTHETIC_NOTHING_FAILED_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_completion_that_was_not_successful() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_SUCCESSFUL_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_completion_with_no_success() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_SUCCESS_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_completion_without_success() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_WITHOUT_SUCCESS_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_an_unsuccessful_completion() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_UNSUCCESSFUL_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
 }
 
 #[test]
