@@ -959,23 +959,29 @@ absolute deployment-owned path and, only for a CLI adapter, required TOML string
 `env_key`. The path is 1 through 4,096 UTF-8 bytes and NUL-free; startup rejects
 every other string before any credential preparation. The path is read per
 preparation and never cached, narrowed by the trailing-line-termination rule
-below. The `anthropic` adapter forms an HTTP header from the value; `codex_cli`
-supplies it to the fresh process under `env_key`. A direct-HTTP adapter rejects
-`env_key` because it does not use a child environment. A CLI adapter requires
-the one credential variable its adapter contract names — `OPENAI_API_KEY` for
-`codex_cli` — and rejects every other value, including forwarded and
-process-control names such as `HOME`, `CODEX_HOME`, and `PATH`. This is the
-delivery for every credential that has an external source of truth — provider
-API keys, and any long-lived bearer token a provider's own tooling mints for
-unattended use. Before comparing paths, startup lexically normalizes each
-absolute path by removing redundant separators and `.` components and folding
-each `..` component without permitting it to cross the root; that operation
-performs no filesystem lookup and follows no symlink. For one adapter, one
-normalized absolute file path may appear on only one profile in a document: two
-spellings of one path are not independent credentials and cannot authorize two
-attempts in one successor chain. That test is deliberately lexical only.
-signalboxd opens no credential file before preparation, so a startup identity
-check would trade the no-startup-preflight rule in
+below. Every adapter admits `file`, and how the value reaches the provider is
+fixed per adapter with no third case: a direct-HTTP adapter forms an HTTP header
+from it — `anthropic` its `x-api-key` header and `openai` its
+`Authorization: Bearer` header — while a CLI adapter supplies it to the fresh
+process under `env_key`. Naming `openai` explicitly matters because `file` is
+the only delivery that replaces its conditional `OPENAI_API_KEY_FILE` channel
+when the catalog-supplied child above lands, so leaving its header path to be
+inferred would leave that adapter with no stated replacement at all. A
+direct-HTTP adapter rejects `env_key` because it does not use a child
+environment. A CLI adapter requires the one credential variable its adapter
+contract names — `OPENAI_API_KEY` for `codex_cli` — and rejects every other
+value, including forwarded and process-control names such as `HOME`,
+`CODEX_HOME`, and `PATH`. This is the delivery for every credential that has an
+external source of truth — provider API keys, and any long-lived bearer token a
+provider's own tooling mints for unattended use. Before comparing paths, startup
+lexically normalizes each absolute path by removing redundant separators and `.`
+components and folding each `..` component without permitting it to cross the
+root; that operation performs no filesystem lookup and follows no symlink. For
+one adapter, one normalized absolute file path may appear on only one profile in
+a document: two spellings of one path are not independent credentials and cannot
+authorize two attempts in one successor chain. That test is deliberately lexical
+only. signalboxd opens no credential file before preparation, so a startup
+identity check would trade the no-startup-preflight rule in
 [credential lifecycle](#credential-lifecycle) for a guarantee an ordinary copy
 defeats anyway. Two distinct paths that a symlink, a hard link, or a copy
 resolves to the same secret therefore remain two members. The accepted cost is

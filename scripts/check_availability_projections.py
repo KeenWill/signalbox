@@ -89,17 +89,15 @@ import sys
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-try:
-    from markdown_it import MarkdownIt
-except ModuleNotFoundError:  # pragma: no cover - exercised by the CI wiring
-    print("availability-projection check FAILED:")
-    print(
-        "  - markdown-it-py is not importable. This checker parses Markdown "
-        "with the toolchain pinned in tooling/requirements-mdformat.txt rather "
-        "than approximating it; install that file's requirements and rerun "
-        "with its interpreter"
-    )
-    sys.exit(1)
+from markdown_reader import (
+    line_of,
+    parser,
+    rendered,
+    require_toolchain,
+    table_cells,
+)
+
+CHECK_NAME = "availability-projection check"
 
 OWNER_PAGE = Path("docs/spec/credential-availability.md")
 
@@ -169,6 +167,16 @@ PROJECTION_TOKENS = (
     "credential_pool_exhausted",
     "pool exhaustion",
     "exhausted pool",
+    # Two more row names, distinctive enough that a page spelling one is
+    # quoting this machine's closed vocabulary rather than using ordinary
+    # words. `selected` and `terminal` stay out for the opposite reason: both
+    # are common English on these pages, and a rule that fired on them would be
+    # satisfied by decorative links and would stop meaning anything. The
+    # hyphenated `availability-successor` stays out too — it is used as a
+    # compound modifier ("availability-successor storage") rather than as a
+    # statement of which ending an attempt reached.
+    "pre-call fail",
+    "post-failure fail",
 )
 
 # Files that no author edits by hand.
@@ -177,33 +185,6 @@ GENERATED_FILES = (Path("docs/invariants.md"),)
 # The em dash that separates an outcome's name from its gloss in the first
 # column. The name is compared exactly; the gloss is prose.
 OUTCOME_SEPARATOR = "—"
-
-
-def parser() -> MarkdownIt:
-    """The CommonMark parser plus GFM tables.
-
-    `linkify` is deliberately not enabled: it is not part of the pinned
-    dependency set, and bare-URL autolinking has no bearing on either rule.
-    """
-    return MarkdownIt("commonmark").enable("table")
-
-
-def rendered(children: list) -> str:
-    """Return the text a reader sees for one inline token's children.
-
-    HTML comments, emphasis delimiters, and link markup contribute nothing,
-    which is what makes a cell holding only `<!-- TODO -->` register as the
-    blank cell it renders as.
-    """
-    parts: list[str] = []
-    for child in children or ():
-        if child.type in ("text", "code_inline"):
-            parts.append(child.content)
-        elif child.type in ("softbreak", "hardbreak"):
-            parts.append(" ")
-        elif child.type == "image":
-            parts.append(rendered(child.children))
-    return "".join(parts)
 
 
 def is_blank(text: str) -> bool:
@@ -253,21 +234,8 @@ def table_rows(tokens: list) -> tuple[list[list[str]], int]:
             text = rendered(tokens[index + 1].children)
             in_section = TABLE_HEADING_PREFIX.lower() in text.lower()
         elif token.type == "table_open" and in_section:
-            line = (token.map[0] + 1) if token.map else 0
-            rows: list[list[str]] = []
-            current: list[str] | None = None
-            depth = index
-            while depth < len(tokens) and tokens[depth].type != "table_close":
-                inner = tokens[depth]
-                if inner.type == "tr_open":
-                    current = []
-                elif inner.type == "tr_close" and current is not None:
-                    rows.append(current)
-                    current = None
-                elif inner.type in ("th_open", "td_open") and current is not None:
-                    current.append(rendered(tokens[depth + 1].children))
-                depth += 1
-            return rows, line
+            rows, _ = table_cells(tokens, index)
+            return rows, line_of(token)
         index += 1
     return [], 0
 
@@ -391,8 +359,7 @@ def top_level_blocks(tokens: list) -> list[tuple[int, str, list[str]]]:
                 for child in inner.children or ():
                     if child.type == "link_open":
                         destinations.append(child.attrGet("href") or "")
-        line = (token.map[0] + 1) if token.map else 0
-        blocks.append((line, "\n".join(text_parts), destinations))
+        blocks.append((line_of(token), "\n".join(text_parts), destinations))
         index = end
     return blocks
 
@@ -449,6 +416,7 @@ def check_links(failures: list[str]) -> int:
 
 
 def main() -> int:
+    require_toolchain(CHECK_NAME)
     failures: list[str] = []
     if not OWNER_PAGE.exists():
         print("availability-projection check FAILED:")
