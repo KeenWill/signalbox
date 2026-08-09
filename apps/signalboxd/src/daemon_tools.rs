@@ -1708,7 +1708,9 @@ mod tests {
 
     /// Composition preserves each execution declaration's permission default:
     /// the sandboxed command takes `Confirm`, because it accepts an arbitrary
-    /// program and no unconfirmed turn may hold that authority; the diagnostics
+    /// program — a compiled default an explicit posture or a session blanket
+    /// can still lower, so this pins the declaration and not the resolved
+    /// approval; the diagnostics
     /// reader stays automatic, since its arguments select no program and it
     /// issues only the fixed Cargo passes it builds itself — which do still run
     /// the workspace's own build scripts, macros, and test binaries; and the

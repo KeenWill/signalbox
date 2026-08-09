@@ -594,16 +594,19 @@ and reading another native or imported conversation default to `Confirm`.
 maps both exact names to `human`. The three execution tools complete the
 enumeration. `unsandboxed_exec` is compiled `AlwaysConfirm`, which no posture,
 approval judge, or session blanket can lower. `sandboxed_exec` defaults to
-`Confirm`, because it accepts an arbitrary program and argument vector and no
-unconfirmed turn may hold that authority. `cargo_diagnostics` defaults to
-`Auto`: its arguments carry no program, so a turn selects neither the binary nor
-its argument vector, and the tool issues only the fixed Cargo check, clippy, and
-test passes it builds itself. Those passes still compile and run the workspace's
-own build scripts, procedural macros, and test binaries, so an automatic
-diagnostics call executes whatever code the workspace already contains, under
-the profile described below. The runtime meaning and precedence of those
-declaration defaults, the explicit posture, the session blanket, and the durable
-approval wait are owned by
+`Confirm`, because it accepts an arbitrary program and argument vector. That is
+a compiled default and not a floor: an explicit `auto` posture resolves it to
+policy-automatic, and with no posture mapped a session blanket approves it
+without a per-call decision. Only the `human` posture parks it for a person
+whatever the blanket says. `cargo_diagnostics` defaults to `Auto`: its arguments
+carry no program, so a turn selects neither the binary nor its argument vector,
+and the tool issues only the fixed Cargo check, clippy, and test passes it
+builds itself. Those passes still compile and run the workspace's own build
+scripts, procedural macros, and test binaries, so an automatic diagnostics call
+executes whatever code the workspace already contains, under the profile
+described below. The runtime meaning and precedence of those declaration
+defaults, the explicit posture, the session blanket, and the durable approval
+wait are owned by
 [Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
 Only the explicit `[tool_approval_postures]` table changes a declaration's
 resolved posture; family composition itself does not.
@@ -618,8 +621,8 @@ and network namespaces; mounts a fresh `/proc`, `/dev`, and `/tmp`; binds a
 read-only operating-system runtime; clears the ambient environment; binds the
 configured workspace root read-write at `/workspace`; and binds neither a home
 nor a configuration directory. A sandboxed command therefore opens no IP
-connection, and reads nothing outside the workspace root and that read-only
-runtime.
+connection beyond its own loopback interface, and binds no host filesystem path
+outside the workspace root and that read-only runtime.
 
 The profile does not provide the following, and no other daemon-local control
 supplies them:
@@ -632,6 +635,10 @@ supplies them:
   admitted on presence alone and are never checked against that root, so one
   configured inside it is bound along with the workspace, as is any secret the
   repository itself carries.
+- The fresh `/proc` and `/dev` are not a private surface. They carry kernel- and
+  host-derived data — `/proc/cpuinfo`, `/proc/meminfo`, and the boot identifier
+  among it — that no bind governs, so the readable surface is wider than the
+  bound paths alone.
 - Everything under the workspace root is writable, including the repository's
   `.git`.
 - `cargo_diagnostics` compiles and runs the workspace's own build scripts,
