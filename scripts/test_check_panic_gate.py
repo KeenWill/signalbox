@@ -113,6 +113,31 @@ def lint_table_with_panic_warned() -> str:
     return deny_all_lints().replace('panic = "deny"', 'panic = "warn"')
 
 
+def lint_table_with_restriction(
+    deny_priority: int, group_level: str, group_priority: str
+) -> str:
+    """Return the required denies plus one `restriction` group entry.
+
+    `group_priority` is spelled as raw TOML so a case can hand the checker an
+    unreadable value without the helper having to model what is readable.
+    """
+    denies = "\n".join(
+        f'{lint} = {{ level = "deny", priority = {deny_priority} }}'
+        for lint in REQUIRED_PANIC_LINTS
+    )
+    group = (
+        f'restriction = {{ level = "{group_level}", priority = {group_priority} }}'
+    )
+    return f"{denies}\n{group}"
+
+
+def lint_table_with_unreadable_lint_priority() -> str:
+    """Return a table whose `panic` deny carries a non-integer priority."""
+    return deny_all_lints().replace(
+        'panic = "deny"', 'panic = { level = "deny", priority = true }'
+    )
+
+
 def workspace_manifest(
     members: tuple[str, ...],
     exclude: tuple[str, ...] = (),
@@ -321,6 +346,70 @@ class PanicGateLintTableTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("[workspace.lints.clippy]", result.stdout)
+
+
+class PanicGateGroupOverrideTests(unittest.TestCase):
+    """Cargo emits lint flags in ascending priority order and the last wins.
+
+    Every required form is a clippy `restriction` lint, so one `restriction`
+    entry ranked above the denies turns all six off while each deny still
+    reads correctly. The passing cases here are the ones that keep this from
+    being a blunt ban on ever naming the group.
+    """
+
+    def test_restriction_allow_outranking_denies_fails(self) -> None:
+        result = check_workspace(
+            clippy_table=lint_table_with_restriction(-1, "allow", "0")
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("clippy::restriction", result.stdout)
+        self.assertIn("clippy::panic", result.stdout)
+
+    def test_restriction_warn_outranking_denies_fails(self) -> None:
+        result = check_workspace(
+            clippy_table=lint_table_with_restriction(0, "warn", "1")
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("clippy::restriction", result.stdout)
+
+    def test_restriction_allow_below_denies_passes(self) -> None:
+        result = check_workspace(
+            clippy_table=lint_table_with_restriction(0, "allow", "-1")
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_restriction_allow_at_equal_priority_passes(self) -> None:
+        result = check_workspace(
+            clippy_table=lint_table_with_restriction(0, "allow", "0")
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_restriction_denied_above_the_lints_passes(self) -> None:
+        result = check_workspace(
+            clippy_table=lint_table_with_restriction(0, "deny", "1")
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_unreadable_group_priority_fails(self) -> None:
+        result = check_workspace(
+            clippy_table=lint_table_with_restriction(0, "allow", "true")
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("unreadable priority", result.stdout)
+
+    def test_unreadable_lint_priority_fails(self) -> None:
+        result = check_workspace(
+            clippy_table=lint_table_with_unreadable_lint_priority()
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("unreadable priority", result.stdout)
 
 
 if __name__ == "__main__":

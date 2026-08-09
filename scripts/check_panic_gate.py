@@ -31,9 +31,22 @@ configured for a crate at all.
 The check fails when
 
 1. a workspace member has no `[lints] workspace = true` in its own manifest,
-   so the workspace lint table — panic forms included — does not reach it, or
+   so the workspace lint table — panic forms included — does not reach it,
 2. the `[workspace.lints.clippy]` table stops denying one of the required
-   panic forms, whether by deletion or by demotion to `warn`/`allow`.
+   panic forms, whether by deletion or by demotion to `warn`/`allow`, or
+3. a `restriction` entry at a non-gating level outranks those denies.
+
+Rule 3 is the one that does not read as a defect in review. Cargo emits lint
+flags in ascending priority order and the last flag wins, so a table whose
+panic lints are denied at priority -1 under a `restriction = { level =
+"allow", priority = 0 }` is a table where nothing is denied at all: every
+deny reads correctly, and clippy accepts a bare `panic!()`. Every required
+form is a restriction lint, so that one group entry disarms all six at once.
+`allow` opens the gate outright; `warn` demotes it to whatever `-D warnings`
+happens to do, which is a contract that lives in a workflow file rather than
+here. Equal priority is safe, the specific lint winning over the group, and a
+group ranked below the denies never reaches them — both confirmed against
+clippy rather than assumed.
 
 Membership is whatever `cargo metadata` resolves, never a reading of the
 `members` list and never a directory glob. Those two disagree with Cargo in
@@ -77,6 +90,15 @@ REQUIRED_PANIC_LINTS = (
 
 GATING_LEVELS = frozenset({"deny", "forbid"})
 
+# Cargo passes lower-priority lint flags first, so a later entry wins. Every
+# required panic form is a clippy `restriction` lint, which makes a
+# `restriction` entry the one group entry able to turn all six back off. The
+# other clippy groups were checked against clippy 1.97.1 with a `panic!()`
+# member and a deny that outranked them — `all`, `pedantic`, `nursery`,
+# `style`, `complexity`, `correctness`, `suspicious`, and `perf` all left the
+# deny in force, because none of them contains a restriction lint.
+OVERRIDING_GROUPS = ("restriction",)
+
 
 def lint_level(configured: object) -> str | None:
     """Return the level of one Cargo lint entry, or `None` if unreadable.
@@ -91,6 +113,24 @@ def lint_level(configured: object) -> str | None:
         level = configured.get("level")
         if isinstance(level, str):
             return level
+    return None
+
+
+def lint_priority(configured: object) -> int | None:
+    """Return the priority of one Cargo lint entry, or `None` if unreadable.
+
+    A bare `panic = "deny"` carries Cargo's default priority of zero. `bool`
+    is rejected explicitly because Python counts it as an `int`, and a
+    `priority = true` should read as malformed rather than as priority one.
+    """
+    if isinstance(configured, str):
+        return 0
+    if isinstance(configured, dict):
+        priority = configured.get("priority", 0)
+        if isinstance(priority, bool):
+            return None
+        if isinstance(priority, int):
+            return priority
     return None
 
 
@@ -183,6 +223,7 @@ def check_panic_lints(root_manifest: dict, failures: list[str]) -> None:
             "Cargo.toml has no [workspace.lints.clippy] table, so no panic form is gated"
         )
         return
+    denied_at: dict[str, int] = {}
     for lint in REQUIRED_PANIC_LINTS:
         if lint not in clippy:
             failures.append(
@@ -195,6 +236,53 @@ def check_panic_lints(root_manifest: dict, failures: list[str]) -> None:
             failures.append(
                 f"[workspace.lints.clippy] sets clippy::{lint} to "
                 f"{level!r}, which does not fail a build (need deny or forbid)"
+            )
+            continue
+        priority = lint_priority(clippy[lint])
+        if priority is None:
+            failures.append(
+                f"[workspace.lints.clippy] gives clippy::{lint} an unreadable "
+                f"priority, so its position against group entries is undecidable"
+            )
+            continue
+        denied_at[lint] = priority
+
+    check_group_overrides(clippy, denied_at, failures)
+
+
+def check_group_overrides(
+    clippy: dict, denied_at: dict[str, int], failures: list[str]
+) -> None:
+    """Record a failure for each group entry that outranks a panic deny.
+
+    Cargo emits lint flags in ascending priority order and the last flag wins,
+    so a group holding these lints at a non-gating level beats every deny it
+    outranks. Equal priority is safe — the specific lint wins over the group —
+    and a group ranked below the denies never reaches them.
+    """
+    for group in OVERRIDING_GROUPS:
+        if group not in clippy:
+            continue
+        level = lint_level(clippy[group])
+        if level in GATING_LEVELS:
+            continue
+        priority = lint_priority(clippy[group])
+        if priority is None:
+            failures.append(
+                f"[workspace.lints.clippy] gives clippy::{group} an unreadable "
+                f"priority, so it cannot be shown to leave the panic denies standing"
+            )
+            continue
+        outranked = sorted(
+            lint for lint, at in denied_at.items() if priority > at
+        )
+        if outranked:
+            listing = ", ".join(f"clippy::{lint}" for lint in outranked)
+            failures.append(
+                f"[workspace.lints.clippy] sets clippy::{group} to {level!r} at "
+                f"priority {priority}, which Cargo emits after — and so overrides "
+                f"— the denies on {listing}; those panic forms are not gated "
+                f"despite reading as denied. Rank the group below them."
             )
 
 
