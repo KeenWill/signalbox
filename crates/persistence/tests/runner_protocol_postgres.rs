@@ -49,8 +49,7 @@ use signalbox_persistence::{
         append_runner_state_transition_for_test,
     },
     runner_protocol::{
-        RunnerConnectionEpoch, RunnerConnectionState, RunnerConnectionTransition,
-        RunnerProtocolCorruption,
+        RunnerConnectionEpoch, RunnerConnectionTransition, RunnerProtocolCorruption,
         RunnerProtocolStore, RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
     },
     session_credentials::{SessionCredentialPin, SessionModelCredential},
@@ -10724,8 +10723,17 @@ async fn s32_inv032_inv044_runner_suspect_outbox_round_trips() -> Result<(), Box
             RunnerConnectionTransition::HeartbeatMissed,
         )
         .await?;
+    let outbox_event_count: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox_event")
+        .fetch_one(&pool)
+        .await?;
+    let runner_event_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_state_transition_outbox_event")
+            .fetch_one(&pool)
+            .await?;
     let event = dispatch_next_outbox_event(&pool).await?;
 
+    assert_eq!(outbox_event_count, 1);
+    assert_eq!(runner_event_count, 1);
     assert_eq!(event.sequence(), 1);
     assert_eq!(event.session(), session);
     assert_eq!(
@@ -10797,8 +10805,8 @@ async fn s32_inv032_inv044_runner_suspect_outbox_failure_rolls_back_connection()
         .await?;
 
     assert_store_check_violation(rejected);
-    assert_eq!(retained.state(), RunnerConnectionState::Connected);
-    assert_eq!(retained.event_ordinal(), 1);
+    assert_eq!(retained.state(), connection.state());
+    assert_eq!(retained.event_ordinal(), connection.event_ordinal());
     assert_eq!(event_count, 0);
     drop(pool);
     Ok(())
