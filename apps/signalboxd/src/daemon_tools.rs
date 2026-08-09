@@ -3281,12 +3281,13 @@ mod tests {
         configure_owned_process_group(&mut child_command);
         let mut child = child_command.spawn().expect("bounded-wait child starts");
 
+        let wait = wait_for_child(&mut child, BRIDGE_CHILD_TEST_TIMEOUT);
+        terminate_owned_process_group(&mut child);
+
         assert!(
-            wait_for_child(&mut child, BRIDGE_CHILD_TEST_TIMEOUT)
-                .expect("bounded wait observes the live child")
+            wait.expect("bounded wait observes the live child")
                 .is_none()
         );
-        terminate_owned_process_group(&mut child);
         assert!(
             child
                 .try_wait()
@@ -4505,7 +4506,6 @@ mod tests {
 
     const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
     const MCP_UNSUPPORTED_PROTOCOL_VERSION: &str = "1900-01-01";
-    const MCP_SERVER_NAME: &str = "signalbox-claude-cli-bridge";
     const MCP_CLIENT_NAME: &str = "signalboxd-mcp-conformance";
     const MCP_INITIALIZE_REQUEST_ID: u64 = 1;
     const MCP_LIST_TOOLS_REQUEST_ID: u64 = 2;
@@ -4700,20 +4700,26 @@ mod tests {
         let initialized = fixture.initialize();
         fixture.finish();
 
-        assert_eq!(
-            initialized["result"]["protocolVersion"],
-            MCP_PROTOCOL_VERSION
-        );
-        assert_eq!(
-            initialized["result"]["capabilities"]["tools"],
-            serde_json::json!({"listChanged": false})
-        );
-        assert_eq!(
-            initialized["result"]["serverInfo"],
-            serde_json::json!({
-                "name": MCP_SERVER_NAME,
-                "version": env!("CARGO_PKG_VERSION"),
-            })
+        expect![[r#"
+            {
+              "id": 1,
+              "jsonrpc": "2.0",
+              "result": {
+                "capabilities": {
+                  "tools": {
+                    "listChanged": false
+                  }
+                },
+                "protocolVersion": "2025-11-25",
+                "serverInfo": {
+                  "name": "signalbox-claude-cli-bridge",
+                  "version": "0.0.0"
+                }
+              }
+            }"#]]
+        .assert_eq(
+            &serde_json::to_string_pretty(&initialized)
+                .expect("initialization response renders as JSON"),
         );
     }
 

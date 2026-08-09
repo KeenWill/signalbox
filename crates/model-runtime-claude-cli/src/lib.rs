@@ -31,6 +31,8 @@ pub use runtime::{
 /// document supplied to Claude Code.
 #[derive(Debug)]
 pub enum ClaudeCliMcpCatalogError {
+    /// Two declarations use the same MCP tool name.
+    DuplicateToolName,
     /// The declarations cannot be represented by the Claude MCP adapter.
     Unsupported(signalbox_model_runtime::PreparationFailure),
     /// Adapter-owned translation reached a defective state.
@@ -42,6 +44,9 @@ pub enum ClaudeCliMcpCatalogError {
 impl std::fmt::Display for ClaudeCliMcpCatalogError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::DuplicateToolName => {
+                formatter.write_str("Claude MCP catalog contains a duplicate tool name")
+            }
             Self::Unsupported(_) => formatter.write_str("Claude MCP catalog is unsupported"),
             Self::Defect(_) => formatter.write_str("Claude MCP catalog translation is defective"),
             Self::Serialization(_) => {
@@ -55,7 +60,7 @@ impl std::error::Error for ClaudeCliMcpCatalogError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Serialization(error) => Some(error),
-            Self::Unsupported(_) | Self::Defect(_) => None,
+            Self::DuplicateToolName | Self::Unsupported(_) | Self::Defect(_) => None,
         }
     }
 }
@@ -68,6 +73,13 @@ impl std::error::Error for ClaudeCliMcpCatalogError {
 pub fn serialize_mcp_catalog(
     tools: &[signalbox_model_runtime::ToolDefinition],
 ) -> Result<Vec<u8>, ClaudeCliMcpCatalogError> {
+    let unique_names = tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if unique_names.len() != tools.len() {
+        return Err(ClaudeCliMcpCatalogError::DuplicateToolName);
+    }
     let catalog = translate::tool_catalog(tools).map_err(|error| match error {
         translate::TranslationError::Failure(failure) => {
             ClaudeCliMcpCatalogError::Unsupported(failure)
@@ -79,4 +91,27 @@ pub fn serialize_mcp_catalog(
 
 fn serialize_catalog(catalog: &bridge::Catalog) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(catalog)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SYNTHETIC_TOOL_NAME: &str = "synthetic_tool";
+    const SYNTHETIC_TOOL_DESCRIPTION: &str = "Synthetic tool";
+
+    fn synthetic_tool() -> signalbox_model_runtime::ToolDefinition {
+        signalbox_model_runtime::ToolDefinition::with_schema(
+            SYNTHETIC_TOOL_NAME,
+            SYNTHETIC_TOOL_DESCRIPTION,
+            serde_json::json!({"type": "object"}),
+        )
+    }
+
+    #[test]
+    fn mcp_catalog_serialization_rejects_duplicate_tool_names() {
+        let tools = vec![synthetic_tool(), synthetic_tool()];
+
+        assert!(serialize_mcp_catalog(&tools).is_err());
+    }
 }
