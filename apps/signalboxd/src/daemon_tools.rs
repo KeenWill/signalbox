@@ -1554,12 +1554,9 @@ mod tests {
             .await;
         let captured_config = fs::read(workspace.path().join(CLAUDE_CAPTURED_CONFIG_FILENAME))
             .expect("the fake CLI captured the prepared MCP config");
-        let catalog = claude_catalog_path_from_config(&captured_config)
+        claude_catalog_path_from_config(&captured_config)
             .expect("the captured MCP config names the bridge catalog");
-        let catalog_name = catalog
-            .file_name()
-            .expect("the prepared Claude catalog path has a filename");
-        fs::read(workspace.path().join(catalog_name))
+        fs::read(workspace.path().join(CLAUDE_CAPTURED_CATALOG_FILENAME))
             .expect("the fake CLI captured the prepared Claude catalog")
     }
 
@@ -1823,6 +1820,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     const CLAUDE_CAPTURED_CONFIG_FILENAME: &str = "captured-mcp-config.json";
     #[cfg(target_os = "linux")]
+    const CLAUDE_CAPTURED_CATALOG_FILENAME: &str = "captured-mcp-catalog.json";
+    #[cfg(target_os = "linux")]
     const SYNTHETIC_CAPTURED_CATALOG_PATH: &str = "catalog with a \"quote\".json";
     #[cfg(target_os = "linux")]
     const CLAUDE_CATALOG_CAPTURE_SCRIPT: &str = r#"#!/bin/sh
@@ -1838,12 +1837,14 @@ done
 test -n "$mcp_config"
 capture_dir=${0%/*}
 cp "$mcp_config" "$capture_dir/captured-mcp-config.json"
-support_dir=${mcp_config%/*}
-for candidate in "$support_dir"/*; do
-  test -f "$candidate" || continue
-  filename=${candidate##*/}
-  cp "$candidate" "$capture_dir/$filename"
-done
+python3 -c 'import json, shutil, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    servers = json.load(source)["mcpServers"]
+assert len(servers) == 1
+arguments = next(iter(servers.values()))["args"]
+assert len(arguments) == 3 and arguments[0] == "--serve"
+shutil.copyfile(arguments[1], sys.argv[2])' \
+  "$mcp_config" "$capture_dir/captured-mcp-catalog.json"
 "#;
 
     #[cfg(target_os = "linux")]
@@ -3869,6 +3870,7 @@ done
         let Some(status) = wait_for_owned_process_group(&mut build, BRIDGE_BUILD_TIMEOUT)
             .expect("bridge binary build is observed")
         else {
+            kill_owned_process_group(&build);
             terminate_owned_process_group(&mut build);
             reader.join().expect("Cargo build output reader exits");
             panic!("bridge binary build exceeded its timeout");
@@ -4460,6 +4462,16 @@ done
                     .expect("bridge readiness waiter remains observable")
                     .is_none(),
                 "bridge readiness waiter stays blocked before tools/list"
+            );
+        }
+
+        #[track_caller]
+        fn assert_blocks_while_list_response_is_backpressured(&mut self) {
+            assert!(
+                wait_for_child(&mut self.child, BRIDGE_CHILD_TEST_TIMEOUT)
+                    .expect("bridge readiness waiter remains observable")
+                    .is_none(),
+                "bridge readiness waiter stays blocked before the full tools/list response"
             );
         }
 
@@ -5276,23 +5288,19 @@ done
 
         expect![[r#"
             {
-              "id": 1,
-              "jsonrpc": "2.0",
-              "result": {
-                "capabilities": {
-                  "tools": {
-                    "listChanged": false
-                  }
-                },
-                "protocolVersion": "2025-11-25",
-                "serverInfo": {
-                  "name": "signalbox-claude-cli-bridge",
-                  "version": "0.0.0"
+              "capabilities": {
+                "tools": {
+                  "listChanged": false
                 }
+              },
+              "protocolVersion": "2025-11-25",
+              "serverInfo": {
+                "name": "signalbox-claude-cli-bridge",
+                "version": "0.0.0"
               }
             }"#]]
         .assert_eq(
-            &serde_json::to_string_pretty(&initialized)
+            &serde_json::to_string_pretty(&initialized["result"])
                 .expect("initialization response renders as JSON"),
         );
     }
@@ -5349,11 +5357,14 @@ done
         let expected_tools = fixture.expected_tools.clone();
         fixture.await_list_response_started();
         assert!(!fixture.ready_path.exists());
-        let waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
+        let mut waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
             executable: &fixture.executable,
             ready: &fixture.ready_path,
             workspace: fixture._support.path(),
         });
+        waiter.synchronize_wait_path();
+        waiter.assert_blocks_while_list_response_is_backpressured();
+        assert!(!fixture.ready_path.exists());
         let listed = fixture.read_list_response();
         waiter.finish_success();
         assert!(fixture.ready_path.is_file());
