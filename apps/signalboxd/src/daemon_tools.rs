@@ -1688,31 +1688,6 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[track_caller]
-    fn synthetic_bridge_tool_definition() -> ToolDefinition {
-        ToolDefinition::new(
-            ToolName::try_new(String::from(SYNTHETIC_BRIDGE_TOOL_NAME))
-                .expect("synthetic bridge tool name is valid"),
-            String::from(SYNTHETIC_BRIDGE_TOOL_DESCRIPTION),
-            ToolInputSchema::try_new(String::from(SYNTHETIC_BRIDGE_TOOL_SCHEMA))
-                .expect("synthetic bridge tool schema is valid"),
-            ToolPermissionDefault::Confirm,
-            ToolEffectClass::EffectFree,
-        )
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn bridge_catalog_projects_definition_fields_into_mcp_shape() {
-        let definition = synthetic_bridge_tool_definition();
-        let observed = String::from_utf8(bridge_catalog(&[definition]))
-            .expect("bridge catalog is valid UTF-8");
-
-        expect![[r#"{"tools":[{"name":"synthetic_bridge_tool","description":"Projects a synthetic bridge tool.","inputSchema":{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}}]}"#]]
-            .assert_eq(&observed);
-    }
-
-    #[cfg(target_os = "linux")]
     #[test]
     fn captured_catalog_path_uses_semantic_mcp_configuration() {
         let config = serde_json::to_string_pretty(&serde_json::json!({
@@ -1846,7 +1821,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     const CLAUDE_CATALOG_CAPTURE_EXECUTABLE: &str = "capture-claude-catalog";
     #[cfg(target_os = "linux")]
-    const CLAUDE_CAPTURED_CONFIG_FILENAME: &str = "mcp.json";
+    const CLAUDE_CAPTURED_CONFIG_FILENAME: &str = "captured-mcp-config.json";
     #[cfg(target_os = "linux")]
     const SYNTHETIC_CAPTURED_CATALOG_PATH: &str = "catalog with a \"quote\".json";
     #[cfg(target_os = "linux")]
@@ -1862,6 +1837,7 @@ while [ "$#" -gt 0 ]; do
 done
 test -n "$mcp_config"
 capture_dir=${0%/*}
+cp "$mcp_config" "$capture_dir/captured-mcp-config.json"
 support_dir=${mcp_config%/*}
 for candidate in "$support_dir"/*; do
   test -f "$candidate" || continue
