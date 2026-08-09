@@ -879,14 +879,42 @@ states the single property the store must satisfy and one pass that establishes
 it.
 
 **Exclusive custody.** No principal but the daemon's effective user may change
-what any path component denotes, and no principal but that user may reach the
-home or read a credential inside it. Concretely, in two parts, because ancestors
-and the home need different things: every path component is reached without
-traversing a symlink and cannot be renamed, replaced, or removed by another
-principal, though ordinary reading and traversal of an ancestor is expected and
-fine; and the home itself, together with every credential-bearing entry in it,
-is owned by the daemon's effective user and grants no other principal any access
-at all. An ancestor may be owned by `root`.
+what any path component denotes, and nothing the child reads under the home
+comes from outside the daemon's exclusive custody. Concretely, in three parts,
+because ancestors, the home, and its contents each need something different:
+
+- **Ancestors.** Every path component is reached without traversing a symlink
+  and cannot be renamed, replaced, or removed by another principal. Ordinary
+  reading and traversal of an ancestor is expected and fine, and an ancestor may
+  be owned by `root`.
+- **The home.** It is owned by the daemon's effective user and grants no other
+  principal any access at all.
+- **Its contents.** Every object under the home is *exclusively held there*.
+  Stated positively and exhaustively, each such object: resolves, from the
+  home's own verified descriptor, to an object inside the verified home,
+  whatever its kind; is owned by the daemon's effective user; is writable by no
+  other principal; and is reachable by no name outside the home, which the
+  daemon establishes by requiring exactly one link. Two exceptions, and only
+  these two: a **directory** is exempt from the single-link requirement, because
+  a directory's link count counts its own `.` and each subdirectory's `..` and
+  therefore says nothing about external names; and a **credential-bearing**
+  entry is held to more, not less — it must be a regular file granting no other
+  principal any access at all, rather than merely no write.
+
+Why the third part is stated this way rather than as a list of rejections: three
+successive attempts to describe what is *excluded* each admitted one narrower
+case. A mode-`0700` home puts its contents beyond another principal's reach only
+if those contents are in fact inside it and reachable only from inside it. A
+`skills` symlink to a directory that principal can write is read by the child
+and never traverses the protected home; so is a `SKILL.md` hard-linked to a
+world-writable file outside it, which no containment-by-resolution rule can see.
+Both fail the positive property, the first on resolution and the second on link
+count, without either being named as a hazard.
+
+Working data is deliberately allowed to be readable by others — an ordinary
+`skills/<name>/SKILL.md` is mode `0644` on many systems and stays admissible —
+because the risk it carries is modification, not disclosure. Only credentials
+carry the disclosure risk, and only they are held to the stricter clause.
 
 One verification pass, the **custody walk**, establishes exactly that property,
 and every rule below is part of it rather than a separate check:
@@ -913,16 +941,17 @@ and every rule below is part of it rather than a separate check:
    adapter contract names as a place the CLI reads credentials from — must open
    no-follow as a *regular file* owned by the daemon's effective user with no
    group or other permission bit set at all. A symlink, FIFO, socket, device, or
-   directory in that position is rejected rather than inspected. The point of
-   this step is not permissions, which step 4 already settled, but escape: a
-   symlink here would resolve to an object outside the verified home, and no
-   entry is ever followed out of it.
-6. Every other entry in the home is the CLI's own working data — `sessions/`,
-   `log/`, `skills/<name>/SKILL.md`, and whatever else that release keeps — and
-   is neither inspected nor constrained. It does not need to be: step 4 already
-   put the whole directory beyond another principal's reach, and requiring
-   otherwise would reject the ordinary operator-established homes this delivery
-   exists to reuse.
+   directory in that position is rejected rather than inspected. This step is
+   about ownership and permissions; containment is step 6's job.
+6. It then descends the home and checks each object against the third part of
+   the property, exactly as stated. It opens every entry no-follow; requires the
+   object to be owned by the daemon's effective user and not writable by group
+   or other; requires a link count of exactly one unless the object is a
+   directory; and, for a symbolic link, requires that re-resolving it
+   descriptor-relative from the home's own descriptor land inside the verified
+   home. Contents are never inspected — the CLI's working data is the CLI's
+   business, and constraining its shape is what rejected ordinary
+   operator-established homes once already.
 7. It then records the home's device and inode as the profile's credential-home
    identity, and a later pass requires the same identity.
 
@@ -931,7 +960,10 @@ scheduling is blocked and no invocation starts against it.
 
 The facets that property covers, stated so a later report is either already
 answered or is honestly a new one: a symlink in any path component; a symlink or
-other non-regular entry standing where a credential file belongs; an ancestor,
+other non-regular entry standing where a credential file belongs; a link
+anywhere in the home resolving outside it; any non-directory object under the
+home carrying more than one link, which is how a hard link from outside is
+detected; any object under the home writable by another principal; an ancestor,
 the home, or a credential file writable by another principal; the home readable
 or traversable by another principal; a credential file readable by another
 principal; and a home replaced by a different object between passes. A hard link
@@ -968,10 +1000,15 @@ covered facet above, each asserting that scheduling is blocked and no invocation
 starts: a symlinked path component, a symlinked `auth.json`, a non-regular
 `auth.json`, a group-writable ancestor without sticky, a world-writable home, a
 mode-`0644` credential file, a group-readable home, and a home whose identity
-changed between passes. It owes one acceptance test too, because a property this
-strict is as easily wrong in the rejecting direction: an ordinary home carrying
-`sessions/`, `log/`, and `skills/<name>/SKILL.md` beside a mode-`0600`
-`auth.json`, under a mode-`0755` `root`-owned ancestor chain, must be admitted.
+changed between passes, a `skills` entry symlinked outside the home, and a
+`SKILL.md` hard-linked to a file outside it. It owes three acceptance tests as
+well, because a property this strict is as easily wrong in the rejecting
+direction and has already regressed once that way: an ordinary home carrying
+`sessions/`, `log/`, and a mode-`0644` `skills/<name>/SKILL.md` beside a
+mode-`0600` `auth.json`, under a mode-`0755` `root`-owned ancestor chain, must
+be admitted; so must one whose working data includes a symlink that stays inside
+the home; and so must a home whose subdirectories carry the ordinary link counts
+their own children imply.
 
 Every per-invocation recheck repeats the complete walk — every ancestor's
 ownership, mode, and sticky exemption, the home's own ownership and mode, its
@@ -1005,15 +1042,22 @@ bound, which is unbounded when absent. The knob exists because the tradeoff is a
 deployment's to make and code cannot observe which side of it a given operator
 is on.
 
-Two profiles whose validated credential-home identities differ are independent
-token families with nothing shared, so a pool holds as many as a deployment has
-and runs them concurrently. The same lexical normalization used for `file` paths
-applies to these directories before the identity check, and neither one
-normalized path nor one underlying directory identity may appear on two
-profiles. The operations policy does not apply, because rotation happens inside
-the store rather than at an external source of truth. And a process the daemon
-did not start — an operator running the CLI by hand against the same directory —
-is outside anything the daemon can coordinate.
+Two `codex_home` profiles must name independently provisioned logins, and that
+is an operator-established precondition rather than something the daemon
+verifies. Distinct directory identity does not establish it: a home copied from
+another has its own device and inode and passes every check while carrying the
+same refresh token. The pinned CLI rotates that token on refresh and treats
+reuse as permanent failure, so two profiles sharing one underlying authorization
+can invalidate it and quarantine both — the failure mode the pool exists to
+avoid, arrived at through the configuration meant to prevent it. The daemon
+cannot detect the sharing, because the store's contents are exactly what it
+never reads. What it does enforce is the necessary condition, not the sufficient
+one: the same lexical normalization used for `file` paths applies before the
+identity check, and neither one normalized path nor one underlying directory
+identity may appear on two profiles. The operations policy does not apply,
+because rotation happens inside the store rather than at an external source of
+truth. And a process the daemon did not start — an operator running the CLI by
+hand against the same directory — is outside anything the daemon can coordinate.
 
 **Committed unimplemented functionality — capacity reservations.** No present
 composition reserves capacity for a bounded `codex_home` profile, records an
@@ -1082,11 +1126,18 @@ operator, polls the configured token endpoint under the same
 one-POST-per-attempt and no-redirect rules the refresh path uses, and on success
 harvests the refresh token and non-secret account metadata into one transaction.
 No scratch credential home is involved, because no child runs: the CLI enters
-the picture only at dispatch, when it is handed a minted access token. Because
-each authorization mints an independent token family, provisioning neither
-disturbs nor depends on any other login for that account: an operator's existing
-CLI logins on this or any other machine keep working, and deleting the profile's
-stored authorization ends only the daemon's own family.
+the picture only at dispatch, when it is handed a minted access token.
+Provisioning depends on no other login for that account: it authorizes through
+its own configured client and stores what it harvests, reading nothing an
+operator's CLI already holds. Whether it *disturbs* one is the authorization
+server's to decide and not something this contract can promise — a server that
+issues one grant per client and account, or that revokes an earlier grant on a
+new authorization, will invalidate an operator's existing login, and the
+exchange gives the daemon no way to detect or prevent that. Deleting the
+profile's stored authorization likewise ends the daemon's own grant and whatever
+else that server ties to it. Where grant independence matters, it is a property
+of the configured authorization server that the operator must establish, not one
+this delivery provides.
 
 A stored authorization is bound to the tuple it was minted under. Provisioning
 persists, in the same transaction as the token generation, the exact
@@ -1115,29 +1166,38 @@ port, path, and query. Redirect following and automatic HTTP, transport, and
 protocol retries are disabled at every layer. Once any request bytes may have
 been written, a connection loss, redirect response, or indeterminate response is
 ambiguous: the daemon does not send again and follows the quarantine path below.
-A second transaction re-locks and matches that generation, persists the returned
-token, and clears the marker before the new access token is used anywhere. A
-definitely committed replacement overwrites the previous refresh token rather
-than retaining it: a superseded token is unusable, and keeping one would only
-preserve material whose sole remaining effect is to invalidate the live
-authorization if it were ever replayed. If the exchange fails after possible
-provider rotation, its persistence commit is ambiguous, or the daemon restarts
-with the marker still present, it never replays the stored token. It first
-rereads the durable generation: a committed replacement is adopted; an uncleared
-marker quarantines the profile and requires re-provisioning. After a successful
-replacement commit, the refresh task publishes the one in-memory access token to
-every joined preparation. A definitely non-rotating failure first clears the
-marker, then publishes its one typed result. An ambiguous exchange, ambiguous
-commit, or refresh-task loss first commits quarantine from the retained marker,
-then publishes that typed result and wakes every joiner. Cancellation follows
-the same evidence boundary: before possible request bytes it is definitely
-non-rotating, and afterward it is ambiguous. Process exit needs no durable
-waiter: startup resolves the retained marker to replacement or quarantine before
-admitting work, and a later preparation observes that durable result. No joiner
-can wait past its own cancellation or the single-flight's one published terminal
-result. Access tokens are held in memory. A clean restart discards them without
-contacting any provider; the first later call preparation that needs a profile
-lazily refreshes it. This keeps access tokens out of the database and preserves
+A second transaction re-locks and matches that generation, compares the account
+identity the response carries against the one stored with that generation,
+persists the returned token, and clears the marker before the new access token
+is used anywhere. An identity that differs is not persisted: the generation
+quarantines and re-provisioning is the only recovery. Why quarantine rather than
+adopt the new identity — dispatch pairs each minted access token with the stored
+account identity to form the CLI's per-account header, so silently keeping the
+old identity would send a valid token under the wrong account, and silently
+adopting the new one would re-scope a profile the operator declared for a
+specific account without the operator saying so. Neither is a decision a refresh
+is entitled to make. A definitely committed replacement overwrites the previous
+refresh token rather than retaining it: a superseded token is unusable, and
+keeping one would only preserve material whose sole remaining effect is to
+invalidate the live authorization if it were ever replayed. If the exchange
+fails after possible provider rotation, its persistence commit is ambiguous, or
+the daemon restarts with the marker still present, it never replays the stored
+token. It first rereads the durable generation: a committed replacement is
+adopted; an uncleared marker quarantines the profile and requires
+re-provisioning. After a successful replacement commit, the refresh task
+publishes the one in-memory access token to every joined preparation. A
+definitely non-rotating failure first clears the marker, then publishes its one
+typed result. An ambiguous exchange, ambiguous commit, or refresh-task loss
+first commits quarantine from the retained marker, then publishes that typed
+result and wakes every joiner. Cancellation follows the same evidence boundary:
+before possible request bytes it is definitely non-rotating, and afterward it is
+ambiguous. Process exit needs no durable waiter: startup resolves the retained
+marker to replacement or quarantine before admitting work, and a later
+preparation observes that durable result. No joiner can wait past its own
+cancellation or the single-flight's one published terminal result. Access tokens
+are held in memory. A clean restart discards them without contacting any
+provider; the first later call preparation that needs a profile lazily refreshes
+it. This keeps access tokens out of the database and preserves
 configuration-independent recovery even when a token endpoint is unavailable.
 
 Dispatch supplies each invocation a scratch credential home carrying a
@@ -1246,14 +1306,19 @@ The five admitted actions are:
 | `avoid_new_sessions` | Sessions with a prior completed call through the member keep it; preparation for a session without one on this pool excludes it.                           |
 | `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an operator clears it.                                               |
 
-**Committed unimplemented functionality — durable trigger effects.** No present
-runtime observes a provider failure, derives a trigger, or stores a quarantine,
-membership exclusion, or session displacement, so no configured action above has
-any effect in this build. The action vocabulary is admitted by the grammar and
-validated at startup exactly as specified, and nothing else. Its implementing
-child owns how each action's durable record is scoped, correlated to the exact
-observation that caused it, serialized against a concurrent observation for the
-same profile, accumulated when a trigger repeats, and read by preparation.
+**Committed unimplemented functionality — durable trigger effects.** Provider
+failures are already observed and classified: each adapter maps its native
+terminal evidence to a closed `ProviderErrorKind`, and model-call execution
+already consumes that typed evidence. What no present runtime does is translate
+a classification into a pool trigger, or store a quarantine, membership
+exclusion, or session displacement, so no configured action above has any effect
+in this build. Its implementing child reuses the existing classification
+boundary rather than replacing it. The action vocabulary is admitted by the
+grammar and validated at startup exactly as specified, and nothing else. Its
+implementing child owns how each action's durable record is scoped, correlated
+to the exact observation that caused it, serialized against a concurrent
+observation for the same profile, accumulated when a trigger repeats, and read
+by preparation.
 
 `switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
 `on_overloaded`, because only those causes carry proof that the request was not
@@ -1578,14 +1643,16 @@ deployment-side rules that code cannot enforce are stated in
 
 - **External and daemon-owned CLI logins.** An `ambient` profile leaves login
   resolution to the CLI under the adapter's existing child-environment contract.
-  A `codex_home` profile instead names a login store the daemon never opens and
-  supplies that directory as the fresh Codex process's credential home. An
-  `oauth` profile inverts this — the daemon holds the rotating authorization and
-  hands each process a scratch home carrying only an access token. The
-  non-ambient forms make two profiles two independent logins, which is what lets
-  one pool hold several. The adapter invents no credential-value shape of its
-  own. The profile's configured billing kind labels derived cost; adapter kind
-  and delivery do not.
+  A `codex_home` profile instead names a login store whose contents the daemon
+  never reads or interprets — it opens entries for metadata alone, which is what
+  the custody walk's descriptor-relative `fstat` requires — and supplies that
+  directory as the fresh Codex process's credential home. An `oauth` profile
+  inverts this — the daemon holds the rotating authorization and hands each
+  process a scratch home carrying only an access token. The non-ambient forms
+  make two profiles two independent logins, which is what lets one pool hold
+  several. The adapter invents no credential-value shape of its own. The
+  profile's configured billing kind labels derived cost; adapter kind and
+  delivery do not.
 
 - **The value is the file's bytes less trailing line termination.** The read
   drops trailing `\n` and `\r` bytes and retains every other byte exactly,
