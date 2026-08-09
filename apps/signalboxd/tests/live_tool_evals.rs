@@ -147,7 +147,9 @@ const WORKSPACE_SEED: &str = "alpha\nbeta fixture\nalpha\n";
 const WORKSPACE_GLOB_PATH: &str = "zz-glob.txt";
 const WORKSPACE_GLOB_CONTENT: &str = "beta glob fixture\n";
 const WORKSPACE_FORCED_READ_MAX_BYTES: usize = 6;
+const WORKSPACE_LIST_PATH: &str = "nested-list";
 const WORKSPACE_LIST_MAX_RESULTS: usize = 20;
+const WORKSPACE_LIST_ENTRY_COUNT: usize = WORKSPACE_LIST_MAX_RESULTS + 1;
 const WORKSPACE_GLOB_MAX_RESULTS: usize = 1;
 const WORKSPACE_SEARCH_MAX_RESULTS: usize = 1;
 const WORKSPACE_NONMATCHING_COUNT: usize = WORKSPACE_LIST_MAX_RESULTS;
@@ -164,6 +166,7 @@ const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
 const WEB_QUERY: &str = "Signalbox tool evaluation";
 const WEB_FETCH_BODY: &str = "Signalbox tool evaluation fixture";
+const WEB_SEARCH_TITLE: &str = "Synthetic Signalbox result";
 const WEB_SEARCH_SNIPPET: &str = "Synthetic result for model-in-the-loop evaluation.";
 const EXPECTED_OPENAI_CREDENTIAL_REFERENCE: &str = "openai-tool-eval";
 const EXPECTED_WEB_CREDENTIAL_REFERENCE: &str = "brave-search-primary";
@@ -467,8 +470,8 @@ const WORKSPACE_CASES: &[ForcedCase] = &[
     },
     ForcedCase {
         name: LIST_DIRECTORY_NAME,
-        expected_arguments: r#"{"path":".","max_results":20}"#,
-        prompt: "Call list_directory with exactly {\"path\":\".\",\"max_results\":20}. After its result, answer done without another tool call.",
+        expected_arguments: r#"{"path":"nested-list","max_results":20}"#,
+        prompt: "Call list_directory with exactly {\"path\":\"nested-list\",\"max_results\":20}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: GLOB_FILES_NAME,
@@ -547,6 +550,13 @@ impl FamilySuite {
             workspace.path().join(WORKSPACE_GLOB_PATH),
             WORKSPACE_GLOB_CONTENT,
         )?;
+        fs::create_dir(workspace.path().join(WORKSPACE_LIST_PATH))?;
+        for index in 0..WORKSPACE_LIST_ENTRY_COUNT {
+            fs::write(
+                workspace.path().join(workspace_list_entry_path(index)),
+                "nested list fixture\n",
+            )?;
+        }
         for index in 0..WORKSPACE_NONMATCHING_COUNT {
             fs::write(
                 workspace.path().join(workspace_nonmatching_path(index)),
@@ -1106,12 +1116,13 @@ fn workspace_nonmatching_path(index: usize) -> String {
 }
 
 fn workspace_listing(entry_count: usize) -> Vec<(String, &'static str)> {
-    std::iter::once((String::from(WORKSPACE_SEED_PATH), "file"))
-        .chain(
-            (0..entry_count.saturating_sub(1))
-                .map(|index| (workspace_nonmatching_path(index), "file")),
-        )
+    (0..entry_count)
+        .map(|index| (workspace_list_entry_path(index), "file"))
         .collect()
+}
+
+fn workspace_list_entry_path(index: usize) -> String {
+    format!("{WORKSPACE_LIST_PATH}/entry-{index:02}.txt")
 }
 
 fn expected_workspace_listing() -> Vec<(String, &'static str)> {
@@ -1119,9 +1130,7 @@ fn expected_workspace_listing() -> Vec<(String, &'static str)> {
 }
 
 fn complete_workspace_listing() -> Vec<(String, &'static str)> {
-    let mut entries = workspace_listing(WORKSPACE_NONMATCHING_COUNT + 1);
-    entries.push((String::from(WORKSPACE_GLOB_PATH), "file"));
-    entries
+    workspace_listing(WORKSPACE_LIST_ENTRY_COUNT)
 }
 
 fn workspace_listing_json(entries: Vec<(String, &'static str)>) -> Vec<serde_json::Value> {
@@ -1148,11 +1157,11 @@ fn web_forced_case_passed(
             result["results"].as_array().is_some_and(|results| {
                 results.len() == 1
                     && results.first().is_some_and(|first| {
-                        first["title"] == arguments["query"]
+                        first["title"] == WEB_SEARCH_TITLE
                             && first["url"] == WEB_URL
                             && first["snippet"] == WEB_SEARCH_SNIPPET
                     })
-            }) && result["truncated"] == false
+            }) && result["truncated"] == true
         }
         _ => false,
     }
@@ -1644,13 +1653,14 @@ impl WebSearchTransport for FixtureWebSearchTransport {
             );
         }
         let result = WebSearchResult::try_new(WebSearchResultFields {
-            title: String::from(WEB_QUERY),
+            title: String::from(WEB_SEARCH_TITLE),
             url: String::from(WEB_URL),
             snippet: String::from(WEB_SEARCH_SNIPPET),
         })
         .expect("the synthetic web result is valid");
-        let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
-            .expect("the synthetic web response is bounded");
+        let response =
+            WebSearchResponse::new(vec![result], WebSearchPageCompleteness::MoreAvailable)
+                .expect("the synthetic web response is bounded");
         WebSearchTransportOutcome::completed(response, credential)
     }
 }
@@ -4287,18 +4297,40 @@ fn forced_web_search_verifier_rejects_an_extra_result() -> EvalResult {
         .find(|case| case.name == WEB_SEARCH_NAME)
         .expect("the web search fixture exists");
     let fixture = serde_json::json!({
-        "title": WEB_QUERY,
+        "title": WEB_SEARCH_TITLE,
         "url": WEB_URL,
         "snippet": WEB_SEARCH_SNIPPET,
     });
     let result = serde_json::json!({
         "results": [fixture.clone(), fixture],
-        "truncated": false,
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
 
     assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_web_search_verifier_accepts_distinct_incomplete_evidence() -> EvalResult {
+    let suite = FamilySuite::web()?;
+    let case = WEB_CASES
+        .iter()
+        .find(|case| case.name == WEB_SEARCH_NAME)
+        .expect("the web search fixture exists");
+    let result = serde_json::json!({
+        "results": [{
+            "title": WEB_SEARCH_TITLE,
+            "url": WEB_URL,
+            "snippet": WEB_SEARCH_SNIPPET,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
