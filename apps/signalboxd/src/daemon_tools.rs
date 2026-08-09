@@ -1447,16 +1447,16 @@ mod tests {
             pool,
             MappedDaemonCredentialInputs {
                 web_search: FileCredentialAccess::new(
-                    support.path().join("web-search"),
-                    CredentialReference::new("synthetic-web-search"),
+                    support.path().join(SYNTHETIC_WEB_SEARCH_CREDENTIAL_PATH),
+                    CredentialReference::new(SYNTHETIC_WEB_SEARCH_CREDENTIAL_REFERENCE),
                 ),
                 code_host: FileCredentialAccess::new(
-                    support.path().join("code-host"),
-                    CredentialReference::new("synthetic-code-host"),
+                    support.path().join(SYNTHETIC_CODE_HOST_CREDENTIAL_PATH),
+                    CredentialReference::new(SYNTHETIC_CODE_HOST_CREDENTIAL_REFERENCE),
                 ),
                 github: FileCredentialAccess::new(
-                    support.path().join("github"),
-                    CredentialReference::new("synthetic-github"),
+                    support.path().join(SYNTHETIC_GITHUB_CREDENTIAL_PATH),
+                    CredentialReference::new(SYNTHETIC_GITHUB_CREDENTIAL_REFERENCE),
                 ),
             },
             GitHubCodeHostTransport::try_new().expect("offline code-host transport constructs"),
@@ -1665,6 +1665,12 @@ mod tests {
     const CARGO_TEST_PROFILE: &str = "test";
     const SYNTHETIC_GOAL_DATABASE_URL: &str =
         "postgresql://signalbox:synthetic@127.0.0.1/signalbox";
+    const SYNTHETIC_WEB_SEARCH_CREDENTIAL_PATH: &str = "web-search";
+    const SYNTHETIC_WEB_SEARCH_CREDENTIAL_REFERENCE: &str = "synthetic-web-search";
+    const SYNTHETIC_CODE_HOST_CREDENTIAL_PATH: &str = "code-host";
+    const SYNTHETIC_CODE_HOST_CREDENTIAL_REFERENCE: &str = "synthetic-code-host";
+    const SYNTHETIC_GITHUB_CREDENTIAL_PATH: &str = "github";
+    const SYNTHETIC_GITHUB_CREDENTIAL_REFERENCE: &str = "synthetic-github";
 
     #[track_caller]
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
@@ -1858,14 +1864,11 @@ mod tests {
             .and_then(Path::parent)
             .and_then(Path::parent)
             .expect("test executable has a Cargo artifact parent");
-        if artifact_parent == default_target_dir {
-            return;
-        }
         let artifact_parent_name = artifact_parent
             .file_name()
             .expect("Cargo artifact parent has a name");
         assert!(
-            artifact_parent.parent() != Some(default_target_dir.as_path())
+            artifact_parent == default_target_dir
                 || input.known_targets.contains(artifact_parent_name),
             "custom Cargo target specifications are unsupported by the nested bridge build"
         );
@@ -2244,6 +2247,22 @@ mod tests {
             current_executable: &executable,
             configured_target_dir: None,
             default_target_dir: target_dir,
+            known_targets: &BTreeSet::new(),
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "custom Cargo target specifications are unsupported by the nested bridge build"
+    )]
+    fn bridge_artifact_selection_rejects_a_custom_target_with_a_cli_target_directory() {
+        let cli_target_dir = Path::new("synthetic-cli-target");
+        let executable = cli_target_dir.join("custom/debug/deps/daemon-tools-test");
+
+        reject_unrecognized_default_target(DefaultTargetRecognition {
+            current_executable: &executable,
+            configured_target_dir: None,
+            default_target_dir: Path::new("synthetic-default-target"),
             known_targets: &BTreeSet::new(),
         });
     }
