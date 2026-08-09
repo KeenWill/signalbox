@@ -5,7 +5,9 @@ implementing stack through this PR (`agent/model-settings-execution`).
 
 The delegated tool-approval posture, judge selection, and daemon composition are
 verified against the implementing stack through this PR
-(`agent/approval-judge-daemon`).
+(`agent/approval-judge-daemon`). The posture values `unsandboxed_exec` accepts,
+and which of them changes its resolved approval, are re-verified against this PR
+(`agent/approval-posture-alwaysconfirm`).
 
 The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
@@ -571,7 +573,7 @@ unknown posture values, and startup rejects a structurally valid name that is
 absent from the selected composition. That name check runs in the pre-database
 configuration pass. An absent table or omitted tool name preserves that
 declaration's legacy permission-default and session-blanket behavior exactly.
-Subject to the `AlwaysConfirm` human-only rule owned by
+Subject to the `AlwaysConfirm` rule owned by
 [Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources),
 an explicit posture supersedes that legacy result for the request: `auto`
 records policy automation and `human` parks for a user even when the session
@@ -595,21 +597,23 @@ invoking session's transcript defaults to `Auto`, while listing conversations
 and reading another native or imported conversation default to `Confirm`.
 `web_search` and `web_fetch` also default to `Confirm`; the checked-in example
 maps both exact names to `human`. The three execution tools complete the
-enumeration. `unsandboxed_exec` is compiled `AlwaysConfirm`, which no posture,
-approval judge, or session blanket can lower. `sandboxed_exec` defaults to
-`Confirm`, because it accepts an arbitrary program and argument vector. That is
-a compiled default and not a floor: an explicit `auto` posture resolves it to
-policy-automatic, and with no posture mapped a session blanket approves it
-without a per-call decision. Only the `human` posture parks it for a person
-whatever the blanket says. `cargo_diagnostics` defaults to `Auto`: its arguments
-carry no program, so a turn selects neither the binary nor its argument vector,
-and the tool issues only the fixed Cargo check, clippy, and test passes it
-builds itself. Those passes still compile and run the workspace's own build
-scripts, procedural macros, and test binaries, so an automatic diagnostics call
-executes whatever code the workspace already contains, under the profile
-described below. The runtime meaning and precedence of those declaration
-defaults, the explicit posture, the session blanket, and the durable approval
-wait are owned by
+enumeration. `unsandboxed_exec` is compiled `AlwaysConfirm`. Every posture value
+remains configurable for it, but which of them changes its resolved approval is
+owned by
+[Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
+`sandboxed_exec` defaults to `Confirm`, because it accepts an arbitrary program
+and argument vector. That is a compiled default and not a floor: an explicit
+`auto` posture resolves it to policy-automatic, and with no posture mapped a
+session blanket approves it without a per-call decision. Only the `human`
+posture parks it for a person whatever the blanket says. `cargo_diagnostics`
+defaults to `Auto`: its arguments carry no program, so a turn selects neither
+the binary nor its argument vector, and the tool issues only the fixed Cargo
+check, clippy, and test passes it builds itself. Those passes still compile and
+run the workspace's own build scripts, procedural macros, and test binaries, so
+an automatic diagnostics call executes whatever code the workspace already
+contains, under the profile described below. The runtime meaning and precedence
+of those declaration defaults, the explicit posture, the session blanket, and
+the durable approval wait are owned by
 [Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
 Only the explicit `[tool_approval_postures]` table changes a declaration's
 resolved posture; family composition itself does not.

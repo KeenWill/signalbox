@@ -791,7 +791,7 @@ Each `RunnerToolDeclaration` contains:
 - one checked `RunnerToolModelDefinition`, containing a nonempty bounded
   model-facing description and a canonical JSON-object argument schema;
 - one required `ToolPermissionDefault`, whose additive `always_confirm` storage
-  encoding round-trips the daemon-local non-overridable approval posture;
+  encoding round-trips the daemon-local always-confirm approval declaration;
 - one required `RunnerToolEffectClass`; and
 - one nonempty `ToolAdmissibleLoci` value.
 
