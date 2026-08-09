@@ -173,6 +173,7 @@ const GIT_CHERRY_PICK_HEAD_PATH: &str = "CHERRY_PICK_HEAD";
 const GIT_MERGE_MESSAGE: &str = "synthetic forced merge\n";
 const GIT_MERGE_MODE: &str = "";
 const GIT_REGULAR_FILE_MODE: i32 = 0o100644;
+const GIT_REGULAR_INDEX_FILE_MODE: u32 = 0o100644;
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
 const WORKSPACE_SEED: &str = "alpha\nbeta fixture\nalpha\n";
 const WORKSPACE_GLOB_DIRECTORY: &str = "glob-scope";
@@ -626,6 +627,7 @@ struct FamilySuite {
     workspace: TempDir,
     git_seed: Option<Oid>,
     git_seed_refs: BTreeMap<String, Oid>,
+    git_stage_seed_worktree_mode: Option<u32>,
     catalog: MergedCatalog,
     executor: SharedFamilyExecutor,
     workspace_seed_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
@@ -644,6 +646,15 @@ impl FamilySuite {
         let workspace = tempfile::tempdir()?;
         let git_seed = seed_git_repository(workspace.path())?;
         let git_seed_refs = git_local_branch_targets(&Repository::open(workspace.path())?)?;
+        #[cfg(unix)]
+        let git_stage_seed_worktree_mode = Some(
+            fs::metadata(workspace.path().join(GIT_STAGE_PATH))?
+                .permissions()
+                .mode()
+                & 0o7777,
+        );
+        #[cfg(not(unix))]
+        let git_stage_seed_worktree_mode = None;
         let tools = LocalGitTools::try_new(
             LocalWorkspaceFileSystem,
             workspace.path(),
@@ -655,6 +666,7 @@ impl FamilySuite {
             workspace,
             git_seed: Some(git_seed),
             git_seed_refs,
+            git_stage_seed_worktree_mode,
             catalog: MergedCatalog::try_new([catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Git(executor)),
             workspace_seed_entries: BTreeMap::new(),
@@ -706,6 +718,7 @@ impl FamilySuite {
             workspace,
             git_seed: None,
             git_seed_refs: BTreeMap::new(),
+            git_stage_seed_worktree_mode: None,
             catalog: MergedCatalog::try_new([read_catalog, mutation_catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Workspace {
                 read: read_executor,
@@ -733,6 +746,7 @@ impl FamilySuite {
             workspace,
             git_seed: None,
             git_seed_refs: BTreeMap::new(),
+            git_stage_seed_worktree_mode: None,
             catalog: MergedCatalog::try_new([fetch_catalog, search_catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Web {
                 fetch: fetch_executor,
@@ -760,6 +774,7 @@ impl FamilySuite {
             workspace,
             git_seed: None,
             git_seed_refs: BTreeMap::new(),
+            git_stage_seed_worktree_mode: None,
             catalog: MergedCatalog::try_new([
                 sandboxed_catalog,
                 unsandboxed_catalog,
@@ -928,6 +943,7 @@ impl FamilySuite {
                     self.workspace.path(),
                     seed,
                     &self.git_seed_refs,
+                    self.git_stage_seed_worktree_mode,
                     case.name,
                     &arguments,
                     &result,
@@ -1057,6 +1073,7 @@ fn git_forced_case_passed(
     root: &Path,
     seed: Oid,
     seed_refs: &BTreeMap<String, Oid>,
+    git_stage_seed_worktree_mode: Option<u32>,
     name: &str,
     arguments: &serde_json::Value,
     result: &serde_json::Value,
@@ -1206,6 +1223,7 @@ fn git_forced_case_passed(
                     &repository,
                     GIT_STAGE_PATH,
                     GIT_STAGE_CONTENT.as_bytes(),
+                    git_stage_seed_worktree_mode,
                 )?
                 && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
                 && head.id() == seed
@@ -1482,13 +1500,31 @@ fn staged_blob_matches_fixture(
     repository: &Repository,
     path: &str,
     expected: &[u8],
+    expected_worktree_mode: Option<u32>,
 ) -> EvalResult<bool> {
     let index = repository.index()?;
     let Some(entry) = index.get_path(Path::new(path), 0) else {
         return Ok(false);
     };
     let blob = repository.find_blob(entry.id)?;
-    Ok(blob.content() == expected && fs::read(root.join(path))? == expected)
+    Ok(entry.mode == GIT_REGULAR_INDEX_FILE_MODE
+        && blob.content() == expected
+        && fs::read(root.join(path))? == expected
+        && worktree_file_mode_matches(&root.join(path), expected_worktree_mode)?)
+}
+
+fn worktree_file_mode_matches(path: &Path, expected: Option<u32>) -> EvalResult<bool> {
+    #[cfg(unix)]
+    return Ok(expected.is_some_and(|expected| {
+        fs::metadata(path)
+            .ok()
+            .is_some_and(|metadata| metadata.permissions().mode() & 0o7777 == expected)
+    }));
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(expected.is_none())
+    }
 }
 
 fn workspace_forced_case_passed(
@@ -4996,12 +5032,23 @@ fn forced_git_stage_verifier_accepts_the_exact_staged_blob() -> EvalResult {
         .find(|case| case.name == GIT_STAGE_NAME)
         .expect("the Git stage fixture exists");
     stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    let repository = Repository::open(suite.workspace.path())?;
+    let index = repository.index()?;
+    let entry = index
+        .get_path(Path::new(GIT_STAGE_PATH), 0)
+        .expect("the exact staged fixture is indexed");
+    let worktree_mode = fs::metadata(suite.workspace.path().join(GIT_STAGE_PATH))?
+        .permissions()
+        .mode()
+        & 0o7777;
     let result = serde_json::json!({
         "staged_paths": 1,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
 
+    assert_eq!(entry.mode, GIT_REGULAR_INDEX_FILE_MODE);
+    assert_eq!(Some(worktree_mode), suite.git_stage_seed_worktree_mode);
     assert!(suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
@@ -5088,6 +5135,29 @@ fn forced_git_stage_verifier_rejects_mutated_unrelated_fixtures() -> EvalResult 
         suite.workspace.path().join(GIT_NATURAL_PATH),
         GIT_COMMIT_CONTENT,
     )?;
+    let result = serde_json::json!({
+        "staged_paths": 1,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_stage_verifier_rejects_an_executable_staged_file() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STAGE_NAME)
+        .expect("the Git stage fixture exists");
+    let path = suite.workspace.path().join(GIT_STAGE_PATH);
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(permissions.mode() | USER_EXECUTE_MODE_BIT);
+    fs::set_permissions(&path, permissions)?;
+    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
     let result = serde_json::json!({
         "staged_paths": 1,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,

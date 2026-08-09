@@ -213,6 +213,8 @@ jobs:
           SIGNALBOX_EXEC_SUPERVISOR: ${{ steps.build.outputs.supervisor }}
         run: |
           set -euo pipefail
+          test -n "${OPENAI_API_KEY}" \
+            || { echo "the openai-smoke environment provides no API key"; exit 1; }
           result="${RUNNER_TEMP}/tool-eval-test-output"
           set +e
           "${{ steps.build.outputs.executable }}" \
