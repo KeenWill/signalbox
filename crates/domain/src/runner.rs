@@ -2733,7 +2733,7 @@ impl SessionRunnerPlacement {
             SessionRunnerPlacementState::RunnerLostBeforePin(lost)
             | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(
                 lost,
-            )) if placement.request.selector == RunnerSelector::Identity(lost.runner)
+            )) if selector_names_runner(&placement.request.selector, lost.runner)
                 && placement_revision_history_matches(
                     placement.revision,
                     &placement.request,
@@ -2768,6 +2768,13 @@ impl SessionRunnerPlacement {
                 _,
             )) => Err(RunnerDomainError::CorruptStoredFacts),
         }
+    }
+}
+
+fn selector_names_runner(selector: &RunnerSelector, runner: RunnerId) -> bool {
+    match selector {
+        RunnerSelector::Identity(selected) => *selected == runner,
+        RunnerSelector::CapabilityClass(_) => false,
     }
 }
 
@@ -6395,6 +6402,25 @@ mod tests {
         )
         .expect("append-only pre-pin replacement history authenticates revision two");
         assert_eq!(restored.state(), &SessionRunnerPlacementState::Unpinned);
+    }
+
+    #[test]
+    fn s32_inv044_lost_before_pin_reconstitution_requires_an_identity_selector() {
+        let selected = runner_id(RUNNER);
+        let input = SessionRunnerPlacementReconstitutionInput {
+            session: session_id(SESSION),
+            revision: RunnerGeneration::one(),
+            request: profileless_placement_request(),
+            state: SessionRunnerPlacementState::RunnerLostBeforePin(
+                RunnerLostBeforePin::from_stored(selected),
+            ),
+            history: RunnerPlacementReconstitutionHistory::Initial,
+        };
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(input, session_id(SESSION), None, None),
+            Err(RunnerDomainError::CorruptStoredFacts),
+        );
     }
 
     #[test]

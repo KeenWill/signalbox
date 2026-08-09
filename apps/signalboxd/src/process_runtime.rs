@@ -172,7 +172,8 @@ use signalbox_process_protocol::{
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
     RunnerPlacementRevision as WireRunnerPlacementRevision,
     RunnerSandboxProfile as WireRunnerSandboxProfile,
-    RunnerStateTransitionState as WireRunnerStateTransitionState, ServerFrame, ServerMessage,
+    RunnerStateTransitionState as WireRunnerStateTransitionState,
+    RunnerWorkingDirectory as WireRunnerWorkingDirectory, ServerFrame, ServerMessage,
     ServiceTier as WireServiceTier, SessionEvent, SessionMetadata as WireSessionMetadata,
     SessionPlacement as WireSessionPlacement, SettingOverlay as WireSettingOverlay,
     SystemPromptMember, SystemPromptText, ToolApprovalEventDecider as WireToolApprovalEventDecider,
@@ -13485,7 +13486,11 @@ impl ProcessUpdateEvent {
                 },
                 working_directory: working_directory
                     .as_ref()
-                    .map(|directory| directory.as_str().to_owned()),
+                    .map(|directory| {
+                        WireRunnerWorkingDirectory::try_new(directory.as_str().to_owned())
+                            .map_err(|_| ProcessConnectionError::EncodeInvariant)
+                    })
+                    .transpose()?,
                 state: match state {
                     DispatchedRunnerState::Pinned => WireRunnerStateTransitionState::Pinned,
                     DispatchedRunnerState::Suspect => WireRunnerStateTransitionState::Suspect,
@@ -13943,7 +13948,8 @@ mod tests {
         RejectionDetail, ReviewFindingInput, ReviewSeverity,
         RunnerPlacementRevision as WireRunnerPlacementRevision,
         RunnerSandboxProfile as WireRunnerSandboxProfile,
-        RunnerStateTransitionState as WireRunnerStateTransitionState, ServerFrame, ServerMessage,
+        RunnerStateTransitionState as WireRunnerStateTransitionState,
+        RunnerWorkingDirectory as WireRunnerWorkingDirectory, ServerFrame, ServerMessage,
         SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
         TurnState, decode_server_line, encode_server_line,
     };
@@ -17320,7 +17326,10 @@ mod tests {
                 placement_revision: WireRunnerPlacementRevision::try_new(placement_revision.get(),)
                     .expect("the fixture placement revision is positive"),
                 sandbox_profile: WireRunnerSandboxProfile::WorkspaceRestricted,
-                working_directory: Some(expected_working_directory),
+                working_directory: Some(
+                    WireRunnerWorkingDirectory::try_new(expected_working_directory)
+                        .expect("the fixture wire directory is valid"),
+                ),
                 state: WireRunnerStateTransitionState::WorkingDirectoryChanged,
             }
         );
