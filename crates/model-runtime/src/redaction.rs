@@ -1921,59 +1921,98 @@ mod tests {
         reconstructed_streams(observed).into_keys().collect()
     }
 
-    /// Every string a JSON consumer reads out of `raw`, already decoded.
+    /// The credential a check searches for.
     ///
-    /// Uses `serde_json` rather than a hand-written unescaper on purpose. The
-    /// scanner this check guards is itself an escape decoder, so a decoder
-    /// written here would be expectation logic mirroring the code under test:
-    /// a decoding bug present in both copies would cancel out and let the
-    /// regression pass. `serde_json` is an independent implementation, so the
-    /// two can disagree.
+    /// A newtype because the subject beside it is also textual: transposing
+    /// two bare `&str` arguments would compile and quietly make this
+    /// classifier hunt emitted text for its own diagnostic label instead of
+    /// the secret, which passes for every leak.
+    #[derive(Clone, Copy, Debug)]
+    struct Secret<'a>(&'a str);
+
+    /// What is being inspected, named for the failure message.
+    #[derive(Clone, Copy, Debug)]
+    struct Subject<'a>(&'a str);
+
+    /// Every completed JSON string token in `raw`, already decoded.
     ///
-    /// Decoding *string tokens* rather than unescaping the whole buffer also
-    /// keeps lexical boundaries: for the credential `line\n":0` and the
-    /// document `{"line\n":0}` a consumer reads the key `line\n` and the
-    /// number `0`, never the secret, and unescaping the raw bytes would have
-    /// reported a leak that is not recoverable.
+    /// Scans for completed string *tokens* rather than parsing the enclosing
+    /// value, which matters three ways:
     ///
-    /// Text that is not a complete JSON value yields nothing to decode — there
-    /// is no document for a consumer to read — and the raw comparison beside
-    /// this still applies. Production redacts such fragments regardless, which
-    /// is verified separately; this governs detection scope only.
+    /// - A streamed argument can end after a complete string but before its
+    ///   document — `{"k":"\u0066ixture/secret"` with no closing brace. A
+    ///   consumer reassembling the stream still recovers that string, and
+    ///   `redact_json` treats partial JSON as credential-bearing for exactly
+    ///   this reason, so requiring the whole value to parse would let an
+    ///   escaped secret through.
+    /// - Duplicate names survive. Deserializing `{"k":"…","k":"safe"}` into a
+    ///   map drops the first member before anything can inspect it, hiding a
+    ///   credential spelled in the shadowed value.
+    /// - Only quoted spans are read, so bytes outside a string are never
+    ///   unescaped: for the credential `line\n":0` and the document
+    ///   `{"line\n":0}` a consumer reads the key `line\n` and the number `0`,
+    ///   never the secret.
+    ///
+    /// The scan itself finds boundaries only. Every decode is `serde_json`'s,
+    /// deliberately, so this stays an independent oracle rather than a second
+    /// copy of the escape semantics under test.
     fn decoded_json_strings(raw: &str) -> Vec<String> {
-        let mut strings = Vec::new();
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
-            collect_json_strings(&value, &mut strings);
-        }
-        strings
-    }
-
-    /// Appends every string `value` carries, keys included.
-    fn collect_json_strings(value: &serde_json::Value, strings: &mut Vec<String>) {
-        match value {
-            serde_json::Value::String(text) => strings.push(text.clone()),
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    collect_json_strings(item, strings);
-                }
+        let mut decoded = Vec::new();
+        let units = raw.as_bytes();
+        let mut at = 0;
+        while at < units.len() {
+            if units[at] != b'"' {
+                at += 1;
+                continue;
             }
-            serde_json::Value::Object(members) => {
-                for (key, member) in members {
-                    strings.push(key.clone());
-                    collect_json_strings(member, strings);
+            match completed_string_token(raw, at) {
+                Some(after) => {
+                    // `serde_json` owns every escape decision; a token it
+                    // rejects is not a string any consumer recovers, and the
+                    // raw comparison still covers those bytes.
+                    if let Ok(text) = serde_json::from_str::<String>(&raw[at..after]) {
+                        decoded.push(text);
+                    }
+                    at = after;
                 }
-            }
-            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+                None => break,
             }
         }
+        decoded
     }
 
-    /// Asserts `secret` is unrecoverable from `text` as its consumer reads it.
+    /// The index just past the string token opening at `from`, when it closes.
+    ///
+    /// Tracks backslash escaping only far enough to know which quote ends the
+    /// token — an escaped quote does not — and reports `None` for a token the
+    /// text never finishes.
+    fn completed_string_token(raw: &str, from: usize) -> Option<usize> {
+        let units = raw.as_bytes();
+        let mut at = from + 1;
+        while at < units.len() {
+            match units[at] {
+                b'\\' => at += 2,
+                b'"' => return Some(at + 1),
+                _ => at += 1,
+            }
+        }
+        None
+    }
+
+    /// Asserts the credential is unrecoverable from `text` as its consumer
+    /// reads it.
     #[track_caller]
-    fn assert_text_hides(text: &str, encoding: TextEncoding, secret: &str, whose: &str) {
+    fn assert_text_hides(
+        text: &str,
+        encoding: TextEncoding,
+        secret: Secret<'_>,
+        subject: Subject<'_>,
+    ) {
+        let Secret(secret) = secret;
+        let Subject(subject) = subject;
         assert!(
             !text.contains(secret),
-            "the credential must not be recoverable; found it literally in {whose}: {text}"
+            "the credential must not be recoverable; found it literally in {subject}: {text}"
         );
         // Exhaustive rather than an equality test: a new encoding must state
         // its observation semantics instead of defaulting to the raw-only
@@ -1984,7 +2023,7 @@ mod tests {
                 for decoded in decoded_json_strings(text) {
                     assert!(
                         !decoded.contains(secret),
-                        "the credential must not be recoverable; {whose} carries a string \
+                        "the credential must not be recoverable; {subject} carries a string \
                          decoding to it: {decoded}"
                     );
                 }
@@ -1998,8 +2037,8 @@ mod tests {
             assert_text_hides(
                 reconstructed,
                 stream.encoding(),
-                secret,
-                &format!("stream {correlation} {stream:?} index {index}"),
+                Secret(secret),
+                Subject(&format!("stream {correlation} {stream:?} index {index}")),
             );
         }
         for observation in observed {
@@ -2008,11 +2047,11 @@ mod tests {
                     assert_text_hides(
                         text,
                         encoding,
-                        secret,
-                        &format!(
+                        Secret(secret),
+                        Subject(&format!(
                             "a complete value on correlation {}",
                             observation.correlation
-                        ),
+                        )),
                     );
                 }
             }
@@ -2359,15 +2398,98 @@ mod tests {
         );
     }
 
-    /// Text that is not a complete JSON value has nothing a consumer decodes,
-    /// so it yields no strings and stands on the raw comparison alone.
+    /// A string that completes is recovered even though its document never
+    /// does, which is the shape a truncated argument stream actually takes.
     #[test]
-    fn incomplete_json_yields_no_decoded_strings() {
+    fn completed_tokens_survive_an_unfinished_document() {
+        let [.., partial] = &REPRESENTATIVE_DISGUISES;
+        let truncated = format!(r#"{{"k":"{}""#, partial.spelling);
+
+        assert_eq!(
+            decoded_json_strings(&truncated),
+            vec![String::from("k"), String::from("fixture/secret")]
+        );
+    }
+
+    /// A token the text never finishes is not recovered: nothing closed it,
+    /// so no consumer reads it as a string.
+    #[test]
+    fn an_unfinished_token_is_not_decoded() {
         assert_eq!(
             decoded_json_strings(r#"{"k":"fixture"#),
-            Vec::<String>::new()
+            vec![String::from("k")]
         );
         assert_eq!(decoded_json_strings("plain text"), Vec::<String>::new());
+    }
+
+    /// Every member is inspected, including one a map would drop.
+    ///
+    /// Deserializing `{"k":"…","k":"safe"}` keeps only the last `k`, so a
+    /// credential spelled in the shadowed member would vanish before any
+    /// check saw it.
+    #[test]
+    fn duplicate_members_are_all_inspected() {
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
+        let shadowed = format!(r#"{{"k":"{}","k":"safe"}}"#, fully.spelling);
+
+        assert_eq!(
+            decoded_json_strings(&shadowed),
+            vec![
+                String::from("k"),
+                String::from("fixture/secret"),
+                String::from("k"),
+                String::from("safe"),
+            ]
+        );
+    }
+
+    /// An escaped quote does not end a token, so the scan cannot be walked
+    /// out of a string and made to miss what follows.
+    #[test]
+    fn an_escaped_quote_does_not_end_a_token() {
+        assert_eq!(
+            decoded_json_strings(r#"{"k":"a\"b","j":"fixture/secret"}"#),
+            vec![
+                String::from("k"),
+                String::from("a\"b"),
+                String::from("j"),
+                String::from("fixture/secret"),
+            ]
+        );
+    }
+
+    /// INV-035: a credential spelled in a member a map would shadow is still
+    /// caught.
+    #[test]
+    #[should_panic(expected = "must not be recoverable")]
+    fn disguised_credential_in_a_shadowed_member_is_caught() {
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
+        let observed = vec![Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: format!(r#"{{"k":"{}","k":"safe"}}"#, fully.spelling),
+            },
+        }];
+
+        assert_no_stream_carries(&observed, "fixture/secret");
+    }
+
+    /// INV-035: a credential in a stream that stops before closing its
+    /// document is still caught.
+    #[test]
+    #[should_panic(expected = "must not be recoverable")]
+    fn disguised_credential_in_an_unfinished_document_is_caught() {
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
+        let observed = vec![Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: format!(r#"{{"k":"{}""#, fully.spelling),
+            },
+        }];
+
+        assert_no_stream_carries(&observed, "fixture/secret");
     }
 
     /// A surrogate pair decodes to its single character, which is the case a
