@@ -347,6 +347,8 @@ const SYNTHETIC_ADDITIONAL_FILE_MODIFICATION_REPORT: &str =
 const SYNTHETIC_COLLATERAL_NOMINALIZED_MODIFICATION_DENIAL_REPORT: &str =
     "Created exec-result.txt; I did not make modifications to any other files.";
 const SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT: &str = "Done, but no changes were made.";
+const SYNTHETIC_COLLATERAL_NO_CHANGES_REPORT: &str =
+    "Created exec-result.txt; no changes were made to any other files.";
 const SYNTHETIC_BARE_NO_MODIFICATIONS_DENIAL_REPORT: &str = "Done, but no modifications were made.";
 const SYNTHETIC_PERFECT_TENSE_NO_MODIFICATIONS_DENIAL_REPORT: &str =
     "Done, but no modifications have been made.";
@@ -4866,9 +4868,27 @@ fn report_denies_success(report: &str, file_creation_required: bool) -> bool {
 
 fn report_denies_file_changes(report: &str) -> bool {
     let words = normalized_report_words(report);
-    let no_changes = words
-        .windows(2)
-        .any(|claim| claim[0] == "no" && matches!(claim[1].as_str(), "change" | "changes"));
+    let no_changes = report
+        .split([';', '.', ',', '!', '?', '\n'])
+        .map(normalized_report_words)
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let change = clause
+                    .get(index + 1)
+                    .is_some_and(|word| matches!(word.as_str(), "change" | "changes"));
+                let scope_start = clause.len().min(index + 2);
+                let scope = &clause[scope_start..clause.len().min(index + 10)];
+                let collateral = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "file" | "files"))
+                    .is_some_and(|file| {
+                        scope[..file]
+                            .iter()
+                            .any(|word| matches!(word.as_str(), "additional" | "other"))
+                    });
+                word == "no" && change && !collateral
+            })
+        });
     let no_file_change = words.iter().enumerate().any(|(index, word)| {
         word == "no"
             && words
@@ -5554,6 +5574,14 @@ fn exec_file_creation_report_rejects_a_bare_no_changes_denial() {
     tracker.observe_response_text(SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_collateral_no_changes_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COLLATERAL_NO_CHANGES_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
 }
 
 #[test]
