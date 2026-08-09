@@ -2725,10 +2725,13 @@ async fn s10_composed_local_git_status_executes_offline() -> Result<(), Box<dyn 
 
 /// S10: the composed sandboxed executor reaches the injected process boundary
 /// and returns its typed host-refusal evidence through the daemon tool loop.
+/// The session blanket is enabled because `sandboxed_exec` declares `Confirm`,
+/// so an unapproved proposal parks instead of dispatching and this test would
+/// observe the approval gate rather than the process boundary it is about.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s10_composed_sandboxed_exec_executes_offline() -> Result<(), Box<dyn Error>> {
-    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::ApproveAll).await?;
     let workspace = tempdir()?;
     let (tool_catalog, tool_executor) = commissioned_daemon_tools(
         &fixture.pool,
