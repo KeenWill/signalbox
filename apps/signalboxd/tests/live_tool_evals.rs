@@ -1064,6 +1064,8 @@ fn git_forced_case_passed(
                 && fs::read_to_string(root.join(GIT_SEED_PATH))? == GIT_BASE_CONTENT
                 && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
                 && git_local_branch_targets(&repository)? == expected_refs
+                && git_base_status_fixture_unchanged(root, &repository)?
+                && git_status_path_states(&repository)? == expected_base_git_statuses()
         }
         GIT_BRANCH_SWITCH_NAME => {
             let Some(branch_name) = arguments["name"].as_str() else {
@@ -1081,9 +1083,13 @@ fn git_forced_case_passed(
                 && fs::read_to_string(root.join(GIT_SEED_PATH))? == GIT_SWITCH_CONTENT
                 && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
                 && git_local_branch_targets(&repository)? == *seed_refs
+                && git_untracked_fixtures_unchanged(root, &repository)?
+                && git_status_path_states(&repository)? == expected_base_git_statuses()
         }
         GIT_CREATE_COMMIT_NAME => {
             let base = repository.find_branch(GIT_BASE_BRANCH, BranchType::Local)?;
+            let mut expected_refs = seed_refs.clone();
+            expected_refs.insert(String::from(GIT_BASE_BRANCH), head.id());
             result["commit"] == head.id().to_string()
                 && result["state_cleaned"] == true
                 && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
@@ -1115,6 +1121,8 @@ fn git_forced_case_passed(
                     GIT_NATURAL_PATH,
                     GIT_NATURAL_CONTENT.as_bytes(),
                 )?
+                && git_local_branch_targets(&repository)? == expected_refs
+                && git_status_path_states(&repository)? == expected_commit_git_statuses()
         }
         GIT_DIFF_NAME => {
             result["patch"].as_str() == Some(expected_bounded_git_worktree_patch(root)?.as_str())
@@ -1122,6 +1130,8 @@ fn git_forced_case_passed(
                 && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
                 && head.id() == seed
                 && git_diff_fixture_unchanged(root, &repository)?
+                && git_local_branch_targets(&repository)? == *seed_refs
+                && git_status_path_states(&repository)? == expected_diff_git_statuses()
         }
         GIT_LOG_NAME => {
             let Some(_revision) = arguments["revision"].as_str() else {
@@ -1149,6 +1159,8 @@ fn git_forced_case_passed(
                 && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
                 && head.id() == seed
                 && git_base_status_fixture_unchanged(root, &repository)?
+                && git_local_branch_targets(&repository)? == *seed_refs
+                && git_status_path_states(&repository)? == expected_base_git_statuses()
         }
         GIT_STAGE_NAME => {
             let Some(paths) = arguments["paths"].as_array() else {
@@ -1174,6 +1186,8 @@ fn git_forced_case_passed(
                 && fs::read(root.join(GIT_SEED_PATH))? == GIT_BASE_CONTENT.as_bytes()
                 && repository.status_file(Path::new(GIT_COMMIT_PATH)).ok() == Some(Status::WT_NEW)
                 && repository.status_file(Path::new(GIT_NATURAL_PATH)).ok() == Some(Status::WT_NEW)
+                && git_local_branch_targets(&repository)? == *seed_refs
+                && git_status_path_states(&repository)? == expected_staged_git_statuses()
         }
         GIT_STATUS_NAME => {
             result["branch"].as_str() == Some(GIT_BASE_BRANCH)
@@ -1184,6 +1198,8 @@ fn git_forced_case_passed(
                 && git_status_entries_match(&result["entries"])
                 && result["truncated"] == true
                 && git_status_fixture_unchanged(root, &repository)?
+                && git_local_branch_targets(&repository)? == *seed_refs
+                && git_status_path_states(&repository)? == expected_status_git_statuses()
         }
         _ => false,
     };
@@ -1298,13 +1314,73 @@ fn git_status_fixture_unchanged(root: &Path, repository: &Repository) -> EvalRes
     Ok(base_unchanged && overflow_unchanged)
 }
 
+fn git_status_path_states(repository: &Repository) -> EvalResult<BTreeMap<PathBuf, Status>> {
+    let mut states = BTreeMap::new();
+    for entry in repository.statuses(None)?.iter() {
+        let path = entry
+            .path()
+            .map_err(|error| io::Error::other(format!("invalid Git status path: {error}")))?;
+        states.insert(PathBuf::from(path), entry.status());
+    }
+    Ok(states)
+}
+
+fn expected_base_git_statuses() -> BTreeMap<PathBuf, Status> {
+    BTreeMap::from([
+        (PathBuf::from(GIT_COMMIT_PATH), Status::WT_NEW),
+        (PathBuf::from(GIT_NATURAL_PATH), Status::WT_NEW),
+        (PathBuf::from(GIT_STAGE_PATH), Status::WT_NEW),
+    ])
+}
+
+fn expected_staged_git_statuses() -> BTreeMap<PathBuf, Status> {
+    BTreeMap::from([
+        (PathBuf::from(GIT_COMMIT_PATH), Status::WT_NEW),
+        (PathBuf::from(GIT_NATURAL_PATH), Status::WT_NEW),
+        (PathBuf::from(GIT_STAGE_PATH), Status::INDEX_NEW),
+    ])
+}
+
+fn expected_commit_git_statuses() -> BTreeMap<PathBuf, Status> {
+    BTreeMap::from([
+        (PathBuf::from(GIT_NATURAL_PATH), Status::WT_NEW),
+        (PathBuf::from(GIT_STAGE_PATH), Status::WT_NEW),
+    ])
+}
+
+fn expected_diff_git_statuses() -> BTreeMap<PathBuf, Status> {
+    BTreeMap::from([
+        (PathBuf::from(GIT_COMMIT_PATH), Status::WT_NEW),
+        (PathBuf::from(GIT_DIFF_OVERFLOW_PATH), Status::WT_NEW),
+        (PathBuf::from(GIT_NATURAL_PATH), Status::WT_NEW),
+        (PathBuf::from(GIT_STAGE_PATH), Status::INDEX_NEW),
+    ])
+}
+
+fn expected_status_git_statuses() -> BTreeMap<PathBuf, Status> {
+    let mut states = expected_base_git_statuses();
+    for index in 0..GIT_STATUS_OVERFLOW_ENTRY_COUNT {
+        states.insert(
+            PathBuf::from(git_status_overflow_path(index)),
+            Status::WT_NEW,
+        );
+    }
+    states
+}
+
 fn git_base_status_fixture_unchanged(root: &Path, repository: &Repository) -> EvalResult<bool> {
     Ok(
         repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
-            && repository.status_file(Path::new(GIT_STAGE_PATH))? == Status::WT_NEW
+            && fs::read(root.join(GIT_SEED_PATH))? == GIT_BASE_CONTENT.as_bytes()
+            && git_untracked_fixtures_unchanged(root, repository)?,
+    )
+}
+
+fn git_untracked_fixtures_unchanged(root: &Path, repository: &Repository) -> EvalResult<bool> {
+    Ok(
+        repository.status_file(Path::new(GIT_STAGE_PATH))? == Status::WT_NEW
             && repository.status_file(Path::new(GIT_COMMIT_PATH))? == Status::WT_NEW
             && repository.status_file(Path::new(GIT_NATURAL_PATH))? == Status::WT_NEW
-            && fs::read(root.join(GIT_SEED_PATH))? == GIT_BASE_CONTENT.as_bytes()
             && fs::read(root.join(GIT_STAGE_PATH))? == GIT_STAGE_CONTENT.as_bytes()
             && fs::read(root.join(GIT_COMMIT_PATH))? == GIT_COMMIT_CONTENT.as_bytes()
             && fs::read(root.join(GIT_NATURAL_PATH))? == GIT_NATURAL_CONTENT.as_bytes(),
@@ -4941,6 +5017,31 @@ fn forced_git_branch_create_verifier_rejects_an_extra_branch() -> EvalResult {
 }
 
 #[test]
+fn forced_git_branch_create_verifier_rejects_an_untracked_fixture_change() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_BRANCH_CREATE_NAME)
+        .expect("the Git branch-create fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    repository.branch("created-by-eval", &target, false)?;
+    fs::write(suite.workspace.path().join(GIT_STAGE_PATH), b"collateral\n")?;
+    let result = serde_json::json!({
+        "branch": "created-by-eval",
+        "head": target.id().to_string(),
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_branch_switch_verifier_rejects_a_head_only_update() -> EvalResult {
     let suite = FamilySuite::git()?;
     let case = GIT_CASES
@@ -5220,6 +5321,45 @@ fn forced_git_log_verifier_rejects_a_moved_target_reference() -> EvalResult {
 }
 
 #[test]
+fn forced_git_log_verifier_rejects_a_moved_non_target_reference() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+    repository
+        .find_reference("refs/heads/switch-target")?
+        .set_target(
+            suite
+                .git_seed
+                .expect("the Git eval suite has a captured seed identity"),
+            "synthetic moved non-target branch",
+        )?;
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_log_verifier_rejects_more_than_the_requested_limit() -> EvalResult {
     let suite = FamilySuite::git()?;
     let case = GIT_CASES
@@ -5325,6 +5465,35 @@ fn forced_git_status_verifier_rejects_a_repository_state_change() -> EvalResult 
         .peel_to_commit()?;
     repository.checkout_tree(target.as_object(), None)?;
     repository.set_head("refs/heads/switch-target")?;
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_status_verifier_rejects_a_collateral_path() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+    fs::write(
+        suite.workspace.path().join("zz-collateral.txt"),
+        b"collateral\n",
+    )?;
 
     assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
