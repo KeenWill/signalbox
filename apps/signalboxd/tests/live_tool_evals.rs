@@ -141,10 +141,15 @@ const GIT_COMMIT_CONTENT: &str = "commit me\n";
 const GIT_NATURAL_PATH: &str = "eval.txt";
 const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
 const GIT_SWITCH_CONTENT: &str = "seed two\n";
+const GIT_BASE_BRANCH: &str = "eval-base";
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
 const WORKSPACE_SEED: &str = "alpha\nbeta fixture\nalpha\n";
+const WORKSPACE_GLOB_PATH: &str = "zz-glob.txt";
+const WORKSPACE_GLOB_CONTENT: &str = "beta glob fixture\n";
 const WORKSPACE_FORCED_READ_MAX_BYTES: usize = 6;
 const WORKSPACE_LIST_MAX_RESULTS: usize = 20;
+const WORKSPACE_GLOB_MAX_RESULTS: usize = 1;
+const WORKSPACE_SEARCH_MAX_RESULTS: usize = 1;
 const WORKSPACE_NONMATCHING_COUNT: usize = WORKSPACE_LIST_MAX_RESULTS;
 const WORKSPACE_ANSWER_PATH: &str = "answer.txt";
 const WORKSPACE_ANSWER: &str = "model loop observed\n";
@@ -310,14 +315,15 @@ async fn run_case(
         .await
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
     let approval_mode = if forced_tool == Some(UNSANDBOXED_EXEC_NAME) {
-        ExecApprovalMode::ApproveExactForced
+        ExecApprovalMode::ApproveOneExactForced
     } else {
         ExecApprovalMode::DenyAll
     };
+    let mut approval_state = ExecApprovalState::new(approval_mode);
     let mut approval_continuations = 0;
     let mut approval_cap_reached = false;
     while database
-        .decide_pending_unsandboxed_requests(session, turn, approval_mode)
+        .decide_pending_unsandboxed_requests(session, turn, &mut approval_state)
         .await?
     {
         if approval_continuations == MAX_NATURAL_APPROVAL_CONTINUATIONS {
@@ -466,13 +472,13 @@ const WORKSPACE_CASES: &[ForcedCase] = &[
     },
     ForcedCase {
         name: GLOB_FILES_NAME,
-        expected_arguments: r#"{"path":".","pattern":"*.txt","max_results":20}"#,
-        prompt: "Call glob_files with exactly {\"path\":\".\",\"pattern\":\"*.txt\",\"max_results\":20}. After its result, answer done without another tool call.",
+        expected_arguments: r#"{"path":".","pattern":"*.txt","max_results":1}"#,
+        prompt: "Call glob_files with exactly {\"path\":\".\",\"pattern\":\"*.txt\",\"max_results\":1}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: SEARCH_FILES_NAME,
-        expected_arguments: r#"{"path":".","pattern":"beta","max_results":20}"#,
-        prompt: "Call search_files with exactly {\"path\":\".\",\"pattern\":\"beta\",\"max_results\":20}. After its result, answer done without another tool call.",
+        expected_arguments: r#"{"path":".","pattern":"beta","max_results":1}"#,
+        prompt: "Call search_files with exactly {\"path\":\".\",\"pattern\":\"beta\",\"max_results\":1}. After its result, answer done without another tool call.",
     },
 ];
 
@@ -537,6 +543,10 @@ impl FamilySuite {
     fn workspace() -> EvalResult<Self> {
         let workspace = tempfile::tempdir()?;
         fs::write(workspace.path().join(WORKSPACE_SEED_PATH), WORKSPACE_SEED)?;
+        fs::write(
+            workspace.path().join(WORKSPACE_GLOB_PATH),
+            WORKSPACE_GLOB_CONTENT,
+        )?;
         for index in 0..WORKSPACE_NONMATCHING_COUNT {
             fs::write(
                 workspace.path().join(workspace_nonmatching_path(index)),
@@ -807,9 +817,17 @@ fn git_forced_case_passed(
             };
             let expected = repository.revparse_single(start)?.peel_to_commit()?.id();
             let branch = repository.find_branch(branch_name, BranchType::Local)?;
+            let base = repository
+                .find_branch(GIT_BASE_BRANCH, BranchType::Local)?
+                .into_reference()
+                .peel_to_commit()?;
             result["branch"] == branch_name
                 && branch.get().target() == Some(expected)
                 && result["head"] == expected.to_string()
+                && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
+                && head.id() == base.id()
+                && fs::read_to_string(root.join(GIT_SEED_PATH))? == "seed three\n"
+                && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
         }
         GIT_BRANCH_SWITCH_NAME => {
             let Some(branch_name) = arguments["name"].as_str() else {
@@ -849,9 +867,16 @@ fn git_forced_case_passed(
             let expected = repository.revparse_single(revision)?.peel_to_commit()?;
             result["commits"].as_array().is_some_and(|commits| {
                 u64::try_from(commits.len()).ok() == Some(max_entries)
-                    && commits
-                        .first()
-                        .is_some_and(|commit| commit["commit"] == expected.id().to_string())
+                    && commits.first().is_some_and(|commit| {
+                        commit["commit"] == expected.id().to_string()
+                            && commit["author_name"] == expected.author().name().unwrap_or_default()
+                            && commit["author_name_truncated"] == false
+                            && commit["author_email"]
+                                == expected.author().email().unwrap_or_default()
+                            && commit["author_email_truncated"] == false
+                            && commit["message"] == expected.message().unwrap_or_default()
+                            && commit["message_truncated"] == false
+                    })
             }) && result["truncated"] == true
         }
         GIT_STAGE_NAME => {
@@ -1030,7 +1055,9 @@ fn workspace_forced_case_passed(
         }
         GLOB_FILES_NAME => {
             let expected = [(String::from(WORKSPACE_SEED_PATH), "file")];
-            result_entries_equal(&result["matches"], &expected) && result["truncated"] == false
+            arguments["max_results"] == WORKSPACE_GLOB_MAX_RESULTS
+                && result_entries_equal(&result["matches"], &expected)
+                && result["truncated"] == true
         }
         SEARCH_FILES_NAME => {
             let Some(pattern) = arguments["pattern"].as_str() else {
@@ -1056,7 +1083,8 @@ fn workspace_forced_case_passed(
                         && matched["text"] == line
                         && matched["line_truncated"] == false
                 })
-            }) && result["truncated"] == false
+            }) && arguments["max_results"] == WORKSPACE_SEARCH_MAX_RESULTS
+                && result["truncated"] == true
         }
         _ => false,
     };
@@ -1091,7 +1119,9 @@ fn expected_workspace_listing() -> Vec<(String, &'static str)> {
 }
 
 fn complete_workspace_listing() -> Vec<(String, &'static str)> {
-    workspace_listing(WORKSPACE_NONMATCHING_COUNT + 1)
+    let mut entries = workspace_listing(WORKSPACE_NONMATCHING_COUNT + 1);
+    entries.push((String::from(WORKSPACE_GLOB_PATH), "file"));
+    entries
 }
 
 fn workspace_listing_json(entries: Vec<(String, &'static str)>) -> Vec<serde_json::Value> {
@@ -1178,6 +1208,8 @@ fn seed_git_repository(root: &Path) -> EvalResult<Oid> {
     repository.branch("log-target", &second, false)?;
     repository.branch("switch-target", &second, false)?;
     let third = commit_git_seed_revision(&repository, &second, "seed three\n", "third seed")?;
+    repository.branch(GIT_BASE_BRANCH, &third, false)?;
+    repository.set_head(&format!("refs/heads/{GIT_BASE_BRANCH}"))?;
     Ok(third.id())
 }
 
@@ -1605,7 +1637,7 @@ impl WebSearchTransport for FixtureWebSearchTransport {
         request: WebSearchRequest,
         credential: &CredentialValue,
     ) -> WebSearchTransportOutcome {
-        if request.query() != WEB_QUERY {
+        if request.query() != WEB_QUERY || credential.expose_bytes() != SYNTHETIC_WEB_CREDENTIAL {
             return WebSearchTransportOutcome::failed(
                 WebSearchTransportFailure::RequestFailed,
                 credential,
@@ -2101,7 +2133,7 @@ impl EvalDatabase {
         &self,
         session: SessionId,
         turn: TurnId,
-        approval_mode: ExecApprovalMode,
+        approval_state: &mut ExecApprovalState,
     ) -> EvalResult<bool> {
         let mut decided_any = false;
         loop {
@@ -2117,11 +2149,7 @@ impl EvalDatabase {
                 .iter()
                 .find(|candidate| candidate.id() == request)
                 .ok_or_else(|| io::Error::other("the pending approval request is absent"))?;
-            let decision = exec_eval_approval_decision(
-                approval_mode,
-                pending.name().as_str(),
-                pending.arguments(),
-            );
+            let decision = approval_state.decision(pending.name().as_str(), pending.arguments());
             let mut service = DecideToolRequestService::new(UuidV7ToolLoopIdGenerator, repository);
             let prepared = service
                 .execute(
@@ -2146,20 +2174,36 @@ impl EvalDatabase {
 #[derive(Clone, Copy)]
 enum ExecApprovalMode {
     DenyAll,
-    ApproveExactForced,
+    ApproveOneExactForced,
 }
 
-fn exec_eval_approval_decision(
-    approval_mode: ExecApprovalMode,
-    name: &str,
-    arguments: &NormalizedToolArguments,
-) -> ToolApprovalDecision {
-    if matches!(approval_mode, ExecApprovalMode::ApproveExactForced)
-        && ExecEvalCase::ForcedUnsandboxed.admits(name, arguments)
-    {
-        ToolApprovalDecision::Approve
-    } else {
-        ToolApprovalDecision::Deny { reason: None }
+struct ExecApprovalState {
+    mode: ExecApprovalMode,
+    exact_forced_approved: bool,
+}
+
+impl ExecApprovalState {
+    const fn new(mode: ExecApprovalMode) -> Self {
+        Self {
+            mode,
+            exact_forced_approved: false,
+        }
+    }
+
+    fn decision(
+        &mut self,
+        name: &str,
+        arguments: &NormalizedToolArguments,
+    ) -> ToolApprovalDecision {
+        if matches!(self.mode, ExecApprovalMode::ApproveOneExactForced)
+            && !self.exact_forced_approved
+            && ExecEvalCase::ForcedUnsandboxed.admits(name, arguments)
+        {
+            self.exact_forced_approved = true;
+            ToolApprovalDecision::Approve
+        } else {
+            ToolApprovalDecision::Deny { reason: None }
+        }
     }
 }
 
@@ -2847,11 +2891,9 @@ struct CargoDiagnosticsEvalStream {
 struct CargoDiagnosticsEvalRecords {
     #[serde(rename = "values")]
     _values: Vec<serde_json::Value>,
-    #[serde(rename = "limit_reached")]
-    _limit_reached: bool,
+    limit_reached: bool,
     provenance: String,
-    #[serde(rename = "known_truncated")]
-    _known_truncated: bool,
+    known_truncated: bool,
 }
 
 /// Whether Cargo diagnostics returned the requested successful pass together
@@ -2869,12 +2911,15 @@ fn cargo_diagnostics_result_passed(result: &serde_json::Value) -> bool {
         && result.execution.cargo_failure.is_null()
         && result.execution.preparation_failure.is_null()
         && result.diagnostics.provenance == "workspace_influenced"
+        && !result.diagnostics.limit_reached
+        && !result.diagnostics.known_truncated
         && result.tests.provenance == "workspace_influenced"
+        && !result.tests.limit_reached
+        && !result.tests.known_truncated
 }
 
 fn cargo_diagnostics_stream_is_valid(stream: &CargoDiagnosticsEvalStream) -> bool {
-    matches!(stream.completeness.as_str(), "complete" | "truncated")
-        && matches!(stream.encoding.as_str(), "utf8" | "lossy_utf8")
+    stream.completeness == "complete" && stream.encoding == "utf8"
 }
 
 fn synthetic_tool_result(
@@ -3836,6 +3881,31 @@ fn forced_git_branch_create_verifier_rejects_the_default_head() -> EvalResult {
 }
 
 #[test]
+fn forced_git_branch_create_verifier_rejects_switching_to_the_created_branch() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_BRANCH_CREATE_NAME)
+        .expect("the Git branch-create fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    repository.branch("created-by-eval", &target, false)?;
+    repository.set_head("refs/heads/created-by-eval")?;
+    let result = serde_json::json!({
+        "branch": "created-by-eval",
+        "head": target.id().to_string(),
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_branch_switch_verifier_rejects_a_head_only_update() -> EvalResult {
     let suite = FamilySuite::git()?;
     let case = GIT_CASES
@@ -3926,14 +3996,21 @@ fn forced_git_log_verifier_accepts_the_bounded_target() -> EvalResult {
         .iter()
         .find(|case| case.name == GIT_LOG_NAME)
         .expect("the Git log fixture exists");
-    let target = Repository::open(suite.workspace.path())?
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
         .find_branch("log-target", BranchType::Local)?
         .into_reference()
-        .peel_to_commit()?
-        .id()
-        .to_string();
+        .peel_to_commit()?;
     let result = serde_json::json!({
-        "commits": [{"commit": target}],
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
@@ -4036,6 +4113,35 @@ fn forced_workspace_search_verifier_rejects_an_empty_success() -> EvalResult {
 }
 
 #[test]
+fn forced_workspace_search_verifier_accepts_the_bounded_first_match() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == SEARCH_FILES_NAME)
+        .expect("the workspace search fixture exists");
+    let match_line = WORKSPACE_SEED
+        .lines()
+        .nth(1)
+        .expect("the workspace search fixture has a matching line");
+    let result = serde_json::json!({
+        "matches": [{
+            "path": WORKSPACE_SEED_PATH,
+            "line": 2,
+            "column": 1,
+            "text_start_column": 1,
+            "text": match_line,
+            "line_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_workspace_read_verifier_rejects_an_unbounded_result() -> EvalResult {
     let suite = FamilySuite::workspace()?;
     let case = WORKSPACE_CASES
@@ -4077,7 +4183,7 @@ fn forced_workspace_listing_verifiers_reject_the_wrong_entry_kind() -> EvalResul
     .to_string();
     let glob_result = serde_json::json!({
         "matches": [{"path": WORKSPACE_SEED_PATH, "kind": "directory"}],
-        "truncated": false,
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
@@ -4117,12 +4223,30 @@ fn forced_workspace_glob_verifier_rejects_a_nonmatching_path() -> EvalResult {
             {"path": WORKSPACE_SEED_PATH, "kind": "file"},
             {"path": workspace_nonmatching_path(0), "kind": "file"}
         ],
-        "truncated": false,
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
 
     assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_glob_verifier_accepts_the_bounded_first_match() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == GLOB_FILES_NAME)
+        .expect("the workspace glob fixture exists");
+    let result = serde_json::json!({
+        "matches": [{"path": WORKSPACE_SEED_PATH, "kind": "file"}],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
@@ -4255,12 +4379,10 @@ fn forced_unsandboxed_eval_denies_model_argument_drift() {
     )
     .expect("drifted unsandboxed fixture arguments normalize");
 
+    let mut approval_state = ExecApprovalState::new(ExecApprovalMode::ApproveOneExactForced);
+
     assert_eq!(
-        exec_eval_approval_decision(
-            ExecApprovalMode::ApproveExactForced,
-            UNSANDBOXED_EXEC_NAME,
-            &drifted,
-        ),
+        approval_state.decision(UNSANDBOXED_EXEC_NAME, &drifted),
         ToolApprovalDecision::Deny { reason: None }
     );
 }
@@ -4273,12 +4395,29 @@ fn unforced_exec_eval_denies_the_exact_forced_unsandboxed_fixture() {
     ))
     .expect("the exact forced unsandboxed fixture arguments normalize");
 
+    let mut approval_state = ExecApprovalState::new(ExecApprovalMode::DenyAll);
+
     assert_eq!(
-        exec_eval_approval_decision(
-            ExecApprovalMode::DenyAll,
-            UNSANDBOXED_EXEC_NAME,
-            &exact_forced,
-        ),
+        approval_state.decision(UNSANDBOXED_EXEC_NAME, &exact_forced),
+        ToolApprovalDecision::Deny { reason: None }
+    );
+}
+
+#[test]
+fn forced_exec_eval_approves_only_one_exact_unsandboxed_fixture() {
+    let unsandboxed = forced_exec_fixture(UNSANDBOXED_EXEC_NAME);
+    let exact_forced = NormalizedToolArguments::try_from_provider_text(String::from(
+        unsandboxed.expected_arguments,
+    ))
+    .expect("the exact forced unsandboxed fixture arguments normalize");
+    let mut approval_state = ExecApprovalState::new(ExecApprovalMode::ApproveOneExactForced);
+
+    assert_eq!(
+        approval_state.decision(UNSANDBOXED_EXEC_NAME, &exact_forced),
+        ToolApprovalDecision::Approve
+    );
+    assert_eq!(
+        approval_state.decision(UNSANDBOXED_EXEC_NAME, &exact_forced),
         ToolApprovalDecision::Deny { reason: None }
     );
 }
@@ -4631,6 +4770,42 @@ fn forced_cargo_diagnostics_accepts_a_complete_successful_check() {
     );
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Pass);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_truncated_stdout_capture() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["execution"]["stdout"]["completeness"] = serde_json::json!("truncated");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_lossy_stderr_capture() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["execution"]["stderr"]["encoding"] = serde_json::json!("lossy_utf8");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_capped_records() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["limit_reached"] = serde_json::json!(true);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_known_truncated_test_records() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["tests"]["known_truncated"] = serde_json::json!(true);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
 }
 
 #[test]
