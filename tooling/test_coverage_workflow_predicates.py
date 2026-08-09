@@ -1373,6 +1373,26 @@ def fixture_cases_by_specification() -> dict[str, list]:
     }
 
 
+def duplicate_specification_identifiers() -> list[str]:
+    """Identifiers claimed by more than one specification, outside test bodies.
+
+    Everything keyed by identifier assumes it names one specification: the
+    fixture map backs one, and `programs_for()` resolves the first. Two
+    specifications sharing a name therefore let one fixture set vouch for both,
+    so the second's program counts as covered while nothing drives it — the
+    hole this module just closed, reopened by a copied line.
+    """
+    seen: dict[str, int] = {}
+    for spec in PREDICATE_SPECS:
+        seen[spec.identifier] = seen.get(spec.identifier, 0) + 1
+    return [
+        f"{identifier} names {count} specifications; one fixture set would vouch for all "
+        "of them while only the first is ever resolved"
+        for identifier, count in seen.items()
+        if count > 1
+    ]
+
+
 def misdeclared_exercised_specs(
     specifications: tuple[PredicateSpec, ...] | None = None,
     cases: dict[str, list] | None = None,
@@ -2808,6 +2828,13 @@ class WorkflowReadingTests(unittest.TestCase):
         one-word edit, and this failure is what demands it."""
         self.assertEqual(misdeclared_presence(), [])
 
+    def test_no_two_specifications_share_an_identifier(self) -> None:
+        """Everything keyed by identifier assumes it names one specification.
+        Two sharing a name let one fixture set vouch for both, so the second's
+        program counts as covered while nothing drives it — this module's own
+        silent-coverage hole, reopened by a copied line."""
+        self.assertEqual(duplicate_specification_identifiers(), [])
+
     def test_a_specification_claiming_fixtures_it_lacks_is_named(self) -> None:
         """The branch that closes the reported hole, driven from a controlled
         registry rather than from the repository's own, which is correct and so
@@ -2824,7 +2851,7 @@ class WorkflowReadingTests(unittest.TestCase):
         problems = misdeclared_exercised_specs((claimed,), {})
 
         self.assertEqual(len(problems), 1)
-        self.assertIn("claims-fixtures-it-lacks", problems[0])
+        self.assertIn(claimed.identifier, problems[0])
         self.assertIn("exercised=True", problems[0])
 
     def test_a_specification_hiding_fixtures_it_has_is_named(self) -> None:
@@ -2840,10 +2867,10 @@ class WorkflowReadingTests(unittest.TestCase):
             tokens=("irrelevant",),
         )
 
-        problems = misdeclared_exercised_specs((hidden,), {"hides-fixtures-it-has": ["a case"]})
+        problems = misdeclared_exercised_specs((hidden,), {hidden.identifier: ["a case"]})
 
         self.assertEqual(len(problems), 1)
-        self.assertIn("hides-fixtures-it-has", problems[0])
+        self.assertIn(hidden.identifier, problems[0])
         self.assertIn("exercised=False", problems[0])
 
     def test_every_exercised_specification_is_backed_by_fixtures(self) -> None:
