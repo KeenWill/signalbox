@@ -1250,11 +1250,12 @@ fn exec_forced_case_passed(target: &str, result: &serde_json::Value) -> bool {
     if result["confinement"]["kind"] != expected_confinement || !exited_cleanly(result) {
         return false;
     }
-    match target {
+    let stdout_matches = match target {
         SANDBOXED_EXEC_NAME => captured_stdout_is(result, EXEC_FORCED_SANDBOXED_OUTPUT),
         UNSANDBOXED_EXEC_NAME => captured_stdout_is(result, EXEC_FORCED_READ_ONLY_OUTPUT),
         _ => false,
-    }
+    };
+    stdout_matches && captured_stderr_is_empty(result)
 }
 
 fn normalized_arguments_text(arguments: &str) -> EvalResult<String> {
@@ -2890,11 +2891,12 @@ impl CaseOutcome {
         if execution["confinement"]["kind"] != expected_confinement || !exited_cleanly(execution) {
             return false;
         }
-        match target {
+        let stdout_matches = match target {
             SANDBOXED_EXEC_NAME => captured_stdout_is(execution, EXEC_FORCED_SANDBOXED_OUTPUT),
             UNSANDBOXED_EXEC_NAME => captured_stdout_is(execution, EXEC_FORCED_READ_ONLY_OUTPUT),
             _ => false,
-        }
+        };
+        stdout_matches && captured_stderr_is_empty(execution)
     }
 }
 
@@ -2938,6 +2940,14 @@ fn captured_stdout_is(execution: &serde_json::Value, expected: &str) -> bool {
     execution["stdout"]["text"] == expected
         && execution["stdout"]["completeness"] == "complete"
         && execution["stdout"]["encoding"] == "utf8"
+}
+
+/// Whether one serialized execution captured an empty, complete, undamaged
+/// standard-error stream, as the direct forced fixtures promise.
+fn captured_stderr_is_empty(execution: &serde_json::Value) -> bool {
+    execution["stderr"]["text"] == ""
+        && execution["stderr"]["completeness"] == "complete"
+        && execution["stderr"]["encoding"] == "utf8"
 }
 
 /// The complete result shape needed before one successful Cargo diagnostics
@@ -5134,6 +5144,57 @@ fn forced_exec_tier_rejects_a_truncated_output_capture() {
             EXEC_FORCED_READ_ONLY_OUTPUT,
         )),
     );
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_missing_stderr_capture() {
+    let mut result = direct_exec_result(DirectExecEvidence::successful_with_confinement(
+        ExecutionConfinement::Unsandboxed,
+        EXEC_FORCED_READ_ONLY_OUTPUT,
+    ));
+    result
+        .as_object_mut()
+        .expect("the direct-exec fixture is an object")
+        .remove("stderr");
+    let outcome = forced_exec_outcome(UNSANDBOXED_EXEC_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_truncated_stderr_capture() {
+    let mut result = direct_exec_result(DirectExecEvidence::successful_with_confinement(
+        ExecutionConfinement::Unsandboxed,
+        EXEC_FORCED_READ_ONLY_OUTPUT,
+    ));
+    result["stderr"]["completeness"] = serde_json::json!("truncated");
+    let outcome = forced_exec_outcome(UNSANDBOXED_EXEC_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_lossy_stderr_capture() {
+    let mut result = direct_exec_result(DirectExecEvidence::successful_with_confinement(
+        ExecutionConfinement::Unsandboxed,
+        EXEC_FORCED_READ_ONLY_OUTPUT,
+    ));
+    result["stderr"]["encoding"] = serde_json::json!("lossy_utf8");
+    let outcome = forced_exec_outcome(UNSANDBOXED_EXEC_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_exec_tier_rejects_a_nonempty_stderr_capture() {
+    let mut result = direct_exec_result(DirectExecEvidence::successful_with_confinement(
+        ExecutionConfinement::Unsandboxed,
+        EXEC_FORCED_READ_ONLY_OUTPUT,
+    ));
+    result["stderr"]["text"] = serde_json::json!(SYNTHETIC_EXECUTOR_FAILURE);
+    let outcome = forced_exec_outcome(UNSANDBOXED_EXEC_NAME, result);
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
 }
