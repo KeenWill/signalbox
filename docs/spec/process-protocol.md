@@ -44,6 +44,10 @@ The session-metadata last-writer actor inventory, its native and terminal-client
 projections, and the totality of the daemon projection that produces it are
 verified against this PR (`fix/review-read-snapshot-permit`).
 
+The coherent review-orchestration snapshot's single-transaction construction,
+the pool capacity it draws, and the writer independence that follows from both
+are verified against this PR (`agent/review-snapshot-mvcc`).
+
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
 implemented in this tree. The version field remains required on every frame and
@@ -417,14 +421,16 @@ Judgment-effect states require strictly fewer applied effects than plan members,
 while repair and later states require equality. Counts belonging to a later
 barrier must remain zero until that barrier can exist. Any state, status, or
 count combination violating those relations is an impossible server projection
-and is malformed. Snapshot construction consumes two units from the shared
+and is malformed. The whole projection is reconstructed inside one read-only
+repeatable-read transaction, so every reported fact comes from a single database
+snapshot and no two of them can disagree. That read is pure and acquires no lock
+any writer waits on: submitting input, starting or advancing a turn, recording
+an approval, and every review mutation proceed unimpeded while a snapshot is
+under construction. Snapshot construction consumes one unit from the shared
 pool-capacity budget, leaving two connections reserved for non-snapshot work; a
-pool with fewer than four configured connections cannot start the process
-listener. The database-global snapshot admission loser rolls back its
-transaction before an exponential retry wait that begins at 10 ms and is capped
-at 100 ms. Admission is bounded to five seconds, after which the read reports
-unavailable; daemon shutdown cancels the admission wait and releases its
-capacity.
+pool with fewer than three configured connections cannot start the process
+listener. Daemon shutdown cancels the capacity wait and releases its
+reservation.
 
 Target subjects, workflows, pass and finding state, finding content, events, and
 external-link vocabularies are the distinct wire representations of the
@@ -1421,13 +1427,14 @@ work. That is session-list, session-metadata-list, session-metadata-read,
 transcript-read, follow-snapshot, goal-read, imported-conversation-read, and
 conversation-list construction; the review target, run, finding, and
 finding-list reads, each of which spans a repeatable-read transaction; and the
-coherent review-orchestration snapshot, which draws two units rather than one.
-The session-metadata read is admitted on the same ground as the rest and not for
-its result size: it opens a transaction, fixes a repeatable-read snapshot,
-selects, and commits. The session-defaults read is the single-statement case; it
-returns its connection immediately and takes no admission. The exact reservation
-is owned by this contract, and every request states its admission class before
-dispatch, so no read verb reaches the pool by omission.
+coherent review-orchestration snapshot, which spans one such transaction too and
+draws the same single unit. The session-metadata read is admitted on the same
+ground as the rest and not for its result size: it opens a transaction, fixes a
+repeatable-read snapshot, selects, and commits. The session-defaults read is the
+single-statement case; it returns its connection immediately and takes no
+admission. The exact reservation is owned by this contract, and every request
+states its admission class before dispatch, so no read verb reaches the pool by
+omission.
 
 Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 

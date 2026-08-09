@@ -147,6 +147,18 @@ impl ReviewWorkflowStore {
         run: ReviewRunId,
     ) -> Result<Option<(ReviewRun, Option<ReviewPass>)>, ReviewWorkflowStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .load_run_with_pass_on_connection(&mut transaction, run)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
+    }
+
+    pub(crate) async fn load_run_with_pass_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        run: ReviewRunId,
+    ) -> Result<Option<(ReviewRun, Option<ReviewPass>)>, ReviewWorkflowStoreError> {
         let row = sqlx::query(
             "SELECT workflow_run.run_id, workflow_run.target_id,
                     workflow_run.workflow_kind, workflow_run.policy_version,
@@ -201,10 +213,9 @@ impl ReviewWorkflowStore {
               WHERE workflow_run.run_id = $1",
         )
         .bind(run.into_uuid())
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut *connection)
         .await?;
         let Some(row) = row else {
-            transaction.commit().await?;
             return Ok(None);
         };
         require_joined_reference(
@@ -218,7 +229,7 @@ impl ReviewWorkflowStore {
             .map(pass_id);
         let loaded_pass = match evidence_pass {
             Some(pass) => Some(
-                load_pass_on_connection(&mut transaction, pass)
+                load_pass_on_connection(&mut *connection, pass)
                     .await?
                     .ok_or_else(|| {
                         corruption("review_run", String::from("referenced pass row is missing"))
@@ -228,7 +239,6 @@ impl ReviewWorkflowStore {
         };
         let run = decode_run(&row, loaded_pass.as_ref())?;
         let pass = loaded_pass.map(|loaded| loaded.pass);
-        transaction.commit().await?;
         Ok(Some((run, pass)))
     }
 
@@ -688,7 +698,7 @@ impl ReviewWorkflowStore {
         Ok(loaded)
     }
 
-    async fn load_findings_on_connection(
+    pub(crate) async fn load_findings_on_connection(
         &self,
         connection: &mut PgConnection,
         findings: &[ReviewFindingId],
@@ -1616,7 +1626,7 @@ impl ReviewWorkflowStore {
         Ok(link)
     }
 
-    async fn load_external_link_on_connection(
+    pub(crate) async fn load_external_link_on_connection(
         connection: &mut PgConnection,
         link: ReviewExternalLinkId,
     ) -> Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError> {
@@ -2038,7 +2048,12 @@ fn require_joined_reference(
     Ok(())
 }
 
-async fn begin_repeatable_read(
+/// Opens one read-only `REPEATABLE READ` transaction.
+///
+/// Every statement issued on the returned transaction observes the same
+/// database snapshot, which is how a multi-statement read stays coherent
+/// without excluding writers.
+pub(crate) async fn begin_repeatable_read(
     pool: &PgPool,
 ) -> Result<Transaction<'_, Postgres>, ReviewWorkflowStoreError> {
     let mut transaction = pool.begin().await?;
@@ -2102,8 +2117,8 @@ async fn load_target_on_connection(
 }
 
 #[derive(Clone, Debug)]
-struct LoadedReviewPass {
-    pass: ReviewPass,
+pub(crate) struct LoadedReviewPass {
+    pub(crate) pass: ReviewPass,
     policy: ReviewPolicy,
     turn_evidence: Option<ReviewPassTurnEvidence>,
     run: ReviewRunEvidence,
@@ -2119,7 +2134,7 @@ impl LoadedReviewPass {
     }
 }
 
-async fn load_pass_on_connection(
+pub(crate) async fn load_pass_on_connection(
     connection: &mut PgConnection,
     pass: ReviewPassId,
 ) -> Result<Option<LoadedReviewPass>, ReviewWorkflowStoreError> {
