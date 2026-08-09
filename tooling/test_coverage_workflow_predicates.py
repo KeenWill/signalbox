@@ -60,6 +60,25 @@ write costs nothing at all.
 use, so the decline is auditable and lapses by itself: a workflow reaching jq a
 new way fails that check, and the question reopens for exactly the form that
 arrived.
+
+The same judgement, applied to the whole module
+-----------------------------------------------
+
+This file was written to close four divergences that review caught and no test
+did, and it went on to find a category nobody had covered: the command around
+the filter, where a create branch sends no body, an empty comment page ends the
+selection, and a dropped `-e` turns a rejected baseline into an accepted one.
+Those are the production breaks it exists to catch, and they are caught.
+
+What follows from that is a bound on further work here, not a claim that the
+module is perfect. A finding is taken up when it is against the original
+submission, when it shows this module would miss a real break in the pipeline,
+or when it shows a test here asserts something false. A finding whose target is
+machinery a review round added, and whose only consequence is that this module
+could check more sharply, is declined: the pipeline behaves the same either
+way, and the measured history is that such findings arrive against code the
+reviewing itself created — none in the first wave against the original
+submission, and a third of them cumulatively since.
 """
 
 from __future__ import annotations
@@ -748,6 +767,21 @@ REQUEST_METHOD_FLAG = "-X"
 # The two branches a publishing step takes: rewrite the existing comment, or
 # create the first one. Both must send the payload; only one runs per run.
 BODY_CARRYING_METHODS = ("PATCH", "POST")
+
+# The runner's temporary directory, which a workflow expression and a shell
+# variable spell differently while naming the same place. The producer reaches
+# it one way and the artifact step names it the other, so both are folded onto
+# one token before they are compared.
+RUNNER_TEMP = "<runner-temp>"
+RUNNER_TEMP_SPELLINGS = ("${{ runner.temp }}", "${RUNNER_TEMP}", "$RUNNER_TEMP")
+ARTIFACT_PATH = re.compile(r"^\s+path:\s*(?P<path>\S.*)$", re.MULTILINE)
+WORKFLOW_ENVIRONMENT_BINDING = re.compile(
+    r"^\s+(?P<name>[A-Z][A-Z0-9_]*):\s+(?P<value>\S.*)$", re.MULTILINE
+)
+UNRESOLVED_NAME = re.compile(r"<(?P<name>[A-Za-z_][A-Za-z0-9_]*)>")
+SHELL_ASSIGNMENT = re.compile(
+    r'^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)="(?P<value>[^"]*)"\s*$', re.MULTILINE
+)
 # The shell reduction that keeps only the first id the selector emitted.
 FIRST_LINE_REDUCTION = re.compile(r"%%\$'\\n'\*")
 
@@ -844,10 +878,15 @@ def payload_handoff_problems() -> list[str]:
                 and words.index(REQUEST_METHOD_FLAG) + 1 < len(words)
                 and words[words.index(REQUEST_METHOD_FLAG) + 1] in BODY_CARRYING_METHODS
             ]
-            if len(requests) < len(BODY_CARRYING_METHODS):
+            methods = sorted(
+                words[words.index(REQUEST_METHOD_FLAG) + 1] for words in requests
+            )
+            if methods != sorted(BODY_CARRYING_METHODS):
                 problems.append(
-                    f"{workflow.name}: expected a request per branch "
-                    f"({', '.join(BODY_CARRYING_METHODS)}), found {len(requests)}"
+                    f"{workflow.name}: expected one request per branch "
+                    f"({', '.join(sorted(BODY_CARRYING_METHODS))}), found {methods}. Counting "
+                    "them is not enough: two rewrites and no create leaves a pull request "
+                    "unable to get its first coverage comment at all"
                 )
             problems.extend(
                 f"{workflow.name}: the {words[words.index(REQUEST_METHOD_FLAG) + 1]} request "
@@ -881,18 +920,19 @@ def unpinned_selector_consumers() -> list[str]:
 
 
 def report_producer_path_problems() -> list[str]:
-    """Report producers that write their comment away from the report they upload.
+    """Report producers writing outside the directory their workflow uploads.
 
-    Runs outside test bodies. The publishing job reads the comment out of the
-    artifact the measuring job uploads, and that artifact is a directory. A
-    producer keeping the `comment.md` name while redirecting somewhere else is
-    still a producer by every other check here, but the file leaves the
-    uploaded directory and the publishing job falls back to reporting that the
-    run measured nothing.
+    Runs outside test bodies. The publishing job never sees the producer's disk;
+    it downloads an artifact, and that artifact is a directory named in the
+    upload step. A producer that moves — even moving its report and its comment
+    together, so the two still sit beside each other — leaves that directory,
+    and the publishing job then finds no comment and reports that the run
+    measured nothing.
     """
     problems: list[str] = []
     for workflow in (COVERAGE_WORKFLOW, SWIFT_WORKFLOW):
         marker = emitted_marker(workflow)
+        uploaded = artifact_directories(workflow)
         for block in read_run_blocks(workflow):
             group = marker_emitting_group(block.script, marker)
             if group is None or REPORT_FILE not in group:
@@ -902,16 +942,79 @@ def report_producer_path_problems() -> list[str]:
             if written is None or report is None:
                 problems.append(
                     f"{workflow.name}/{block.job}: could not read where the comment or the "
-                    "report is written, so nothing checks they land together"
+                    "report is written, so nothing checks they reach the publishing job"
                 )
                 continue
-            if written.rsplit("/", 1)[0] != report.rsplit("/", 1)[0]:
+            comment_directory = resolved_directory(workflow, block.script, written)
+            report_directory = resolved_directory(workflow, block.script, report)
+            if comment_directory != report_directory:
                 problems.append(
                     f"{workflow.name}/{block.job}: the comment is written to {written!r} but "
-                    f"the report it wraps is at {report!r}; only the report's directory is "
-                    "uploaded, so the publishing job would find no comment"
+                    f"the report it wraps is at {report!r}; they must travel together"
+                )
+            if comment_directory not in uploaded:
+                problems.append(
+                    f"{workflow.name}/{block.job}: the comment lands in {comment_directory!r}, "
+                    f"which no artifact step carries ({sorted(uploaded)}), so the publishing "
+                    "job would download no comment and post the no-report body"
                 )
     return problems
+
+
+def artifact_directories(workflow: Path) -> set[str]:
+    """Every directory the workflow uploads or downloads, outside test bodies."""
+    return {
+        normalised_workflow_path(found.group("path").strip())
+        for found in ARTIFACT_PATH.finditer(workflow.read_text(encoding="utf-8"))
+    }
+
+
+def normalised_workflow_path(text: str) -> str:
+    """One path with the temporary directory spelled one way, outside test bodies.
+
+    A workflow expression and a shell variable name the same directory, and the
+    producer reaches it through the second while the artifact step names it with
+    the first. Comparing them as written would report a mismatch that is not one.
+    """
+    for spelling in RUNNER_TEMP_SPELLINGS:
+        text = text.replace(spelling, RUNNER_TEMP)
+    return text.rstrip("/")
+
+
+def directory_bindings(workflow: Path, script: str) -> dict[str, str]:
+    """Every name the workflow binds to a path, outside test bodies.
+
+    Both the step environment and the block's own assignments, because a
+    producer reaches its directory through either: one workflow sets an
+    environment variable and assigns it to a shell name, the other assigns the
+    temporary directory straight through.
+    """
+    bindings: dict[str, str] = {}
+    for found in WORKFLOW_ENVIRONMENT_BINDING.finditer(workflow.read_text(encoding="utf-8")):
+        bindings[found.group("name")] = found.group("value").strip().strip('"')
+    for found in SHELL_ASSIGNMENT.finditer(script):
+        bindings[found.group("name")] = found.group("value")
+    return bindings
+
+
+def resolved_directory(workflow: Path, script: str, path: str) -> str:
+    """The directory a written file lands in, with names resolved, outside test bodies."""
+    bindings = directory_bindings(workflow, script)
+    resolved = path
+    # Two spellings reach here: a raw `$name`, and the `<name>` a reader that
+    # already substituted leaves behind for a name it had no value for. Both
+    # stand for the same binding, so both are resolved.
+    for _ in range(len(bindings) + 1):
+        expanded = SHELL_VARIABLE.sub(
+            lambda found: bindings.get(found.group("name"), found.group(0)), resolved
+        )
+        expanded = UNRESOLVED_NAME.sub(
+            lambda found: bindings.get(found.group("name"), found.group(0)), expanded
+        )
+        if expanded == resolved:
+            break
+        resolved = expanded
+    return normalised_workflow_path(resolved).rsplit("/", 1)[0]
 
 
 def report_path_in(group: str) -> str | None:
@@ -1886,6 +1989,20 @@ NATIVE_DOCUMENTS: tuple[RecordedDocument, ...] = (
         name="fully covered boundary",
         document=native_report(
             native_target(PRODUCT_TARGET, covered=BOUNDARY_LINES, executable=BOUNDARY_LINES)
+        ),
+        loader_reads=True,
+        predicate_accepts=True,
+        divergence=AGREEMENT_REQUIRED,
+    ),
+    RecordedDocument(
+        name="a target carrying source files",
+        document=native_report(
+            native_target(
+                PRODUCT_TARGET,
+                covered=40,
+                executable=100,
+                files=(native_source(NATIVE_SOURCE_PATH, covered=10, executable=60),),
+            )
         ),
         loader_reads=True,
         predicate_accepts=True,
