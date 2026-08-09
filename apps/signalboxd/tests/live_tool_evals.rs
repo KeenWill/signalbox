@@ -141,6 +141,7 @@ const GIT_COMMIT_PATH: &str = "commit-me.txt";
 const GIT_COMMIT_CONTENT: &str = "commit me\n";
 const GIT_NATURAL_PATH: &str = "eval.txt";
 const GIT_NATURAL_CONTENT: &str = "natural eval\n";
+const GIT_DRIFTED_NATURAL_CONTENT: &str = "drifted eval\n";
 const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
 const GIT_SWITCH_CONTENT: &str = "seed two\n";
 const GIT_BASE_BRANCH: &str = "eval-base";
@@ -152,9 +153,11 @@ const WORKSPACE_GLOB_CONTENT: &str = "beta glob fixture\n";
 const WORKSPACE_GLOB_OVERFLOW_PATH: &str = "glob-scope/zz-overflow.txt";
 const WORKSPACE_SEARCH_DIRECTORY: &str = "search-scope";
 const WORKSPACE_SEARCH_PATH: &str = "search-scope/match.txt";
-const WORKSPACE_SEARCH_CONTENT: &str = "beta search fixture\nbeta search overflow\n";
+const WORKSPACE_SEARCH_CONTENT: &str =
+    "search prelude\nbeta search fixture\nbeta search overflow\n";
 const WORKSPACE_FORCED_READ_MAX_BYTES: usize = 6;
 const WORKSPACE_READ_MAX_BYTES: usize = 256 * 1024;
+const WORKSPACE_DRIFTED_SEED: &str = "alpha\nbeta fixturE\nalpha\n";
 const WORKSPACE_LIST_PATH: &str = "nested-list";
 const WORKSPACE_LIST_MAX_RESULTS: usize = 20;
 const WORKSPACE_LIST_ENTRY_COUNT: usize = WORKSPACE_LIST_MAX_RESULTS + 1;
@@ -1116,16 +1119,16 @@ fn workspace_forced_case_passed(
             else {
                 return Ok(false);
             };
-            let complete = fs::read_to_string(root.join(path))?;
-            let Some(expected) = complete.get(..max_bytes) else {
+            let Some(expected) = WORKSPACE_SEED.get(..max_bytes) else {
                 return Ok(false);
             };
             result["path"] == path
                 && max_bytes == WORKSPACE_FORCED_READ_MAX_BYTES
                 && result["content"] == expected
                 && result["bytes_read"] == expected.len()
-                && result["total_bytes"] == complete.len()
+                && result["total_bytes"] == WORKSPACE_SEED.len()
                 && result["truncated"] == true
+                && fs::read(root.join(path))? == WORKSPACE_SEED.as_bytes()
         }
         LIST_DIRECTORY_NAME => {
             result_entries_equal(&result["entries"], &expected_workspace_listing())
@@ -1365,11 +1368,18 @@ fn git_natural_state_passed(root: &Path, seed: Oid) -> EvalResult<bool> {
     let index_contains_only_expected_paths = index.len() == 2
         && index.get_path(Path::new(GIT_SEED_PATH), 0).is_some()
         && index.get_path(Path::new(GIT_NATURAL_PATH), 0).is_some();
+    let commit_adds_expected_natural_fixture = commit_adds_exact_fixture(
+        &repository,
+        &head,
+        GIT_NATURAL_PATH,
+        GIT_NATURAL_CONTENT.as_bytes(),
+    )?;
     Ok(message_matches
         && exactly_one_descendant_commit
         && commit_changes_only_natural_path
         && natural_path_is_clean
-        && index_contains_only_expected_paths)
+        && index_contains_only_expected_paths
+        && commit_adds_expected_natural_fixture)
 }
 
 #[derive(Clone, Debug)]
@@ -3781,6 +3791,21 @@ fn git_natural_state_rejects_a_commit_with_an_unrelated_fixture() -> EvalResult 
 }
 
 #[test]
+fn git_natural_state_rejects_a_commit_with_drifted_bytes() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let seed = seed_git_repository(workspace.path())?;
+    fs::write(
+        workspace.path().join(GIT_NATURAL_PATH),
+        GIT_DRIFTED_NATURAL_CONTENT,
+    )?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+
+    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    Ok(())
+}
+
+#[test]
 fn git_natural_state_rejects_extra_staging_after_the_target_commit() -> EvalResult {
     let workspace = tempfile::tempdir()?;
     let seed = seed_git_repository(workspace.path())?;
@@ -4238,12 +4263,12 @@ fn forced_workspace_search_verifier_accepts_the_bounded_first_match() -> EvalRes
         .expect("the workspace search fixture exists");
     let match_line = WORKSPACE_SEARCH_CONTENT
         .lines()
-        .next()
+        .nth(1)
         .expect("the workspace search fixture has a matching line");
     let result = serde_json::json!({
         "matches": [{
             "path": WORKSPACE_SEARCH_PATH,
-            "line": 1,
+            "line": 2,
             "column": 1,
             "text_start_column": 1,
             "text": match_line,
@@ -4300,6 +4325,34 @@ fn forced_workspace_read_verifier_rejects_an_unbounded_result() -> EvalResult {
         "bytes_read": WORKSPACE_SEED.len(),
         "total_bytes": WORKSPACE_SEED.len(),
         "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_read_verifier_rejects_a_mutated_fixture() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == READ_FILE_NAME)
+        .expect("the workspace read fixture exists");
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_SEED_PATH),
+        WORKSPACE_DRIFTED_SEED,
+    )?;
+    let prefix = WORKSPACE_DRIFTED_SEED
+        .get(..WORKSPACE_FORCED_READ_MAX_BYTES)
+        .expect("the drifted workspace fixture covers the forced bound");
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "content": prefix,
+        "bytes_read": prefix.len(),
+        "total_bytes": WORKSPACE_DRIFTED_SEED.len(),
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
