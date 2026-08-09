@@ -142,6 +142,8 @@ const GIT_STATUS_OVERFLOW_ENTRY_COUNT: usize = EXPECTED_GIT_STATUS_MAX_ENTRIES -
 const GIT_NATURAL_PATH: &str = "eval.txt";
 const GIT_NATURAL_CONTENT: &str = "natural eval\n";
 const GIT_DRIFTED_NATURAL_CONTENT: &str = "drifted eval\n";
+const GIT_COLLATERAL_PATH: &str = "collateral.txt";
+const GIT_COLLATERAL_CONTENT: &str = "collateral\n";
 const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
 const GIT_SWITCH_CONTENT: &str = "seed two\n";
 const GIT_BASE_CONTENT: &str = "seed three\n";
@@ -197,6 +199,9 @@ const ARBITRARY_EVAL_SESSION_ID: u128 = 0x9107;
 const ARBITRARY_EVAL_MODEL_CALL_ID: u128 = 0x9108;
 const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x9109;
 const ARBITRARY_SECOND_EVAL_REQUEST_ID: u128 = 0x910a;
+const ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX: u64 = 1;
+const ARBITRARY_REQUEST_ENTRY_INDEX: u64 = 2;
+const ARBITRARY_LATE_RESULT_ENTRY_INDEX: u64 = 3;
 const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
 const SYNTHETIC_EXECUTOR_FAILURE: &str = "synthetic executor failure";
 const DRIFTED_APPLY_PATCH_ARGUMENTS: &str =
@@ -972,6 +977,7 @@ fn git_forced_case_passed(
             let Some(paths) = arguments["paths"].as_array() else {
                 return Ok(false);
             };
+            let base = repository.find_branch(GIT_BASE_BRANCH, BranchType::Local)?;
             result["staged_paths"] == paths.len()
                 && paths.iter().all(|path| {
                     path.as_str().is_some_and(|path| {
@@ -984,6 +990,11 @@ fn git_forced_case_passed(
                     GIT_STAGE_PATH,
                     GIT_STAGE_CONTENT.as_bytes(),
                 )?
+                && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
+                && head.id() == seed
+                && base.get().target() == Some(seed)
+                && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
+                && fs::read(root.join(GIT_SEED_PATH))? == GIT_BASE_CONTENT.as_bytes()
                 && repository.status_file(Path::new(GIT_COMMIT_PATH)).ok() == Some(Status::WT_NEW)
                 && repository.status_file(Path::new(GIT_NATURAL_PATH)).ok() == Some(Status::WT_NEW)
         }
@@ -1090,6 +1101,7 @@ fn git_diff_fixture_unchanged(root: &Path, repository: &Repository) -> EvalResul
         repository.status_file(Path::new(GIT_STAGE_PATH))? == Status::INDEX_NEW
             && repository.status_file(Path::new(GIT_COMMIT_PATH))? == Status::WT_NEW
             && repository.status_file(Path::new(GIT_NATURAL_PATH))? == Status::WT_NEW
+            && repository.status_file(Path::new(GIT_DIFF_OVERFLOW_PATH))? == Status::WT_NEW
             && fs::read(root.join(GIT_STAGE_PATH))? == GIT_STAGE_CONTENT.as_bytes()
             && fs::read(root.join(GIT_COMMIT_PATH))? == GIT_COMMIT_CONTENT.as_bytes()
             && fs::read(root.join(GIT_NATURAL_PATH))? == GIT_NATURAL_CONTENT.as_bytes()
@@ -1544,6 +1556,7 @@ fn git_natural_state_passed(root: &Path, seed: Oid) -> EvalResult<bool> {
             GIT_COMMIT_PATH,
             GIT_COMMIT_CONTENT.as_bytes(),
         )?;
+    let complete_status_matches = git_natural_status_matches(&repository)?;
     Ok(head_remains_on_seeded_branch
         && seeded_branch_advanced
         && message_matches
@@ -1552,7 +1565,24 @@ fn git_natural_state_passed(root: &Path, seed: Oid) -> EvalResult<bool> {
         && natural_path_is_clean
         && index_contains_only_expected_paths
         && commit_adds_expected_natural_fixture
-        && unrelated_fixtures_unchanged)
+        && unrelated_fixtures_unchanged
+        && complete_status_matches)
+}
+
+fn git_natural_status_matches(repository: &Repository) -> EvalResult<bool> {
+    let statuses = repository.statuses(None)?;
+    let mut actual = BTreeMap::new();
+    for entry in statuses.iter() {
+        let path = entry
+            .path()
+            .map_err(|_| io::Error::other("a Git status path is not valid UTF-8"))?;
+        actual.insert(path.to_owned(), entry.status());
+    }
+    let expected = BTreeMap::from([
+        (String::from(GIT_COMMIT_PATH), Status::WT_NEW),
+        (String::from(GIT_STAGE_PATH), Status::WT_NEW),
+    ]);
+    Ok(actual == expected)
 }
 
 fn untracked_git_fixture_matches(
@@ -2288,6 +2318,8 @@ struct CaseSnapshot {
 struct RequestSnapshot {
     request_id: Uuid,
     producing_model_call_id: Uuid,
+    entry_index: u64,
+    completed_result_entry_index: Option<u64>,
     name: String,
     arguments_text: String,
     attempt_succeeded: bool,
@@ -2312,12 +2344,14 @@ impl CaseSnapshot {
             .ok_or_else(|| io::Error::other("the eval transcript turn is missing"))?
             .state();
         let turn_disposition = SnapshotTurnDisposition::from_process_state(turn_state);
-        let successful_requests = successful_tool_requests(transcript.entries());
+        let completed_results = completed_tool_result_entry_indices(transcript.entries());
+        let successful_requests = completed_results.keys().copied().collect::<BTreeSet<_>>();
         let requests = transcript
             .entries()
             .iter()
             .filter_map(|entry| match entry {
                 ProcessTranscriptEntry::AssistantToolUse {
+                    entry_index,
                     turn: request_turn,
                     model_call,
                     request,
@@ -2327,6 +2361,10 @@ impl CaseSnapshot {
                 } if *request_turn == turn => Some(RequestSnapshot {
                     request_id: request.into_uuid(),
                     producing_model_call_id: model_call.into_uuid(),
+                    entry_index: *entry_index,
+                    completed_result_entry_index: completed_results
+                        .get(&request.into_uuid())
+                        .copied(),
                     name: name.clone(),
                     arguments_text: arguments.clone(),
                     attempt_succeeded: successful_requests.contains(&request.into_uuid()),
@@ -2406,6 +2444,11 @@ impl CaseSnapshot {
                 read < write
                     && self.requests[read].producing_model_call_id
                         != self.requests[write].producing_model_call_id
+                    && self.requests[read]
+                        .completed_result_entry_index
+                        .is_some_and(|result_entry_index| {
+                            result_entry_index < self.requests[write].entry_index
+                        })
             })
     }
 
@@ -2568,15 +2611,16 @@ fn workspace_natural_read_result_passed(
         && result["truncated"] == false
 }
 
-fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid> {
+fn completed_tool_result_entry_indices(entries: &[ProcessTranscriptEntry]) -> BTreeMap<Uuid, u64> {
     entries
         .iter()
         .filter_map(|entry| match entry {
             ProcessTranscriptEntry::ToolExecutionResult {
+                entry_index,
                 request,
                 disposition: ProcessToolExecutionResultDisposition::Completed,
                 ..
-            } => Some(request.into_uuid()),
+            } => Some((request.into_uuid(), *entry_index)),
             ProcessTranscriptEntry::ToolExecutionResult {
                 disposition: ProcessToolExecutionResultDisposition::KnownFailed,
                 ..
@@ -2597,6 +2641,12 @@ fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid
             | ProcessTranscriptEntry::ImportedText { .. }
             | ProcessTranscriptEntry::Imported { .. } => None,
         })
+        .collect()
+}
+
+fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid> {
+    completed_tool_result_entry_indices(entries)
+        .into_keys()
         .collect()
 }
 
@@ -2940,6 +2990,8 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -2965,6 +3017,8 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -2990,6 +3044,8 @@ fn forced_tier_reports_infrastructure_for_an_exact_known_failed_attempt() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(target),
                 arguments_text: String::from("{}"),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: None,
                 attempt_succeeded: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -3017,6 +3073,8 @@ fn unforced_web_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_SEARCH_NAME),
                 arguments_text: serde_json::json!({"query": WEB_QUERY}).to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: None,
                 attempt_succeeded: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -3044,6 +3102,8 @@ fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_STAGE_NAME),
                 arguments_text: serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: None,
                 attempt_succeeded: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -3071,6 +3131,8 @@ fn unforced_git_tier_reports_a_premature_commit_failure_as_a_miss() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_CREATE_COMMIT_NAME),
                 arguments_text: serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: None,
                 attempt_succeeded: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -3099,6 +3161,8 @@ fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
                     producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                     name: String::from(GIT_STAGE_NAME),
                     arguments_text: serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
                 },
                 RequestSnapshot {
@@ -3106,6 +3170,8 @@ fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
                     producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                     name: String::from(GIT_CREATE_COMMIT_NAME),
                     arguments_text: serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: None,
                     attempt_succeeded: false,
                 },
             ],
@@ -3129,6 +3195,8 @@ fn unforced_git_tier_keeps_a_duplicate_commit_failure_as_a_miss() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_STAGE_NAME),
                 arguments_text: serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -3136,6 +3204,8 @@ fn unforced_git_tier_keeps_a_duplicate_commit_failure_as_a_miss() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_CREATE_COMMIT_NAME),
                 arguments_text: serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -3143,6 +3213,8 @@ fn unforced_git_tier_keeps_a_duplicate_commit_failure_as_a_miss() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_CREATE_COMMIT_NAME),
                 arguments_text: serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: None,
                 attempt_succeeded: false,
             },
         ],
@@ -3171,6 +3243,8 @@ fn unforced_workspace_tier_reports_infrastructure_for_an_exact_known_failed_atte
                     "content": WORKSPACE_ANSWER,
                 })
                 .to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: None,
                 attempt_succeeded: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -3199,6 +3273,8 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
                     producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                     name: String::from(APPLY_PATCH_NAME),
                     arguments_text: String::from("{}"),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
                 },
                 RequestSnapshot {
@@ -3206,6 +3282,8 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
                     producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                     name: String::from(READ_FILE_NAME),
                     arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: None,
                     attempt_succeeded: false,
                 },
             ],
@@ -3270,6 +3348,8 @@ fn successful_request(
         producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
         name: name.to_owned(),
         arguments_text: arguments.to_string(),
+        entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+        completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
         attempt_succeeded: true,
     }
 }
@@ -3282,6 +3362,8 @@ fn failed_request_snapshot(name: &str, arguments: serde_json::Value) -> CaseSnap
             producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
             name: name.to_owned(),
             arguments_text: arguments.to_string(),
+            entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+            completed_result_entry_index: None,
             attempt_succeeded: false,
         }],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -3384,6 +3466,8 @@ fn unforced_workspace_tier_requires_each_request_result_to_round_trip() {
                     producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                     name: String::from(READ_FILE_NAME),
                     arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
                 },
                 RequestSnapshot {
@@ -3395,6 +3479,8 @@ fn unforced_workspace_tier_requires_each_request_result_to_round_trip() {
                         "content": WORKSPACE_ANSWER,
                     })
                     .to_string(),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
                 },
             ],
@@ -3423,6 +3509,8 @@ fn unforced_git_tier_requires_both_task_tools() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_STAGE_NAME),
                 arguments_text: serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -3481,6 +3569,21 @@ fn git_natural_state_rejects_a_deleted_unrelated_fixture() -> EvalResult {
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
     fs::remove_file(workspace.path().join(GIT_STAGE_PATH))?;
+
+    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    Ok(())
+}
+
+#[test]
+fn git_natural_state_rejects_a_collateral_untracked_file() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let seed = seed_git_repository(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    fs::write(
+        workspace.path().join(GIT_COLLATERAL_PATH),
+        GIT_COLLATERAL_CONTENT,
+    )?;
 
     assert!(!git_natural_state_passed(workspace.path(), seed)?);
     Ok(())
@@ -3618,6 +3721,27 @@ fn forced_git_stage_verifier_rejects_an_extra_staged_fixture() -> EvalResult {
         .expect("the Git stage fixture exists");
     stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
     stage_path(suite.workspace.path(), GIT_COMMIT_PATH)?;
+    let result = serde_json::json!({
+        "staged_paths": 1,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_stage_verifier_rejects_a_switched_branch() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STAGE_NAME)
+        .expect("the Git stage fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    repository.set_head("refs/heads/switch-target")?;
+    repository.checkout_head(None)?;
+    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
     let result = serde_json::json!({
         "staged_paths": 1,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
@@ -3927,6 +4051,26 @@ fn forced_git_diff_verifier_rejects_an_unstaged_fixture() -> EvalResult {
     let mut index = Repository::open(suite.workspace.path())?.index()?;
     index.remove_path(Path::new(GIT_STAGE_PATH))?;
     index.write()?;
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_diff_verifier_rejects_a_staged_overflow_fixture() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_DIFF_NAME)
+        .expect("the Git diff fixture exists");
+    suite.prepare_git_case(GIT_DIFF_NAME)?;
+    let result = serde_json::json!({
+        "patch": expected_bounded_git_worktree_patch(suite.workspace.path())?,
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+    stage_path(suite.workspace.path(), GIT_DIFF_OVERFLOW_PATH)?;
 
     assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
@@ -4661,6 +4805,8 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(target),
                 arguments_text: String::from(r#"{"unexpected":true}"#),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -4700,6 +4846,8 @@ fn successful_workspace_natural_snapshot() -> CaseSnapshot {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(READ_FILE_NAME),
                 arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -4711,6 +4859,8 @@ fn successful_workspace_natural_snapshot() -> CaseSnapshot {
                     "path": WORKSPACE_ANSWER_PATH,
                 })
                 .to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
         ],
@@ -4747,6 +4897,8 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
                     "path": WORKSPACE_ANSWER_PATH,
                 })
                 .to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -4754,6 +4906,8 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(READ_FILE_NAME),
                 arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
         ],
@@ -4777,6 +4931,8 @@ fn workspace_natural_state_requires_the_read_to_cover_the_full_brief() {
                     "path": WORKSPACE_SEED_PATH,
                 })
                 .to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -4788,6 +4944,8 @@ fn workspace_natural_state_requires_the_read_to_cover_the_full_brief() {
                     "path": WORKSPACE_ANSWER_PATH,
                 })
                 .to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
         ],
@@ -4807,6 +4965,8 @@ fn workspace_natural_state_requires_a_later_model_call_for_the_write() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(READ_FILE_NAME),
                 arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -4818,11 +4978,21 @@ fn workspace_natural_state_requires_a_later_model_call_for_the_write() {
                     "path": WORKSPACE_ANSWER_PATH,
                 })
                 .to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
     };
+
+    assert!(!snapshot.workspace_natural_requests_passed());
+}
+
+#[test]
+fn workspace_natural_state_requires_the_read_result_before_the_write_call() {
+    let mut snapshot = successful_workspace_natural_snapshot();
+    snapshot.requests[0].completed_result_entry_index = Some(ARBITRARY_LATE_RESULT_ENTRY_INDEX);
 
     assert!(!snapshot.workspace_natural_requests_passed());
 }
@@ -4837,6 +5007,8 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(READ_FILE_NAME),
                 arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -4848,6 +5020,8 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
                     "path": WORKSPACE_ANSWER_PATH,
                 })
                 .to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -4860,6 +5034,8 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
                     "path": WORKSPACE_SEED_PATH,
                 })
                 .to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
         ],
@@ -4948,6 +5124,8 @@ fn git_natural_state_requires_a_later_model_call_for_the_commit() -> EvalResult 
                 arguments_text: normalized_arguments_text(
                     &serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
                 )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -4957,6 +5135,8 @@ fn git_natural_state_requires_a_later_model_call_for_the_commit() -> EvalResult 
                 arguments_text: normalized_arguments_text(
                     &serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
                 )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
         ],
@@ -4979,6 +5159,8 @@ fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalRe
                 arguments_text: normalized_arguments_text(
                     &serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
                 )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -4988,6 +5170,8 @@ fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalRe
                 arguments_text: normalized_arguments_text(
                     &serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
                 )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -4997,6 +5181,8 @@ fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalRe
                 arguments_text: normalized_arguments_text(
                     &serde_json::json!({"paths": [GIT_STAGE_PATH]}).to_string(),
                 )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
         ],
@@ -5019,6 +5205,8 @@ fn web_natural_state_requires_a_later_model_call_for_the_fetch() -> EvalResult {
                 arguments_text: normalized_arguments_text(
                     &serde_json::json!({"query": WEB_QUERY}).to_string(),
                 )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -5028,6 +5216,8 @@ fn web_natural_state_requires_a_later_model_call_for_the_fetch() -> EvalResult {
                 arguments_text: normalized_arguments_text(
                     &serde_json::json!({"url": WEB_URL}).to_string(),
                 )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
         ],
@@ -5048,6 +5238,8 @@ fn web_natural_state_requires_the_exact_query() -> EvalResult {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_SEARCH_NAME),
                 arguments_text: String::from(r#"{"query":"different query"}"#),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -5055,6 +5247,8 @@ fn web_natural_state_requires_the_exact_query() -> EvalResult {
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_FETCH_NAME),
                 arguments_text: serde_json::json!({"url": WEB_URL}).to_string(),
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
         ],
@@ -5077,6 +5271,8 @@ fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResul
                 arguments_text: normalized_arguments_text(
                     &serde_json::json!({"url": WEB_URL}).to_string(),
                 )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -5086,6 +5282,8 @@ fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResul
                 arguments_text: normalized_arguments_text(
                     &serde_json::json!({"query": WEB_QUERY}).to_string(),
                 )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
             RequestSnapshot {
@@ -5095,6 +5293,8 @@ fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResul
                 arguments_text: normalized_arguments_text(
                     &serde_json::json!({"url": WEB_URL}).to_string(),
                 )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
             },
         ],
