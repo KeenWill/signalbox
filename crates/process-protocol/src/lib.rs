@@ -1190,6 +1190,8 @@ pub enum CanonicalValueError {
     SystemPrompt,
     /// A dotted session placement or root-global-read decision was invalid.
     Placement,
+    /// Runner working-directory text was empty, NUL-bearing, or oversized.
+    RunnerWorkingDirectory,
     /// Dollar amount was not canonical bounded nonnegative decimal text.
     DollarAmount,
     /// Billing rate version was empty, padded, NUL-bearing, or oversized.
@@ -1208,6 +1210,7 @@ impl fmt::Display for CanonicalValueError {
             Self::Digest => "digest is not canonical lowercase 64-character hexadecimal text",
             Self::SystemPrompt => "session system prompt is empty, oversized, or contains U+0000",
             Self::Placement => "session placement is invalid",
+            Self::RunnerWorkingDirectory => "runner working directory is invalid",
             Self::DollarAmount => "dollar amount is not canonical nonnegative decimal text",
             Self::RateVersion => "billing rate version is invalid",
         })
@@ -5253,12 +5256,51 @@ pub enum ToolBatchState {
 
 /// Sandbox profile selected by one runner placement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum RunnerSandboxProfile {
     /// Supervised execution with the invoking user's ambient filesystem and network access.
+    #[serde(rename = "ambient")]
     Ambient,
     /// Execution restricted to the placement-owned writable root.
+    #[serde(rename = "workspace-restricted")]
     WorkspaceRestricted,
+}
+
+/// Exact bounded runner working-directory text carried on the process wire.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RunnerWorkingDirectory(String);
+
+impl RunnerWorkingDirectory {
+    /// Maximum UTF-8 bytes admitted by the runner domain and process wire.
+    pub const MAX_UTF8_BYTES: usize = DomainRunnerWorkingDirectory::MAX_BYTES;
+
+    /// Admits nonempty, NUL-free text within the exact byte bound.
+    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        if value.is_empty() || value.len() > Self::MAX_UTF8_BYTES || value.contains('\0') {
+            Err(CanonicalValueError::RunnerWorkingDirectory)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Borrows the exact validated directory text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for RunnerWorkingDirectory {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<RunnerWorkingDirectory> for String {
+    fn from(value: RunnerWorkingDirectory) -> Self {
+        value.0
+    }
 }
 
 /// Positive runner placement revision carried by follower-visible wire facts.
@@ -5591,7 +5633,7 @@ pub enum SessionEvent {
         sandbox_profile: RunnerSandboxProfile,
         /// Caller-selected directory, null when the runner default was selected.
         #[serde(deserialize_with = "deserialize_required_nullable")]
-        working_directory: Option<String>,
+        working_directory: Option<RunnerWorkingDirectory>,
         /// Exact closed transition state.
         state: RunnerStateTransitionState,
     },
@@ -6159,25 +6201,13 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
             rationale,
             ..
         } => validate_tool_approval_event_shape(decision, decider, rationale)?,
-        SessionEvent::RunnerStateTransition {
-            placement_revision: _,
-            working_directory,
-            ..
-        } => {
-            if working_directory.as_ref().is_some_and(|directory| {
-                directory.is_empty()
-                    || directory.len() > DomainRunnerWorkingDirectory::MAX_BYTES
-                    || directory.contains('\0')
-            }) {
-                return Err(FrameValidationError::RunnerShape);
-            }
-        }
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
+        | SessionEvent::RunnerStateTransition { .. }
         | SessionEvent::ContextCompacted { .. }
         | SessionEvent::TurnCompleted { .. }
         | SessionEvent::TurnFailed { .. }
@@ -7424,8 +7454,6 @@ pub enum FrameValidationError {
     ModelSettingsShape,
     /// A dotted placement or its root-global-read acknowledgement is invalid.
     PlacementShape,
-    /// A runner-state event carried invalid placement facts.
-    RunnerShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -7459,7 +7487,6 @@ impl fmt::Display for FrameValidationError {
             Self::DelegationShape => "session-delegation frame shape is inconsistent",
             Self::ModelSettingsShape => "model-settings frame shape is inconsistent",
             Self::PlacementShape => "session-placement frame shape is inconsistent",
-            Self::RunnerShape => "runner-state frame shape is inconsistent",
         })
     }
 }
@@ -7894,12 +7921,13 @@ mod tests {
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
         ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject,
-        RunnerPlacementRevision, RunnerSandboxProfile, RunnerStateTransitionState, ServerFrame,
-        ServerMessage, ServiceTier, SessionEvent, SessionMetadata, SettingOverlay,
-        SystemPromptMember, SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision,
-        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
-        TurnModelSettingsSnapshot, TurnState, UsageProvenance, decode_client_line,
-        decode_server_line, encode_client_line, encode_server_line, validate_adjustments,
+        RunnerPlacementRevision, RunnerSandboxProfile, RunnerStateTransitionState,
+        RunnerWorkingDirectory, ServerFrame, ServerMessage, ServiceTier, SessionEvent,
+        SessionMetadata, SettingOverlay, SystemPromptMember, SystemPromptText,
+        ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
+        TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnModelSettingsSnapshot,
+        TurnState, UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
+        encode_server_line, validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
@@ -14894,11 +14922,14 @@ mod tests {
                     placement_revision: RunnerPlacementRevision::try_new(5)
                         .expect("the fixture placement revision is positive"),
                     sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
-                    working_directory: Some(String::from("workspace/project")),
+                    working_directory: Some(
+                        RunnerWorkingDirectory::try_new(String::from("workspace/project"))
+                            .expect("the fixture working directory is valid"),
+                    ),
                     state: RunnerStateTransitionState::WorkingDirectoryChanged,
                 },
             },
-            r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000003","event":{"type":"runner_state_transition","runner_id":"00000000-0000-0000-0000-000000000004","placement_revision":"5","sandbox_profile":"workspace_restricted","working_directory":"workspace/project","state":"working_directory_changed"}}"#,
+            r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000003","event":{"type":"runner_state_transition","runner_id":"00000000-0000-0000-0000-000000000004","placement_revision":"5","sandbox_profile":"workspace-restricted","working_directory":"workspace/project","state":"working_directory_changed"}}"#,
         )?;
         Ok(())
     }
@@ -14907,5 +14938,22 @@ mod tests {
     fn runner_state_transition_revision_rejects_zero_at_construction_and_decode() {
         assert_eq!(RunnerPlacementRevision::try_new(0), None);
         assert!(serde_json::from_str::<RunnerPlacementRevision>(r#""0""#).is_err());
+    }
+
+    #[test]
+    fn runner_working_directory_rejects_every_invalid_wire_shape() {
+        assert_eq!(
+            RunnerWorkingDirectory::try_new(String::new()),
+            Err(super::CanonicalValueError::RunnerWorkingDirectory)
+        );
+        assert_eq!(
+            RunnerWorkingDirectory::try_new(String::from("bad\0path")),
+            Err(super::CanonicalValueError::RunnerWorkingDirectory)
+        );
+        assert_eq!(
+            RunnerWorkingDirectory::try_new("x".repeat(RunnerWorkingDirectory::MAX_UTF8_BYTES + 1)),
+            Err(super::CanonicalValueError::RunnerWorkingDirectory)
+        );
+        assert!(serde_json::from_str::<RunnerWorkingDirectory>(r#"""#).is_err());
     }
 }
