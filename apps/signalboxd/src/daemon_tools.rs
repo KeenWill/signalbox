@@ -1806,6 +1806,8 @@ mod tests {
     const CARGO_PROFILE_OPTION_PREFIX: &str = "--profile=";
     const CARGO_CONFIG_OPTION: &str = "--config";
     const CARGO_CONFIG_OPTION_PREFIX: &str = "--config=";
+    const CARGO_MANIFEST_PATH_OPTION: &str = "--manifest-path";
+    const CARGO_MANIFEST_FILENAME: &str = "Cargo.toml";
     const CARGO_COLOR_OPTION: &str = "--color";
     const CARGO_CHANGE_DIRECTORY_OPTION: &str = "-C";
     const CARGO_UNSTABLE_OPTION: &str = "-Z";
@@ -2707,6 +2709,24 @@ done
                 key_value,
                 OsStr::new(CARGO_CONFIG_OPTION),
                 expected_path.as_os_str(),
+            ]
+        );
+    }
+
+    #[test]
+    fn bridge_build_preserves_parent_cargo_config_hierarchy() {
+        let invocation_directory = Path::new("/synthetic/invocation");
+        let workspace = Path::new("/synthetic/workspace");
+        let expected_manifest = workspace.join(CARGO_MANIFEST_FILENAME);
+        let mut command = Command::new(CARGO_PROGRAM_STEM);
+        configure_bridge_build_location(&mut command, invocation_directory, workspace);
+
+        assert_eq!(command.get_current_dir(), Some(invocation_directory));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                OsStr::new(CARGO_MANIFEST_PATH_OPTION),
+                expected_manifest.as_os_str(),
             ]
         );
     }
@@ -3815,8 +3835,12 @@ done
             .arg(&selection.profile)
             .arg("--target-dir")
             .arg(&selection.target_dir)
-            .current_dir(workspace)
             .stdout(Stdio::piped());
+        configure_bridge_build_location(
+            &mut build_command,
+            &invocation.invocation_directory,
+            &workspace,
+        );
         apply_cargo_config_overrides(&mut build_command, &invocation.config_overrides);
         if let Some(rustc) = normalized_rustc_override(&invocation.invocation_directory) {
             build_command.env("RUSTC", rustc);
@@ -3860,6 +3884,17 @@ done
         for config in config_overrides {
             command.arg(CARGO_CONFIG_OPTION).arg(config);
         }
+    }
+
+    fn configure_bridge_build_location(
+        command: &mut Command,
+        invocation_directory: &Path,
+        workspace: &Path,
+    ) {
+        command
+            .arg(CARGO_MANIFEST_PATH_OPTION)
+            .arg(workspace.join(CARGO_MANIFEST_FILENAME))
+            .current_dir(invocation_directory);
     }
 
     #[track_caller]
