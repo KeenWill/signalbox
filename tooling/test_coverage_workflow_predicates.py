@@ -169,6 +169,7 @@ class ScannedInvocation:
     program: str | None
     reason: str
     excerpt: str
+    through_gh_flag: bool
 
     @property
     def readable(self) -> bool:
@@ -280,9 +281,14 @@ def read_jq_invocation(script: str, index: int, *, through_gh_flag: bool) -> Sca
     if through_gh_flag:
         text, kind, _ = read_shell_word(script, index)
         if kind in LITERAL_WORD_KINDS:
-            return ScannedInvocation(program=text, reason="", excerpt=excerpt)
+            return ScannedInvocation(
+                program=text, reason="", excerpt=excerpt, through_gh_flag=through_gh_flag
+            )
         return ScannedInvocation(
-            program=None, reason=f"the --jq filter is written as {kind}", excerpt=excerpt
+            program=None,
+            reason=f"the --jq filter is written as {kind}",
+            excerpt=excerpt,
+            through_gh_flag=through_gh_flag,
         )
 
     filter_comes_from_a_file = False
@@ -292,11 +298,17 @@ def read_jq_invocation(script: str, index: int, *, through_gh_flag: bool) -> Sca
 
         if kind == "end-of-command":
             return ScannedInvocation(
-                program=None, reason="the invocation ends before naming a filter", excerpt=excerpt
+                program=None,
+                reason="the invocation ends before naming a filter",
+                excerpt=excerpt,
+                through_gh_flag=through_gh_flag,
             )
         if kind == "unterminated-quote":
             return ScannedInvocation(
-                program=None, reason="an unterminated quote", excerpt=excerpt
+                program=None,
+                reason="an unterminated quote",
+                excerpt=excerpt,
+                through_gh_flag=through_gh_flag,
             )
 
         if kind == "bare" and text.startswith("-") and text != "-":
@@ -312,12 +324,20 @@ def read_jq_invocation(script: str, index: int, *, through_gh_flag: bool) -> Sca
 
         if filter_comes_from_a_file:
             return ScannedInvocation(
-                program=None, reason="the filter is read from a file", excerpt=excerpt
+                program=None,
+                reason="the filter is read from a file",
+                excerpt=excerpt,
+                through_gh_flag=through_gh_flag,
             )
         if kind in LITERAL_WORD_KINDS:
-            return ScannedInvocation(program=text, reason="", excerpt=excerpt)
+            return ScannedInvocation(
+                program=text, reason="", excerpt=excerpt, through_gh_flag=through_gh_flag
+            )
         return ScannedInvocation(
-            program=None, reason=f"the filter is written as {kind}", excerpt=excerpt
+            program=None,
+            reason=f"the filter is written as {kind}",
+            excerpt=excerpt,
+            through_gh_flag=through_gh_flag,
         )
 
 
@@ -339,6 +359,7 @@ class ExtractedProgram:
     job: str
     step: str
     program: str
+    through_gh_flag: bool
 
     def describe(self) -> str:
         excerpt = " ".join(self.program.split())[:80]
@@ -497,10 +518,15 @@ def extract_jq_programs(blocks: list[RunBlock]) -> list[ExtractedProgram]:
     """Extract every readable jq program from the given run blocks, outside test bodies."""
     return [
         ExtractedProgram(
-            workflow=block.workflow, job=block.job, step=block.step, program=program
+            workflow=block.workflow,
+            job=block.job,
+            step=block.step,
+            program=invocation.program,
+            through_gh_flag=invocation.through_gh_flag,
         )
         for block in blocks
-        for program in jq_programs_in(block.script)
+        for invocation in scan_jq_invocations(block.script)
+        if invocation.program is not None
     ]
 
 
@@ -810,6 +836,23 @@ def programs_for(identifier: str) -> list[ExtractedProgram]:
     return [program for program in all_extracted_programs() if spec.matches(program)]
 
 
+def one_extracted_for(identifier: str) -> ExtractedProgram:
+    """The single extracted program matching one specification, outside test bodies.
+
+    Carries how the workflow reaches it, not only its text: a filter reached
+    through `gh api --jq` is run by the GitHub CLI, and one passed to the binary
+    is run by jq, and the two do not print the same things.
+    """
+    matches = programs_for(identifier)
+    if len(matches) != 1:
+        raise AssertionError(
+            f"predicate not found / extraction pattern broke: expected exactly one jq "
+            f"program matching {identifier!r}, found {len(matches)}. Extracted overall: "
+            f"{[program.describe() for program in all_extracted_programs()]}"
+        )
+    return matches[0]
+
+
 def one_program_for(identifier: str) -> str:
     """The single extracted program matching one specification, outside test bodies.
 
@@ -1041,57 +1084,229 @@ def native_comment_body() -> str:
     return f"{emitted_marker(SWIFT_WORKFLOW)}\n\n{report}"
 
 
-# What each workflow adds around the rendered report. The report-producing step
-# appends provenance after the report, and the publish step writes a wholly
-# different body when a run measured nothing. Both are built here in the shape
-# the workflows print rather than copied out of them: the wording belongs to the
-# workflow files, which this branch does not touch, while the shape is what the
-# payload program has to survive. None of these characters — backticks around a
-# SHA, a Markdown link's brackets and parentheses, a URL — comes from the
-# renderer, so a payload that mangled only workflow-added text would round-trip
-# a report-only fixture perfectly.
-MEASURED_SHA = "0123456789abcdef0123456789abcdef01234567"
-PULL_REQUEST_HEAD_SHA = "fedcba9876543210fedcba9876543210fedcba98"
-WORKFLOW_RUN_ID = "1234567890"
-RUN_URL = f"https://github.com/owner/repository/actions/runs/{WORKFLOW_RUN_ID}"
+# The values the workflows interpolate into the comments they write. Only these
+# are invented here; every word around them is read out of the workflow, because
+# the wording is producer-specific and inventing a plausible stand-in tests
+# nothing. One workflow says it uploads the HTML report and LCOV, the other the
+# xccov reports, so a payload filter that rewrote only producer-specific text
+# would round-trip a shared invented footer perfectly.
+SYNTHETIC_SHELL_VALUES = {
+    "MEASURED_SHA": "0123456789abcdef0123456789abcdef01234567",
+    "HEAD_SHA": "fedcba9876543210fedcba9876543210fedcba98",
+    "GITHUB_RUN_ID": "1234567890",
+    "GITHUB_SERVER_URL": "https://github.example",
+    "GITHUB_REPOSITORY": "owner/repository",
+}
+
+SHELL_VARIABLE = re.compile(r"\$\{?(?P<name>\w+)\}?")
+PRINTF_TOKEN = re.compile(r"printf(?![-\w])")
+CAT_TOKEN = re.compile(r"cat(?![-\w])")
+REPORT_FILE = "report.md"
+
+REPORT_BODY = "report"
+NO_REPORT_BODY = "no-report"
 
 
-def provenance_footer() -> str:
-    """The provenance a report-producing step appends, outside test bodies."""
-    return (
-        f"\nMeasured at `{MEASURED_SHA}`, the merge commit this pull request builds, whose "
-        f"head is `{PULL_REQUEST_HEAD_SHA}`, by [run {WORKFLOW_RUN_ID}]({RUN_URL}), which "
-        "uploads the report as an artifact.\n"
+@dataclass(frozen=True)
+class Emission:
+    """One thing a producer writes into the comment: literal text, or the report."""
+
+    kind: str
+    text: str
+
+
+def substitute_shell_variables(text: str) -> str:
+    """Replace shell variables with synthetic values, outside test bodies."""
+    return SHELL_VARIABLE.sub(
+        lambda found: SYNTHETIC_SHELL_VALUES.get(
+            found.group("name"), f"<{found.group('name')}>"
+        ),
+        text,
     )
+
+
+def read_command_words(script: str, index: int) -> tuple[list[str], int]:
+    """Read one command's words, with variables substituted, outside test bodies."""
+    words: list[str] = []
+    while True:
+        text, kind, following = read_shell_word(script, index)
+        if kind == "end-of-command":
+            return words, index
+        if kind == "unterminated-quote":
+            return words, following
+        words.append(substitute_shell_variables(text) if kind == "shell-expansion" else text)
+        index = following
+
+
+def render_printf(words: list[str]) -> str:
+    """Render one printf call, outside test bodies.
+
+    Only `%s` is interpreted, which is all these workflows use, and `\\n` and
+    `\\t` are decoded because a single-quoted format reaches printf with them
+    still literal.
+    """
+    if not words:
+        return ""
+    template = words[0].replace("\\n", "\n").replace("\\t", "\t")
+    arguments = list(words[1:])
+    return re.sub("%s", lambda _: arguments.pop(0) if arguments else "", template)
+
+
+def marker_emitting_group(script: str, marker: str) -> str | None:
+    """The brace group that writes the comment body, outside test bodies.
+
+    A producing step does more than write the comment — the coverage one also
+    builds a preamble and echoes the report into the job summary — so the body
+    is the brace group carrying the marker, not the whole step. Taking the step
+    would splice the report in twice.
+    """
+    lines = script.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "{":
+            start = index
+        elif stripped.startswith("}") and start is not None:
+            group = "\n".join(lines[start + 1 : index])
+            if marker in group:
+                return group
+            start = None
+    return None
+
+
+def shell_emissions(group: str) -> list[Emission]:
+    """Everything a producer's brace group writes, in order, outside test bodies."""
+    emissions: list[Emission] = []
+    index, length = 0, len(group)
+    while index < length:
+        character = group[index]
+        if character == "\\":
+            index += 2
+            continue
+        if character == "'":
+            closing = group.find("'", index + 1)
+            if closing < 0:
+                break
+            index = closing + 1
+            continue
+        if character == '"':
+            cursor = index + 1
+            while cursor < length and group[cursor] != '"':
+                cursor += 2 if group[cursor] == "\\" else 1
+            index = cursor + 1
+            continue
+        if character == "#" and (index == 0 or group[index - 1] in " \t\n"):
+            newline = group.find("\n", index)
+            index = length if newline < 0 else newline
+            continue
+
+        in_command_position = index == 0 or group[index - 1] in COMMAND_POSITION_PREFIXES
+        printf = PRINTF_TOKEN.match(group, index)
+        if printf and in_command_position:
+            words, following = read_command_words(group, printf.end())
+            emissions.append(Emission(kind="text", text=render_printf(words)))
+            index = following
+            continue
+        concatenate = CAT_TOKEN.match(group, index)
+        if concatenate and in_command_position:
+            words, following = read_command_words(group, concatenate.end())
+            if any(REPORT_FILE in word for word in words):
+                emissions.append(Emission(kind=REPORT_BODY, text=""))
+            index = following
+            continue
+        index += 1
+    return emissions
+
+
+def producer_bodies(workflow: Path, report: str) -> dict[str, str]:
+    """The comment each producer writes, composed from the workflow's own text.
+
+    Runs outside test bodies. The literal words come from the workflow rather
+    than from this file: they are producer-specific, they belong to files this
+    branch does not edit, and a stand-in written here would be a phrase neither
+    workflow ever prints — which is exactly what a payload filter rewriting
+    producer text would slip past.
+
+    The conditional provenance clause is composed as though the head SHA is
+    set, which is the pull-request case these comments are written for.
+    """
+    marker = emitted_marker(workflow)
+    bodies: dict[str, str] = {}
+    for block in comment_producing_blocks(workflow):
+        group = marker_emitting_group(block.script, marker)
+        if group is None:
+            continue
+        emissions = shell_emissions(group)
+        if not emissions:
+            continue
+        composed = "".join(
+            report if emission.kind == REPORT_BODY else emission.text for emission in emissions
+        )
+        carries_report = any(emission.kind == REPORT_BODY for emission in emissions)
+        bodies[REPORT_BODY if carries_report else NO_REPORT_BODY] = composed
+    return bodies
+
+
+def produced_body(workflow: Path, which: str, report: str = "") -> str:
+    """One composed producer body, outside test bodies.
+
+    Raises rather than defaulting: a body this module cannot compose is a
+    producer it is no longer reading, and every round trip built on it would
+    quietly test a shorter string than the workflow writes.
+    """
+    bodies = producer_bodies(workflow, report)
+    if which not in bodies:
+        raise AssertionError(
+            f"could not compose the {which!r} comment body from {workflow.name}: "
+            f"found {sorted(bodies)}. The producer's shape changed, and every round trip "
+            "built on it would otherwise test text the workflow never writes."
+        )
+    return bodies[which]
+
+
+def provenance_text(workflow: Path) -> str:
+    """What a producer writes around the report, marker and report removed.
+
+    Runs outside test bodies. Composing with an empty report and dropping the
+    marker leaves exactly the producer-specific prose, which is the part a
+    stand-in written in this file would have replaced with a phrase neither
+    workflow prints.
+    """
+    return produced_body(workflow, REPORT_BODY, "").replace(emitted_marker(workflow), "")
 
 
 def rust_full_comment_body() -> str:
-    """The whole comment the coverage workflow writes: marker, report, provenance."""
-    return f"{rust_comment_body()}{provenance_footer()}"
+    """The whole comment the coverage workflow writes, in the workflow's own words."""
+    return produced_body(
+        COVERAGE_WORKFLOW,
+        REPORT_BODY,
+        render(healthy_export(), FIXTURE_REPO_ROOT, RUST_TOP_UNCOVERED, RUST_REPORT_TITLE),
+    )
 
 
 def native_full_comment_body() -> str:
-    """The whole comment the swift workflow writes, in the same three parts."""
-    return f"{native_comment_body()}{provenance_footer()}"
+    """The whole comment the swift workflow writes, in the workflow's own words."""
+    return produced_body(
+        SWIFT_WORKFLOW,
+        REPORT_BODY,
+        NATIVE_SUMMARIZER.render(
+            native_report(native_target(PRODUCT_TARGET, covered=40, executable=100)),
+            FIXTURE_REPO_ROOT,
+            NATIVE_TOP_UNCOVERED,
+            NATIVE_REPORT_TITLE,
+        ),
+    )
 
 
-def no_report_comment_body(workflow: Path, title: str) -> str:
+def no_report_comment_body(workflow: Path) -> str:
     """The comment a publish step writes when its run measured nothing.
 
-    Built outside test bodies, and carrying the workflow's own marker, because
-    that is the whole point of this body: it replaces the previous run's numbers
-    under the same marker rather than leaving them standing as the current
-    readout. A body that lost the marker would post beside the stale comment
-    instead of over it.
+    Composed from the workflow, and carrying that workflow's marker, because
+    replacing the previous run's numbers under one marker is the whole point of
+    this body: one that lost the marker would post beside the stale comment
+    rather than over it.
     """
-    return (
-        f"{emitted_marker(workflow)}\n\n"
-        f"## {title}\n\n"
-        f"The coverage run for `{PULL_REQUEST_HEAD_SHA}` produced no report; see "
-        f"[run {WORKFLOW_RUN_ID}]({RUN_URL}).\n\n"
-        "Nothing is gated on this. The measurement is missing, not failing, and no merge "
-        "waits on it.\n"
-    )
+    return produced_body(workflow, NO_REPORT_BODY)
 
 
 def comments_page(*comments: dict) -> str:
@@ -1400,6 +1615,57 @@ def run_jq(program: str, document: str, *arguments: str) -> JqResult:
     return JqResult(
         status=completed.returncode, stdout=completed.stdout, stderr=completed.stderr
     )
+
+
+def run_extracted(identifier: str, document: str) -> JqResult:
+    """Run one extracted filter the way its own workflow runs it, outside test bodies.
+
+    A filter reached through `gh api --jq` is executed by the GitHub CLI's own
+    jq implementation, not by the jq binary, and the CLI prints a string result
+    unquoted where the binary quotes it unless asked not to. Running such a
+    filter here with `-r` matches that, so a filter whose output is a string is
+    compared against what the workflow would actually see.
+
+    What this cannot reproduce is the implementation itself: the CLI exposes its
+    formatter only as a modifier on a live API request, so reaching it would
+    mean a network call, which this module does not make. The remaining
+    exposure is bounded rather than assumed — see the test asserting these
+    filters emit only integers, which is a shape both implementations agree on.
+    """
+    extracted = one_extracted_for(identifier)
+    raw_output = ("-r",) if extracted.through_gh_flag else ()
+    return run_jq(extracted.program, document, *raw_output)
+
+
+def selector_output_lines(identifier: str) -> list[str]:
+    """Every line a selector prints across the recorded comment pages, outside test bodies."""
+    pages = (
+        comments_page({"id": MARKER_COMMENT_ID, "body": rust_comment_body()}),
+        comments_page({"id": MARKER_COMMENT_ID, "body": native_comment_body()}),
+        comments_page({"id": FOREIGN_COMMENT_ID, "body": "an ordinary review comment"}),
+        comments_page(
+            {"id": MARKER_COMMENT_ID, "body": no_report_comment_body(COVERAGE_WORKFLOW)}
+        ),
+        comments_page(
+            {"id": MARKER_COMMENT_ID, "body": no_report_comment_body(SWIFT_WORKFLOW)}
+        ),
+    )
+    return [
+        line
+        for page in pages
+        for line in run_extracted(identifier, page).stdout.split()
+    ]
+
+
+def non_integer_selector_output(identifier: str) -> list[str]:
+    """Selector output that is not a plain integer, outside test bodies.
+
+    The GitHub CLI runs these filters on its own jq implementation, which agrees
+    with the jq binary about numbers and differs about how strings are printed.
+    A selector that only ever emits comment ids therefore behaves identically
+    under both, and this is what checks that it only ever does.
+    """
+    return [line for line in selector_output_lines(identifier) if not line.lstrip("-").isdigit()]
 
 
 def predicate_disagreements(
@@ -1735,6 +2001,23 @@ class WorkflowReadingTests(unittest.TestCase):
             producers_disagreeing_with_selector(SWIFT_WORKFLOW, NATIVE_STICKY_SELECTOR), []
         )
 
+    def test_each_workflow_contributes_its_own_provenance(self) -> None:
+        """The prose each producer wraps around the report is its own, and is
+        composed from the workflow rather than written here.
+
+        One workflow names the artifacts it uploads one way and the other names
+        different artifacts, so a single invented footer shared by both fixtures
+        would be a sentence neither workflow prints — and a payload filter that
+        rewrote only producer-specific text would round-trip it untouched.
+        Asserting the two differ pins that the real text is in use, without
+        pinning wording that belongs to files this branch does not edit."""
+        self.assertNotEqual(
+            provenance_text(COVERAGE_WORKFLOW), provenance_text(SWIFT_WORKFLOW)
+        )
+        self.assertNotEqual(
+            no_report_comment_body(COVERAGE_WORKFLOW), no_report_comment_body(SWIFT_WORKFLOW)
+        )
+
     def test_the_recorded_markers_are_the_ones_the_workflows_use(self) -> None:
         """The constants in this module are a convenience for reading the tests
         below, never the source of truth. Checked against the workflows so they
@@ -1818,14 +2101,14 @@ class CommentPayloadTests(JqBackedTestCase):
         passed through the payload program at all. A run that measured nothing
         posts this instead of a report, and it has to survive the same
         machinery."""
-        body = no_report_comment_body(COVERAGE_WORKFLOW, RUST_REPORT_TITLE)
+        body = no_report_comment_body(COVERAGE_WORKFLOW)
 
         self.assertEqual(self.payload_body(RUST_COMMENT_PAYLOAD, body), body)
 
     def test_the_native_payload_round_trips_the_no_report_comment(self) -> None:
         """The native workflow writes its own no-report body through its own
         copy of the payload program."""
-        body = no_report_comment_body(SWIFT_WORKFLOW, NATIVE_REPORT_TITLE)
+        body = no_report_comment_body(SWIFT_WORKFLOW)
 
         self.assertEqual(self.payload_body(NATIVE_COMMENT_PAYLOAD, body), body)
 
@@ -1887,7 +2170,7 @@ class StickySelectorTests(JqBackedTestCase):
         extracted selector then finds it by id."""
         page = comments_page({"id": MARKER_COMMENT_ID, "body": rust_comment_body()})
 
-        result = run_jq(one_program_for(RUST_STICKY_SELECTOR), page)
+        result = run_extracted(RUST_STICKY_SELECTOR, page)
 
         self.assert_selection(result, str(MARKER_COMMENT_ID))
 
@@ -1896,7 +2179,7 @@ class StickySelectorTests(JqBackedTestCase):
         marker, which are a separate copy and can drift."""
         page = comments_page({"id": MARKER_COMMENT_ID, "body": native_comment_body()})
 
-        result = run_jq(one_program_for(NATIVE_STICKY_SELECTOR), page)
+        result = run_extracted(NATIVE_STICKY_SELECTOR, page)
 
         self.assert_selection(result, str(MARKER_COMMENT_ID))
 
@@ -1909,11 +2192,11 @@ class StickySelectorTests(JqBackedTestCase):
         page = comments_page(
             {
                 "id": MARKER_COMMENT_ID,
-                "body": no_report_comment_body(COVERAGE_WORKFLOW, RUST_REPORT_TITLE),
+                "body": no_report_comment_body(COVERAGE_WORKFLOW),
             }
         )
 
-        result = run_jq(one_program_for(RUST_STICKY_SELECTOR), page)
+        result = run_extracted(RUST_STICKY_SELECTOR, page)
 
         self.assert_selection(result, str(MARKER_COMMENT_ID))
 
@@ -1922,11 +2205,11 @@ class StickySelectorTests(JqBackedTestCase):
         page = comments_page(
             {
                 "id": MARKER_COMMENT_ID,
-                "body": no_report_comment_body(SWIFT_WORKFLOW, NATIVE_REPORT_TITLE),
+                "body": no_report_comment_body(SWIFT_WORKFLOW),
             }
         )
 
-        result = run_jq(one_program_for(NATIVE_STICKY_SELECTOR), page)
+        result = run_extracted(NATIVE_STICKY_SELECTOR, page)
 
         self.assert_selection(result, str(MARKER_COMMENT_ID))
 
@@ -1937,7 +2220,7 @@ class StickySelectorTests(JqBackedTestCase):
         two."""
         page = comments_page({"id": FOREIGN_COMMENT_ID, "body": native_comment_body()})
 
-        result = run_jq(one_program_for(RUST_STICKY_SELECTOR), page)
+        result = run_extracted(RUST_STICKY_SELECTOR, page)
 
         self.assert_selection(result, "")
 
@@ -1946,7 +2229,7 @@ class StickySelectorTests(JqBackedTestCase):
         first: the markers could have been prefixes of each other one way."""
         page = comments_page({"id": FOREIGN_COMMENT_ID, "body": rust_comment_body()})
 
-        result = run_jq(one_program_for(NATIVE_STICKY_SELECTOR), page)
+        result = run_extracted(NATIVE_STICKY_SELECTOR, page)
 
         self.assert_selection(result, "")
 
@@ -1957,7 +2240,7 @@ class StickySelectorTests(JqBackedTestCase):
         quoting = f"I think the {RUST_MARKER} marker should move."
         page = comments_page({"id": FOREIGN_COMMENT_ID, "body": quoting})
 
-        result = run_jq(one_program_for(RUST_STICKY_SELECTOR), page)
+        result = run_extracted(RUST_STICKY_SELECTOR, page)
 
         self.assert_selection(result, "")
 
@@ -1971,12 +2254,27 @@ class StickySelectorTests(JqBackedTestCase):
             {"id": SECOND_MARKER_COMMENT_ID, "body": body},
         )
 
-        result = run_jq(one_program_for(RUST_STICKY_SELECTOR), page)
+        result = run_extracted(RUST_STICKY_SELECTOR, page)
 
         self.assertEqual(result.status, 0, f"the selector failed: {result.stderr.strip()}")
         self.assertEqual(
             result.stdout.split(), [str(MARKER_COMMENT_ID), str(SECOND_MARKER_COMMENT_ID)]
         )
+
+    def test_the_selectors_emit_only_engine_independent_output(self) -> None:
+        """These two filters are reached through `gh api --jq`, so production
+        runs them on the GitHub CLI's own jq implementation rather than on the
+        jq binary this module executes. The two agree about numbers and differ
+        about how they print strings, and the CLI exposes its formatter only as
+        a modifier on a live API request, so there is no offline way to run the
+        real one without a network call this module refuses to make.
+
+        Rather than assume the difference is harmless, this bounds it: the
+        selectors' contract is to emit comment ids, and if everything they emit
+        across the recorded pages is an integer, then the one behaviour the
+        implementations disagree about is unreachable from here."""
+        self.assertEqual(non_integer_selector_output(RUST_STICKY_SELECTOR), [])
+        self.assertEqual(non_integer_selector_output(NATIVE_STICKY_SELECTOR), [])
 
     def test_a_comment_carrying_no_body_stops_the_selector(self) -> None:
         """An expected divergence, recorded rather than fixed: the workflow
@@ -1992,7 +2290,7 @@ class StickySelectorTests(JqBackedTestCase):
             {"id": MARKER_COMMENT_ID, "body": rust_comment_body()},
         )
 
-        result = run_jq(one_program_for(RUST_STICKY_SELECTOR), page)
+        result = run_extracted(RUST_STICKY_SELECTOR, page)
 
         self.assertTrue(result.errored, "expected jq to refuse a comment with no body")
         self.assertIn("startswith", result.stderr)
