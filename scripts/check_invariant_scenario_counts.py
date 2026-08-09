@@ -661,15 +661,29 @@ def punctuation_dash(text: str, index: int) -> bool:
         if before not in " \t" or after not in " \t":
             return False
     # A typographic dash asks for a bound whatever its spacing, because this
-    # repository writes unspaced em dashes as ordinary sentence punctuation:
-    # "retains that connection—and therefore the session-level lock—until
-    # shutdown" in docs/spec/process-protocol.md, one of 14 such uses across 5
-    # tracked documents. Requiring the bound separates that from a range, and
-    # costs none of the ranges the corpus actually writes: all eight of its
-    # dash-before-digit occurrences are en dashes with a numeric lower bound
-    # (`1–64`, `9–12`, `1–4,096`), each still refused. No identifier here
-    # uses a typographic dash — those are ASCII hyphens without exception — so
-    # nothing else depended on the old reading.
+    # repository writes unspaced typographic dashes as ordinary sentence
+    # punctuation: "retains that connection—and therefore the session-level
+    # lock—until shutdown" in docs/spec/process-protocol.md, and it is not
+    # alone.
+    #
+    # Two properties of the corpus are what make the requirement safe, and
+    # they are stated as properties rather than tallies on purpose. A count
+    # embedded here would be a restated total that goes stale the moment a
+    # document is edited, invisibly and with nothing to catch it — which is
+    # the exact failure this file exists to report on everyone else. A
+    # property that stops holding, by contrast, changes what the scan reads at
+    # that spot, so it surfaces as a count appearing where none did rather
+    # than as a number quietly going wrong:
+    #
+    # * Every dash that sits immediately before a digit is a range carrying a
+    #   numeric lower bound (`1–64`, `9–12`, `1–4,096`), so requiring the
+    #   bound refuses all of them exactly as before.
+    # * No identifier uses a typographic dash; `INV-NNN` is ASCII without
+    #   exception, so the citation reading depends on the hyphen branch above
+    #   and not on this one.
+    #
+    # Both are re-derivable from `git ls-files '*.md'` in a line, which is the
+    # point: the evidence is reproducible instead of transcribed.
     return not preceded_by_a_number(text, index)
 
 
