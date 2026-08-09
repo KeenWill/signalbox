@@ -7330,6 +7330,50 @@ async fn s32_inv009_inv044_runner_recovery_rejects_non_ambiguous_tool_attempt()
     Ok(())
 }
 
+/// INV-009 / INV-044: later tool-attempt mutation cannot invalidate the exact
+/// physical attempt retained by an active runner-recovery wait.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rechecks_changed_tool_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_execution_possible_lease_loss(&pool, &pin.lease).await?;
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await?;
+    let rejected = sqlx::query(
+        "UPDATE tool_attempt
+            SET terminal_disposition_kind = 'known_failed',
+                error_kind = 'execution_failed'
+          WHERE attempt_id = $1",
+    )
+    .bind(interrupted_attempt.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("tool-attempt changes must preserve the exact runner recovery wait");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-009 / INV-044: a completed lease cannot be reclassified as the
 /// physical execution interrupted by a later runner loss.
 #[tokio::test]
