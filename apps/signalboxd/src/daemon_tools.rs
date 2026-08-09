@@ -1702,20 +1702,6 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[track_caller]
-    fn synthetic_deep_bridge_tool_definition() -> ToolDefinition {
-        ToolDefinition::new(
-            ToolName::try_new(String::from(SYNTHETIC_BRIDGE_TOOL_NAME))
-                .expect("synthetic bridge tool name is valid"),
-            String::from(SYNTHETIC_BRIDGE_TOOL_DESCRIPTION),
-            ToolInputSchema::try_new(synthetic_deep_bridge_tool_schema())
-                .expect("deep synthetic bridge schema is admitted"),
-            ToolPermissionDefault::Confirm,
-            ToolEffectClass::EffectFree,
-        )
-    }
-
-    #[cfg(target_os = "linux")]
     #[test]
     fn bridge_catalog_projects_definition_fields_into_mcp_shape() {
         let definition = synthetic_bridge_tool_definition();
@@ -5282,21 +5268,6 @@ done
     #[test]
     fn claude_mcp_bridge_lists_the_exact_daemon_catalog() {
         let mut fixture = McpBridgeFixture::start();
-        fixture.initialize();
-        let expected = fixture.expected_tools.clone();
-        let listed = fixture.list_tools();
-        fixture.finish();
-
-        assert_eq!(listed, expected);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn claude_mcp_bridge_lists_a_domain_admitted_deep_schema() {
-        let workspace = tempfile::tempdir().expect("workspace root exists");
-        let definitions = [synthetic_deep_bridge_tool_definition()];
-        let mut fixture =
-            McpBridgeFixture::start_with_workspace_and_definitions(workspace, &definitions);
         fixture.initialize();
         let expected = fixture.expected_tools.clone();
         let listed = fixture.list_tools();

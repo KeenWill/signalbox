@@ -22,8 +22,6 @@ use crate::wire::{
     UserEvent,
 };
 
-const SYNTHETIC_ASSISTANT_MODEL: &str = "<synthetic>";
-
 fn reject_duplicate_json_members(line: &str) -> Result<(), DecodeFailure> {
     let duplicate = provider_json_has_duplicate_members(line)
         .map_err(|error| DecodeFailure::stream_protocol(error.to_string()))?;
@@ -45,7 +43,6 @@ pub(crate) struct EventDecoder<C> {
     reported_model: Option<ProviderReportedModel>,
     native_session_id: Option<String>,
     native_model: Option<String>,
-    native_assistant_model: Option<String>,
     message_id: Option<ProviderMessageId>,
     native_message_id: Option<String>,
     content: Vec<AssistantPart>,
@@ -93,7 +90,6 @@ impl<C: Clone> EventDecoder<C> {
             reported_model: None,
             native_session_id: None,
             native_model: None,
-            native_assistant_model: None,
             message_id: None,
             native_message_id: None,
             content: Vec::new(),
@@ -173,22 +169,9 @@ impl<C: Clone> EventDecoder<C> {
         value: Value,
         sink: &mut RedactingSink<'_, C>,
     ) -> Result<(), DecodeFailure> {
-        let subtype = value.get("subtype").and_then(Value::as_str);
-        if matches!(
-            subtype,
-            Some("hook_started" | "hook_progress" | "hook_response")
-        ) {
-            return Ok(());
-        }
-        if subtype != Some("init") {
-            return Err(DecodeFailure::stream_protocol(format!(
-                "unexpected Claude system event subtype `{}`",
-                subtype.unwrap_or("missing")
-            )));
-        }
-        if self.initialized {
+        if value.get("subtype").and_then(Value::as_str) != Some("init") || self.initialized {
             return Err(DecodeFailure::stream_protocol(
-                "duplicate Claude system init event",
+                "unexpected or duplicate Claude system event",
             ));
         }
         let event: SystemInit = decode(value)?;
@@ -286,25 +269,11 @@ impl<C: Clone> EventDecoder<C> {
             self.message_id = Some(ProviderMessageId::new(sanitized));
             self.native_message_id = Some(event.message.id.clone());
         }
-        let model_matches_init = self.native_model.as_deref().is_some_and(|initialized| {
-            assistant_model_matches_init(initialized, &event.message.model)
-        });
-        let model_matches_prior_assistant = self
-            .native_assistant_model
-            .as_ref()
-            .is_none_or(|observed| observed == &event.message.model);
-        if !model_matches_init {
-            return Err(DecodeFailure::stream_protocol(format!(
-                "Claude assistant model `{}` matches neither system init nor the pinned CLI sentinel",
-                redact_text(&event.message.model)
-            )));
-        }
-        if !model_matches_prior_assistant {
+        if self.native_model.as_deref() != Some(event.message.model.as_str()) {
             return Err(DecodeFailure::stream_protocol(
-                "Claude assistant model contradicts a prior assistant event",
+                "Claude assistant model contradicts system init",
             ));
         }
-        self.native_assistant_model = Some(event.message.model.clone());
         if let Some(usage) = event.message.usage {
             self.usage.absorb(message_usage(usage));
         }
@@ -784,10 +753,6 @@ impl<C: Clone> EventDecoder<C> {
             usage: self.usage,
         })
     }
-}
-
-fn assistant_model_matches_init(initialized: &str, assistant: &str) -> bool {
-    initialized == assistant || assistant == SYNTHETIC_ASSISTANT_MODEL
 }
 
 fn tool_result_text(value: &Value) -> Option<&str> {
