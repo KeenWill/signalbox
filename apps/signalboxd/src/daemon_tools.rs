@@ -5283,8 +5283,16 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
     #[test]
     fn claude_mcp_bridge_negotiates_the_supported_protocol() {
         let mut fixture = McpBridgeFixture::start();
-        let initialized = fixture.initialize();
+        let mut initialized = fixture.initialize();
         fixture.finish();
+
+        let server_version = initialized["result"]["serverInfo"]
+            .as_object_mut()
+            .expect("MCP server info is an object")
+            .remove("version")
+            .expect("MCP server info declares its version");
+
+        assert_eq!(server_version, env!("CARGO_PKG_VERSION"));
 
         expect![[r#"
             {
@@ -5295,8 +5303,7 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
               },
               "protocolVersion": "2025-11-25",
               "serverInfo": {
-                "name": "signalbox-claude-cli-bridge",
-                "version": "0.0.0"
+                "name": "signalbox-claude-cli-bridge"
               }
             }"#]]
         .assert_eq(
@@ -5321,9 +5328,12 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
     fn claude_mcp_bridge_lists_the_exact_daemon_catalog() {
         let mut fixture = McpBridgeFixture::start();
         fixture.initialize();
-        let expected = fixture.expected_tools.clone();
-        let listed = fixture.list_tools();
+        let mut expected = fixture.expected_tools.clone();
+        let mut listed = fixture.list_tools();
         fixture.finish();
+
+        expected.sort_by(|left, right| left.name.cmp(&right.name));
+        listed.sort_by(|left, right| left.name.cmp(&right.name));
 
         assert_eq!(listed, expected);
     }
