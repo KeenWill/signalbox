@@ -301,6 +301,7 @@ const SYNTHETIC_NOT_SUCCESSFUL_COMPLETION_REPORT: &str = "Completed, but not suc
 const SYNTHETIC_NO_SUCCESS_COMPLETION_REPORT: &str = "Done with no success.";
 const SYNTHETIC_WITHOUT_SUCCESS_COMPLETION_REPORT: &str = "Completed without any success.";
 const SYNTHETIC_UNSUCCESSFUL_COMPLETION_REPORT: &str = "Completed unsuccessfully.";
+const SYNTHETIC_NOT_SUCCESSFULLY_REPORT: &str = "Done, but not successfully.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_NO_FILES_WRITTEN_REPORT: &str = "Done; no files were written.";
@@ -703,6 +704,7 @@ struct GitFixtureSnapshot {
     static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reflog_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reference_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    reference_modified_times: BTreeMap<PathBuf, SystemTime>,
     objects: GitObjectInventory,
     object_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
 }
@@ -2487,6 +2489,24 @@ fn git_reference_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceE
     filesystem_entries(&repository.path().join(GIT_REFS_DIRECTORY), None)
 }
 
+fn git_reference_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
+    let repository = Repository::open(root)?;
+    filesystem_file_modified_times(&repository.path().join(GIT_REFS_DIRECTORY))
+}
+
+fn filesystem_file_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
+    filesystem_entries(root, None)?
+        .into_iter()
+        .filter_map(|(relative, snapshot)| {
+            matches!(snapshot, WorkspaceEntrySnapshot::File { .. }).then_some(relative)
+        })
+        .map(|relative| {
+            let modified = fs::symlink_metadata(root.join(&relative))?.modified()?;
+            Ok((relative, modified))
+        })
+        .collect()
+}
+
 fn direct_git_reference_entry(
     template: &WorkspaceEntrySnapshot,
     target: Oid,
@@ -2510,6 +2530,8 @@ fn git_forced_reference_entries_match(
 ) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let mut expected = seed_fixture.reference_entries.clone();
+    let actual_modified_times = git_reference_modified_times(root)?;
+    let mut expected_modified_times = seed_fixture.reference_modified_times.clone();
     let base_path = Path::new("heads").join(GIT_BASE_BRANCH);
     match case_name {
         GIT_BRANCH_CREATE_NAME => {
@@ -2526,7 +2548,12 @@ fn git_forced_reference_entries_match(
             let Some(entry) = direct_git_reference_entry(template, target) else {
                 return Ok(false);
             };
-            expected.insert(Path::new("heads").join(branch_name), entry);
+            let path = Path::new("heads").join(branch_name);
+            let Some(modified) = actual_modified_times.get(&path) else {
+                return Ok(false);
+            };
+            expected.insert(path.clone(), entry);
+            expected_modified_times.insert(path, *modified);
         }
         GIT_CREATE_COMMIT_NAME => {
             let Some(template) = expected.get(&base_path) else {
@@ -2535,11 +2562,18 @@ fn git_forced_reference_entries_match(
             let Some(entry) = direct_git_reference_entry(template, head.id()) else {
                 return Ok(false);
             };
-            expected.insert(base_path, entry);
+            expected.insert(base_path.clone(), entry);
+            let Some(modified) = actual_modified_times.get(&base_path) else {
+                return Ok(false);
+            };
+            expected_modified_times.insert(base_path, *modified);
         }
         _ => {}
     }
-    Ok(git_reference_entries(root)? == expected)
+    Ok(
+        git_reference_entries(root)? == expected
+            && actual_modified_times == expected_modified_times,
+    )
 }
 
 fn git_fixture_modes(root: &Path) -> EvalResult<BTreeMap<PathBuf, Option<u32>>> {
@@ -2571,6 +2605,7 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         static_metadata_entries: git_static_metadata_entries(root)?,
         reflog_entries: git_reflog_entries(root)?,
         reference_entries: git_reference_entries(root)?,
+        reference_modified_times: git_reference_modified_times(root)?,
         objects: git_object_inventory(&repository)?,
         object_entries: git_object_entries(root)?,
     })
@@ -3862,6 +3897,8 @@ fn git_natural_reference_entries_match(
     seed_fixture: &GitFixtureSnapshot,
 ) -> EvalResult<bool> {
     let mut expected = seed_fixture.reference_entries.clone();
+    let actual_modified_times = git_reference_modified_times(root)?;
+    let mut expected_modified_times = seed_fixture.reference_modified_times.clone();
     let base_path = Path::new("heads").join(GIT_BASE_BRANCH);
     let Some(template) = expected.get(&base_path) else {
         return Ok(false);
@@ -3869,8 +3906,15 @@ fn git_natural_reference_entries_match(
     let Some(entry) = direct_git_reference_entry(template, head.id()) else {
         return Ok(false);
     };
-    expected.insert(base_path, entry);
-    Ok(git_reference_entries(root)? == expected)
+    let Some(modified) = actual_modified_times.get(&base_path) else {
+        return Ok(false);
+    };
+    expected.insert(base_path.clone(), entry);
+    expected_modified_times.insert(base_path, *modified);
+    Ok(
+        git_reference_entries(root)? == expected
+            && actual_modified_times == expected_modified_times,
+    )
 }
 
 fn git_natural_status_matches(repository: &Repository) -> EvalResult<bool> {
@@ -4597,17 +4641,16 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         "result",
         "success",
         "successful",
+        "successfully",
     ];
     let negative_no_claim = words
         .windows(2)
         .any(|pair| pair[0] == "no" && negative_no_objects.contains(&pair[1].as_str()));
     let negative_without_success = words.iter().enumerate().any(|(index, word)| {
         word == "without"
-            && words
-                .iter()
-                .skip(index + 1)
-                .take(3)
-                .any(|outcome| matches!(outcome.as_str(), "success" | "successful"))
+            && words.iter().skip(index + 1).take(3).any(|outcome| {
+                matches!(outcome.as_str(), "success" | "successful" | "successfully")
+            })
     });
     let negative_no_file_claim = file_creation_required
         && words.iter().enumerate().any(|(index, word)| {
@@ -4658,6 +4701,7 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         "staged",
         "success",
         "successful",
+        "successfully",
         "switch",
         "switched",
         "updated",
@@ -5045,6 +5089,14 @@ fn final_response_report_rejects_completion_without_success() {
 fn final_response_report_rejects_an_unsuccessful_completion() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_UNSUCCESSFUL_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_not_successfully() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_SUCCESSFULLY_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
 }
@@ -8189,6 +8241,46 @@ fn forced_git_log_verifier_rejects_metadata_directory_mtime_drift() -> EvalResul
         .peel_to_commit()?;
     fs::File::open(repository.path().join(GIT_HOOKS_DIRECTORY))?
         .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_nested_reference_mtime_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    fs::File::open(
+        repository
+            .path()
+            .join(GIT_REFS_DIRECTORY)
+            .join("heads")
+            .join("log-target"),
+    )?
+    .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
     let result = serde_json::json!({
         "commits": [{
             "commit": target.id().to_string(),
