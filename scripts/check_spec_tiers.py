@@ -116,12 +116,24 @@ ABSENCE_PHRASES = (
 
 # Ownership markers that assign work to a future change. Rule 5 matches these
 # inside an implemented section only.
+#
+# An absence claim counts only where it opens a sentence. That is how a tier
+# claim is written — "No present composition performs it" — while the same
+# words mid-sentence are ordinary description, as in "a call with no present
+# usage axis", which asserts nothing about any build. Matching both spellings
+# would make the rule cry wolf, and a checker that does that is turned off.
 FUTURE_OWNERSHIP_MARKERS = (
-    "no present",
-    "implementing child",
-    "committed unimplemented",
-    "committed future",
+    re.compile(r"(?:^|(?<=[.:;!?]\s))no (?:present|current|composed)\b", re.M),
+    re.compile(r"\bimplementing child\b"),
+    re.compile(r"\bcommitted unimplemented\b"),
+    re.compile(r"\bcommitted future\b"),
 )
+
+# Sections whose whole purpose is to point at what is not implemented. Rule 5
+# cannot apply to them: `docs/spec/README.md` requires each page to surface its
+# deferred and undecided items as pointers in exactly this section, so a page
+# satisfying that convention would fail a rule that forbids naming them.
+TIER_FREE_SECTIONS = frozenset({"Open edges"})
 
 FENCE = re.compile(r"^\s*(```|~~~)")
 
@@ -266,13 +278,14 @@ def check_page(path: Path, failures: list[str]) -> None:
                     f"it, so the label is decoration rather than a claim a reader "
                     f"can check"
                 )
-            if part.tier == TIER_IMPLEMENTED:
+            if part.tier == TIER_IMPLEMENTED and part.title not in TIER_FREE_SECTIONS:
                 for marker in FUTURE_OWNERSHIP_MARKERS:
-                    if marker in body:
+                    found = marker.search(body)
+                    if found is not None:
                         failures.append(
                             f"{path}:{part.line}: implemented section "
-                            f"{part.title!r} contains {marker!r}, which assigns "
-                            f"behavior to a future change. Move it under a "
+                            f"{part.title!r} contains {found.group(0)!r}, which "
+                            f"assigns behavior to a future change. Move it under a "
                             f"committed-unimplemented `###` heading, where its "
                             f"tier is its position"
                         )
