@@ -5,7 +5,9 @@ implementing stack through this PR (`agent/model-settings-execution`).
 
 The delegated tool-approval posture, judge selection, and daemon composition are
 verified against the implementing stack through this PR
-(`agent/approval-judge-daemon`).
+(`agent/approval-judge-daemon`). The posture values `unsandboxed_exec` accepts,
+and which of them changes its resolved approval, are re-verified against this PR
+(`agent/approval-posture-alwaysconfirm`).
 
 The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
@@ -574,9 +576,7 @@ an explicit posture supersedes that legacy result for the request: `auto`
 records policy automation and `human` parks for a user even when the session
 blanket is enabled. `delegated` parks the request, invokes the approval judge,
 and exposes the ordinary user-decision path only after escalation or a terminal
-judge failure. On an `AlwaysConfirm` declaration that rule admits `delegated`
-alone: the judge is a distinct decider that can still deny or escalate, whereas
-`auto` would erase the decision the declaration demands.
+judge failure.
 
 The optional `[approval_judge]` table has exactly one `selection_id`, and the
 configuration parser requires it to name a configured direct selection. The
@@ -594,10 +594,10 @@ invoking session's transcript defaults to `Auto`, while listing conversations
 and reading another native or imported conversation default to `Confirm`.
 `web_search` and `web_fetch` also default to `Confirm`; the checked-in example
 maps both exact names to `human`. The three execution tools complete the
-enumeration. `unsandboxed_exec` is compiled `AlwaysConfirm`, which no session
-blanket can lower and which parks for a human whenever the deployment maps no
-posture for it. Mapping it `delegated` is the one configured way to route it to
-the approval judge instead; `auto` leaves the compiled declaration standing.
+enumeration. `unsandboxed_exec` is compiled `AlwaysConfirm`. Every posture value
+remains configurable for it, but which of them changes its resolved approval is
+owned by
+[Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
 `sandboxed_exec` defaults to `Confirm`, because it accepts an arbitrary program
 and argument vector. That is a compiled default and not a floor: an explicit
 `auto` posture resolves it to policy-automatic, and with no posture mapped a
