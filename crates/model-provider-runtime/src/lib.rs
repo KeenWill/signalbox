@@ -3453,12 +3453,10 @@ mod tests {
             source,
         };
 
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "application tool schema is invalid at the runtime bridge: {SYNTHETIC_INVALID_TOOL_NAME}"
-            )
-        );
+        expect![[
+            "application tool schema is invalid at the runtime bridge: synthetic_invalid_tool"
+        ]]
+        .assert_eq(&error.to_string());
         assert_eq!(error.tool_name(), SYNTHETIC_INVALID_TOOL_NAME);
         assert_eq!(
             std::error::Error::source(&error).map(ToString::to_string),
