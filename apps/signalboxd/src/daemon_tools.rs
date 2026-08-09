@@ -1622,6 +1622,7 @@ mod tests {
     }
 
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct ListedBridgeTool {
         name: String,
         description: String,
@@ -1674,6 +1675,7 @@ mod tests {
     const SYNTHETIC_BRIDGE_TOOL_DESCRIPTION: &str = "Projects a synthetic bridge tool.";
     const SYNTHETIC_BRIDGE_TOOL_SCHEMA: &str =
         r#"{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}"#;
+    const SYNTHETIC_UNMODELED_BRIDGE_TOOL_TITLE: &str = "Synthetic unmodeled title";
     const SYNTHETIC_MCP_SERVER_NAME: &str = "synthetic";
     const SYNTHETIC_MCP_IGNORED_ARGUMENT: &str = "ready path";
 
@@ -1728,6 +1730,12 @@ mod tests {
         profile: OsString,
         target: Option<OsString>,
         target_dir: PathBuf,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct CargoTestInvocation {
+        profile: OsString,
+        config_overrides: Vec<OsString>,
     }
 
     struct ConfiguredCargoTargetDirInput<'a> {
@@ -1787,6 +1795,8 @@ mod tests {
     const CARGO_PROGRAM_STEM: &str = "cargo";
     const CARGO_PROFILE_OPTION: &str = "--profile";
     const CARGO_PROFILE_OPTION_PREFIX: &str = "--profile=";
+    const CARGO_CONFIG_OPTION: &str = "--config";
+    const CARGO_CONFIG_OPTION_PREFIX: &str = "--config=";
     const CARGO_RELEASE_OPTION: &str = "--release";
     const MCP_JSON_RPC_VERSION: &str = "2.0";
     const SYNTHETIC_WRONG_JSON_RPC_VERSION: &str = "1.0";
@@ -1840,9 +1850,10 @@ done
 
     #[cfg(target_os = "linux")]
     #[track_caller]
-    fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
+    fn claude_mcp_bridge_artifact_selection(
+        invocation: &CargoTestInvocation,
+    ) -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
-        let debug_profile = current_cargo_test_profile();
         let known_targets = rustc_target_names();
         let configured_target_dir = configured_cargo_target_dir(&current, &known_targets);
         let default_target_dir = configured_target_dir
@@ -1858,7 +1869,8 @@ done
         });
         claude_mcp_bridge_artifact_selection_for(BridgeArtifactSelectionInput {
             current_executable: &current,
-            debug_profile: debug_profile
+            debug_profile: invocation
+                .profile
                 .to_str()
                 .expect("Cargo profile names are valid UTF-8"),
             configured_target_dir: configured_target_dir.as_deref(),
@@ -1870,7 +1882,7 @@ done
 
     #[cfg(target_os = "linux")]
     #[track_caller]
-    fn current_cargo_test_profile() -> OsString {
+    fn current_cargo_test_invocation() -> CargoTestInvocation {
         let parent = rustix::process::getppid().expect("the test process has a parent");
         let command_line_path = Path::new(PROC_FILESYSTEM_ROOT)
             .join(parent.as_raw_nonzero().get().to_string())
@@ -1890,30 +1902,99 @@ done
             .filter(|argument| !argument.is_empty())
             .map(OsStr::from_bytes)
             .collect::<Vec<_>>();
-        cargo_test_profile_from_arguments(&arguments)
-            .expect("the daemon-tools suite retains its parent Cargo test invocation")
+        cargo_test_invocation_from_arguments(
+            &arguments,
+            &std::env::current_dir().expect("the Cargo invocation directory is available"),
+        )
+        .expect("the daemon-tools suite retains its parent Cargo test invocation")
     }
 
     fn cargo_test_profile_from_arguments(arguments: &[&OsStr]) -> Option<OsString> {
+        cargo_test_invocation_from_arguments(arguments, Path::new("."))
+            .map(|invocation| invocation.profile)
+    }
+
+    fn cargo_test_invocation_from_arguments(
+        arguments: &[&OsStr],
+        invocation_directory: &Path,
+    ) -> Option<CargoTestInvocation> {
         if Path::new(arguments.first()?).file_stem()? != OsStr::new(CARGO_PROGRAM_STEM) {
             return None;
         }
-        let mut arguments = arguments.iter().copied();
-        while let Some(argument) = arguments.next() {
-            if argument == OsStr::new(CARGO_PROFILE_OPTION) {
-                return arguments.next().map(OsStr::to_os_string);
+        let mut profile = None;
+        let mut config_overrides = Vec::new();
+        let mut found_test_subcommand = false;
+        let mut index = 1;
+        while let Some(argument) = arguments.get(index).copied() {
+            if argument == OsStr::new(CARGO_CONFIG_OPTION) {
+                let config = arguments.get(index + 1).copied()?;
+                config_overrides.push(normalized_cargo_config_override(
+                    config,
+                    invocation_directory,
+                )?);
+                index += 2;
+                continue;
             }
-            if let Some(profile) = argument
+            if let Some(config) = argument
+                .to_str()
+                .and_then(|argument| argument.strip_prefix(CARGO_CONFIG_OPTION_PREFIX))
+            {
+                config_overrides.push(normalized_cargo_config_override(
+                    OsStr::new(config),
+                    invocation_directory,
+                )?);
+                index += 1;
+                continue;
+            }
+            if !found_test_subcommand {
+                if matches!(
+                    argument.to_str(),
+                    Some(CARGO_TEST_SUBCOMMAND | CARGO_TEST_SUBCOMMAND_ALIAS)
+                ) {
+                    found_test_subcommand = true;
+                } else if !argument.as_bytes().starts_with(b"+")
+                    && !argument.as_bytes().starts_with(b"-")
+                {
+                    return None;
+                }
+                index += 1;
+                continue;
+            }
+            if argument == OsStr::new(CARGO_PROFILE_OPTION) {
+                profile = Some(arguments.get(index + 1)?.to_os_string());
+                index += 2;
+                continue;
+            }
+            if let Some(argument_profile) = argument
                 .to_str()
                 .and_then(|argument| argument.strip_prefix(CARGO_PROFILE_OPTION_PREFIX))
             {
-                return Some(OsString::from(profile));
+                profile = Some(OsString::from(argument_profile));
+                index += 1;
+                continue;
             }
             if argument == OsStr::new(CARGO_RELEASE_OPTION) {
-                return Some(OsString::from(CARGO_RELEASE_PROFILE));
+                profile = Some(OsString::from(CARGO_RELEASE_PROFILE));
             }
+            index += 1;
         }
-        Some(OsString::from(CARGO_TEST_PROFILE))
+        found_test_subcommand.then(|| CargoTestInvocation {
+            profile: profile.unwrap_or_else(|| OsString::from(CARGO_TEST_PROFILE)),
+            config_overrides,
+        })
+    }
+
+    fn normalized_cargo_config_override(
+        config: &OsStr,
+        invocation_directory: &Path,
+    ) -> Option<OsString> {
+        (!config.is_empty()).then(|| {
+            if config.as_bytes().contains(&b'=') || Path::new(config).is_absolute() {
+                config.to_os_string()
+            } else {
+                invocation_directory.join(config).into_os_string()
+            }
+        })
     }
 
     #[track_caller]
@@ -2484,6 +2565,56 @@ done
         assert_eq!(
             cargo_test_profile_from_arguments(&arguments),
             Some(OsString::from(CARGO_DEV_PROFILE))
+        );
+    }
+
+    #[test]
+    fn cargo_test_profile_rejects_an_unexpanded_configured_alias() {
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new("configured-test-alias"),
+        ];
+
+        assert_eq!(cargo_test_profile_from_arguments(&arguments), None);
+    }
+
+    #[test]
+    fn bridge_build_preserves_parent_cargo_config_overrides() {
+        let invocation_directory = Path::new("/synthetic/invocation");
+        let key_value = OsStr::new("profile.test.overflow-checks=false");
+        let relative_path = OsStr::new("config/bridge.toml");
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new(CARGO_CONFIG_OPTION),
+            key_value,
+            OsStr::new(CARGO_TEST_SUBCOMMAND),
+            OsStr::new(CARGO_CONFIG_OPTION),
+            relative_path,
+            OsStr::new(CARGO_PROFILE_OPTION),
+            OsStr::new(CARGO_DEV_PROFILE),
+        ];
+        let invocation = cargo_test_invocation_from_arguments(&arguments, invocation_directory)
+            .expect("the synthetic Cargo test invocation is admitted");
+        let expected_path = invocation_directory.join(relative_path);
+        let mut command = Command::new(CARGO_PROGRAM_STEM);
+        apply_cargo_config_overrides(&mut command, &invocation.config_overrides);
+
+        assert_eq!(invocation.profile, OsString::from(CARGO_DEV_PROFILE));
+        assert_eq!(
+            invocation.config_overrides,
+            vec![
+                key_value.to_os_string(),
+                expected_path.clone().into_os_string()
+            ]
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                OsStr::new(CARGO_CONFIG_OPTION),
+                key_value,
+                OsStr::new(CARGO_CONFIG_OPTION),
+                expected_path.as_os_str(),
+            ]
         );
     }
 
@@ -3609,7 +3740,8 @@ done
             .and_then(Path::parent)
             .expect("signalboxd manifest has a workspace root")
             .to_path_buf();
-        let selection = claude_mcp_bridge_artifact_selection();
+        let invocation = current_cargo_test_invocation();
+        let selection = claude_mcp_bridge_artifact_selection(&invocation);
         require_direct_bridge_execution(&selection);
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
         let mut build_command = Command::new(cargo);
@@ -3629,6 +3761,7 @@ done
             .arg(&selection.target_dir)
             .current_dir(workspace)
             .stdout(Stdio::piped());
+        apply_cargo_config_overrides(&mut build_command, &invocation.config_overrides);
         if let Some(rustc) = normalized_rustc_override() {
             build_command.env("RUSTC", rustc);
         }
@@ -3658,6 +3791,12 @@ done
             "bridge binary build produces its target"
         );
         executable
+    }
+
+    fn apply_cargo_config_overrides(command: &mut Command, config_overrides: &[OsString]) {
+        for config in config_overrides {
+            command.arg(CARGO_CONFIG_OPTION).arg(config);
+        }
     }
 
     #[track_caller]
@@ -4066,6 +4205,28 @@ done
             serde_json::from_str(&response).expect("synthetic list response is valid JSON");
 
         assert_eq!(response.into_tools(MCP_LIST_TOOLS_REQUEST_ID), None);
+    }
+
+    #[test]
+    fn raw_list_response_rejects_an_unmodeled_tool_member() {
+        let response = serde_json::json!({
+            "jsonrpc": MCP_JSON_RPC_VERSION,
+            "id": MCP_LIST_TOOLS_REQUEST_ID,
+            "result": {
+                "tools": [{
+                    "name": SYNTHETIC_BRIDGE_TOOL_NAME,
+                    "description": SYNTHETIC_BRIDGE_TOOL_DESCRIPTION,
+                    "inputSchema": serde_json::from_str::<serde_json::Value>(
+                        SYNTHETIC_BRIDGE_TOOL_SCHEMA
+                    )
+                    .expect("the synthetic bridge schema is valid JSON"),
+                    "title": SYNTHETIC_UNMODELED_BRIDGE_TOOL_TITLE,
+                }]
+            }
+        })
+        .to_string();
+
+        assert!(serde_json::from_str::<ListedBridgeResponse>(&response).is_err());
     }
 
     #[test]
