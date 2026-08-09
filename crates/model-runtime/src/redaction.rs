@@ -1789,6 +1789,30 @@ mod tests {
     ///
     /// Exhaustive over `ObservationFact` so a new text-bearing fact cannot be
     /// added without deciding whether the credential could ride out on it.
+    /// How a consumer reads one emitted value on its way out.
+    ///
+    /// A JSON-bearing value is decoded before anyone sees it, so a credential
+    /// spelled with `\uXXXX` escapes is recovered whole even though the raw
+    /// bytes contain no literal secret. An absence check comparing only raw
+    /// text would declare such a stream safe.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TextEncoding {
+        /// Reaches the consumer exactly as emitted.
+        Plain,
+        /// A JSON consumer decodes escapes before reading it.
+        Json,
+    }
+
+    impl EmittedStream {
+        /// How a consumer of this stream reads its reassembled text.
+        const fn encoding(self) -> TextEncoding {
+            match self {
+                Self::Text | Self::Thinking => TextEncoding::Plain,
+                Self::ToolArguments => TextEncoding::Json,
+            }
+        }
+    }
+
     /// Where one emitted fact's provider-controlled text belongs.
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum EmittedText<'a> {
@@ -1798,8 +1822,9 @@ mod tests {
             index: u32,
             text: &'a str,
         },
-        /// Complete values standing alone rather than extending a stream.
-        Complete(Vec<&'a str>),
+        /// Complete values standing alone rather than extending a stream,
+        /// each with the encoding its consumer reads it through.
+        Complete(Vec<(&'a str, TextEncoding)>),
         /// Carries no provider-controlled text at all.
         Absent,
     }
@@ -1834,25 +1859,30 @@ mod tests {
                 text: fragment.as_str(),
             },
             ObservationFact::ToolCallProposed(proposal) => EmittedText::Complete(vec![
-                proposal.id.as_str(),
-                proposal.name.as_str(),
-                proposal.arguments_json.as_str(),
+                (proposal.id.as_str(), TextEncoding::Plain),
+                (proposal.name.as_str(), TextEncoding::Plain),
+                // The one JSON-bearing value here: a consumer decodes it.
+                (proposal.arguments_json.as_str(), TextEncoding::Json),
             ]),
             ObservationFact::ProviderModelReported(model) => {
-                EmittedText::Complete(vec![model.as_str()])
+                EmittedText::Complete(vec![(model.as_str(), TextEncoding::Plain)])
             }
             ObservationFact::ExchangeEstablished(exchange) => EmittedText::Complete(
                 exchange
                     .provider_request_id
                     .iter()
-                    .map(ProviderRequestId::as_str)
+                    .map(|id| (id.as_str(), TextEncoding::Plain))
                     .collect(),
             ),
             ObservationFact::FinishReported(finish) => EmittedText::Complete(match finish {
-                FinishReason::StopSequence { sequence } => {
-                    sequence.as_deref().into_iter().collect()
+                FinishReason::StopSequence { sequence } => sequence
+                    .as_deref()
+                    .map(|value| (value, TextEncoding::Plain))
+                    .into_iter()
+                    .collect(),
+                FinishReason::Unrecognized { provider_token } => {
+                    vec![(provider_token.as_str(), TextEncoding::Plain)]
                 }
-                FinishReason::Unrecognized { provider_token } => vec![provider_token.as_str()],
                 FinishReason::EndTurn
                 | FinishReason::MaxOutputTokens
                 | FinishReason::ContextWindowExceeded
@@ -1891,23 +1921,155 @@ mod tests {
         reconstructed_streams(observed).into_keys().collect()
     }
 
+    /// Decodes the JSON escapes a consumer resolves, leaving other bytes as
+    /// they are.
+    ///
+    /// Deliberately a decoder rather than a parse: a reassembled delta stream
+    /// is a *fragment*, so it need not be standalone-valid JSON, and an
+    /// unrecognised escape is passed through rather than rejected. Handles
+    /// `\uXXXX` including surrogate pairs, with hex case ignored, plus the
+    /// single-character escapes — `\/` among them, which is how a credential
+    /// containing a solidus is most cheaply disguised.
+    fn decoded_json_text(raw: &str) -> String {
+        let units = raw.chars().collect::<Vec<_>>();
+        let mut decoded = String::with_capacity(raw.len());
+        let mut at = 0;
+        while at < units.len() {
+            if units[at] != '\\' || at + 1 >= units.len() {
+                decoded.push(units[at]);
+                at += 1;
+                continue;
+            }
+            match units[at + 1] {
+                'u' => match hex_quad(&units, at + 2) {
+                    // A high surrogate only decodes with its partner; alone it
+                    // is not a character, so it passes through as written.
+                    Some(high) if (0xD800..0xDC00).contains(&high) => {
+                        match low_surrogate(&units, at + 6) {
+                            Some(low) => {
+                                let combined = 0x1_0000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                                decoded.extend(char::from_u32(combined));
+                                at += 12;
+                            }
+                            None => {
+                                decoded.push_str("\\u");
+                                at += 2;
+                            }
+                        }
+                    }
+                    Some(unit) => match char::from_u32(unit) {
+                        Some(resolved) => {
+                            decoded.push(resolved);
+                            at += 6;
+                        }
+                        None => {
+                            decoded.push_str("\\u");
+                            at += 2;
+                        }
+                    },
+                    // Fewer than four hex digits is not an escape; nothing is
+                    // consumed beyond the backslash so the digits survive.
+                    None => {
+                        decoded.push_str("\\u");
+                        at += 2;
+                    }
+                },
+                '/' => {
+                    decoded.push('/');
+                    at += 2;
+                }
+                '"' => {
+                    decoded.push('"');
+                    at += 2;
+                }
+                '\\' => {
+                    decoded.push('\\');
+                    at += 2;
+                }
+                'n' => {
+                    decoded.push('\n');
+                    at += 2;
+                }
+                'r' => {
+                    decoded.push('\r');
+                    at += 2;
+                }
+                't' => {
+                    decoded.push('\t');
+                    at += 2;
+                }
+                'b' => {
+                    decoded.push('\u{8}');
+                    at += 2;
+                }
+                'f' => {
+                    decoded.push('\u{c}');
+                    at += 2;
+                }
+                other => {
+                    decoded.push('\\');
+                    decoded.push(other);
+                    at += 2;
+                }
+            }
+        }
+        decoded
+    }
+
+    /// The value of exactly four hex digits at `at`, hex case ignored.
+    fn hex_quad(units: &[char], at: usize) -> Option<u32> {
+        let digits = units.get(at..at + 4)?;
+        digits
+            .iter()
+            .try_fold(0_u32, |value, digit| Some(value * 16 + digit.to_digit(16)?))
+    }
+
+    /// The trailing `\uXXXX` of a surrogate pair at `at`, when one is present.
+    fn low_surrogate(units: &[char], at: usize) -> Option<u32> {
+        (units.get(at) == Some(&'\\') && units.get(at + 1) == Some(&'u'))
+            .then(|| hex_quad(units, at + 2))
+            .flatten()
+            .filter(|unit| (0xDC00..0xE000).contains(unit))
+    }
+
+    /// Asserts `secret` is unrecoverable from `text` as its consumer reads it.
+    #[track_caller]
+    fn assert_text_hides(text: &str, encoding: TextEncoding, secret: &str, whose: &str) {
+        assert!(
+            !text.contains(secret),
+            "the credential must not be recoverable; found it literally in {whose}: {text}"
+        );
+        if encoding == TextEncoding::Json {
+            let decoded = decoded_json_text(text);
+            assert!(
+                !decoded.contains(secret),
+                "the credential must not be recoverable; {whose} decodes to a value \
+                 containing it: {decoded}"
+            );
+        }
+    }
+
     #[track_caller]
     fn assert_no_stream_carries(observed: &[Observation<String>], secret: &str) {
         for ((correlation, stream, index), reconstructed) in &reconstructed_streams(observed) {
-            assert!(
-                !reconstructed.contains(secret),
-                "the credential must not be recoverable from any emitted stream; \
-                 found it on correlation {correlation} {stream:?} index {index}: {reconstructed}"
+            assert_text_hides(
+                reconstructed,
+                stream.encoding(),
+                secret,
+                &format!("stream {correlation} {stream:?} index {index}"),
             );
         }
         for observation in observed {
             if let EmittedText::Complete(values) = emitted_text(&observation.fact) {
-                for text in values {
-                    assert!(
-                        !text.contains(secret),
-                        "the credential must not be emitted; found it in a complete value on \
-                         correlation {}: {text}",
-                        observation.correlation
+                for (text, encoding) in values {
+                    assert_text_hides(
+                        text,
+                        encoding,
+                        secret,
+                        &format!(
+                            "a complete value on correlation {}",
+                            observation.correlation
+                        ),
                     );
                 }
             }
@@ -1920,7 +2082,7 @@ mod tests {
     /// two deltas leaks recoverably even though neither fragment contains it,
     /// and the projection those cases use never reconstructs that stream.
     #[test]
-    #[should_panic(expected = "must not be recoverable from any emitted stream")]
+    #[should_panic(expected = "must not be recoverable")]
     fn split_credential_on_an_uninspected_stream_is_caught() {
         let observed = vec![
             Observation {
@@ -1985,14 +2147,14 @@ mod tests {
             emitted_text(&ObservationFact::ProviderModelReported(
                 ProviderReportedModel::new("fixture-model")
             )),
-            EmittedText::Complete(vec!["fixture-model"])
+            EmittedText::Complete(vec![("fixture-model", TextEncoding::Plain)])
         );
         assert_eq!(
             emitted_text(&ObservationFact::ExchangeEstablished(ExchangeFacts {
                 provider_request_id: Some(ProviderRequestId::new("fixture-request")),
                 http_status: Some(200),
             })),
-            EmittedText::Complete(vec!["fixture-request"])
+            EmittedText::Complete(vec![("fixture-request", TextEncoding::Plain)])
         );
         assert_eq!(
             emitted_text(&ObservationFact::FinishReported(
@@ -2000,7 +2162,7 @@ mod tests {
                     provider_token: String::from("fixture-token"),
                 }
             )),
-            EmittedText::Complete(vec!["fixture-token"])
+            EmittedText::Complete(vec![("fixture-token", TextEncoding::Plain)])
         );
         assert_eq!(
             emitted_text(&ObservationFact::FinishReported(FinishReason::EndTurn)),
@@ -2149,6 +2311,131 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// Every escape spelling a provider could use to disguise the fixture
+    /// credential inside a JSON value.
+    ///
+    /// Synthetic throughout: each decodes to `fixture/secret`, and each was
+    /// confirmed against production redaction, which scrubs all five.
+    const DISGUISED_CREDENTIAL_SPELLINGS: [(&str, &str); 5] = [
+        (
+            "fully escaped",
+            r"\u0066\u0069\u0078\u0074\u0075\u0072\u0065\u002f\u0073\u0065\u0063\u0072\u0065\u0074",
+        ),
+        ("escaped solidus", r"fixture\/secret"),
+        ("partial escape", r"\u0066ixture/secret"),
+        ("uppercase hex", r"fixture\u002Fsecret"),
+        ("escaped tail", r"fixture/sec\u0072\u0065\u0074"),
+    ];
+
+    /// The decoder recovers the credential from every disguised spelling, so
+    /// the absence check sees what a JSON consumer would.
+    ///
+    /// Straight-line per spelling rather than a loop over the table: each
+    /// spelling is its own claim and names itself when it fails.
+    #[test]
+    fn every_disguised_spelling_decodes_to_the_credential() {
+        let [fully, solidus, partial, uppercase, tail] = DISGUISED_CREDENTIAL_SPELLINGS;
+
+        assert_eq!(decoded_json_text(fully.1), "fixture/secret", "{}", fully.0);
+        assert_eq!(
+            decoded_json_text(solidus.1),
+            "fixture/secret",
+            "{}",
+            solidus.0
+        );
+        assert_eq!(
+            decoded_json_text(partial.1),
+            "fixture/secret",
+            "{}",
+            partial.0
+        );
+        assert_eq!(
+            decoded_json_text(uppercase.1),
+            "fixture/secret",
+            "{}",
+            uppercase.0
+        );
+        assert_eq!(decoded_json_text(tail.1), "fixture/secret", "{}", tail.0);
+    }
+
+    /// Escapes the decoder does not recognise pass through untouched, so a
+    /// plain-text stream is never rewritten into a false positive.
+    #[test]
+    fn unrecognised_escapes_pass_through_undecoded() {
+        assert_eq!(decoded_json_text(r"plain text"), "plain text");
+        assert_eq!(decoded_json_text(r"a\qb"), r"a\qb");
+        assert_eq!(decoded_json_text(r"trailing\"), "trailing\\");
+        assert_eq!(decoded_json_text(r"\u00"), r"\u00");
+        assert_eq!(decoded_json_text(r"\ud83d\ude00"), "\u{1f600}");
+    }
+
+    /// A raw `contains` declares a disguised leak safe; the JSON-aware check
+    /// does not. This is the regression the check exists to catch, pinned as
+    /// a difference between the two rather than asserted in prose.
+    #[test]
+    fn a_raw_match_would_miss_what_the_json_aware_check_catches() {
+        let [fully, ..] = DISGUISED_CREDENTIAL_SPELLINGS;
+        let leaked = format!(r#"{{"k":"{}"}}"#, fully.1);
+
+        // The raw comparison the check used to make: no literal secret.
+        assert!(
+            !leaked.contains("fixture/secret"),
+            "the disguised spelling contains no literal credential, which is the point"
+        );
+        // What a JSON consumer actually recovers.
+        assert!(decoded_json_text(&leaked).contains("fixture/secret"));
+    }
+
+    /// INV-035: a disguised credential emitted on a stream the intended-stream
+    /// assertion never reconstructs is still caught.
+    #[test]
+    #[should_panic(expected = "must not be recoverable")]
+    fn disguised_credential_on_an_uninspected_stream_is_caught() {
+        let [fully, ..] = DISGUISED_CREDENTIAL_SPELLINGS;
+        let observed = vec![Observation {
+            correlation: "call-9".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 7,
+                fragment: format!(r#"{{"k":"{}"}}"#, fully.1),
+            },
+        }];
+
+        assert_no_stream_carries(&observed, "fixture/secret");
+    }
+
+    /// The same disguise inside a decoded proposal's arguments is caught too.
+    #[test]
+    #[should_panic(expected = "must not be recoverable")]
+    fn disguised_credential_in_proposed_arguments_is_caught() {
+        let [fully, ..] = DISGUISED_CREDENTIAL_SPELLINGS;
+        let observed = vec![Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolCallProposed(ToolCallProposal {
+                id: ToolCallId::new("id-1"),
+                name: ToolName::new("t"),
+                arguments_json: format!(r#"{{"k":"{}"}}"#, fully.1),
+            }),
+        }];
+
+        assert_no_stream_carries(&observed, "fixture/secret");
+    }
+
+    /// A plain-text stream is matched raw: escape-looking bytes in assistant
+    /// text are literal there, so decoding them would invent a leak.
+    #[test]
+    fn escape_shaped_plain_text_is_not_decoded_into_a_false_positive() {
+        let [fully, ..] = DISGUISED_CREDENTIAL_SPELLINGS;
+        let observed = vec![Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: fully.1.to_string(),
+            },
+        }];
+
+        assert_no_stream_carries(&observed, "fixture/secret");
     }
 
     /// INV-035: a credential spelled as a surrogate pair survives a boundary
