@@ -478,15 +478,21 @@ impl PostgresReviewOrchestrationStore {
     /// and drop the transaction while `LOCK TABLE` was still running, and the
     /// rollback releasing the locks it had already taken would queue behind
     /// that statement.
+    ///
+    /// The remainder is measured once the connection is in hand, because
+    /// acquiring one is itself a wait against a saturated pool — long enough to
+    /// spend the budget the guard is about to be configured with. Measuring
+    /// before that wait installs a bound the caller has already outlived.
     async fn try_admit_snapshot(
         &self,
         deadline: Instant,
     ) -> Result<Option<Transaction<'_, Postgres>>, ReviewOrchestrationStoreError> {
+        let mut transaction = self.pool.begin().await?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
+            transaction.rollback().await?;
             return Err(ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut);
         }
-        let mut transaction = self.pool.begin().await?;
         bound_snapshot_guard(&mut transaction, remaining).await?;
         let admitted: bool = sqlx::query_scalar(
             "SELECT pg_try_advisory_xact_lock(
