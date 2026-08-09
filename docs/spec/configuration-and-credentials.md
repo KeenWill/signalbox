@@ -1190,10 +1190,10 @@ says nothing about what the CLI itself writes after it starts.
 ##### The custody walk
 
 No present composition performs any part of it, and no document can reach it:
-`codex_home` is rejected with every other delivery spelling before any store is
-opened, by the profile table's unknown-field rule above. The implementing child
-owes a test per covered facet above, each asserting that scheduling is blocked
-and no invocation starts: a symlinked path component, a symlinked `auth.json`, a
+the parser validates a `codex_home` profile's fields and then rejects it as an
+undelivered delivery, before any store is opened. The implementing child owes a
+test per covered facet above, each asserting that scheduling is blocked and no
+invocation starts: a symlinked path component, a symlinked `auth.json`, a
 non-regular `auth.json`, a group-writable ancestor without sticky, a
 world-writable home, a mode-`0644` credential file, a group-readable home, and a
 home whose identity changed between passes, a `skills` entry symlinked outside
@@ -1844,11 +1844,14 @@ configuration change.
 
 No present preparation path resolves a pool or selects a member. Configuration
 parsing takes the preferred member once, at startup, and session creation pins
-it; nothing consults the pool again, so `tie_break` beyond `first_listed`,
+it; nothing consults the pool again, so every setting that survives the
+admission rules above —
 [`on_pool_exhausted`](credential-availability.md#the-credential-availability-machine),
-and every trigger action are retained-and-inert, and an existing session stays
-on the profile it was created with. The implementing child moves the selection
-the paragraphs below describe to preparation.
+`round_robin`, and each retained trigger action — is retained-and-inert, and an
+existing session stays on the profile it was created with. The settings this
+build cannot honor are startup failures rather than inert, as stated above. The
+implementing child moves the selection the paragraphs below describe to
+preparation.
 
 Selection happens at model-call preparation, never at session creation. For the
 resolved target's family, preparation reads the session's current immutable
