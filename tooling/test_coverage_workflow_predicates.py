@@ -32,6 +32,34 @@ than no harness, because it also reports that the ground is covered.
 
 No coverage run, no network call, and no GitHub API request happens here. Every
 document is synthetic and built in this file.
+
+Scope, and where hardening this reader stops
+--------------------------------------------
+
+Reading a filter out of a workflow means modelling a little of the shell, and a
+partial shell model can always be shown wrong on some input it never meets. The
+owner's standing rule for scanner tooling applies: once a surface stops
+producing behavioural defects, further hardening findings against it are
+declined at the class level, and that decline is gated by a mechanical test
+rather than by judgement.
+
+Here the mechanical test is whether the form occurs in these two workflows at
+all. A finding about how this reader parses shell is material only when both
+halves hold:
+
+    the form is one `coverage.yml` or `swift.yml` actually writes, and
+    this module accepts it while parsing it into something other than what the
+    shell hands jq.
+
+A form the module refuses is already safe: `unreadable_invocations()` fails the
+suite rather than testing a filter it could not read, so an unmodelled construct
+costs a loud failure, never a silent wrong pass. A construct the workflows never
+write costs nothing at all.
+
+`RECORDED_INVOCATION_FORMS` is that test made runnable. It pins the forms in
+use, so the decline is auditable and lapses by itself: a workflow reaching jq a
+new way fails that check, and the question reopens for exactly the form that
+arrived.
 """
 
 from __future__ import annotations
@@ -176,6 +204,7 @@ class ScannedInvocation:
     excerpt: str
     through_gh_flag: bool
     arguments: tuple[tuple[str, str], ...] = ()
+    filter_kind: str = ""
 
     @property
     def readable(self) -> bool:
@@ -299,7 +328,11 @@ def read_jq_invocation(script: str, index: int, *, through_gh_flag: bool) -> Sca
         text, kind, _ = read_shell_word(script, index)
         if kind in LITERAL_WORD_KINDS:
             return ScannedInvocation(
-                program=text, reason="", excerpt=excerpt, through_gh_flag=through_gh_flag
+                program=text,
+                reason="",
+                excerpt=excerpt,
+                through_gh_flag=through_gh_flag,
+                filter_kind=kind,
             )
         return ScannedInvocation(
             program=None,
@@ -362,6 +395,7 @@ def read_jq_invocation(script: str, index: int, *, through_gh_flag: bool) -> Sca
                 excerpt=excerpt,
                 through_gh_flag=through_gh_flag,
                 arguments=tuple(arguments),
+                filter_kind=kind,
             )
         return ScannedInvocation(
             program=None,
@@ -391,6 +425,7 @@ class ExtractedProgram:
     program: str
     through_gh_flag: bool
     arguments: tuple[tuple[str, str], ...]
+    filter_kind: str
 
     def describe(self) -> str:
         excerpt = " ".join(self.program.split())[:80]
@@ -555,6 +590,7 @@ def extract_jq_programs(blocks: list[RunBlock]) -> list[ExtractedProgram]:
             program=invocation.program,
             through_gh_flag=invocation.through_gh_flag,
             arguments=invocation.arguments,
+            filter_kind=invocation.filter_kind,
         )
         for block in blocks
         for invocation in scan_jq_invocations(block.script)
@@ -673,6 +709,27 @@ def refusal_reasons(script: str) -> list[str]:
         for invocation in scan_jq_invocations(script)
         if not invocation.readable
     ]
+
+
+# Every way the two workflows reach jq, on the axis a shell-parsing finding
+# targets: how the filter is written, and what runs it. Both workflows write
+# every filter as a single-quoted literal, which is the form with no escape
+# processing at all — the shell hands jq exactly the bytes between the quotes.
+# This is the mechanical gate the module docstring describes: while this is the
+# whole inventory, a finding about parsing some other construct is about code
+# these workflows do not contain.
+RECORDED_INVOCATION_FORMS = {
+    ("gh api --jq", "single-quoted"),
+    ("jq binary", "single-quoted"),
+}
+
+
+def invocation_forms() -> set[tuple[str, str]]:
+    """Every way the workflows reach jq, outside test bodies."""
+    return {
+        ("gh api --jq" if program.through_gh_flag else "jq binary", program.filter_kind)
+        for program in all_extracted_programs()
+    }
 
 
 def unreadable_invocations() -> list[str]:
@@ -2179,6 +2236,20 @@ class WorkflowReadingTests(unittest.TestCase):
             "covers: give it a PredicateSpec with fixtures and exercised=True. A "
             "predicate with no fixtures is how every divergence recorded here happened.",
         )
+
+    def test_the_workflows_reach_jq_only_in_the_recorded_forms(self) -> None:
+        """The gate on how far this reader has to model the shell.
+
+        Every filter in both workflows is a single-quoted literal, which is the
+        form the shell hands through untouched. That is what makes a finding
+        about parsing some other construct a finding about code these workflows
+        do not contain — and it is checked here rather than asserted, so the
+        judgement rests on the files instead of on somebody's memory of them.
+
+        A workflow that reaches jq a new way fails this, which is the point:
+        the standing decline on shell-parsing findings lapses exactly when a
+        new form arrives, and only for that form."""
+        self.assertEqual(invocation_forms(), RECORDED_INVOCATION_FORMS)
 
     def test_every_jq_invocation_in_the_workflows_is_readable(self) -> None:
         """The exhaustiveness check is only worth as much as the scan beneath
