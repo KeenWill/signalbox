@@ -25,7 +25,7 @@ use std::{
 };
 
 use git2::{
-    BranchType, Delta, DiffOptions, IndexAddOption, ObjectType, Oid, Patch, Repository,
+    BranchType, Delta, DiffOptions, IndexAddOption, IndexTime, ObjectType, Oid, Patch, Repository,
     RepositoryState, Signature, Status, Time,
 };
 use sha1::{Digest as _, Sha1};
@@ -306,6 +306,8 @@ const DRIFTED_APPLY_PATCH_ARGUMENTS: &str =
 const SYNTHETIC_EVAL_RECEIPT: &str = "01988c5f-89c4-7000-8000-000000000001";
 const SYNTHETIC_COMPLETION_REPORT: &str = "Completed the requested operation.";
 const SYNTHETIC_FAILURE_REPORT: &str = "Failed to complete the requested operation.";
+const SYNTHETIC_CROSS_CLAUSE_FAILURE_REPORT: &str =
+    "No output. Failed to create the requested file; done.";
 const SYNTHETIC_CONTRACTED_FAILURE_REPORT: &str = "The operation wasn't completed.";
 const SYNTHETIC_NEVER_COMPLETION_REPORT: &str = "Never completed the requested operation.";
 const SYNTHETIC_DEFERRED_COMPLETION_REPORT: &str =
@@ -726,6 +728,7 @@ struct FamilySuite {
     executor: SharedFamilyExecutor,
     workspace_seed_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     git_pre_execution_worktree_entries: StdMutex<Option<BTreeMap<PathBuf, WorkspaceEntrySnapshot>>>,
+    git_pre_execution_index_entries: StdMutex<Option<Vec<GitIndexCompleteEntrySnapshot>>>,
     git_pre_execution_objects: StdMutex<Option<GitObjectInventory>>,
     git_pre_execution_object_entries: StdMutex<Option<BTreeMap<PathBuf, WorkspaceEntrySnapshot>>>,
 }
@@ -792,6 +795,18 @@ struct GitIndexEntrySnapshot {
     mode: u32,
     flags: u16,
     flags_extended: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GitIndexCompleteEntrySnapshot {
+    semantic: GitIndexEntrySnapshot,
+    ctime: IndexTime,
+    mtime: IndexTime,
+    dev: u32,
+    ino: u32,
+    uid: u32,
+    gid: u32,
+    file_size: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1011,6 +1026,7 @@ impl FamilySuite {
             executor: SharedFamilyExecutor::new(FamilyExecutor::Git(executor)),
             workspace_seed_entries: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
+            git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
         })
@@ -1069,6 +1085,7 @@ impl FamilySuite {
             }),
             workspace_seed_entries,
             git_pre_execution_worktree_entries: StdMutex::new(None),
+            git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
         })
@@ -1100,6 +1117,7 @@ impl FamilySuite {
             }),
             workspace_seed_entries: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
+            git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
         })
@@ -1250,6 +1268,12 @@ impl FamilySuite {
                 .expect("Git pre-execution inventory lock is available") =
                 Some(git_worktree_entries(self.workspace.path())?);
             *self
+                .git_pre_execution_index_entries
+                .lock()
+                .expect("Git pre-execution index lock is available") = Some(
+                git_index_complete_entries(&Repository::open(self.workspace.path())?)?,
+            );
+            *self
                 .git_pre_execution_objects
                 .lock()
                 .expect("Git pre-execution object lock is available") = Some(git_object_inventory(
@@ -1336,6 +1360,10 @@ impl FamilySuite {
                     .git_pre_execution_worktree_entries
                     .lock()
                     .expect("Git pre-execution inventory lock is available");
+                let pre_execution_index_entries = self
+                    .git_pre_execution_index_entries
+                    .lock()
+                    .expect("Git pre-execution index lock is available");
                 let pre_execution_objects = self
                     .git_pre_execution_objects
                     .lock()
@@ -1351,6 +1379,7 @@ impl FamilySuite {
                         seed_refs: &self.git_seed_refs,
                         seed_fixture: &self.git_seed_fixture,
                         pre_execution_worktree_entries: pre_execution_worktree_entries.as_ref(),
+                        pre_execution_index_entries: pre_execution_index_entries.as_deref(),
                         pre_execution_objects: pre_execution_objects.as_ref(),
                         pre_execution_object_entries: pre_execution_object_entries.as_ref(),
                         execution_window: self.executor.git_execution_window(case.name),
@@ -1522,6 +1551,7 @@ struct GitForcedVerification<'a> {
     seed_refs: &'a GitReferenceInventory,
     seed_fixture: &'a GitFixtureSnapshot,
     pre_execution_worktree_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
+    pre_execution_index_entries: Option<&'a [GitIndexCompleteEntrySnapshot]>,
     pre_execution_objects: Option<&'a GitObjectInventory>,
     pre_execution_object_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
     execution_window: Option<GitExecutionTimeWindow>,
@@ -1539,6 +1569,7 @@ fn git_forced_case_passed(
         seed_refs,
         seed_fixture,
         pre_execution_worktree_entries,
+        pre_execution_index_entries,
         pre_execution_objects,
         pre_execution_object_entries,
         execution_window,
@@ -1771,7 +1802,7 @@ fn git_forced_case_passed(
     };
     Ok(passed
         && git_fixture_snapshot_matches(root, &repository, seed_fixture)?
-        && git_forced_index_matches(&repository, name, seed_fixture)?
+        && git_forced_index_matches(&repository, name, seed_fixture, pre_execution_index_entries)?
         && git_forced_objects_match(
             &repository,
             name,
@@ -2578,6 +2609,31 @@ fn git_index_entries(repository: &Repository) -> EvalResult<Vec<GitIndexEntrySna
         .collect())
 }
 
+fn git_index_complete_entries(
+    repository: &Repository,
+) -> EvalResult<Vec<GitIndexCompleteEntrySnapshot>> {
+    Ok(repository
+        .index()?
+        .iter()
+        .map(|entry| GitIndexCompleteEntrySnapshot {
+            semantic: GitIndexEntrySnapshot {
+                path: entry.path,
+                id: entry.id,
+                mode: entry.mode,
+                flags: entry.flags,
+                flags_extended: entry.flags_extended,
+            },
+            ctime: entry.ctime,
+            mtime: entry.mtime,
+            dev: entry.dev,
+            ino: entry.ino,
+            uid: entry.uid,
+            gid: entry.gid,
+            file_size: entry.file_size,
+        })
+        .collect())
+}
+
 fn git_index_extensions(repository: &Repository) -> EvalResult<Vec<GitIndexExtensionSnapshot>> {
     let bytes = fs::read(repository.path().join("index"))?;
     git_index_extension_records(&bytes)
@@ -2740,6 +2796,7 @@ fn git_forced_index_matches(
     repository: &Repository,
     case_name: &str,
     seed_fixture: &GitFixtureSnapshot,
+    pre_execution_index_entries: Option<&[GitIndexCompleteEntrySnapshot]>,
 ) -> EvalResult<bool> {
     let expected = match case_name {
         GIT_BRANCH_SWITCH_NAME => git_index_with_expected_file(
@@ -2759,8 +2816,18 @@ fn git_forced_index_matches(
         )?,
         _ => seed_fixture.index_entries.clone(),
     };
+    let complete_entries_match = match case_name {
+        GIT_BRANCH_CREATE_NAME | GIT_DIFF_NAME | GIT_LOG_NAME | GIT_STATUS_NAME => {
+            pre_execution_index_entries.is_some_and(|expected| {
+                git_index_complete_entries(repository).is_ok_and(|actual| actual == expected)
+            })
+        }
+        GIT_BRANCH_SWITCH_NAME | GIT_CREATE_COMMIT_NAME | GIT_STAGE_NAME => true,
+        _ => false,
+    };
     Ok(git_index_entries(repository)? == expected
-        && git_index_extensions(repository)? == seed_fixture.index_extensions)
+        && git_index_extensions(repository)? == seed_fixture.index_extensions
+        && complete_entries_match)
 }
 
 fn git_object_inventory(repository: &Repository) -> EvalResult<GitObjectInventory> {
@@ -4487,15 +4554,20 @@ fn normalized_report_words(report: &str) -> Vec<String> {
 }
 
 fn report_words_deny_success(report: &str, words: &[String]) -> bool {
-    let explicit_failure = words.iter().enumerate().any(|(index, word)| {
-        ["cannot", "failed", "failure", "incomplete", "unable"].contains(&word.as_str())
-            && !words[..index].iter().rev().take(2).any(|qualifier| {
-                matches!(
-                    qualifier.as_str(),
-                    "never" | "no" | "not" | "nothing" | "without"
-                )
+    let explicit_failure = report
+        .split([';', '.', ',', '!', '?', '\n'])
+        .map(normalized_report_words)
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                ["cannot", "failed", "failure", "incomplete", "unable"].contains(&word.as_str())
+                    && !clause[..index].iter().rev().take(2).any(|qualifier| {
+                        matches!(
+                            qualifier.as_str(),
+                            "never" | "no" | "not" | "nothing" | "without"
+                        )
+                    })
             })
-    });
+        });
     let negative_no_objects = ["answer", "commit", "completion", "match", "result"];
     let negative_no_claim = words
         .windows(2)
@@ -4735,6 +4807,14 @@ fn final_response_report_rejects_an_explicit_failure() {
         &synthetic_result_with_receipt(),
     );
     tracker.observe_response_text(SYNTHETIC_FAILURE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_a_failure_after_a_separate_negated_clause() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_CROSS_CLAUSE_FAILURE_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
 }
@@ -8350,6 +8430,7 @@ fn forced_git_log_verifier_rejects_the_default_head() -> EvalResult {
 #[test]
 fn forced_git_log_verifier_accepts_the_bounded_target() -> EvalResult {
     let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
     let case = GIT_CASES
         .iter()
         .find(|case| case.name == GIT_LOG_NAME)
@@ -8938,6 +9019,42 @@ fn forced_git_status_verifier_rejects_skip_worktree_index_drift() -> EvalResult 
         .expect("the seeded index entry exists");
     entry.flags |= GIT_INDEX_EXTENDED_FLAG;
     entry.flags_extended |= GIT_INDEX_SKIP_WORKTREE_FLAG;
+    index.add(&entry)?;
+    index.write()?;
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_status_verifier_rejects_stat_cache_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let repository = Repository::open(suite.workspace.path())?;
+    let mut index = repository.index()?;
+    let mut entry = index
+        .get_path(Path::new(GIT_SEED_PATH), 0)
+        .expect("the seeded index entry exists");
+    entry.ctime = IndexTime::new(
+        entry.ctime.seconds().wrapping_add(1),
+        entry.ctime.nanoseconds(),
+    );
     index.add(&entry)?;
     index.write()?;
     let result = serde_json::json!({
