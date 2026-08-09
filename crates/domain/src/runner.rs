@@ -2199,8 +2199,9 @@ pub struct PinnedRunnerPlacement {
 
 /// Durable source of a session placement's runner-loss transition.
 ///
-/// Registration-triggered loss is distinct because it is the sole version-one
-/// case in which checked recovery may retain the same runner identity.
+/// The source is retained so a later replacement transaction can decide
+/// whether same-runner recovery is admissible. The current domain replacement
+/// transitions refuse a same-runner successor for every source.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RunnerPlacementLossSource {
     /// The runner connection became durably lost.
@@ -2615,7 +2616,11 @@ impl SessionRunnerPlacement {
                     Box::new(lost),
                 ))
             }
-            _ => return Err(RunnerDomainError::InvalidState),
+            SessionRunnerPlacementState::Unpinned
+            | SessionRunnerPlacementState::Pinned(_)
+            | SessionRunnerPlacementState::RunnerAbandoned(_) => {
+                return Err(RunnerDomainError::InvalidState);
+            }
         };
         Ok(self)
     }
