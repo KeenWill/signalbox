@@ -2712,6 +2712,9 @@ impl TerminalAttemptEndReconstitutionInput {
         disposition: CancellationStopDisposition,
         interrupt: AppliedInterruptCommandResult,
     ) -> Self;
+    pub const fn yielded_to_runner_recovery(
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
     // accessors: end(), interrupt()
 }
 

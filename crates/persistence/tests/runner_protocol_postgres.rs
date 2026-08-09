@@ -6010,6 +6010,17 @@ async fn s32_inv029_inv044_stop_terminalizes_runner_recovery_wait() -> Result<()
             |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xa126))),
         )
         .await?;
+    let reload = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa127)),
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa128)),
+                ContextFrontierId::from_uuid(uuid(0xa129)),
+                TurnAttemptId::from_uuid(uuid(0xa12a)),
+            ),
+        )
+        .await?;
     let terminal: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
         "SELECT state_kind, terminal_disposition_kind,
                 runner_recovery_runner_id
@@ -6050,6 +6061,10 @@ async fn s32_inv029_inv044_stop_terminalizes_runner_recovery_wait() -> Result<()
         )
     );
     assert_eq!(retained_loss, "runner_lost_before_pin");
+    assert!(
+        reload.is_some(),
+        "the terminalized runner wait must reload before its queued successor starts"
+    );
     assert_eq!(
         persisted_effect,
         (
@@ -6337,6 +6352,17 @@ async fn s32_inv029_inv044_runner_recovery_stop_preserves_tool_ambiguity()
             |_| (vec![tool_closure], terminal_frontier),
         )
         .await?;
+    let reload = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa169)),
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa16a)),
+                ContextFrontierId::from_uuid(uuid(0xa16b)),
+                TurnAttemptId::from_uuid(uuid(0xa16c)),
+            ),
+        )
+        .await?;
     let persisted: (String, Uuid, Uuid) = sqlx::query_as(
         "SELECT lifecycle.terminal_disposition_kind,
                 lifecycle.terminal_tool_attempt_id,
@@ -6363,6 +6389,10 @@ async fn s32_inv029_inv044_runner_recovery_stop_preserves_tool_ambiguity()
     assert_eq!(persisted.0, "reconciliation_required");
     assert_eq!(persisted.1, interrupted_attempt.into_uuid());
     assert_eq!(persisted.2, boundary.into_uuid());
+    assert!(
+        reload.is_some(),
+        "the terminalized ambiguous runner wait must reload before its queued successor starts"
+    );
     assert_eq!(closure.0, "tool_closed_by_turn_end");
     assert_eq!(closure.1, request.into_uuid());
     drop(pool);
