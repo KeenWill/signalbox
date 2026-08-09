@@ -291,9 +291,14 @@ impl<C: Clone> EventDecoder<C> {
             .native_assistant_model
             .as_ref()
             .is_none_or(|observed| observed == &event.message.model);
-        if !model_matches_init || !model_matches_prior_assistant {
+        if !model_matches_init {
             return Err(DecodeFailure::stream_protocol(
-                "Claude assistant model contradicts system init",
+                "Claude assistant model does not resolve the system init model",
+            ));
+        }
+        if !model_matches_prior_assistant {
+            return Err(DecodeFailure::stream_protocol(
+                "Claude assistant model contradicts a prior assistant event",
             ));
         }
         self.native_assistant_model = Some(event.message.model.clone());
