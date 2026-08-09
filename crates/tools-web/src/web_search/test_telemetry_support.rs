@@ -4,8 +4,9 @@ use signalbox_application::{
 use signalbox_domain::ToolAttemptDispatchCorrelation;
 use signalbox_model_runtime::{CredentialAccessError, CredentialValue};
 use std::{
+    cell::RefCell,
     io::{self, Write},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use super::{diagnostic::*, telemetry::*, transport_failure::*};
@@ -24,27 +25,18 @@ pub(super) const SESSION_ID_DIAGNOSTIC: &str = "session_id=00000000-0000-0000-00
 
 pub(super) const TURN_ID_DIAGNOSTIC: &str = "turn_id=00000000-0000-0000-0000-000000000002";
 
-#[derive(Clone, Default)]
-pub(super) struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
-
-impl CapturedTelemetry {
-    pub(super) fn text(&self) -> String {
-        String::from_utf8(
-            self.0
-                .lock()
-                .expect("captured telemetry lock is available")
-                .clone(),
-        )
-        .expect("captured telemetry is UTF-8")
-    }
+thread_local! {
+    /// Telemetry captured on this thread alone.
+    static CAPTURED_TELEMETRY: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
+
+/// Appends every formatted event to the emitting thread's own buffer.
+#[derive(Clone, Copy, Default)]
+pub(super) struct CapturedTelemetry;
 
 impl Write for CapturedTelemetry {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .expect("captured telemetry lock is available")
-            .extend_from_slice(buffer);
+        CAPTURED_TELEMETRY.with(|captured| captured.borrow_mut().extend_from_slice(buffer));
         Ok(buffer.len())
     }
 
@@ -57,8 +49,43 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedTelemetry
     type Writer = Self;
 
     fn make_writer(&'writer self) -> Self::Writer {
-        self.clone()
+        *self
     }
+}
+
+/// Installs the capturing subscriber once for the whole test process, and
+/// clears whatever this thread captured earlier.
+///
+/// It must be global rather than thread-scoped. `tracing` caches each
+/// callsite's interest process-wide, but `set_default` binds a subscriber to
+/// one thread, so a sibling test that reaches a callsite first on another
+/// thread registers it against no subscriber at all -- recording it as
+/// uninteresting for every thread, including the one that installed a capture.
+/// The event then is not merely written late; it is never emitted, and the
+/// assertion reads an empty buffer.
+///
+/// Writes are routed per thread so concurrent tests never read each other's
+/// events, which keeps assertions on both presence and absence honest.
+pub(super) fn capture_telemetry_for_this_thread() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+
+    INSTALLED.get_or_init(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(CapturedTelemetry)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other global telemetry subscriber is installed");
+    });
+    CAPTURED_TELEMETRY.with(|captured| captured.borrow_mut().clear());
+}
+
+/// Returns the telemetry captured on this thread.
+pub(super) fn captured_telemetry() -> String {
+    CAPTURED_TELEMETRY
+        .with(|captured| String::from_utf8(captured.borrow().clone()))
+        .expect("captured telemetry is UTF-8")
 }
 
 pub(super) struct FormattingExecutor<Executor> {
@@ -89,16 +116,9 @@ pub(super) fn capture_credential_failure(
     error: &CredentialAccessError,
     correlation: &ToolAttemptDispatchCorrelation,
 ) -> String {
-    let output = CapturedTelemetry::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(output.clone())
-        .finish();
-    tracing::subscriber::with_default(subscriber, || {
-        report_credential_access_failure(error, correlation);
-    });
-    output.text()
+    capture_telemetry_for_this_thread();
+    report_credential_access_failure(error, correlation);
+    captured_telemetry()
 }
 
 pub(super) fn capture_credential_failure_in_credential_span(
@@ -106,34 +126,20 @@ pub(super) fn capture_credential_failure_in_credential_span(
     correlation: &ToolAttemptDispatchCorrelation,
     credential: &str,
 ) -> String {
-    let output = CapturedTelemetry::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(output.clone())
-        .finish();
-    tracing::subscriber::with_default(subscriber, || {
-        let caller = tracing::warn_span!("caller", credential);
-        let _entered = caller.enter();
-        report_credential_access_failure(error, correlation);
-    });
-    output.text()
+    capture_telemetry_for_this_thread();
+    let caller = tracing::warn_span!("caller", credential);
+    let _entered = caller.enter();
+    report_credential_access_failure(error, correlation);
+    captured_telemetry()
 }
 
 pub(super) fn capture_credential_value_failure(
     correlation: &ToolAttemptDispatchCorrelation,
     credential: &CredentialValue,
 ) -> (String, Result<(), WebSearchExecutorError>) {
-    let output = CapturedTelemetry::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(output.clone())
-        .finish();
-    let result = tracing::subscriber::with_default(subscriber, || {
-        report_credential_value_failure(correlation, credential)
-    });
-    (output.text(), result)
+    capture_telemetry_for_this_thread();
+    let result = report_credential_value_failure(correlation, credential);
+    (captured_telemetry(), result)
 }
 
 pub(super) fn fully_percent_encode(value: &str) -> String {
@@ -144,20 +150,13 @@ pub(super) fn capture_credential_value_failure_in_credential_span(
     correlation: &ToolAttemptDispatchCorrelation,
     credential: &CredentialValue,
 ) -> (String, Result<(), WebSearchExecutorError>) {
-    let output = CapturedTelemetry::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(output.clone())
-        .finish();
+    capture_telemetry_for_this_thread();
     let credential_text =
         std::str::from_utf8(credential.expose_bytes()).expect("fixture credential is UTF-8");
-    let result = tracing::subscriber::with_default(subscriber, || {
-        let caller = tracing::warn_span!("caller", credential = credential_text);
-        let _entered = caller.enter();
-        report_credential_value_failure(correlation, credential)
-    });
-    (output.text(), result)
+    let caller = tracing::warn_span!("caller", credential = credential_text);
+    let _entered = caller.enter();
+    let result = report_credential_value_failure(correlation, credential);
+    (captured_telemetry(), result)
 }
 
 pub(super) fn capture_transport_failure(
@@ -165,15 +164,9 @@ pub(super) fn capture_transport_failure(
     correlation: &ToolAttemptDispatchCorrelation,
     credential: &CredentialValue,
 ) -> (String, Result<(), WebSearchExecutorError>) {
-    let output = CapturedTelemetry::default();
-    let subscriber = tracing_subscriber::fmt()
-        .compact()
-        .with_writer(output.clone())
-        .finish();
-    let result = tracing::subscriber::with_default(subscriber, || {
-        report_transport_failure(failure, correlation, credential)
-    });
-    (output.text(), result)
+    capture_telemetry_for_this_thread();
+    let result = report_transport_failure(failure, correlation, credential);
+    (captured_telemetry(), result)
 }
 
 pub(super) fn capture_response_body_failure(
@@ -181,28 +174,16 @@ pub(super) fn capture_response_body_failure(
     correlation: &ToolAttemptDispatchCorrelation,
     credential: &CredentialValue,
 ) -> (String, Result<(), WebSearchExecutorError>) {
-    let output = CapturedTelemetry::default();
-    let subscriber = tracing_subscriber::fmt()
-        .compact()
-        .with_writer(output.clone())
-        .finish();
-    let result = tracing::subscriber::with_default(subscriber, || {
-        report_response_body_failure(failure_class, correlation, credential)
-    });
-    (output.text(), result)
+    capture_telemetry_for_this_thread();
+    let result = report_response_body_failure(failure_class, correlation, credential);
+    (captured_telemetry(), result)
 }
 
 pub(super) fn capture_response_sanitization_failure(
     correlation: &ToolAttemptDispatchCorrelation,
     credential: &CredentialValue,
 ) -> (String, Result<(), WebSearchExecutorError>) {
-    let output = CapturedTelemetry::default();
-    let subscriber = tracing_subscriber::fmt()
-        .compact()
-        .with_writer(output.clone())
-        .finish();
-    let result = tracing::subscriber::with_default(subscriber, || {
-        report_response_sanitization_failure(correlation, credential)
-    });
-    (output.text(), result)
+    capture_telemetry_for_this_thread();
+    let result = report_response_sanitization_failure(correlation, credential);
+    (captured_telemetry(), result)
 }

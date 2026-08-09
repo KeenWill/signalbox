@@ -28,9 +28,14 @@ use sqlx::types::Uuid;
 use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
 
 /// Closed delegated-session relationship policy discriminators in PostgreSQL.
+///
+/// Public because the outbox decode tripwire drives these spellings with the
+/// exact set the durable `CHECK` constraint admits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DelegationPolicyStorageKind {
+pub enum DelegationPolicyStorageKind {
+    /// The child outlives parent state changes.
     Background,
+    /// The child follows the two explicit parent-state actions.
     Bound,
 }
 
@@ -38,19 +43,87 @@ pub(crate) enum DelegationPolicyStorageKind {
     dead_code,
     reason = "delegation relationship inserts are owned by the deferred placement writer"
 )]
-pub(crate) const fn delegation_policy_kind_to_str(
-    value: DelegationPolicyStorageKind,
-) -> &'static str {
+pub const fn delegation_policy_kind_to_str(value: DelegationPolicyStorageKind) -> &'static str {
     match value {
         DelegationPolicyStorageKind::Background => "background",
         DelegationPolicyStorageKind::Bound => "bound",
     }
 }
 
-pub(crate) fn delegation_policy_kind_from_str(value: &str) -> Option<DelegationPolicyStorageKind> {
+/// Decodes one durable `policy_kind` spelling.
+pub fn delegation_policy_kind_from_str(value: &str) -> Option<DelegationPolicyStorageKind> {
     match value {
         "background" => Some(DelegationPolicyStorageKind::Background),
         "bound" => Some(DelegationPolicyStorageKind::Bound),
+        _ => None,
+    }
+}
+
+/// Closed delegated-session update discriminators in PostgreSQL.
+///
+/// Public because the outbox decode tripwire drives these spellings with the
+/// exact set the durable `CHECK` constraint admits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DelegationUpdateStorageKind {
+    /// A parent committed one child relationship and its spawn policy.
+    ChildSpawned,
+    /// A parent registered one foreground or background wait.
+    ChildWaiting,
+    /// Parent termination evaluated one relationship edge.
+    ChildLifecycleDisposition,
+    /// A terminal child result became durable for its parent.
+    ChildResult,
+    /// One relationship message became durable for its recipient.
+    SessionMessage,
+}
+
+pub const fn delegation_update_kind_to_str(value: DelegationUpdateStorageKind) -> &'static str {
+    match value {
+        DelegationUpdateStorageKind::ChildSpawned => "child_spawned",
+        DelegationUpdateStorageKind::ChildWaiting => "child_waiting",
+        DelegationUpdateStorageKind::ChildLifecycleDisposition => "child_lifecycle_disposition",
+        DelegationUpdateStorageKind::ChildResult => "child_result",
+        DelegationUpdateStorageKind::SessionMessage => "session_message",
+    }
+}
+
+/// Decodes one durable `update_kind` spelling.
+pub fn delegation_update_kind_from_str(value: &str) -> Option<DelegationUpdateStorageKind> {
+    match value {
+        "child_spawned" => Some(DelegationUpdateStorageKind::ChildSpawned),
+        "child_waiting" => Some(DelegationUpdateStorageKind::ChildWaiting),
+        "child_lifecycle_disposition" => {
+            Some(DelegationUpdateStorageKind::ChildLifecycleDisposition)
+        }
+        "child_result" => Some(DelegationUpdateStorageKind::ChildResult),
+        "session_message" => Some(DelegationUpdateStorageKind::SessionMessage),
+        _ => None,
+    }
+}
+
+/// Closed delegation wake subject discriminators in PostgreSQL.
+///
+/// Public for the same reason as [`DelegationUpdateStorageKind`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DelegationWakeStorageKind {
+    /// A child result is available to its parent.
+    Result,
+    /// One message is available to the event's recipient session.
+    Message,
+}
+
+pub const fn delegation_wake_subject_to_str(value: DelegationWakeStorageKind) -> &'static str {
+    match value {
+        DelegationWakeStorageKind::Result => "result",
+        DelegationWakeStorageKind::Message => "message",
+    }
+}
+
+/// Decodes one durable `subject_kind` spelling.
+pub fn delegation_wake_subject_from_str(value: &str) -> Option<DelegationWakeStorageKind> {
+    match value {
+        "result" => Some(DelegationWakeStorageKind::Result),
+        "message" => Some(DelegationWakeStorageKind::Message),
         _ => None,
     }
 }
@@ -183,10 +256,6 @@ pub(crate) fn delegation_transition_failure_from_str(
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "delegation outcome rows are currently written by PostgreSQL lifecycle triggers"
-)]
 pub(crate) const fn delegation_outcome_kind_to_str(value: DelegationOutcomeKind) -> &'static str {
     match value {
         DelegationOutcomeKind::ResultReturned => "result_returned",
@@ -210,10 +279,6 @@ pub(crate) fn delegation_outcome_kind_from_str(value: &str) -> Option<Delegation
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "delegation outcome rows are currently written by PostgreSQL lifecycle triggers"
-)]
 pub(crate) const fn delegation_outcome_reason_to_str(
     value: DelegationOutcomeReason,
 ) -> Option<&'static str> {
@@ -1764,22 +1829,24 @@ mod tests {
 
     use super::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
-        DelegationPolicyStorageKind, DelegationRejectionStorageKind, DurableCommandIdMappingError,
-        DurableCommandKind, PlanEventStorageKind, PositiveOrdinalMappingError,
-        SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
-        SessionPlacementResultStorageKind, StoredModelSettingsError, accepted_input_id_from_uuid,
-        accepted_input_id_to_uuid, approval_judge_recommendation_from_str,
-        approval_judge_recommendation_to_str, approval_judge_state_from_str,
-        approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
-        approval_judge_terminal_disposition_to_str, bound_child_action_from_str,
-        bound_child_action_to_str, defaults_version_from_numeric, defaults_version_to_numeric,
-        delegation_message_direction_from_str, delegation_message_direction_to_str,
-        delegation_outcome_kind_from_str, delegation_outcome_kind_to_str,
-        delegation_outcome_reason_from_str, delegation_outcome_reason_to_str,
-        delegation_policy_kind_from_str, delegation_policy_kind_to_str,
-        delegation_rejection_kind_from_str, delegation_rejection_kind_to_str,
-        delegation_transition_failure_from_str, delegation_transition_failure_to_str,
-        delegation_wait_mode_from_str, delegation_wait_mode_to_str,
+        DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
+        DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
+        PlanEventStorageKind, PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
+        SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
+        StoredModelSettingsError, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
+        approval_judge_state_from_str, approval_judge_state_to_str,
+        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
+        bound_child_action_from_str, bound_child_action_to_str, defaults_version_from_numeric,
+        defaults_version_to_numeric, delegation_message_direction_from_str,
+        delegation_message_direction_to_str, delegation_outcome_kind_from_str,
+        delegation_outcome_kind_to_str, delegation_outcome_reason_from_str,
+        delegation_outcome_reason_to_str, delegation_policy_kind_from_str,
+        delegation_policy_kind_to_str, delegation_rejection_kind_from_str,
+        delegation_rejection_kind_to_str, delegation_transition_failure_from_str,
+        delegation_transition_failure_to_str, delegation_update_kind_from_str,
+        delegation_update_kind_to_str, delegation_wait_mode_from_str, delegation_wait_mode_to_str,
+        delegation_wake_subject_from_str, delegation_wake_subject_to_str,
         dispatched_runner_state_from_str, dispatched_runner_state_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, durable_command_kind_from_str,
         durable_command_kind_to_str, input_position_from_numeric, input_position_to_numeric,
@@ -1824,6 +1891,67 @@ mod tests {
             Some(DelegationPolicyStorageKind::Bound)
         );
         assert_eq!(delegation_policy_kind_from_str(UNKNOWN_DISCRIMINATOR), None);
+    }
+
+    /// Every delegation update spelling survives a round trip, and only those.
+    ///
+    /// The outbox dispatcher decodes this column for every committed
+    /// delegation update, and a spelling it cannot read stalls the singleton
+    /// cursor for every session, so the closed set is pinned here.
+    #[test]
+    fn delegation_update_kind_mapping_is_closed() {
+        assert_eq!(
+            delegation_update_kind_from_str(delegation_update_kind_to_str(
+                DelegationUpdateStorageKind::ChildSpawned,
+            )),
+            Some(DelegationUpdateStorageKind::ChildSpawned)
+        );
+        assert_eq!(
+            delegation_update_kind_from_str(delegation_update_kind_to_str(
+                DelegationUpdateStorageKind::ChildWaiting,
+            )),
+            Some(DelegationUpdateStorageKind::ChildWaiting)
+        );
+        assert_eq!(
+            delegation_update_kind_from_str(delegation_update_kind_to_str(
+                DelegationUpdateStorageKind::ChildLifecycleDisposition,
+            )),
+            Some(DelegationUpdateStorageKind::ChildLifecycleDisposition)
+        );
+        assert_eq!(
+            delegation_update_kind_from_str(delegation_update_kind_to_str(
+                DelegationUpdateStorageKind::ChildResult,
+            )),
+            Some(DelegationUpdateStorageKind::ChildResult)
+        );
+        assert_eq!(
+            delegation_update_kind_from_str(delegation_update_kind_to_str(
+                DelegationUpdateStorageKind::SessionMessage,
+            )),
+            Some(DelegationUpdateStorageKind::SessionMessage)
+        );
+        assert_eq!(delegation_update_kind_from_str(UNKNOWN_DISCRIMINATOR), None);
+    }
+
+    /// Every delegation wake subject survives a round trip, and only those.
+    #[test]
+    fn delegation_wake_subject_mapping_is_closed() {
+        assert_eq!(
+            delegation_wake_subject_from_str(delegation_wake_subject_to_str(
+                DelegationWakeStorageKind::Result,
+            )),
+            Some(DelegationWakeStorageKind::Result)
+        );
+        assert_eq!(
+            delegation_wake_subject_from_str(delegation_wake_subject_to_str(
+                DelegationWakeStorageKind::Message,
+            )),
+            Some(DelegationWakeStorageKind::Message)
+        );
+        assert_eq!(
+            delegation_wake_subject_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
     }
 
     #[test]

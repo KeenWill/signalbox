@@ -4,7 +4,7 @@
 //! run, pass, finding, event, and external-link values are always reconstructed
 //! through [`ReviewWorkflowStore`].
 
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{error::Error, fmt};
 
 use signalbox_application::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
@@ -21,55 +21,18 @@ use signalbox_domain::{
     ReviewPassId, ReviewPassRef, ReviewPolicy, ReviewPolicyVersion, ReviewRunEvidence, ReviewRunId,
     ReviewRunRef, ReviewTargetId, ReviewText,
 };
-use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     command_registry::REVIEW_ORCHESTRATION_KIND,
     mapping::durable_command_id_to_uuid,
-    review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
+    review_workflow::{
+        ReviewWorkflowStore, ReviewWorkflowStoreError, begin_repeatable_read,
+        load_pass_on_connection,
+    },
 };
 
 const STORAGE_VERSION: i16 = 1;
-const SNAPSHOT_ADMISSION_INITIAL_BACKOFF: Duration = Duration::from_millis(10);
-const SNAPSHOT_ADMISSION_MAX_BACKOFF: Duration = Duration::from_millis(100);
-const SNAPSHOT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
-const REVIEW_SNAPSHOT_LOCKS: &str = "LOCK TABLE
-    accepted_input,
-    turn_lifecycle,
-    review_external_link,
-    review_external_link_attachment,
-    review_external_link_observation,
-    review_external_object_identity,
-    review_finding,
-    review_finding_event,
-    review_finding_event_head,
-    review_orchestration_attempt,
-    review_orchestration_command,
-    review_orchestration_command_recovery,
-    review_orchestration_concern,
-    review_orchestration_concern_claim,
-    review_orchestration_concern_finding,
-    review_orchestration_fanout_seal,
-    review_orchestration_fanout_member,
-    review_orchestration_import,
-    review_orchestration_judgment_plan,
-    review_orchestration_judgment_member,
-    review_orchestration_judgment_effect,
-    review_orchestration_publication_inventory_seal,
-    review_orchestration_publication_inventory,
-    review_orchestration_publication_outcome_seal,
-    review_orchestration_publication_outcome,
-    review_orchestration_repair_inventory_seal,
-    review_orchestration_repair_inventory,
-    review_orchestration_repair_outcome_seal,
-    review_orchestration_repair_outcome,
-    review_pass,
-    review_pass_finding_inventory_seal,
-    review_pass_produced_finding,
-    review_run,
-    review_target
-    IN SHARE MODE";
-
 /// PostgreSQL adapter for durable orchestration attempts and command receipts.
 #[derive(Clone, Debug)]
 pub struct PostgresReviewOrchestrationStore {
@@ -153,6 +116,19 @@ impl PostgresReviewOrchestrationStore {
         &self,
         attempt: ReviewOrchestrationAttemptId,
     ) -> Result<Option<ReviewOrchestrationAttempt>, ReviewOrchestrationStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .load_attempt_on_connection(&mut transaction, attempt)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
+    }
+
+    async fn load_attempt_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        attempt: ReviewOrchestrationAttemptId,
+    ) -> Result<Option<ReviewOrchestrationAttempt>, ReviewOrchestrationStoreError> {
         let row = sqlx::query(
             "SELECT target_id, policy_version, minimum_judge_confidence,
                     minimum_publication_confidence, concern_set_version,
@@ -162,7 +138,7 @@ impl PostgresReviewOrchestrationStore {
               WHERE attempt_id = $1",
         )
         .bind(attempt.as_uuid())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
         let Some(row) = row else {
             return Ok(None);
@@ -175,7 +151,7 @@ impl PostgresReviewOrchestrationStore {
               ORDER BY concern_ordinal",
         )
         .bind(attempt.as_uuid())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await?
         .into_iter()
         .map(|row| {
@@ -303,72 +279,170 @@ impl PostgresReviewOrchestrationStore {
         &self,
         attempt: ReviewOrchestrationAttemptId,
     ) -> Result<Option<ReviewOrchestrationCurrentStage>, ReviewOrchestrationStoreError> {
-        let Some(immutable) = self.load_attempt(attempt).await? else {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let Some(immutable) = self
+            .load_attempt_on_connection(&mut transaction, attempt)
+            .await?
+        else {
+            transaction.commit().await?;
             return Ok(None);
         };
-        let Some(import) = self.load_import(attempt).await? else {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingImport));
+        let mut facts = AttemptFacts::new(self, attempt, immutable);
+        let stage = facts.current_stage(&mut transaction).await?;
+        transaction.commit().await?;
+        Ok(Some(stage))
+    }
+
+    /// Loads every daemon adapter fact from one coherent database snapshot.
+    ///
+    /// The whole read runs inside a single read-only `REPEATABLE READ`
+    /// transaction, so every loader observes the same database snapshot and the
+    /// projection cannot be torn across statements. The read is pure — it holds
+    /// no lock any writer waits on, so concurrent input, turns, approvals and
+    /// review mutations proceed while it runs.
+    pub async fn load_snapshot(
+        &self,
+        attempt: ReviewOrchestrationAttemptId,
+    ) -> Result<Option<ReviewOrchestrationSnapshotFacts>, ReviewOrchestrationStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let facts = self
+            .load_snapshot_on_connection(&mut transaction, attempt)
+            .await?;
+        transaction.commit().await?;
+        Ok(facts)
+    }
+
+    async fn load_snapshot_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        attempt: ReviewOrchestrationAttemptId,
+    ) -> Result<Option<ReviewOrchestrationSnapshotFacts>, ReviewOrchestrationStoreError> {
+        let Some(immutable) = self
+            .load_attempt_on_connection(&mut *connection, attempt)
+            .await?
+        else {
+            return Ok(None);
+        };
+        // The stage ladder consults almost every fact the snapshot carries, so
+        // one memo serves both: the ladder decides from it, and the remaining
+        // fields are then forced through the same memo rather than reloaded.
+        // Deriving the stage from the very facts the snapshot reports also
+        // makes the projection internally consistent by construction.
+        let mut facts = AttemptFacts::new(self, attempt, immutable);
+        let current_stage = facts.current_stage(&mut *connection).await?;
+        Ok(Some(
+            facts
+                .into_snapshot_facts(&mut *connection, current_stage)
+                .await?,
+        ))
+    }
+}
+
+/// Every durable fact one attempt's stage and snapshot consult, loaded at most
+/// once each.
+///
+/// The stage ladder short-circuits at the earliest stage it can prove, so it
+/// reads a prefix of these facts; the snapshot needs a fixed set of them
+/// whatever the stage turns out to be. Holding both behind one memo keeps the
+/// ladder's laziness while charging the snapshot for each loader exactly once.
+struct AttemptFacts<'store> {
+    store: &'store PostgresReviewOrchestrationStore,
+    attempt: ReviewOrchestrationAttemptId,
+    immutable: ReviewOrchestrationAttempt,
+    import: Option<Option<ReviewImportOutcome>>,
+    concern_claims: Option<Vec<ReviewConcernClaim>>,
+    judgment_plan: Option<Option<ReviewJudgmentPlan>>,
+    applied_judgment_effects: Option<Vec<ReviewJudgmentEffectId>>,
+    repair_inventory_sealed: Option<bool>,
+    repair_outcomes: Option<Option<Vec<ReviewRepairMemberOutcome>>>,
+    publication_inventory_sealed: Option<bool>,
+    publication_outcomes: Option<Option<Vec<ReviewPublicationMemberOutcome>>>,
+}
+
+impl<'store> AttemptFacts<'store> {
+    const fn new(
+        store: &'store PostgresReviewOrchestrationStore,
+        attempt: ReviewOrchestrationAttemptId,
+        immutable: ReviewOrchestrationAttempt,
+    ) -> Self {
+        Self {
+            store,
+            attempt,
+            immutable,
+            import: None,
+            concern_claims: None,
+            judgment_plan: None,
+            applied_judgment_effects: None,
+            repair_inventory_sealed: None,
+            repair_outcomes: None,
+            publication_inventory_sealed: None,
+            publication_outcomes: None,
+        }
+    }
+
+    /// Derives the deterministic daemon-visible stage, reading only the facts
+    /// each decision needs to reach the next one.
+    async fn current_stage(
+        &mut self,
+        connection: &mut PgConnection,
+    ) -> Result<ReviewOrchestrationCurrentStage, ReviewOrchestrationStoreError> {
+        let Some(import) = self.import(&mut *connection).await? else {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingImport);
         };
         if matches!(import, ReviewImportOutcome::Incomplete { .. }) {
-            return Ok(Some(ReviewOrchestrationCurrentStage::ImportIncomplete));
+            return Ok(ReviewOrchestrationCurrentStage::ImportIncomplete);
         }
-        let claims = self.load_concern_claims(attempt).await?;
-        if claims.len() < immutable.concerns().len() {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingConcerns));
+        let expected_concerns = self.immutable.concerns().len();
+        if self.concern_claims(&mut *connection).await?.len() < expected_concerns {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingConcerns);
         }
-        if claims
+        if self
+            .concern_claims(&mut *connection)
+            .await?
             .iter()
             .any(|claim| !matches!(claim.outcome(), ReviewConcernOutcome::Succeeded(_)))
         {
-            return Ok(Some(ReviewOrchestrationCurrentStage::FanoutIncomplete));
+            return Ok(ReviewOrchestrationCurrentStage::FanoutIncomplete);
         }
-        let Some(plan) = self.load_judgment_plan(attempt).await? else {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingJudgment));
+        let Some(planned_members) = self
+            .judgment_plan(&mut *connection)
+            .await?
+            .map(|plan| plan.members().len())
+        else {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingJudgment);
         };
-        let effects = self.load_applied_judgment_effects(attempt).await?;
-        if effects.len() < plan.members().len() {
-            let interrupted: bool = sqlx::query_scalar(
-                "SELECT EXISTS (
-                    SELECT 1 FROM review_orchestration_command
-                     WHERE attempt_id = $1
-                       AND result_stage = 'judgment_incomplete'
-                       AND judgment_effect_count = $2
-                    UNION ALL
-                    SELECT 1 FROM review_orchestration_command_recovery
-                     WHERE attempt_id = $1
-                       AND result_stage = 'judgment_incomplete'
-                       AND judgment_effect_count = $2
-                )",
-            )
-            .bind(attempt.as_uuid())
-            .bind(count_i64(effects.len())?)
-            .fetch_one(&self.pool)
-            .await?;
-            return Ok(Some(if interrupted {
-                ReviewOrchestrationCurrentStage::JudgmentIncomplete
-            } else {
-                ReviewOrchestrationCurrentStage::AwaitingJudgmentEffects
-            }));
+        let applied = self.applied_judgment_effects(&mut *connection).await?.len();
+        if applied < planned_members {
+            return Ok(
+                if self
+                    .judgment_was_interrupted(&mut *connection, applied)
+                    .await?
+                {
+                    ReviewOrchestrationCurrentStage::JudgmentIncomplete
+                } else {
+                    ReviewOrchestrationCurrentStage::AwaitingJudgmentEffects
+                },
+            );
         }
-        let Some(_) = load_finding_inventory(self, attempt, "repair").await? else {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingRepair));
-        };
-        let Some(repairs) = load_repairs(self, attempt).await? else {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingRepair));
+        if !self.repair_inventory_sealed(&mut *connection).await? {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingRepair);
+        }
+        let Some(repairs) = self.repair_outcomes(&mut *connection).await? else {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingRepair);
         };
         if repairs
             .iter()
             .any(|outcome| matches!(outcome, ReviewRepairMemberOutcome::Blocked(_)))
         {
-            return Ok(Some(ReviewOrchestrationCurrentStage::RepairIncomplete));
+            return Ok(ReviewOrchestrationCurrentStage::RepairIncomplete);
         }
-        let Some(_) = load_finding_inventory(self, attempt, "publication").await? else {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingPublication));
+        if !self.publication_inventory_sealed(&mut *connection).await? {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingPublication);
+        }
+        let Some(publications) = self.publication_outcomes(&mut *connection).await? else {
+            return Ok(ReviewOrchestrationCurrentStage::AwaitingPublication);
         };
-        let Some(publications) = load_publications(self, attempt).await? else {
-            return Ok(Some(ReviewOrchestrationCurrentStage::AwaitingPublication));
-        };
-        Ok(Some(
+        Ok(
             if publications
                 .iter()
                 .all(|outcome| matches!(outcome, ReviewPublicationMemberOutcome::Published(_)))
@@ -377,86 +451,157 @@ impl PostgresReviewOrchestrationStore {
             } else {
                 ReviewOrchestrationCurrentStage::PublicationIncomplete
             },
-        ))
+        )
     }
 
-    /// Loads every daemon adapter fact from one coherently locked database view.
-    ///
-    /// Snapshot admission is database-global and transaction-scoped. The
-    /// admitted transaction holds shared locks across every review table used
-    /// by canonical reconstruction while the existing workflow loaders use the
-    /// same configured pool. Concurrent snapshots release unsuccessful
-    /// admission attempts before an exponentially backed-off retry; the wait
-    /// begins at 10 ms and is capped at 100 ms, preserving one reader connection
-    /// without polling PostgreSQL on every scheduler turn.
-    pub async fn load_snapshot(
-        &self,
-        attempt: ReviewOrchestrationAttemptId,
-    ) -> Result<Option<ReviewOrchestrationSnapshotFacts>, ReviewOrchestrationStoreError> {
-        if self.pool.options().get_max_connections() < 2 {
-            return Err(corruption(
-                "review orchestration snapshots require two configured pool connections",
-            ));
-        }
-        let snapshot_keeper = self.begin_snapshot_guard().await?;
-        let result = self.load_snapshot_while_locked(attempt).await;
-        let released = snapshot_keeper.rollback().await;
-        let facts = result?;
-        released?;
-        Ok(facts)
-    }
-
-    async fn begin_snapshot_guard(
-        &self,
-    ) -> Result<Transaction<'_, Postgres>, ReviewOrchestrationStoreError> {
-        bounded_snapshot_admission(self.wait_for_snapshot_guard()).await
-    }
-
-    async fn wait_for_snapshot_guard(
-        &self,
-    ) -> Result<Transaction<'_, Postgres>, ReviewOrchestrationStoreError> {
-        let mut backoff = SNAPSHOT_ADMISSION_INITIAL_BACKOFF;
-        loop {
-            let mut transaction = self.pool.begin().await?;
-            let admitted: bool = sqlx::query_scalar(
-                "SELECT pg_try_advisory_xact_lock(
-                    hashtext('signalbox:review-orchestration'),
-                    hashtext('coherent-snapshot'))",
-            )
-            .fetch_one(&mut *transaction)
-            .await?;
-            if admitted {
-                sqlx::query(REVIEW_SNAPSHOT_LOCKS)
-                    .execute(&mut *transaction)
-                    .await?;
-                return Ok(transaction);
-            }
-            transaction.rollback().await?;
-            tokio::time::sleep(backoff).await;
-            backoff = std::cmp::min(backoff.saturating_mul(2), SNAPSHOT_ADMISSION_MAX_BACKOFF);
-        }
-    }
-
-    async fn load_snapshot_while_locked(
-        &self,
-        attempt: ReviewOrchestrationAttemptId,
-    ) -> Result<Option<ReviewOrchestrationSnapshotFacts>, ReviewOrchestrationStoreError> {
-        let Some(immutable) = self.load_attempt(attempt).await? else {
-            return Ok(None);
-        };
-        let current_stage = self
-            .current_stage(attempt)
-            .await?
-            .ok_or_else(|| corruption("snapshot attempt disappeared"))?;
-        Ok(Some(ReviewOrchestrationSnapshotFacts {
-            attempt: immutable,
+    /// Forces the facts the snapshot reports that the stage ladder may have
+    /// short-circuited before reaching, then assembles the projection.
+    async fn into_snapshot_facts(
+        mut self,
+        connection: &mut PgConnection,
+        current_stage: ReviewOrchestrationCurrentStage,
+    ) -> Result<ReviewOrchestrationSnapshotFacts, ReviewOrchestrationStoreError> {
+        self.concern_claims(&mut *connection).await?;
+        self.judgment_plan(&mut *connection).await?;
+        self.applied_judgment_effects(&mut *connection).await?;
+        self.repair_outcomes(&mut *connection).await?;
+        self.publication_outcomes(&mut *connection).await?;
+        Ok(ReviewOrchestrationSnapshotFacts {
+            attempt: self.immutable,
             current_stage,
-            concern_claims: self.load_concern_claims(attempt).await?,
-            judgment_plan: self.load_judgment_plan(attempt).await?,
-            applied_judgment_effects: self.load_applied_judgment_effects(attempt).await?,
-            repair_outcomes: self.load_repair_outcomes(attempt).await?,
-            publication_outcomes: self.load_publication_outcomes(attempt).await?,
-        }))
+            concern_claims: self.concern_claims.unwrap_or_default(),
+            judgment_plan: self.judgment_plan.flatten(),
+            applied_judgment_effects: self.applied_judgment_effects.unwrap_or_default(),
+            repair_outcomes: self.repair_outcomes.flatten(),
+            publication_outcomes: self.publication_outcomes.flatten(),
+        })
+    }
+
+    async fn import(
+        &mut self,
+        connection: &mut PgConnection,
+    ) -> Result<Option<&ReviewImportOutcome>, ReviewOrchestrationStoreError> {
+        if self.import.is_none() {
+            self.import = Some(
+                self.store
+                    .load_import_on_connection(connection, self.attempt)
+                    .await?,
+            );
+        }
+        Ok(self.import.as_ref().and_then(Option::as_ref))
+    }
+
+    async fn concern_claims(
+        &mut self,
+        connection: &mut PgConnection,
+    ) -> Result<&[ReviewConcernClaim], ReviewOrchestrationStoreError> {
+        if self.concern_claims.is_none() {
+            self.concern_claims = Some(
+                self.store
+                    .load_concern_claims_on_connection(connection, self.attempt)
+                    .await?,
+            );
+        }
+        Ok(self.concern_claims.as_deref().unwrap_or_default())
+    }
+
+    async fn judgment_plan(
+        &mut self,
+        connection: &mut PgConnection,
+    ) -> Result<Option<&ReviewJudgmentPlan>, ReviewOrchestrationStoreError> {
+        if self.judgment_plan.is_none() {
+            self.judgment_plan =
+                Some(load_judgment_plan_on_connection(self.store, connection, self.attempt).await?);
+        }
+        Ok(self.judgment_plan.as_ref().and_then(Option::as_ref))
+    }
+
+    async fn applied_judgment_effects(
+        &mut self,
+        connection: &mut PgConnection,
+    ) -> Result<&[ReviewJudgmentEffectId], ReviewOrchestrationStoreError> {
+        if self.applied_judgment_effects.is_none() {
+            self.applied_judgment_effects =
+                Some(load_applied_effects_on_connection(connection, self.attempt).await?);
+        }
+        Ok(self.applied_judgment_effects.as_deref().unwrap_or_default())
+    }
+
+    async fn repair_inventory_sealed(
+        &mut self,
+        connection: &mut PgConnection,
+    ) -> Result<bool, ReviewOrchestrationStoreError> {
+        if self.repair_inventory_sealed.is_none() {
+            self.repair_inventory_sealed = Some(
+                load_finding_inventory_on_connection(connection, self.attempt, "repair")
+                    .await?
+                    .is_some(),
+            );
+        }
+        Ok(self.repair_inventory_sealed.unwrap_or_default())
+    }
+
+    async fn repair_outcomes(
+        &mut self,
+        connection: &mut PgConnection,
+    ) -> Result<Option<&[ReviewRepairMemberOutcome]>, ReviewOrchestrationStoreError> {
+        if self.repair_outcomes.is_none() {
+            self.repair_outcomes =
+                Some(load_repairs_on_connection(self.store, connection, self.attempt).await?);
+        }
+        Ok(self.repair_outcomes.as_ref().and_then(Option::as_deref))
+    }
+
+    async fn publication_inventory_sealed(
+        &mut self,
+        connection: &mut PgConnection,
+    ) -> Result<bool, ReviewOrchestrationStoreError> {
+        if self.publication_inventory_sealed.is_none() {
+            self.publication_inventory_sealed = Some(
+                load_finding_inventory_on_connection(connection, self.attempt, "publication")
+                    .await?
+                    .is_some(),
+            );
+        }
+        Ok(self.publication_inventory_sealed.unwrap_or_default())
+    }
+
+    async fn publication_outcomes(
+        &mut self,
+        connection: &mut PgConnection,
+    ) -> Result<Option<&[ReviewPublicationMemberOutcome]>, ReviewOrchestrationStoreError> {
+        if self.publication_outcomes.is_none() {
+            self.publication_outcomes =
+                Some(load_publications_on_connection(self.store, connection, self.attempt).await?);
+        }
+        Ok(self
+            .publication_outcomes
+            .as_ref()
+            .and_then(Option::as_deref))
+    }
+
+    async fn judgment_was_interrupted(
+        &self,
+        connection: &mut PgConnection,
+        applied: usize,
+    ) -> Result<bool, ReviewOrchestrationStoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM review_orchestration_command
+                 WHERE attempt_id = $1
+                   AND result_stage = 'judgment_incomplete'
+                   AND judgment_effect_count = $2
+                UNION ALL
+                SELECT 1 FROM review_orchestration_command_recovery
+                 WHERE attempt_id = $1
+                   AND result_stage = 'judgment_incomplete'
+                   AND judgment_effect_count = $2
+            )",
+        )
+        .bind(self.attempt.as_uuid())
+        .bind(count_i64(applied)?)
+        .fetch_one(connection)
+        .await?)
     }
 }
 
@@ -755,56 +900,12 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
         &self,
         attempt: ReviewOrchestrationAttemptId,
     ) -> Result<Option<ReviewImportOutcome>, Self::Error> {
-        let row = sqlx::query(
-            "SELECT outcome_kind, pass_id, external_link_id, template_digest, context_digest
-               FROM review_orchestration_import WHERE attempt_id = $1",
-        )
-        .bind(attempt.as_uuid())
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some(row) = row else { return Ok(None) };
-        let kind: String = row.try_get("outcome_kind")?;
-        let template = decode_digest(row.try_get("template_digest")?)?;
-        let pass_id: Option<Uuid> = row.try_get("pass_id")?;
-        let outcome = match kind.as_str() {
-            "succeeded" => {
-                let pass_id = pass_id.ok_or_else(|| corruption("succeeded import lacks pass"))?;
-                let (pass, run) = self.load_evidence(ReviewPassId::from_uuid(pass_id)).await?;
-                let link = match row.try_get::<Option<Uuid>, _>("external_link_id")? {
-                    Some(id) => Some(Box::new(
-                        self.workflow
-                            .load_external_link(ReviewExternalLinkId::from_uuid(id))
-                            .await?
-                            .ok_or_else(|| corruption("import link is missing"))?,
-                    )),
-                    None => None,
-                };
-                ReviewImportOutcome::Succeeded {
-                    context: ReviewImportedContextEvidence::new(
-                        pass.reference(),
-                        decode_bytes(row.try_get("context_digest")?)?,
-                    ),
-                    pass: Box::new(pass),
-                    run,
-                    external_link: link,
-                    template_digest: template,
-                }
-            }
-            "failed" | "blocked" | "cancelled" => {
-                let evidence = match pass_id {
-                    Some(id) => Some(self.load_evidence(ReviewPassId::from_uuid(id)).await?),
-                    None => None,
-                };
-                ReviewImportOutcome::Incomplete {
-                    pass: evidence.as_ref().map(|(pass, _)| Box::new(pass.clone())),
-                    run: evidence.map(|(_, run)| run),
-                    template_digest: template,
-                    status: decode_incomplete_status(&kind)?,
-                }
-            }
-            _ => return Err(corruption("import outcome kind is not closed")),
-        };
-        Ok(Some(outcome))
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .load_import_on_connection(&mut transaction, attempt)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
     }
 
     async fn record_import(
@@ -855,32 +956,12 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
         &self,
         attempt: ReviewOrchestrationAttemptId,
     ) -> Result<Vec<ReviewConcernClaim>, Self::Error> {
-        let rows = sqlx::query(
-            "SELECT DISTINCT ON (concern_key)
-                    concern_key, claim_ordinal, template_digest, outcome_kind, pass_id
-               FROM review_orchestration_concern_claim
-              WHERE attempt_id = $1
-              ORDER BY concern_key, claim_ordinal DESC",
-        )
-        .bind(attempt.as_uuid())
-        .fetch_all(&self.pool)
-        .await?;
-        let mut claims = Vec::with_capacity(rows.len());
-        for row in rows {
-            claims.push(self.decode_concern_claim(attempt, &row).await?);
-        }
-        let immutable = self
-            .load_attempt(attempt)
-            .await?
-            .ok_or_else(|| corruption("concern claims name a missing attempt"))?;
-        claims.sort_by_key(|claim| {
-            immutable
-                .concerns()
-                .iter()
-                .position(|expected| expected.key() == claim.concern())
-                .unwrap_or(usize::MAX)
-        });
-        Ok(claims)
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .load_concern_claims_on_connection(&mut transaction, attempt)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
     }
 
     async fn record_concern_claim(
@@ -1111,19 +1192,135 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
 }
 
 impl PostgresReviewOrchestrationStore {
+    async fn load_import_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        attempt: ReviewOrchestrationAttemptId,
+    ) -> Result<Option<ReviewImportOutcome>, ReviewOrchestrationStoreError> {
+        let row = sqlx::query(
+            "SELECT outcome_kind, pass_id, external_link_id, template_digest, context_digest
+               FROM review_orchestration_import WHERE attempt_id = $1",
+        )
+        .bind(attempt.as_uuid())
+        .fetch_optional(&mut *connection)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let kind: String = row.try_get("outcome_kind")?;
+        let template = decode_digest(row.try_get("template_digest")?)?;
+        let pass_id: Option<Uuid> = row.try_get("pass_id")?;
+        let outcome = match kind.as_str() {
+            "succeeded" => {
+                let pass_id = pass_id.ok_or_else(|| corruption("succeeded import lacks pass"))?;
+                let (pass, run) = self
+                    .load_evidence_on_connection(&mut *connection, ReviewPassId::from_uuid(pass_id))
+                    .await?;
+                let link = match row.try_get::<Option<Uuid>, _>("external_link_id")? {
+                    Some(id) => Some(Box::new(
+                        ReviewWorkflowStore::load_external_link_on_connection(
+                            &mut *connection,
+                            ReviewExternalLinkId::from_uuid(id),
+                        )
+                        .await?
+                        .ok_or_else(|| corruption("import link is missing"))?,
+                    )),
+                    None => None,
+                };
+                ReviewImportOutcome::Succeeded {
+                    context: ReviewImportedContextEvidence::new(
+                        pass.reference(),
+                        decode_bytes(row.try_get("context_digest")?)?,
+                    ),
+                    pass: Box::new(pass),
+                    run,
+                    external_link: link,
+                    template_digest: template,
+                }
+            }
+            "failed" | "blocked" | "cancelled" => {
+                let evidence = match pass_id {
+                    Some(id) => Some(
+                        self.load_evidence_on_connection(
+                            &mut *connection,
+                            ReviewPassId::from_uuid(id),
+                        )
+                        .await?,
+                    ),
+                    None => None,
+                };
+                ReviewImportOutcome::Incomplete {
+                    pass: evidence.as_ref().map(|(pass, _)| Box::new(pass.clone())),
+                    run: evidence.map(|(_, run)| run),
+                    template_digest: template,
+                    status: decode_incomplete_status(&kind)?,
+                }
+            }
+            _ => return Err(corruption("import outcome kind is not closed")),
+        };
+        Ok(Some(outcome))
+    }
+
+    async fn load_concern_claims_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        attempt: ReviewOrchestrationAttemptId,
+    ) -> Result<Vec<ReviewConcernClaim>, ReviewOrchestrationStoreError> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT ON (concern_key)
+                    concern_key, claim_ordinal, template_digest, outcome_kind, pass_id
+               FROM review_orchestration_concern_claim
+              WHERE attempt_id = $1
+              ORDER BY concern_key, claim_ordinal DESC",
+        )
+        .bind(attempt.as_uuid())
+        .fetch_all(&mut *connection)
+        .await?;
+        let mut claims = Vec::with_capacity(rows.len());
+        for row in rows {
+            claims.push(
+                self.decode_concern_claim_on_connection(&mut *connection, attempt, &row)
+                    .await?,
+            );
+        }
+        let immutable = self
+            .load_attempt_on_connection(&mut *connection, attempt)
+            .await?
+            .ok_or_else(|| corruption("concern claims name a missing attempt"))?;
+        claims.sort_by_key(|claim| {
+            immutable
+                .concerns()
+                .iter()
+                .position(|expected| expected.key() == claim.concern())
+                .unwrap_or(usize::MAX)
+        });
+        Ok(claims)
+    }
+
     async fn load_evidence(
         &self,
         pass_id: ReviewPassId,
     ) -> Result<(ReviewPassEvidence, ReviewRunEvidence), ReviewOrchestrationStoreError> {
-        let pass = self
-            .workflow
-            .load_pass(pass_id)
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .load_evidence_on_connection(&mut transaction, pass_id)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
+    }
+
+    async fn load_evidence_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        pass_id: ReviewPassId,
+    ) -> Result<(ReviewPassEvidence, ReviewRunEvidence), ReviewOrchestrationStoreError> {
+        let pass = load_pass_on_connection(&mut *connection, pass_id)
             .await?
-            .ok_or_else(|| corruption("referenced review pass is missing"))?;
+            .ok_or_else(|| corruption("referenced review pass is missing"))?
+            .pass;
         let run = self
             .workflow
-            .load_run(pass.reference().run().run())
+            .load_run_with_pass_on_connection(&mut *connection, pass.reference().run().run())
             .await?
+            .map(|(run, _)| run)
             .ok_or_else(|| corruption("referenced review run is missing"))?;
         Ok((
             ReviewPassEvidence::from_pass(&pass, run.policy()),
@@ -1136,6 +1333,20 @@ impl PostgresReviewOrchestrationStore {
         attempt: ReviewOrchestrationAttemptId,
         row: &PgRow,
     ) -> Result<ReviewConcernClaim, ReviewOrchestrationStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .decode_concern_claim_on_connection(&mut transaction, attempt, row)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
+    }
+
+    async fn decode_concern_claim_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        attempt: ReviewOrchestrationAttemptId,
+        row: &PgRow,
+    ) -> Result<ReviewConcernClaim, ReviewOrchestrationStoreError> {
         let concern = decode_key(row.try_get("concern_key")?)?;
         let template = decode_digest(row.try_get("template_digest")?)?;
         let kind: String = row.try_get("outcome_kind")?;
@@ -1144,29 +1355,40 @@ impl PostgresReviewOrchestrationStore {
         let outcome = match kind.as_str() {
             "succeeded" => {
                 let (producer, run) = self
-                    .load_evidence(pass.ok_or_else(|| corruption("successful claim lacks pass"))?)
+                    .load_evidence_on_connection(
+                        &mut *connection,
+                        pass.ok_or_else(|| corruption("successful claim lacks pass"))?,
+                    )
                     .await?;
                 let findings = self
-                    .load_claim_findings(attempt, concern.as_str(), row.try_get("claim_ordinal")?)
+                    .load_claim_findings_on_connection(
+                        &mut *connection,
+                        attempt,
+                        concern.as_str(),
+                        row.try_get("claim_ordinal")?,
+                    )
                     .await?;
                 ReviewConcernOutcome::Succeeded(Box::new(ReviewConcernSuccess::new(
                     producer, run, template, findings,
                 )))
             }
             "failed" => ReviewConcernOutcome::Failed {
-                pass: self.pass_ref(pass).await?,
+                pass: self.pass_ref_on_connection(&mut *connection, pass).await?,
             },
             "blocked" => ReviewConcernOutcome::Blocked {
-                pass: self.pass_ref(pass).await?,
+                pass: self.pass_ref_on_connection(&mut *connection, pass).await?,
             },
             "cancelled" => ReviewConcernOutcome::Cancelled {
                 pass: match pass {
-                    Some(pass) => Some(self.pass_ref(Some(pass)).await?),
+                    Some(pass) => Some(
+                        self.pass_ref_on_connection(&mut *connection, Some(pass))
+                            .await?,
+                    ),
                     None => None,
                 },
             },
             "superseded" => ReviewConcernOutcome::Superseded {
-                pass: self.pass_ref(pass).await?,
+                pass: self.pass_ref_on_connection(&mut *connection, pass).await?,
             },
             _ => return Err(corruption("concern outcome kind is not closed")),
         };
@@ -1177,16 +1399,30 @@ impl PostgresReviewOrchestrationStore {
         &self,
         pass: Option<ReviewPassId>,
     ) -> Result<ReviewPassRef, ReviewOrchestrationStoreError> {
-        Ok(self
-            .workflow
-            .load_pass(pass.ok_or_else(|| corruption("claim lacks pass"))?)
-            .await?
-            .ok_or_else(|| corruption("claim pass is missing"))?
-            .reference())
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self.pass_ref_on_connection(&mut transaction, pass).await?;
+        transaction.commit().await?;
+        Ok(loaded)
     }
 
-    async fn load_claim_findings(
+    async fn pass_ref_on_connection(
         &self,
+        connection: &mut PgConnection,
+        pass: Option<ReviewPassId>,
+    ) -> Result<ReviewPassRef, ReviewOrchestrationStoreError> {
+        Ok(load_pass_on_connection(
+            connection,
+            pass.ok_or_else(|| corruption("claim lacks pass"))?,
+        )
+        .await?
+        .ok_or_else(|| corruption("claim pass is missing"))?
+        .pass
+        .reference())
+    }
+
+    async fn load_claim_findings_on_connection(
+        &self,
+        connection: &mut PgConnection,
         attempt: ReviewOrchestrationAttemptId,
         concern: &str,
         claim_ordinal: i32,
@@ -1199,18 +1435,25 @@ impl PostgresReviewOrchestrationStore {
         .bind(attempt.as_uuid())
         .bind(concern)
         .bind(claim_ordinal)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await?;
-        let mut findings = Vec::with_capacity(rows.len());
-        for row in rows {
-            let current = self
-                .workflow
-                .load_finding(ReviewFindingId::from_uuid(row.try_get("finding_id")?))
-                .await?
-                .ok_or_else(|| corruption("concern finding is missing"))?;
-            findings.push(ReviewFinding::new(current.proposal().clone()));
-        }
-        Ok(findings)
+        let identities = rows
+            .iter()
+            .map(|row| Ok(ReviewFindingId::from_uuid(row.try_get("finding_id")?)))
+            .collect::<Result<Vec<_>, ReviewOrchestrationStoreError>>()?;
+        let loaded = self
+            .workflow
+            .load_findings_on_connection(&mut *connection, &identities)
+            .await?;
+        identities
+            .iter()
+            .map(|identity| {
+                loaded
+                    .get(identity)
+                    .map(|finding| ReviewFinding::new(finding.proposal().clone()))
+                    .ok_or_else(|| corruption("concern finding is missing"))
+            })
+            .collect()
     }
 
     async fn verify_claim_evidence(
@@ -1224,13 +1467,17 @@ impl PostgresReviewOrchestrationStore {
                     "concern success differs from canonical pass evidence",
                 ));
             }
+            let identities = success
+                .findings()
+                .iter()
+                .map(|finding| finding.proposal().reference().finding())
+                .collect::<Vec<_>>();
+            let canonical = self.workflow.load_findings(&identities).await?;
             for finding in success.findings() {
-                let canonical = self
-                    .workflow
-                    .load_finding(finding.proposal().reference().finding())
-                    .await?
+                let loaded = canonical
+                    .get(&finding.proposal().reference().finding())
                     .ok_or_else(|| corruption("concern success finding is missing"))?;
-                if canonical != *finding {
+                if loaded != finding {
                     return Err(corruption("concern success differs from canonical finding"));
                 }
             }
@@ -1404,16 +1651,30 @@ async fn load_judgment_plan_impl(
     store: &PostgresReviewOrchestrationStore,
     attempt: ReviewOrchestrationAttemptId,
 ) -> Result<Option<ReviewJudgmentPlan>, ReviewOrchestrationStoreError> {
+    let mut transaction = begin_repeatable_read(&store.pool).await?;
+    let loaded = load_judgment_plan_on_connection(store, &mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(loaded)
+}
+
+async fn load_judgment_plan_on_connection(
+    store: &PostgresReviewOrchestrationStore,
+    connection: &mut PgConnection,
+    attempt: ReviewOrchestrationAttemptId,
+) -> Result<Option<ReviewJudgmentPlan>, ReviewOrchestrationStoreError> {
     let row = sqlx::query(
         "SELECT analysis_pass_id, template_digest
            FROM review_orchestration_judgment_plan WHERE attempt_id = $1",
     )
     .bind(attempt.as_uuid())
-    .fetch_optional(&store.pool)
+    .fetch_optional(&mut *connection)
     .await?;
     let Some(row) = row else { return Ok(None) };
     let (pass, run) = store
-        .load_evidence(ReviewPassId::from_uuid(row.try_get("analysis_pass_id")?))
+        .load_evidence_on_connection(
+            &mut *connection,
+            ReviewPassId::from_uuid(row.try_get("analysis_pass_id")?),
+        )
         .await?;
     let rows = sqlx::query(
         "SELECT member.finding_id, member.finding_run_id, member.finding_pass_id,
@@ -1425,7 +1686,7 @@ async fn load_judgment_plan_impl(
           WHERE member.attempt_id = $1 ORDER BY member_ordinal",
     )
     .bind(attempt.as_uuid())
-    .fetch_all(&store.pool)
+    .fetch_all(&mut *connection)
     .await?;
     let mut members = Vec::with_capacity(rows.len());
     for row in rows {
@@ -1465,6 +1726,16 @@ async fn load_applied_effects_impl(
     store: &PostgresReviewOrchestrationStore,
     attempt: ReviewOrchestrationAttemptId,
 ) -> Result<Vec<ReviewJudgmentEffectId>, ReviewOrchestrationStoreError> {
+    let mut transaction = begin_repeatable_read(&store.pool).await?;
+    let loaded = load_applied_effects_on_connection(&mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(loaded)
+}
+
+async fn load_applied_effects_on_connection(
+    connection: &mut PgConnection,
+    attempt: ReviewOrchestrationAttemptId,
+) -> Result<Vec<ReviewJudgmentEffectId>, ReviewOrchestrationStoreError> {
     let rows = sqlx::query(
         "SELECT member.finding_id, member.finding_run_id, member.finding_pass_id,
                 attempt_row.target_id
@@ -1477,7 +1748,7 @@ async fn load_applied_effects_impl(
           WHERE effect.attempt_id = $1 ORDER BY effect.effect_ordinal",
     )
     .bind(attempt.as_uuid())
-    .fetch_all(&store.pool)
+    .fetch_all(&mut *connection)
     .await?;
     rows.iter()
         .map(|row| {
@@ -1586,6 +1857,17 @@ async fn load_finding_inventory(
     attempt: ReviewOrchestrationAttemptId,
     stage: &'static str,
 ) -> Result<Option<Vec<ReviewFindingRef>>, ReviewOrchestrationStoreError> {
+    let mut transaction = begin_repeatable_read(&store.pool).await?;
+    let loaded = load_finding_inventory_on_connection(&mut transaction, attempt, stage).await?;
+    transaction.commit().await?;
+    Ok(loaded)
+}
+
+async fn load_finding_inventory_on_connection(
+    connection: &mut PgConnection,
+    attempt: ReviewOrchestrationAttemptId,
+    stage: &'static str,
+) -> Result<Option<Vec<ReviewFindingRef>>, ReviewOrchestrationStoreError> {
     let (seal_sql, member_sql) = match stage {
         "repair" => (
             "SELECT 1 FROM review_orchestration_repair_inventory_seal WHERE attempt_id = $1",
@@ -1607,7 +1889,7 @@ async fn load_finding_inventory(
     };
     if sqlx::query(seal_sql)
         .bind(attempt.as_uuid())
-        .fetch_optional(&store.pool)
+        .fetch_optional(&mut *connection)
         .await?
         .is_none()
     {
@@ -1615,7 +1897,7 @@ async fn load_finding_inventory(
     }
     let rows = sqlx::query(member_sql)
         .bind(attempt.as_uuid())
-        .fetch_all(&store.pool)
+        .fetch_all(&mut *connection)
         .await?;
     Ok(Some(
         rows.iter()
@@ -1694,15 +1976,26 @@ async fn load_repairs(
     store: &PostgresReviewOrchestrationStore,
     attempt: ReviewOrchestrationAttemptId,
 ) -> Result<Option<Vec<ReviewRepairMemberOutcome>>, ReviewOrchestrationStoreError> {
+    let mut transaction = begin_repeatable_read(&store.pool).await?;
+    let loaded = load_repairs_on_connection(store, &mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(loaded)
+}
+
+async fn load_repairs_on_connection(
+    store: &PostgresReviewOrchestrationStore,
+    connection: &mut PgConnection,
+    attempt: ReviewOrchestrationAttemptId,
+) -> Result<Option<Vec<ReviewRepairMemberOutcome>>, ReviewOrchestrationStoreError> {
     if sqlx::query("SELECT 1 FROM review_orchestration_repair_outcome_seal WHERE attempt_id = $1")
         .bind(attempt.as_uuid())
-        .fetch_optional(&store.pool)
+        .fetch_optional(&mut *connection)
         .await?
         .is_none()
     {
         return Ok(None);
     }
-    let inventory = load_finding_inventory(store, attempt, "repair")
+    let inventory = load_finding_inventory_on_connection(&mut *connection, attempt, "repair")
         .await?
         .ok_or_else(|| corruption("repair outcome seal lacks inventory"))?;
     let rows = sqlx::query(
@@ -1711,11 +2004,24 @@ async fn load_repairs(
           WHERE attempt_id = $1 ORDER BY member_ordinal",
     )
     .bind(attempt.as_uuid())
-    .fetch_all(&store.pool)
+    .fetch_all(&mut *connection)
     .await?;
     if rows.len() != inventory.len() {
         return Err(corruption("repair outcomes do not cover their inventory"));
     }
+    // Every fixed member reads its own event out of a complete finding, so the
+    // whole set is reconstructed once here rather than one target graph per
+    // member.
+    let mut fixed = Vec::new();
+    for row in &rows {
+        if row.try_get::<String, _>("outcome_kind")? == "fixed" {
+            fixed.push(ReviewFindingId::from_uuid(row.try_get("finding_id")?));
+        }
+    }
+    let repaired = store
+        .workflow
+        .load_findings_on_connection(&mut *connection, &fixed)
+        .await?;
     let mut outcomes = Vec::with_capacity(rows.len());
     for (row, finding_ref) in rows.iter().zip(inventory) {
         if ReviewFindingId::from_uuid(row.try_get("finding_id")?) != finding_ref.finding() {
@@ -1724,10 +2030,8 @@ async fn load_repairs(
         let kind: String = row.try_get("outcome_kind")?;
         outcomes.push(match kind.as_str() {
             "fixed" => {
-                let finding = store
-                    .workflow
-                    .load_finding(finding_ref.finding())
-                    .await?
+                let finding = repaired
+                    .get(&finding_ref.finding())
                     .ok_or_else(|| corruption("fixed finding is missing"))?;
                 let ordinal = usize::try_from(row.try_get::<i64, _>("event_ordinal")?)
                     .ok()
@@ -1824,17 +2128,28 @@ async fn load_publications(
     store: &PostgresReviewOrchestrationStore,
     attempt: ReviewOrchestrationAttemptId,
 ) -> Result<Option<Vec<ReviewPublicationMemberOutcome>>, ReviewOrchestrationStoreError> {
+    let mut transaction = begin_repeatable_read(&store.pool).await?;
+    let loaded = load_publications_on_connection(store, &mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(loaded)
+}
+
+async fn load_publications_on_connection(
+    store: &PostgresReviewOrchestrationStore,
+    connection: &mut PgConnection,
+    attempt: ReviewOrchestrationAttemptId,
+) -> Result<Option<Vec<ReviewPublicationMemberOutcome>>, ReviewOrchestrationStoreError> {
     if sqlx::query(
         "SELECT 1 FROM review_orchestration_publication_outcome_seal WHERE attempt_id = $1",
     )
     .bind(attempt.as_uuid())
-    .fetch_optional(&store.pool)
+    .fetch_optional(&mut *connection)
     .await?
     .is_none()
     {
         return Ok(None);
     }
-    let inventory = load_finding_inventory(store, attempt, "publication")
+    let inventory = load_finding_inventory_on_connection(&mut *connection, attempt, "publication")
         .await?
         .ok_or_else(|| corruption("publication outcome seal lacks inventory"))?;
     let rows = sqlx::query(
@@ -1843,7 +2158,7 @@ async fn load_publications(
           WHERE attempt_id = $1 ORDER BY member_ordinal",
     )
     .bind(attempt.as_uuid())
-    .fetch_all(&store.pool)
+    .fetch_all(&mut *connection)
     .await?;
     if rows.len() != inventory.len() {
         return Err(corruption(
@@ -1858,17 +2173,19 @@ async fn load_publications(
         let kind: String = row.try_get("outcome_kind")?;
         outcomes.push(match kind.as_str() {
             "published" => {
-                let link = store
-                    .workflow
-                    .load_external_link(ReviewExternalLinkId::from_uuid(
-                        row.try_get("external_link_id")?,
-                    ))
-                    .await?
-                    .ok_or_else(|| corruption("published external link is missing"))?;
+                let link = ReviewWorkflowStore::load_external_link_on_connection(
+                    &mut *connection,
+                    ReviewExternalLinkId::from_uuid(row.try_get("external_link_id")?),
+                )
+                .await?
+                .ok_or_else(|| corruption("published external link is missing"))?;
                 let reference = ReviewFindingExternalLinkRef::try_new(finding, &link)
                     .map_err(|_| corruption("published link is not canonical"))?;
                 let (_, run) = store
-                    .load_evidence(reference.attachment_pass().reference().pass())
+                    .load_evidence_on_connection(
+                        &mut *connection,
+                        reference.attachment_pass().reference().pass(),
+                    )
                     .await?;
                 ReviewPublicationMemberOutcome::Published(Box::new(ReviewPublicationSuccess::new(
                     reference,
@@ -1932,21 +2249,6 @@ fn encode_disposition(
         }
         ReviewPlannedDisposition::Stale => ("stale", None, None),
     }
-}
-
-async fn bounded_snapshot_admission<Output>(
-    operation: impl Future<Output = Result<Output, ReviewOrchestrationStoreError>>,
-) -> Result<Output, ReviewOrchestrationStoreError> {
-    bounded_snapshot_admission_with_timeout(operation, SNAPSHOT_ADMISSION_TIMEOUT).await
-}
-
-async fn bounded_snapshot_admission_with_timeout<Output>(
-    operation: impl Future<Output = Result<Output, ReviewOrchestrationStoreError>>,
-    timeout: Duration,
-) -> Result<Output, ReviewOrchestrationStoreError> {
-    tokio::time::timeout(timeout, operation)
-        .await
-        .map_err(|_| ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut)?
 }
 
 fn decode_finding_ref(
@@ -2448,7 +2750,6 @@ fn ordinal_i32(value: usize) -> Result<i32, ReviewOrchestrationStoreError> {
 pub enum ReviewOrchestrationStoreError {
     Database(sqlx::Error),
     CommitAmbiguous(sqlx::Error),
-    SnapshotAdmissionTimedOut,
     Workflow(ReviewWorkflowStoreError),
     Corruption(&'static str),
 }
@@ -2463,9 +2764,6 @@ impl fmt::Display for ReviewOrchestrationStoreError {
                 formatter,
                 "review orchestration commit is ambiguous: {error}"
             ),
-            Self::SnapshotAdmissionTimedOut => {
-                formatter.write_str("review orchestration snapshot admission timed out")
-            }
             Self::Workflow(error) => write!(
                 formatter,
                 "review orchestration canonical evidence failed: {error}"
@@ -2483,7 +2781,7 @@ impl Error for ReviewOrchestrationStoreError {
         match self {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::Workflow(error) => Some(error),
-            Self::SnapshotAdmissionTimedOut | Self::Corruption(_) => None,
+            Self::Corruption(_) => None,
         }
     }
 }
@@ -2506,81 +2804,38 @@ const fn corruption(detail: &'static str) -> ReviewOrchestrationStoreError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        REVIEW_SNAPSHOT_LOCKS, ReviewOrchestrationStoreError,
-        bounded_snapshot_admission_with_timeout,
-    };
-
-    fn lock_position(table: &str) -> usize {
-        REVIEW_SNAPSHOT_LOCKS
-            .find(table)
-            .expect("the orchestration snapshot lock inventory names the table")
-    }
-
-    #[tokio::test]
-    async fn snapshot_admission_timeout_is_typed() {
-        let pending = std::future::pending::<Result<(), ReviewOrchestrationStoreError>>();
-
-        let error =
-            bounded_snapshot_admission_with_timeout(pending, std::time::Duration::from_millis(1))
-                .await
-                .expect_err("snapshot admission must be time bounded");
-
-        assert!(matches!(
-            error,
-            ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut
-        ));
-    }
-
+    /// No loader in this file may reach the database on a bare pooled
+    /// connection.
+    ///
+    /// The `*_on_connection` helpers exist so `load_snapshot` can run the whole
+    /// projection inside one `REPEATABLE READ` transaction. Handed a connection
+    /// checked straight out of the pool instead, those same helpers run each of
+    /// their statements as a separate `READ COMMITTED` autocommit statement.
+    /// That silently drops the per-loader coherence the standalone entry points
+    /// used to inherit from `ReviewWorkflowStore`'s own transactions — a
+    /// multi-statement external-link or pass load could then straddle a
+    /// concurrent commit and return exactly the torn external-link projection
+    /// that `docs/spec/review-workflows.md` rules out.
+    ///
+    /// Every standalone entry point must therefore open and commit a
+    /// transaction, so this holds for the file as a whole rather than for a
+    /// list of functions that a new loader could be added beside.
     #[test]
-    fn snapshot_locks_each_parent_and_seal_before_its_written_members() {
+    fn no_loader_reaches_the_database_on_a_bare_pooled_connection() {
+        // Assembled rather than written out, so this test does not match itself.
+        let bare = concat!("pool", ".acquire()");
+        let offenders = include_str!("review_orchestration.rs")
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(bare))
+            .map(|(index, _)| index + 1)
+            .collect::<Vec<_>>();
+
         assert!(
-            lock_position("review_orchestration_attempt,")
-                < lock_position("review_orchestration_concern,")
-        );
-        assert!(
-            lock_position("review_orchestration_concern,")
-                < lock_position("review_orchestration_concern_claim,")
-        );
-        assert!(
-            lock_position("review_orchestration_concern_claim,")
-                < lock_position("review_orchestration_concern_finding,")
-        );
-        assert!(
-            lock_position("review_orchestration_fanout_seal,")
-                < lock_position("review_orchestration_fanout_member,")
-        );
-        assert!(
-            lock_position("review_orchestration_judgment_plan,")
-                < lock_position("review_orchestration_judgment_member,")
-        );
-        assert!(
-            lock_position("review_orchestration_judgment_member,")
-                < lock_position("review_orchestration_judgment_effect,")
-        );
-        assert!(
-            lock_position("review_orchestration_repair_inventory_seal,")
-                < lock_position("review_orchestration_repair_inventory,")
-        );
-        assert!(
-            lock_position("review_orchestration_repair_inventory,")
-                < lock_position("review_orchestration_repair_outcome_seal,")
-        );
-        assert!(
-            lock_position("review_orchestration_repair_outcome_seal,")
-                < lock_position("review_orchestration_repair_outcome,")
-        );
-        assert!(
-            lock_position("review_orchestration_publication_inventory_seal,")
-                < lock_position("review_orchestration_publication_inventory,")
-        );
-        assert!(
-            lock_position("review_orchestration_publication_inventory,")
-                < lock_position("review_orchestration_publication_outcome_seal,")
-        );
-        assert!(
-            lock_position("review_orchestration_publication_outcome_seal,")
-                < lock_position("review_orchestration_publication_outcome,")
+            offenders.is_empty(),
+            "review_orchestration.rs reaches the database on a bare pooled \
+             connection at line(s) {offenders:?}; a standalone loader must open a \
+             repeatable-read transaction so its statements share one snapshot"
         );
     }
 }
