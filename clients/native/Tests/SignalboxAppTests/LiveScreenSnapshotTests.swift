@@ -31,10 +31,11 @@ import XCTest
 /// canvases are the accepted cost of a corpus that shows each screen at every
 /// shape the application ships in.
 ///
-/// Two tests skip the two phone canvases, each for a reason stated on it and
-/// each a rendering that would be wrong rather than redundant: the Templates
-/// gate has no compact destination to enter it through, and the presented
-/// creation sheet records clipped there. Nothing else is pruned; a
+/// Two tests prune a canvas, each for a reason stated on it and each a
+/// rendering that would be wrong rather than redundant: the Templates gate
+/// skips both phone canvases, having no compact destination to enter it
+/// through, and the presented creation sheet skips the portrait phone canvas
+/// alone, which records the form clipped. Nothing else is pruned; a
 /// near-duplicate of one screen across two canvases is a reference, not a
 /// saving.
 ///
@@ -59,9 +60,24 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// exist and the other carries the argument for why no golden is the right
     /// outcome.
     enum ScenarioDisposition {
-        /// Rendered by a test in this file or its `+LegacyScreens` extension,
-        /// on the canvases named there.
-        case rendered
+        /// Rendered by the named test, on the canvases named there.
+        ///
+        /// The name is checked rather than decorative:
+        /// `testEveryRenderedScenarioNamesATestThatExists` fails when no test on
+        /// this class defines it, and
+        /// `testNoTwoRenderedScenariosClaimTheSameTest` fails when a second
+        /// scenario points at a test that already answers for another. Together
+        /// they are what a bare `.rendered` was missing — that case could be
+        /// returned for a new scenario to clear the compile error without a
+        /// snapshot existing anywhere, and the documentation above claimed
+        /// otherwise. Discharging the decision now means writing a test.
+        ///
+        /// What it still does not prove is that the named test renders *this*
+        /// scenario; nothing here reads the argument the test passes to
+        /// `rootView(for:)`. It proves the test exists and answers for nothing
+        /// else, which is what makes the next case's cheapest path an actual
+        /// rendering.
+        case rendered(by: String)
         /// Deliberately not rendered, for the reason given.
         case refused(reason: String)
 
@@ -78,33 +94,33 @@ final class LiveScreenSnapshotTests: XCTestCase {
         static func of(_ scenario: ScreenshotScenario) -> ScenarioDisposition {
             switch scenario {
             case .setup:
-                return .rendered
+                return .rendered(by: "testTransportGateWithoutAConfiguredSocket")
             case .sessions:
-                return .rendered
+                return .rendered(by: "testSessionList")
             case .newSession:
-                return .rendered
+                return .rendered(by: "testSessionListPresentingTheCreationSheet")
             case .activeChat:
-                return .rendered
+                return .rendered(by: "testSessionTranscriptForACompletedTurn")
             case .markdownBasics:
-                return .rendered
+                return .rendered(by: "testSessionTranscriptRenderingMarkdownHeadingsAndLists")
             case .markdownTable:
-                return .rendered
+                return .rendered(by: "testSessionTranscriptRenderingAMarkdownTable")
             case .markdownCode:
-                return .rendered
+                return .rendered(by: "testSessionTranscriptRenderingMarkdownCodeAndQuotes")
             case .markdownMessage:
-                return .rendered
+                return .rendered(by: "testSessionTranscriptRenderingAMarkdownIncidentReport")
             case .pendingApproval:
-                return .rendered
+                return .rendered(by: "testSessionTranscriptWithAToolRequestAwaitingApproval")
             case .completedTool:
-                return .rendered
+                return .rendered(by: "testSessionTranscriptWithACompletedTool")
             case .failedTool:
-                return .rendered
+                return .rendered(by: "testSessionTranscriptWithAFailedTool")
             case .runners:
-                return .rendered
+                return .rendered(by: "testRunnersCapabilityGate")
             case .monitor:
-                return .rendered
+                return .rendered(by: "testMonitorCapabilityGate")
             case .settings:
-                return .rendered
+                return .rendered(by: "testSettingsScreen")
             case .artifactPreview:
                 return .refused(
                     reason: """
@@ -134,6 +150,87 @@ final class LiveScreenSnapshotTests: XCTestCase {
                 return !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
         }
+
+        /// The test this disposition names, or `nil` for a refusal.
+        var renderingTestName: String? {
+            switch self {
+            case .rendered(let name):
+                return name
+            case .refused:
+                return nil
+            }
+        }
+    }
+
+    /// The test every rendered scenario names, in `allCases` order.
+    ///
+    /// These three are computed properties rather than test bodies because they
+    /// iterate, and `docs/agents/testing-style.md` rule 2 governs test bodies.
+    /// The tests below are the straight-line assertions over what they return.
+    private static var claimedRenderingTestNames: [String] {
+        ScreenshotScenario.allCases.compactMap { ScenarioDisposition.of($0).renderingTestName }
+    }
+
+    /// The names no test on this class defines.
+    ///
+    /// `defaultTestSuite` is the enumeration XCTest itself runs, so it sees an
+    /// `async` test the Objective-C selector for one does not: a method written
+    /// `func testFoo() async` is bridged under a different selector, and asking
+    /// the runtime whether the class responds to `testFoo` would report every
+    /// test in this file missing. A name here reads `-[Class testFoo]`, so the
+    /// last space-separated component with its bracket removed is the method.
+    private static var claimedNamesMissingFromTheSuite: [String] {
+        let defined = Set(
+            defaultTestSuite.tests.map { test in
+                String(test.name.split(separator: " ").last ?? "")
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            }
+        )
+        return claimedRenderingTestNames.filter { !defined.contains($0) }.sorted()
+    }
+
+    /// The names more than one scenario claims.
+    private static var claimedNamesUsedMoreThanOnce: [String] {
+        var counts: [String: Int] = [:]
+        for name in claimedRenderingTestNames {
+            counts[name, default: 0] += 1
+        }
+        return counts.filter { $0.value > 1 }.map(\.key).sorted()
+    }
+
+    /// Every rendered scenario names a test that exists.
+    ///
+    /// This is what makes `.rendered` cost something. Without it the case was a
+    /// bare tag: a scenario added later cleared the compile error by returning
+    /// it, no snapshot had to exist, and the suite went on reporting exhaustive
+    /// coverage — the same failure the count had, one level along. The cheapest
+    /// way to discharge the decision is now writing the test.
+    func testEveryRenderedScenarioNamesATestThatExists() {
+        XCTAssertEqual(
+            Self.claimedNamesMissingFromTheSuite,
+            [],
+            """
+            A scenario says it is rendered by a test this class does not \
+            define. Write the test, or refuse the scenario with a reason.
+            """
+        )
+    }
+
+    /// No two rendered scenarios name the same test.
+    ///
+    /// The existence check alone would accept a new scenario pointing at a test
+    /// that already answers for a different one, which is the same uncovered
+    /// case reached by a shorter edit. Together the two make a new `.rendered`
+    /// require a test that exists and answers for nothing else.
+    func testNoTwoRenderedScenariosClaimTheSameTest() {
+        XCTAssertEqual(
+            Self.claimedNamesUsedMoreThanOnce,
+            [],
+            """
+            One test is claimed by more than one scenario, so at least one of \
+            them has no rendering of its own. Give it a test, or refuse it.
+            """
+        )
     }
 
     /// The one refused scenario states a reason.
@@ -181,17 +278,34 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// the scenario names it, and the presenting controller is inside the
     /// canvas window, so this renderer does capture it.
     ///
-    /// The phone canvases are skipped because their rendering is broken rather
-    /// than merely redundant. A presented sheet lays out against the
-    /// presentation's own metrics, and the sheet this screen presents is
-    /// `ProcessSessionCreationSheet`, which declares `minWidth: 520` — wider
-    /// than the 390-point phone canvas — so what those two record is the form
-    /// centred and clipped on both edges, reading "cel" and "Cr" where its
-    /// buttons are. That is the canvas cutting into a presentation, not the
-    /// application, and it is the same fact `SnapshotCanvas.sheet` exists for:
-    /// its 540-point width is what clears that minimum, and a canvas anywhere
-    /// between 390 and 519 would clip the same way.
+    /// Only the portrait phone canvas is skipped, and only because its
+    /// rendering is broken rather than merely redundant. A presented sheet lays
+    /// out against the presentation's own metrics, and the sheet this screen
+    /// presents is `ProcessSessionCreationSheet`, which declares
+    /// `minWidth: 520` — wider than the 390-point portrait canvas — so what
+    /// that one records is the form centred and clipped on both edges, reading
+    /// "cel" and "Cr" where its buttons are and "w Session" where its title is.
+    /// That is the canvas cutting into a presentation, not the application, and
+    /// it is the same fact `SnapshotCanvas.sheet` exists for: its 540-point
+    /// width is what clears that minimum.
     /// `testSessionCreationSheetContent` records the content at that width.
+    ///
+    /// The landscape phone canvas is not skipped, and the reason it once was
+    /// did not survive being looked at. It is 844 points wide, so nothing
+    /// clips; it is vertically compact, so the sheet presents full-screen the
+    /// way an iPhone in landscape presents one, and the golden shows the whole
+    /// form legible with the list fully covered. That is a presentation neither
+    /// iPad canvas records — those get the centred form sheet over a dimmed
+    /// list — so skipping it was dropping the only reference for a shape the
+    /// application ships.
+    ///
+    /// It also answers a question about this renderer worth writing down. The
+    /// suite runs in one portrait scene and never rotates it, so a fair worry
+    /// is that a landscape canvas records portrait presentation behaviour at
+    /// landscape dimensions. This golden is the measurement: an 844-point-wide
+    /// full-screen sheet on a portrait scene is presentation geometry following
+    /// the canvas and the overridden traits, not the scene. See the note on
+    /// `SnapshotCanvas.verticalSizeClass`.
     ///
     /// The number is this screen's and not the legacy one's. `CreateSessionSheet`
     /// declares `minWidth: 420`, and it is what
@@ -199,6 +313,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// would put the clipping threshold 100 points low and make a canvas that
     /// still clips look like one that fits.
     func testSessionListPresentingTheCreationSheet() async {
+        await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPhoneLandscape)
         await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPadPortrait)
         await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPadLandscape)
     }

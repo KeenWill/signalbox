@@ -199,6 +199,31 @@ extension SnapshotCanvas {
         }
     }
 
+    /// The vertical class, and the reason a landscape canvas is a landscape
+    /// reference without the scene being rotated.
+    ///
+    /// `LiveScreenRenderer` hosts every canvas in the one portrait scene the
+    /// test bundle's host application owns, and nothing requests a geometry
+    /// update, so `interfaceOrientation` stays portrait for all five. The fair
+    /// worry is that the two landscape canvases then record portrait
+    /// presentation behaviour at landscape dimensions, which would make their
+    /// goldens accept a regression confined to real landscape.
+    ///
+    /// Measured rather than assumed, on the case that would show it first. A
+    /// presented sheet is the most orientation-sensitive thing this suite
+    /// renders, and `testSessionListPresentingTheCreationSheet` records it on
+    /// `.iPhoneLandscape` as a full-screen sheet 844 points wide — which is
+    /// what a vertically compact presentation does, and is not what the
+    /// portrait scene would give it. Presentation geometry follows the canvas
+    /// and these overrides; the scene's orientation does not reach it. The
+    /// portrait canvas of that same test is the control: it records the form
+    /// clipped at 390 points, so the two differ by the canvas rather than by
+    /// the scene they share.
+    ///
+    /// What stays outside that measurement is anything reading the scene
+    /// directly. Nothing in the application does — `interfaceOrientation` and
+    /// `UIDevice` appear nowhere under `clients/native/Sources` — so the seam
+    /// is between these traits and UIKit, which is where it was measured.
     private var verticalSizeClass: UIUserInterfaceSizeClass {
         switch self {
         case .iPhoneLandscape:
