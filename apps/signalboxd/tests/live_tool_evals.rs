@@ -1169,6 +1169,7 @@ impl FamilySuite {
                 case: ExecEvalCase::Natural,
             }),
             workspace_seed_entries: BTreeMap::new(),
+            workspace_seed_modified_times: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
