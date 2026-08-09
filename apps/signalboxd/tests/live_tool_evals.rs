@@ -25,7 +25,8 @@ use std::{
 };
 
 use git2::{
-    BranchType, Delta, DiffOptions, IndexAddOption, Oid, Patch, Repository, Signature, Status,
+    BranchType, Delta, DiffOptions, IndexAddOption, Oid, Patch, Repository, RepositoryState,
+    Signature, Status,
 };
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -155,8 +156,10 @@ const GIT_RESTORE_BRANCH_REFLOG_MESSAGE: &str = "restore synthetic seeded branch
 const GIT_MERGE_HEAD_PATH: &str = "MERGE_HEAD";
 const GIT_MERGE_MESSAGE_PATH: &str = "MERGE_MSG";
 const GIT_MERGE_MODE_PATH: &str = "MERGE_MODE";
+const GIT_CHERRY_PICK_HEAD_PATH: &str = "CHERRY_PICK_HEAD";
 const GIT_MERGE_MESSAGE: &str = "synthetic forced merge\n";
 const GIT_MERGE_MODE: &str = "";
+const GIT_REGULAR_FILE_MODE: i32 = 0o100644;
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
 const WORKSPACE_SEED: &str = "alpha\nbeta fixture\nalpha\n";
 const WORKSPACE_GLOB_DIRECTORY: &str = "glob-scope";
@@ -174,6 +177,10 @@ const WORKSPACE_FORCED_READ_MAX_BYTES: usize = 6;
 const WORKSPACE_DRIFTED_SEED: &str = "alpha\nbeta fixturE\nalpha\n";
 #[cfg(unix)]
 const USER_EXECUTE_MODE_BIT: u32 = 0o100;
+#[cfg(unix)]
+const WORKSPACE_CREATED_FILE_MODE: Option<u32> = Some(0o600);
+#[cfg(not(unix))]
+const WORKSPACE_CREATED_FILE_MODE: Option<u32> = None;
 const SYNTHETIC_WRONG_STAGED_PATH_COUNT: usize = 0;
 const SYNTHETIC_WRONG_COMMIT_ID: &str = "synthetic-wrong-commit-id";
 const WORKSPACE_LIST_PATH: &str = "nested-list";
@@ -860,8 +867,11 @@ impl FamilySuite {
         tracker: &OperationTracker,
     ) -> EvalResult<bool> {
         match self.family {
-            EvalFamily::Workspace => Ok(workspace_natural_read_result_passed(snapshot, tracker)),
-            EvalFamily::Web => Ok(tracker.final_response_reports(WEB_FETCH_BODY)),
+            EvalFamily::Workspace => {
+                Ok(workspace_natural_result_payloads_passed(snapshot, tracker))
+            }
+            EvalFamily::Web => Ok(web_natural_result_payloads_passed(snapshot, tracker)
+                && tracker.final_response_reports(WEB_FETCH_BODY)),
             EvalFamily::Git => {
                 git_natural_result_payloads_passed(self.workspace.path(), snapshot, tracker)
             }
@@ -887,7 +897,7 @@ fn workspace_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntry
             } else if file_type.is_file() {
                 let content = fs::read(entry.path())?;
                 #[cfg(unix)]
-                let mode = Some(entry.metadata()?.permissions().mode());
+                let mode = Some(entry.metadata()?.permissions().mode() & 0o7777);
                 #[cfg(not(unix))]
                 let mode = None;
                 entries.insert(relative, WorkspaceEntrySnapshot::File { content, mode });
@@ -984,7 +994,7 @@ fn git_forced_case_passed(
                 )?
                 && head.parent_id(0)? == seed
                 && head.parent_id(1)? == log_target.id()
-                && git_merge_state_is_clean(&repository)
+                && git_operation_state_is_clean(&repository)
                 && untracked_git_fixture_matches(
                     root,
                     &repository,
@@ -1060,8 +1070,18 @@ fn git_forced_case_passed(
                 && base.get().target() == Some(seed)
                 && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
                 && fs::read(root.join(GIT_SEED_PATH))? == GIT_BASE_CONTENT.as_bytes()
-                && repository.status_file(Path::new(GIT_COMMIT_PATH)).ok() == Some(Status::WT_NEW)
-                && repository.status_file(Path::new(GIT_NATURAL_PATH)).ok() == Some(Status::WT_NEW)
+                && untracked_git_fixture_matches(
+                    root,
+                    &repository,
+                    GIT_COMMIT_PATH,
+                    GIT_COMMIT_CONTENT.as_bytes(),
+                )?
+                && untracked_git_fixture_matches(
+                    root,
+                    &repository,
+                    GIT_NATURAL_PATH,
+                    GIT_NATURAL_CONTENT.as_bytes(),
+                )?
                 && git_local_branch_targets(&repository)? == *seed_refs
                 && git_status_path_states(&repository)? == expected_staged_git_statuses()
         }
@@ -1112,6 +1132,7 @@ fn commit_adds_exact_fixture(
     Ok(deltas.next().is_none()
         && delta.status() == Delta::Added
         && delta.new_file().path() == Some(Path::new(path))
+        && entry.filemode() == GIT_REGULAR_FILE_MODE
         && blob.content() == expected)
 }
 
@@ -1307,8 +1328,9 @@ fn git_status_entries_json() -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn git_merge_state_is_clean(repository: &Repository) -> bool {
-    !repository.path().join(GIT_MERGE_HEAD_PATH).exists()
+fn git_operation_state_is_clean(repository: &Repository) -> bool {
+    repository.state() == RepositoryState::Clean
+        && !repository.path().join(GIT_MERGE_HEAD_PATH).exists()
         && !repository.path().join(GIT_MERGE_MESSAGE_PATH).exists()
         && !repository.path().join(GIT_MERGE_MODE_PATH).exists()
 }
@@ -1474,7 +1496,7 @@ fn workspace_mutation_entries_match(
     let actual_entries = workspace_entries(root)?;
     let mode = match (seed_entries.get(target), actual_entries.get(target)) {
         (Some(WorkspaceEntrySnapshot::File { mode, .. }), _) => *mode,
-        (None, Some(WorkspaceEntrySnapshot::File { mode, .. })) => *mode,
+        (None, Some(WorkspaceEntrySnapshot::File { .. })) => WORKSPACE_CREATED_FILE_MODE,
         _ => return Ok(false),
     };
     let mut expected_entries = seed_entries.clone();
@@ -1552,6 +1574,33 @@ fn web_forced_case_passed(
         }
         _ => false,
     }
+}
+
+fn web_natural_result_payloads_passed(snapshot: &CaseSnapshot, tracker: &OperationTracker) -> bool {
+    let Ok(Some((search, fetch))) = snapshot.web_natural_request_pair() else {
+        return false;
+    };
+    let Some(search_content) = tracker.result_content(search.request_id) else {
+        return false;
+    };
+    let Some(fetch_content) = tracker.result_content(fetch.request_id) else {
+        return false;
+    };
+    let Ok(search_result) = serde_json::from_str::<serde_json::Value>(&search_content) else {
+        return false;
+    };
+    let Ok(fetch_result) = serde_json::from_str::<serde_json::Value>(&fetch_content) else {
+        return false;
+    };
+    web_forced_case_passed(
+        WEB_SEARCH_NAME,
+        &serde_json::json!({"query": WEB_QUERY}),
+        &search_result,
+    ) && web_forced_case_passed(
+        WEB_FETCH_NAME,
+        &serde_json::json!({"url": WEB_URL}),
+        &fetch_result,
+    )
 }
 
 fn normalized_arguments_text(arguments: &str) -> EvalResult<String> {
@@ -1766,6 +1815,7 @@ fn git_natural_state_passed(
             GIT_COMMIT_CONTENT.as_bytes(),
         )?;
     let complete_status_matches = git_natural_status_matches(&repository)?;
+    let operation_state_is_clean = git_operation_state_is_clean(&repository);
     let mut expected_refs = seed_refs.clone();
     expected_refs.insert(String::from(GIT_BASE_BRANCH), head.id());
     let complete_ref_inventory_matches = git_local_branch_targets(&repository)? == expected_refs;
@@ -1780,6 +1830,7 @@ fn git_natural_state_passed(
         && commit_adds_expected_natural_fixture
         && unrelated_fixtures_unchanged
         && complete_status_matches
+        && operation_state_is_clean
         && complete_ref_inventory_matches)
 }
 
@@ -2772,7 +2823,7 @@ impl CaseSnapshot {
             }))
     }
 
-    fn web_natural_requests_passed(&self) -> EvalResult<bool> {
+    fn web_natural_request_pair(&self) -> EvalResult<Option<(&RequestSnapshot, &RequestSnapshot)>> {
         let expected_query =
             normalized_arguments_text(&serde_json::json!({"query": WEB_QUERY}).to_string())?;
         let expected_url =
@@ -2781,18 +2832,29 @@ impl CaseSnapshot {
             .requests
             .iter()
             .enumerate()
-            .any(|(search_index, search)| {
-                search.name == WEB_SEARCH_NAME
-                    && search.arguments_text == expected_query
-                    && self.requests.iter().skip(search_index + 1).any(|fetch| {
-                        fetch.name == WEB_FETCH_NAME
-                            && fetch.arguments_text == expected_url
-                            && search.producing_model_call_id != fetch.producing_model_call_id
-                            && search.completed_result_entry_index.is_some_and(
-                                |result_entry_index| result_entry_index < fetch.entry_index,
-                            )
+            .find_map(|(search_index, search)| {
+                (search.name == WEB_SEARCH_NAME && search.arguments_text == expected_query)
+                    .then(|| {
+                        self.requests
+                            .iter()
+                            .skip(search_index + 1)
+                            .find(|fetch| {
+                                fetch.name == WEB_FETCH_NAME
+                                    && fetch.arguments_text == expected_url
+                                    && search.producing_model_call_id
+                                        != fetch.producing_model_call_id
+                                    && search.completed_result_entry_index.is_some_and(
+                                        |result_entry_index| result_entry_index < fetch.entry_index,
+                                    )
+                            })
+                            .map(|fetch| (search, fetch))
                     })
+                    .flatten()
             }))
+    }
+
+    fn web_natural_requests_passed(&self) -> EvalResult<bool> {
+        Ok(self.web_natural_request_pair()?.is_some())
     }
 
     fn exact_natural_request_failed(&self, family: EvalFamily) -> bool {
@@ -2898,6 +2960,42 @@ fn workspace_natural_read_result_passed(
         && result["bytes_read"] == WORKSPACE_SEED.len()
         && result["total_bytes"] == WORKSPACE_SEED.len()
         && result["truncated"] == false
+}
+
+fn workspace_natural_write_result_passed(
+    snapshot: &CaseSnapshot,
+    tracker: &OperationTracker,
+) -> bool {
+    let Some(request) = snapshot.requests.iter().find(|request| {
+        request.name == WRITE_FILE_NAME
+            && request.attempt_succeeded
+            && request.arguments().is_some_and(|arguments| {
+                arguments
+                    == serde_json::json!({
+                        "path": WORKSPACE_ANSWER_PATH,
+                        "content": WORKSPACE_ANSWER,
+                    })
+            })
+    }) else {
+        return false;
+    };
+    let Some(content) = tracker.result_content(request.request_id) else {
+        return false;
+    };
+    let Ok(result) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    result["path"] == WORKSPACE_ANSWER_PATH
+        && result["bytes_written"] == WORKSPACE_ANSWER.len()
+        && result["created"] == true
+}
+
+fn workspace_natural_result_payloads_passed(
+    snapshot: &CaseSnapshot,
+    tracker: &OperationTracker,
+) -> bool {
+    workspace_natural_read_result_passed(snapshot, tracker)
+        && workspace_natural_write_result_passed(snapshot, tracker)
 }
 
 fn completed_tool_result_entry_indices(entries: &[ProcessTranscriptEntry]) -> BTreeMap<Uuid, u64> {
@@ -3847,6 +3945,47 @@ fn git_natural_state_rejects_a_commit_with_drifted_bytes() -> EvalResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn git_natural_state_rejects_an_executable_committed_fixture() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    let path = workspace.path().join(GIT_NATURAL_PATH);
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(permissions.mode() | USER_EXECUTE_MODE_BIT);
+    fs::set_permissions(&path, permissions)?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+    )?);
+    Ok(())
+}
+
+#[test]
+fn git_natural_state_rejects_retained_operation_state() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    fs::write(
+        Repository::open(workspace.path())?
+            .path()
+            .join(GIT_CHERRY_PICK_HEAD_PATH),
+        format!("{seed}\n"),
+    )?;
+
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+    )?);
+    Ok(())
+}
+
 #[test]
 fn git_natural_state_rejects_extra_staging_after_the_target_commit() -> EvalResult {
     let workspace = tempfile::tempdir()?;
@@ -4114,6 +4253,32 @@ fn forced_git_stage_verifier_rejects_a_switched_branch() -> EvalResult {
 }
 
 #[test]
+fn forced_git_stage_verifier_rejects_mutated_unrelated_fixtures() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STAGE_NAME)
+        .expect("the Git stage fixture exists");
+    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    fs::write(
+        suite.workspace.path().join(GIT_COMMIT_PATH),
+        GIT_NATURAL_CONTENT,
+    )?;
+    fs::write(
+        suite.workspace.path().join(GIT_NATURAL_PATH),
+        GIT_COMMIT_CONTENT,
+    )?;
+    let result = serde_json::json!({
+        "staged_paths": 1,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_commit_verifier_accepts_the_exact_fixture_tree() -> EvalResult {
     let suite = FamilySuite::git()?;
     let case = GIT_CASES
@@ -4305,6 +4470,36 @@ fn forced_git_commit_verifier_rejects_retained_merge_state() -> EvalResult {
         .to_string();
     let result = serde_json::json!({
         "commit": head,
+        "state_cleaned": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_commit_verifier_rejects_retained_cherry_pick_state() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_CREATE_COMMIT_NAME)
+        .expect("the Git commit fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let message = arguments["message"]
+        .as_str()
+        .expect("the Git commit fixture has a message");
+    suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
+    commit_staged_paths(suite.workspace.path(), message)?;
+    let repository = Repository::open(suite.workspace.path())?;
+    let head = repository.head()?.peel_to_commit()?.id();
+    fs::write(
+        repository.path().join(GIT_CHERRY_PICK_HEAD_PATH),
+        format!("{head}\n"),
+    )?;
+    let result = serde_json::json!({
+        "commit": head.to_string(),
         "state_cleaned": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
@@ -4959,6 +5154,66 @@ fn forced_workspace_write_verifier_rejects_a_deleted_unrelated_fixture() -> Eval
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn forced_workspace_write_verifier_accepts_the_private_creation_mode() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == WRITE_FILE_NAME)
+        .expect("the workspace write fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let path = arguments["path"]
+        .as_str()
+        .expect("the workspace write fixture has a path");
+    let content = arguments["content"]
+        .as_str()
+        .expect("the workspace write fixture has content");
+    let target = suite.workspace.path().join(path);
+    fs::write(&target, content)?;
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
+    let result = serde_json::json!({
+        "path": path,
+        "bytes_written": content.len(),
+        "created": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_workspace_write_verifier_rejects_an_insecure_creation_mode() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == WRITE_FILE_NAME)
+        .expect("the workspace write fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let path = arguments["path"]
+        .as_str()
+        .expect("the workspace write fixture has a path");
+    let content = arguments["content"]
+        .as_str()
+        .expect("the workspace write fixture has content");
+    let target = suite.workspace.path().join(path);
+    fs::write(&target, content)?;
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o777))?;
+    let result = serde_json::json!({
+        "path": path,
+        "bytes_written": content.len(),
+        "created": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
 #[test]
 fn forced_workspace_apply_patch_verifier_rejects_collateral_mutation() -> EvalResult {
     let suite = FamilySuite::workspace()?;
@@ -4976,6 +5231,28 @@ fn forced_workspace_apply_patch_verifier_rejects_collateral_mutation() -> EvalRe
     )?;
     let result = serde_json::json!({
         "operations_applied": 1,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_workspace_apply_patch_verifier_rejects_an_insecure_creation_mode() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == APPLY_PATCH_NAME)
+        .expect("the workspace apply-patch fixture exists");
+    let target = suite.workspace.path().join("patched.txt");
+    fs::write(&target, "patched by eval\n")?;
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o777))?;
+    let result = serde_json::json!({
+        "operations_applied": 1,
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
@@ -5618,6 +5895,24 @@ fn record_workspace_read_result(tracker: &OperationTracker, content: &str, trunc
     );
 }
 
+fn record_workspace_write_result(
+    tracker: &OperationTracker,
+    path: &str,
+    bytes_written: usize,
+    created: bool,
+) {
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+        &serde_json::json!({
+            "path": path,
+            "bytes_written": bytes_written,
+            "created": created,
+            EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+        })
+        .to_string(),
+    );
+}
+
 #[test]
 fn workspace_natural_state_requires_the_read_before_the_write() {
     let snapshot = CaseSnapshot {
@@ -5831,6 +6126,35 @@ fn workspace_natural_execution_accepts_the_exact_full_read_result() {
     record_workspace_read_result(&tracker, WORKSPACE_SEED, false);
 
     assert!(workspace_natural_read_result_passed(&snapshot, &tracker));
+}
+
+#[test]
+fn workspace_natural_execution_accepts_exact_read_and_write_results() {
+    let snapshot = successful_workspace_natural_snapshot();
+    let tracker = OperationTracker::default();
+    record_workspace_read_result(&tracker, WORKSPACE_SEED, false);
+    record_workspace_write_result(
+        &tracker,
+        WORKSPACE_ANSWER_PATH,
+        WORKSPACE_ANSWER.len(),
+        true,
+    );
+
+    assert!(workspace_natural_result_payloads_passed(
+        &snapshot, &tracker
+    ));
+}
+
+#[test]
+fn workspace_natural_execution_rejects_inaccurate_write_evidence() {
+    let snapshot = successful_workspace_natural_snapshot();
+    let tracker = OperationTracker::default();
+    record_workspace_read_result(&tracker, WORKSPACE_SEED, false);
+    record_workspace_write_result(&tracker, WORKSPACE_SEED_PATH, 0, false);
+
+    assert!(!workspace_natural_result_payloads_passed(
+        &snapshot, &tracker
+    ));
 }
 
 #[test]
@@ -6113,6 +6437,122 @@ fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalRe
     };
 
     assert!(!snapshot.git_natural_requests_passed()?);
+    Ok(())
+}
+
+fn successful_web_natural_snapshot() -> EvalResult<CaseSnapshot> {
+    Ok(CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(WEB_SEARCH_NAME),
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"query": WEB_QUERY}).to_string(),
+                )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(WEB_FETCH_NAME),
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"url": WEB_URL}).to_string(),
+                )?,
+                entry_index: ARBITRARY_LATE_RESULT_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_LATE_RESULT_ENTRY_INDEX + 1),
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    })
+}
+
+fn record_web_natural_results(
+    tracker: &OperationTracker,
+    search_result: serde_json::Value,
+    fetch_result: serde_json::Value,
+) {
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &search_result.to_string(),
+    );
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+        &fetch_result.to_string(),
+    );
+}
+
+fn exact_web_search_result() -> serde_json::Value {
+    serde_json::json!({
+        "results": [{
+            "title": WEB_SEARCH_TITLE,
+            "url": WEB_URL,
+            "snippet": WEB_SEARCH_SNIPPET,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+}
+
+fn exact_web_fetch_result() -> serde_json::Value {
+    serde_json::json!({
+        "url": WEB_URL,
+        "status": 200,
+        "content_type": "text/plain",
+        "body": WEB_FETCH_BODY,
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+}
+
+#[test]
+fn web_natural_execution_accepts_exact_search_and_fetch_results() -> EvalResult {
+    let snapshot = successful_web_natural_snapshot()?;
+    let tracker = OperationTracker::default();
+    record_web_natural_results(
+        &tracker,
+        exact_web_search_result(),
+        exact_web_fetch_result(),
+    );
+
+    assert!(web_natural_result_payloads_passed(&snapshot, &tracker));
+    Ok(())
+}
+
+#[test]
+fn web_natural_execution_rejects_an_empty_search_result() -> EvalResult {
+    let snapshot = successful_web_natural_snapshot()?;
+    let tracker = OperationTracker::default();
+    let empty_search = serde_json::json!({
+        "results": [],
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    });
+    record_web_natural_results(&tracker, empty_search, exact_web_fetch_result());
+
+    assert!(!web_natural_result_payloads_passed(&snapshot, &tracker));
+    Ok(())
+}
+
+#[test]
+fn web_natural_execution_rejects_corrupted_fetch_metadata() -> EvalResult {
+    let snapshot = successful_web_natural_snapshot()?;
+    let tracker = OperationTracker::default();
+    let corrupted_fetch = serde_json::json!({
+        "url": WEB_ORIGIN,
+        "status": 201,
+        "content_type": "application/octet-stream",
+        "body": WEB_FETCH_BODY,
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    });
+    record_web_natural_results(&tracker, exact_web_search_result(), corrupted_fetch);
+
+    assert!(!web_natural_result_payloads_passed(&snapshot, &tracker));
     Ok(())
 }
 
