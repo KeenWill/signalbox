@@ -159,19 +159,30 @@ class Suite:
     features: tuple[str, ...]
     shards: int
     skip: tuple[str, ...]
+    include_binaries: tuple[str, ...]
+    exclude_binaries: tuple[str, ...]
 
     def filterset(self) -> str:
         """Render this suite's nextest filterset expression.
 
+        Binary predicates partition same-package test targets before
         `not test(<substring>)` reproduces libtest's `--skip <substring>`:
         nextest's `test()` predicate matches a substring of the test path by
         default, which is exactly what libtest matched. With nothing skipped
         the expression is `all()`, so the run job always passes a `-E` and
         needs no conditional.
         """
-        if not self.skip:
-            return "all()"
-        return " and ".join(f"not test({skipped})" for skipped in self.skip)
+        terms: list[str] = []
+        if self.include_binaries:
+            included = " or ".join(
+                f"binary({binary})" for binary in self.include_binaries
+            )
+            terms.append(f"({included})")
+        terms.extend(
+            f"not binary({binary})" for binary in self.exclude_binaries
+        )
+        terms.extend(f"not test({skipped})" for skipped in self.skip)
+        return " and ".join(terms) if terms else "all()"
 
 
 def manifest_line(text: str, name: str) -> int:
@@ -205,7 +216,16 @@ def parse_suites(text: str) -> tuple[Suite, ...]:
         extra = sorted(
             key
             for key in entry
-            if key not in {"name", "package", "features", "shards", "skip"}
+            if key
+            not in {
+                "name",
+                "package",
+                "features",
+                "shards",
+                "skip",
+                "include_binaries",
+                "exclude_binaries",
+            }
         )
         if extra:
             raise ManifestError(f"{where} has unknown keys: {', '.join(extra)}")
@@ -255,6 +275,31 @@ def parse_suites(text: str) -> tuple[Suite, ...]:
                     f"{where} (`{name}`) skip term `{skipped}` is not a plain "
                     "test-name substring"
                 )
+        include_binaries = entry.get("include_binaries", [])
+        exclude_binaries = entry.get("exclude_binaries", [])
+        for field, binaries in (
+            ("include_binaries", include_binaries),
+            ("exclude_binaries", exclude_binaries),
+        ):
+            if not isinstance(binaries, list) or not all(
+                isinstance(binary, str)
+                and re.fullmatch(r"[A-Za-z0-9_-]+", binary) is not None
+                for binary in binaries
+            ):
+                raise ManifestError(
+                    f"{where} (`{name}`) needs `{field}` as a list of plain "
+                    "Cargo test-target names"
+                )
+            if len(set(binaries)) != len(binaries):
+                raise ManifestError(
+                    f"{where} (`{name}`) declares a `{field}` target twice"
+                )
+        overlap = sorted(set(include_binaries) & set(exclude_binaries))
+        if overlap:
+            raise ManifestError(
+                f"{where} (`{name}`) both includes and excludes "
+                f"{', '.join(overlap)}"
+            )
         suites.append(
             Suite(
                 name=name,
@@ -262,6 +307,8 @@ def parse_suites(text: str) -> tuple[Suite, ...]:
                 features=tuple(features),
                 shards=shards,
                 skip=tuple(skip),
+                include_binaries=tuple(include_binaries),
+                exclude_binaries=tuple(exclude_binaries),
             )
         )
     return tuple(suites)
