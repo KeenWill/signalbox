@@ -91,9 +91,9 @@ use signalbox_tools_web::{
 };
 use signalbox_tools_workspace::{
     APPLY_PATCH_NAME, EDIT_FILE_NAME, GLOB_FILES_NAME, LIST_DIRECTORY_NAME,
-    LocalWorkspaceFileSystem, READ_FILE_NAME, ReadFileArguments, SEARCH_FILES_NAME,
-    WRITE_FILE_NAME, WorkspaceMutationExecutor, WorkspaceMutationTools, WorkspaceReadExecutor,
-    WorkspaceReadTools,
+    LocalWorkspaceFileSystem, MAX_WORKSPACE_READ_BYTES, READ_FILE_NAME, ReadFileArguments,
+    SEARCH_FILES_NAME, WRITE_FILE_NAME, WorkspaceMutationExecutor, WorkspaceMutationTools,
+    WorkspaceReadExecutor, WorkspaceReadTools,
 };
 use signalboxd::{ActivatedTurnExecution, PostgresProviderModelExecution};
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -178,7 +178,6 @@ const WORKSPACE_SEARCH_PATH: &str = "search-scope/match.txt";
 const WORKSPACE_SEARCH_CONTENT: &str =
     "search prelude\nbeta search fixture\nbeta search overflow\n";
 const WORKSPACE_FORCED_READ_MAX_BYTES: usize = 6;
-const WORKSPACE_READ_MAX_BYTES: usize = 256 * 1024;
 const WORKSPACE_DRIFTED_SEED: &str = "alpha\nbeta fixturE\nalpha\n";
 const WORKSPACE_LIST_PATH: &str = "nested-list";
 const WORKSPACE_LIST_MAX_RESULTS: usize = 20;
@@ -197,10 +196,12 @@ const EXEC_FORCED_READ_ONLY_OUTPUT: &str = "forced unsandboxed eval\n";
 const SYNTHETIC_CARGO_TEST_EXECUTABLE: &str = "synthetic-test-executable";
 const SYNTHETIC_CARGO_TEST_NAME: &str = "synthetic_test_name";
 const SYNTHETIC_CARGO_DIAGNOSTIC_MESSAGE: &str = "synthetic compiler diagnostic";
+const SYNTHETIC_CARGO_DIAGNOSTIC_FILE: &str = "src/lib.rs";
 const CARGO_ERROR_DIAGNOSTIC_LEVEL: &str = "error";
 const CARGO_WARNING_DIAGNOSTIC_LEVEL: &str = "warning";
 const SYNTHETIC_CARGO_DIAGNOSTIC_LINE: u64 = 7;
 const SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN: u64 = 4;
+const SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN: u64 = 8;
 const SYNTHETIC_CARGO_DIAGNOSTIC_BACKWARDS_END_COLUMN: u64 = 3;
 const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
 const EXEC_NATURAL_OUTPUT: &str = "";
@@ -601,6 +602,7 @@ struct FamilySuite {
     git_seed: Option<Oid>,
     catalog: MergedCatalog,
     executor: SharedFamilyExecutor,
+    workspace_seed_files: BTreeMap<PathBuf, Vec<u8>>,
 }
 
 impl FamilySuite {
@@ -619,6 +621,7 @@ impl FamilySuite {
             git_seed: Some(git_seed),
             catalog: MergedCatalog::try_new([catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Git(executor)),
+            workspace_seed_files: BTreeMap::new(),
         })
     }
 
@@ -656,6 +659,7 @@ impl FamilySuite {
                 "nonmatching fixture\n",
             )?;
         }
+        let workspace_seed_files = workspace_files(workspace.path())?;
         let reads = WorkspaceReadTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
         let mutations =
             WorkspaceMutationTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
@@ -670,6 +674,7 @@ impl FamilySuite {
                 read: read_executor,
                 mutation: mutation_executor,
             }),
+            workspace_seed_files,
         })
     }
 
@@ -695,6 +700,7 @@ impl FamilySuite {
                 fetch: fetch_executor,
                 search: search_executor,
             }),
+            workspace_seed_files: BTreeMap::new(),
         })
     }
 
@@ -726,6 +732,7 @@ impl FamilySuite {
                 diagnostics: diagnostics_executor,
                 case: ExecEvalCase::Natural,
             }),
+            workspace_seed_files: BTreeMap::new(),
         })
     }
 
@@ -899,7 +906,8 @@ impl FamilySuite {
             }
             EvalFamily::Workspace => {
                 let bytes_match = self.workspace_answer_matches()?;
-                Ok(bytes_match && snapshot.workspace_natural_requests_passed())
+                let seed_files_match = self.workspace_seed_files_match()?;
+                Ok(bytes_match && seed_files_match && snapshot.workspace_natural_requests_passed())
             }
             EvalFamily::Web => snapshot.web_natural_requests_passed(),
             EvalFamily::Exec => self.exec_result_matches(),
@@ -914,6 +922,12 @@ impl FamilySuite {
         }
     }
 
+    fn workspace_seed_files_match(&self) -> EvalResult<bool> {
+        let mut actual = workspace_files(self.workspace.path())?;
+        actual.remove(Path::new(WORKSPACE_ANSWER_PATH));
+        Ok(actual == self.workspace_seed_files)
+    }
+
     fn exec_result_matches(&self) -> EvalResult<bool> {
         match fs::read(self.workspace.path().join(EXEC_RESULT_PATH)) {
             Ok(bytes) => Ok(bytes == EXEC_RESULT.as_bytes()),
@@ -921,6 +935,28 @@ impl FamilySuite {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+fn workspace_files(root: &Path) -> EvalResult<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = BTreeMap::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                let relative = entry
+                    .path()
+                    .strip_prefix(root)
+                    .map_err(|_| io::Error::other("workspace fixture escaped its root"))?
+                    .to_path_buf();
+                files.insert(relative, fs::read(entry.path())?);
+            }
+        }
+    }
+    Ok(files)
 }
 
 fn seed_exec_workspace(root: &Path) -> EvalResult {
@@ -2833,7 +2869,7 @@ fn workspace_read_covers_seed(arguments: &serde_json::Value) -> bool {
     };
     arguments.path == WORKSPACE_SEED_PATH
         && arguments.max_bytes >= WORKSPACE_SEED.len()
-        && arguments.max_bytes <= WORKSPACE_READ_MAX_BYTES
+        && arguments.max_bytes <= MAX_WORKSPACE_READ_BYTES
 }
 
 fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid> {
@@ -3299,9 +3335,7 @@ fn cargo_diagnostic_record_is_success_evidence(record: &serde_json::Value) -> bo
     else {
         return false;
     };
-    cargo_diagnostic_file_is_valid(&diagnostic.file)
-        && cargo_diagnostic_completeness_is_valid(&diagnostic.file_completeness)
-        && cargo_diagnostic_span_is_valid(&diagnostic.span)
+    cargo_diagnostic_location_is_valid(&diagnostic)
         && diagnostic.level_completeness == "complete"
         && !diagnostic.level.is_empty()
         && diagnostic.level != CARGO_ERROR_DIAGNOSTIC_LEVEL
@@ -3309,8 +3343,16 @@ fn cargo_diagnostic_record_is_success_evidence(record: &serde_json::Value) -> bo
         && cargo_diagnostic_completeness_is_valid(&diagnostic.message_completeness)
 }
 
-fn cargo_diagnostic_file_is_valid(file: &serde_json::Value) -> bool {
-    file.is_null() || file.is_string()
+fn cargo_diagnostic_location_is_valid(diagnostic: &CargoDiagnosticsEvalDiagnostic) -> bool {
+    match (diagnostic.file.as_str(), diagnostic.span.is_null()) {
+        (Some(file), false) => {
+            !file.is_empty()
+                && cargo_diagnostic_completeness_is_valid(&diagnostic.file_completeness)
+                && cargo_diagnostic_span_is_valid(&diagnostic.span)
+        }
+        (None, true) if diagnostic.file.is_null() => diagnostic.file_completeness == "complete",
+        _ => false,
+    }
 }
 
 fn cargo_diagnostic_completeness_is_valid(completeness: &str) -> bool {
@@ -4010,7 +4052,7 @@ fn unforced_workspace_tier_keeps_an_undersized_read_bound_as_a_miss() {
 #[test]
 fn unforced_workspace_tier_keeps_an_oversized_read_bound_as_a_miss() {
     let mut arguments = bounded_workspace_read_arguments();
-    arguments["max_bytes"] = serde_json::json!(WORKSPACE_READ_MAX_BYTES + 1);
+    arguments["max_bytes"] = serde_json::json!(MAX_WORKSPACE_READ_BYTES + 1);
     let snapshot = failed_request_snapshot(READ_FILE_NAME, arguments);
 
     assert!(!snapshot.exact_natural_request_failed(EvalFamily::Workspace));
@@ -5676,6 +5718,15 @@ fn synthetic_cargo_diagnostic(level: &str) -> CargoDiagnostic {
     }
 }
 
+fn synthetic_cargo_diagnostic_span() -> serde_json::Value {
+    serde_json::json!({
+        "line_start": SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
+        "column_start": SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN,
+        "line_end": SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
+        "column_end": SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN,
+    })
+}
+
 #[test]
 fn forced_exec_tier_passes_the_exact_captured_output() {
     let outcome = forced_exec_outcome(
@@ -5748,6 +5799,20 @@ fn forced_cargo_diagnostics_accepts_a_complete_successful_check() {
 }
 
 #[test]
+fn forced_cargo_diagnostics_accepts_correlated_file_and_span() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["file"] = serde_json::json!(SYNTHETIC_CARGO_DIAGNOSTIC_FILE);
+    diagnostic["span"] = synthetic_cargo_diagnostic_span();
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Pass);
+}
+
+#[test]
 fn forced_cargo_diagnostics_rejects_error_diagnostics_from_a_successful_check() {
     let mut result = successful_cargo_diagnostics_result();
     result["diagnostics"]["values"] = serde_json::to_value(vec![synthetic_cargo_diagnostic(
@@ -5780,6 +5845,45 @@ fn forced_cargo_diagnostics_rejects_a_backwards_same_line_span() {
         "line_end": SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
         "column_end": SYNTHETIC_CARGO_DIAGNOSTIC_BACKWARDS_END_COLUMN,
     });
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_span_without_its_file() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["span"] = synthetic_cargo_diagnostic_span();
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_file_without_its_span() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["file"] = serde_json::json!(SYNTHETIC_CARGO_DIAGNOSTIC_FILE);
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_requires_complete_absent_location_evidence() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["file_completeness"] = serde_json::json!("truncated");
     result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
@@ -6283,6 +6387,46 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
     };
 
     assert!(!snapshot.workspace_natural_requests_passed());
+}
+
+#[test]
+fn workspace_natural_state_rejects_collateral_fixture_mutation() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_ANSWER_PATH),
+        WORKSPACE_ANSWER,
+    )?;
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_SEED_PATH),
+        WORKSPACE_DRIFTED_SEED,
+    )?;
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(READ_FILE_NAME),
+                arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(WRITE_FILE_NAME),
+                arguments_text: serde_json::json!({
+                    "content": WORKSPACE_ANSWER,
+                    "path": WORKSPACE_ANSWER_PATH,
+                })
+                .to_string(),
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!suite.natural_state_passed(&snapshot)?);
+    Ok(())
 }
 
 #[test]
