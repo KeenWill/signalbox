@@ -3888,7 +3888,7 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
     let mut blocker = pool.begin().await?;
     sqlx::query(
         "SELECT enrollment_id
-           FROM runner_enrollment
+           FROM runner_current_registration
           WHERE enrollment_id = $1
           FOR UPDATE",
     )
@@ -3903,7 +3903,7 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
     });
     tokio::time::timeout(LOCK_WAIT_PROBE, &mut replacement)
         .await
-        .expect_err("registration replacement must wait for enrollment authority");
+        .expect_err("registration replacement must wait for registration-head authority");
     let mut lease_store = tokio::spawn(async move { store.store_lease(&lease).await });
     tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
         .await
