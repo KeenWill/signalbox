@@ -249,6 +249,8 @@ const SYNTHETIC_NO_ERRORS_COMPLETION_REPORT: &str =
     "Completed the requested operation with no errors.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
+const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
+    "Completed the commit; I did not modify any other files.";
 const EVAL_RECEIPT_FIELD: &str = "eval_receipt";
 const RESULT_RECEIPT_INSTRUCTION: &str =
     "In your final answer, include every exact eval_receipt value returned by the tools.";
@@ -587,6 +589,7 @@ struct FamilySuite {
     catalog: MergedCatalog,
     executor: SharedFamilyExecutor,
     workspace_seed_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    git_pre_execution_worktree_entries: StdMutex<Option<BTreeMap<PathBuf, WorkspaceEntrySnapshot>>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -633,6 +636,7 @@ impl FamilySuite {
             catalog: MergedCatalog::try_new([catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Git(executor)),
             workspace_seed_entries: BTreeMap::new(),
+            git_pre_execution_worktree_entries: StdMutex::new(None),
         })
     }
 
@@ -688,6 +692,7 @@ impl FamilySuite {
                 mutation: mutation_executor,
             }),
             workspace_seed_entries,
+            git_pre_execution_worktree_entries: StdMutex::new(None),
         })
     }
 
@@ -716,6 +721,7 @@ impl FamilySuite {
                 search: search_executor,
             }),
             workspace_seed_entries: BTreeMap::new(),
+            git_pre_execution_worktree_entries: StdMutex::new(None),
         })
     }
 
@@ -813,6 +819,11 @@ impl FamilySuite {
                 }
                 _ => {}
             }
+            *self
+                .git_pre_execution_worktree_entries
+                .lock()
+                .expect("Git pre-execution inventory lock is available") =
+                Some(git_worktree_entries(self.workspace.path())?);
         }
         Ok(())
     }
@@ -856,11 +867,18 @@ impl FamilySuite {
                 let seed = self.git_seed.ok_or_else(|| {
                     io::Error::other("the Git eval suite has no captured seed identity")
                 })?;
+                let pre_execution_worktree_entries = self
+                    .git_pre_execution_worktree_entries
+                    .lock()
+                    .expect("Git pre-execution inventory lock is available");
                 git_forced_case_passed(
-                    self.workspace.path(),
-                    seed,
-                    &self.git_seed_refs,
-                    &self.git_seed_fixture,
+                    GitForcedVerification {
+                        root: self.workspace.path(),
+                        seed,
+                        seed_refs: &self.git_seed_refs,
+                        seed_fixture: &self.git_seed_fixture,
+                        pre_execution_worktree_entries: pre_execution_worktree_entries.as_ref(),
+                    },
                     case.name,
                     &arguments,
                     &result,
@@ -989,15 +1007,27 @@ fn filesystem_entries(
     Ok(entries)
 }
 
-fn git_forced_case_passed(
-    root: &Path,
+struct GitForcedVerification<'a> {
+    root: &'a Path,
     seed: Oid,
-    seed_refs: &GitReferenceInventory,
-    seed_fixture: &GitFixtureSnapshot,
+    seed_refs: &'a GitReferenceInventory,
+    seed_fixture: &'a GitFixtureSnapshot,
+    pre_execution_worktree_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
+}
+
+fn git_forced_case_passed(
+    verification: GitForcedVerification<'_>,
     name: &str,
     arguments: &serde_json::Value,
     result: &serde_json::Value,
 ) -> EvalResult<bool> {
+    let GitForcedVerification {
+        root,
+        seed,
+        seed_refs,
+        seed_fixture,
+        pre_execution_worktree_entries,
+    } = verification;
     let repository = Repository::open(root)?;
     let head = repository.head()?.peel_to_commit()?;
     let seed_commit = repository.find_commit(seed)?;
@@ -1191,7 +1221,7 @@ fn git_forced_case_passed(
     };
     Ok(passed
         && git_fixture_snapshot_matches(root, &repository, seed_fixture)?
-        && git_forced_worktree_matches(root, name, seed_fixture)?)
+        && git_forced_worktree_matches(root, name, seed_fixture, pre_execution_worktree_entries)?)
 }
 
 fn commit_adds_exact_fixture(
@@ -1831,9 +1861,12 @@ fn git_forced_worktree_matches(
     root: &Path,
     case_name: &str,
     seed_fixture: &GitFixtureSnapshot,
+    pre_execution_worktree_entries: Option<&BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
 ) -> EvalResult<bool> {
     let actual = git_worktree_entries(root)?;
-    let mut expected = seed_fixture.worktree_entries.clone();
+    let mut expected = pre_execution_worktree_entries
+        .cloned()
+        .unwrap_or_else(|| seed_fixture.worktree_entries.clone());
     match case_name {
         GIT_BRANCH_SWITCH_NAME => {
             let Some(WorkspaceEntrySnapshot::File { mode, .. }) =
@@ -1850,7 +1883,7 @@ fn git_forced_worktree_matches(
                 },
             );
         }
-        GIT_DIFF_NAME => {
+        GIT_DIFF_NAME if pre_execution_worktree_entries.is_none() => {
             if !insert_expected_file_with_observed_mode(
                 &actual,
                 &mut expected,
@@ -1860,7 +1893,7 @@ fn git_forced_worktree_matches(
                 return Ok(false);
             }
         }
-        GIT_STATUS_NAME => {
+        GIT_STATUS_NAME if pre_execution_worktree_entries.is_none() => {
             let directory = Path::new(GIT_STATUS_OVERFLOW_DIRECTORY);
             let Some(WorkspaceEntrySnapshot::Directory { mode }) = actual.get(directory) else {
                 return Ok(false);
@@ -2729,8 +2762,6 @@ fn report_words_deny_success(words: &[String]) -> bool {
         "failed",
         "failure",
         "incomplete",
-        "never",
-        "not",
         "unable",
     ]
     .iter()
@@ -2752,7 +2783,33 @@ fn report_words_deny_success(words: &[String]) -> bool {
                         .any(|word| word == outcome)
                 })
     });
-    explicit_failure || negative_no_claim || negative_no_file_claim
+    let negative_outcomes = [
+        "commit",
+        "committed",
+        "complete",
+        "completed",
+        "create",
+        "created",
+        "done",
+        "find",
+        "finish",
+        "finished",
+        "found",
+        "match",
+        "matched",
+        "write",
+        "written",
+        "wrote",
+    ];
+    let scoped_negation = words.iter().enumerate().any(|(index, word)| {
+        matches!(word.as_str(), "never" | "not")
+            && words
+                .iter()
+                .skip(index + 1)
+                .take(3)
+                .any(|word| negative_outcomes.contains(&word.as_str()))
+    });
+    explicit_failure || negative_no_claim || negative_no_file_claim || scoped_negation
 }
 
 impl OperationTrackerState {
@@ -2926,6 +2983,14 @@ fn final_response_report_accepts_completion_with_no_errors() {
 fn final_response_report_accepts_completion_with_no_file_changes() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_completion_with_scoped_negation() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
 }
@@ -5336,6 +5401,30 @@ fn forced_git_diff_verifier_accepts_the_seeded_worktree_patch() -> EvalResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn forced_git_diff_verifier_rejects_post_seed_fixture_mode_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_DIFF_NAME)
+        .expect("the Git diff fixture exists");
+    suite.prepare_git_case(GIT_DIFF_NAME)?;
+    let path = suite.workspace.path().join(GIT_DIFF_OVERFLOW_PATH);
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(permissions.mode() ^ USER_EXECUTE_MODE_BIT);
+    fs::set_permissions(&path, permissions)?;
+    let result = serde_json::json!({
+        "patch": expected_bounded_git_worktree_patch(suite.workspace.path())?,
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
 #[test]
 fn forced_git_diff_verifier_rejects_an_empty_patch() -> EvalResult {
     let suite = FamilySuite::git()?;
@@ -5629,6 +5718,36 @@ fn forced_git_status_verifier_accepts_the_bounded_prefix() -> EvalResult {
     .to_string();
 
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_status_verifier_rejects_post_seed_fixture_mode_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let path = suite.workspace.path().join(git_status_overflow_path(0));
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(permissions.mode() ^ USER_EXECUTE_MODE_BIT);
+    fs::set_permissions(&path, permissions)?;
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
