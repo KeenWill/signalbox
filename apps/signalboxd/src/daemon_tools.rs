@@ -1777,8 +1777,10 @@ mod tests {
     const EMPTY_CARGO_TARGET_DIRECTORY_MARKER: &[u8] = b"";
     const CARGO_TEST_PROFILE: &str = "test";
     const CARGO_DEV_PROFILE: &str = "dev";
+    const CARGO_BENCH_PROFILE: &str = "bench";
     const CARGO_RELEASE_PROFILE: &str = "release";
     const CARGO_TEST_SUBCOMMAND: &str = "test";
+    const CARGO_TEST_SUBCOMMAND_ALIAS: &str = "t";
     const CARGO_PROGRAM_STEM: &str = "cargo";
     const CARGO_PROFILE_OPTION: &str = "--profile";
     const CARGO_PROFILE_OPTION_PREFIX: &str = "--profile=";
@@ -1891,12 +1893,6 @@ done
         if Path::new(arguments.first()?).file_stem()? != OsStr::new(CARGO_PROGRAM_STEM) {
             return None;
         }
-        if !arguments
-            .iter()
-            .any(|argument| *argument == OsStr::new(CARGO_TEST_SUBCOMMAND))
-        {
-            return None;
-        }
         let mut arguments = arguments.iter().copied();
         while let Some(argument) = arguments.next() {
             if argument == OsStr::new(CARGO_PROFILE_OPTION) {
@@ -1950,7 +1946,7 @@ done
     fn admitted_configured_target_dir(
         input: AdmittedConfiguredTargetDirInput<'_>,
     ) -> Option<PathBuf> {
-        let configured = canonicalized_target_dir(input.configured_target_dir);
+        let configured = fs::canonicalize(input.configured_target_dir).ok()?;
         configured_target_matches_executable(ConfiguredTargetMatchInput {
             current_executable: input.current_executable,
             candidate: &configured,
@@ -2293,7 +2289,7 @@ done
             .expect("Cargo profile directory has a name");
         let profile = match profile_dir_name.to_str() {
             Some("debug") => OsString::from(input.debug_profile),
-            Some(CARGO_RELEASE_PROFILE) => OsString::from(CARGO_RELEASE_PROFILE),
+            Some(CARGO_RELEASE_PROFILE) => OsString::from(input.debug_profile),
             _ => profile_dir_name.to_os_string(),
         };
         let artifact_parent = profile_dir
@@ -2437,11 +2433,52 @@ done
             target_dir: Path::new("synthetic-target"),
             configured_target_dir: None,
             default_target_dir: Path::new("synthetic-target"),
-            debug_profile: CARGO_TEST_PROFILE,
+            debug_profile: CARGO_RELEASE_PROFILE,
             expected_profile: CARGO_RELEASE_PROFILE,
             expected_target: None,
             recognized_target: None,
         });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_preserves_an_explicit_bench_profile() {
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new(CARGO_TEST_SUBCOMMAND),
+            OsStr::new(CARGO_PROFILE_OPTION),
+            OsStr::new(CARGO_BENCH_PROFILE),
+        ];
+        let profile = cargo_test_profile_from_arguments(&arguments)
+            .expect("the synthetic Cargo test invocation names a profile");
+        let executable = Path::new("synthetic-target/release/deps/daemon-tools-test");
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable,
+            target_dir: Path::new("synthetic-target"),
+            configured_target_dir: None,
+            default_target_dir: Path::new("synthetic-target"),
+            debug_profile: profile
+                .to_str()
+                .expect("the synthetic Cargo profile is valid UTF-8"),
+            expected_profile: CARGO_BENCH_PROFILE,
+            expected_target: None,
+            recognized_target: None,
+        });
+    }
+
+    #[test]
+    fn cargo_test_profile_accepts_the_builtin_test_alias() {
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new(CARGO_TEST_SUBCOMMAND_ALIAS),
+            OsStr::new(CARGO_PROFILE_OPTION),
+            OsStr::new(CARGO_DEV_PROFILE),
+        ];
+
+        assert_eq!(
+            cargo_test_profile_from_arguments(&arguments),
+            Some(OsString::from(CARGO_DEV_PROFILE))
+        );
     }
 
     #[test]
@@ -2576,6 +2613,32 @@ done
         let stale_target_dir = fixture.path().join("synthetic-stale-target");
         fs::create_dir(&cli_target_dir).expect("CLI target directory exists");
         fs::create_dir(&stale_target_dir).expect("stale target directory exists");
+        let executable = cli_target_dir.join("debug/deps/daemon-tools-test");
+        let configured = admitted_configured_target_dir(AdmittedConfiguredTargetDirInput {
+            current_executable: &executable,
+            configured_target_dir: &stale_target_dir,
+            known_targets: &BTreeSet::new(),
+        });
+
+        assert_eq!(configured, None);
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: &cli_target_dir,
+            configured_target_dir: configured.as_deref(),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: None,
+        });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_ignores_a_nonexistent_stale_target_directory() {
+        let fixture = tempfile::tempdir().expect("fixture root exists");
+        let cli_target_dir = fixture.path().join("synthetic-cli-target");
+        let stale_target_dir = fixture.path().join("synthetic-stale-target");
+        fs::create_dir(&cli_target_dir).expect("CLI target directory exists");
         let executable = cli_target_dir.join("debug/deps/daemon-tools-test");
         let configured = admitted_configured_target_dir(AdmittedConfiguredTargetDirInput {
             current_executable: &executable,
@@ -3634,7 +3697,8 @@ done
 
     #[test]
     fn cargo_bridge_artifact_uses_the_reported_executable_path() {
-        let executable = PathBuf::from("synthetic-target/bridge");
+        const SYNTHETIC_REPORTED_EXECUTABLE: &str = "synthetic-target/bridge";
+        let executable = PathBuf::from(SYNTHETIC_REPORTED_EXECUTABLE);
         let message = serde_json::json!({
             "reason": "compiler-artifact",
             "target": {"name": CLAUDE_MCP_BRIDGE_BINARY},
