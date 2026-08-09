@@ -1162,7 +1162,6 @@ mod tests {
 
     use expect_test::expect;
     use serde::{Deserialize, Deserializer, de::IgnoredAny};
-    use serde_json::value::RawValue;
     use signalbox_application::ToolCatalog;
     use signalbox_application::ToolInputSchema;
     use signalbox_domain::{ToolEffectClass, ToolPermissionDefault};
@@ -1591,7 +1590,7 @@ mod tests {
     struct ComparableBridgeTool {
         name: String,
         description: String,
-        input_schema: String,
+        input_schema: serde_json::Value,
     }
 
     #[derive(Deserialize)]
@@ -1628,7 +1627,7 @@ mod tests {
         name: String,
         description: String,
         #[serde(rename = "inputSchema")]
-        input_schema: Box<RawValue>,
+        input_schema: serde_json::Value,
     }
 
     impl ListedBridgeResponse {
@@ -1650,7 +1649,7 @@ mod tests {
             ComparableBridgeTool {
                 name: self.name,
                 description: self.description,
-                input_schema: self.input_schema.get().to_owned(),
+                input_schema: self.input_schema,
             }
         }
     }
@@ -1667,7 +1666,8 @@ mod tests {
             .map(|definition| ComparableBridgeTool {
                 name: definition.name().as_str().to_owned(),
                 description: definition.description().to_owned(),
-                input_schema: definition.input_schema().as_str().to_owned(),
+                input_schema: serde_json::from_str(definition.input_schema().as_str())
+                    .expect("daemon tool schemas are valid JSON values"),
             })
             .collect()
     }
