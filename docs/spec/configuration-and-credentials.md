@@ -612,17 +612,22 @@ Only the explicit `[tool_approval_postures]` table changes a declaration's
 resolved posture; family composition itself does not.
 
 `sandboxed_exec` and `cargo_diagnostics` share one daemon-local bubblewrap
-profile. Its name claims more than it delivers, so this page states the profile
-as an enforced part and an explicitly unenforced part rather than as a single
-guarantee.
+profile. Its name claims more than it delivers, so this page recites the launch
+and then lists separately what the profile does not provide. The recitation
+draws no consequence, because every consequence stated here so far has proved
+narrower than it sounded.
 
-The profile enforces exactly this. It unshares the user, mount, PID, IPC, UTS,
-and network namespaces; mounts a fresh `/proc`, `/dev`, and `/tmp`; binds a
-read-only operating-system runtime; clears the ambient environment; binds the
-configured workspace root read-write at `/workspace`; and binds neither a home
-nor a configuration directory. A sandboxed command therefore opens no IP
-connection beyond its own loopback interface, and binds no host filesystem path
-outside the workspace root and that read-only runtime.
+The launch is this. Bubblewrap receives `--die-with-parent`, `--new-session`,
+`--unshare-user`, `--unshare-pid`, `--unshare-ipc`, `--unshare-uts`, and
+`--unshare-net`. It mounts a fresh `/proc`, a fresh `/dev`, and a `tmpfs` at
+`/tmp`; creates `/etc`; and read-only binds `/usr`, `/bin`, `/lib`, `/lib64`,
+`/nix/store`, `/etc/alternatives`, `/etc/hosts`, and `/etc/nsswitch.conf`, each
+where it is present. It binds the configured workspace root read-write at
+`/workspace`, read-only binds the pinned execution supervisor — a host path that
+need not lie under that root — at `/signalbox-exec-dispatch`, and changes
+directory to `/workspace` or to the requested directory beneath it. The child
+environment is cleared and then set to `LANG`, `LC_ALL`, `PATH`, and
+`HOME=/workspace`. Every command is dispatched through the supervisor.
 
 The profile does not provide the following, and no other daemon-local control
 supplies them:
@@ -639,6 +644,9 @@ supplies them:
   host-derived data — `/proc/cpuinfo`, `/proc/meminfo`, and the boot identifier
   among it — that no bind governs, so the readable surface is wider than the
   bound paths alone.
+- `HOME` is the workspace root, so home-relative configuration discovery —
+  `~/.cargo`, `~/.config`, and anything else a program resolves that way — lands
+  inside the writable workspace rather than at a host location.
 - Everything under the workspace root is writable, including the repository's
   `.git`.
 - `cargo_diagnostics` compiles and runs the workspace's own build scripts,

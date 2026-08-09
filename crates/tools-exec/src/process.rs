@@ -113,7 +113,7 @@ struct SandboxedExecContract;
 impl ToolContract for SandboxedExecContract {
     type Arguments = ExecArguments;
     const NAME: &'static str = SANDBOXED_EXEC_NAME;
-    const DESCRIPTION: &'static str = "Runs one bounded direct command in a bwrap-confined injected workspace with no host or external network access.";
+    const DESCRIPTION: &'static str = "Runs one bounded direct command in a bwrap-confined injected workspace whose network namespace holds only a loopback interface.";
 }
 
 struct UnsandboxedExecContract;
