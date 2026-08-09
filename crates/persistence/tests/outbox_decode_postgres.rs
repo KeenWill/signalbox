@@ -41,15 +41,16 @@ use signalbox_domain::{
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
     create_session::CreateSessionRepository,
-    local_test_connection_options, migrate,
+    local_test_connection_options,
+    mapping::{DelegationUpdateStorageKind, DelegationWakeStorageKind},
+    migrate,
     outbox::{
-        DelegationUpdateKind, DelegationWakeSubject, DispatchedBoundChildAction,
-        DispatchedDelegationOutcome, DispatchedDelegationPolicy, DispatchedDelegationProvenance,
-        DispatchedDelegationReason, DispatchedDelegationUpdate, DispatchedDelegationWaitMode,
-        DispatchedDelegationWake, DispatchedModelCallDisposition, DispatchedModelCallState,
-        DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
-        OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatcher,
-        decode_bound_action, decode_delegation_outcome, decode_delegation_reason,
+        DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
+        DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
+        DispatchedDelegationWaitMode, DispatchedDelegationWake, DispatchedModelCallDisposition,
+        DispatchedModelCallState, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
+        DispatchedToolBatchState, OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError,
+        OutboxDispatcher, decode_bound_action, decode_delegation_outcome, decode_delegation_reason,
         decode_delegation_update_kind, decode_delegation_wake_subject, decode_wait_mode,
     },
 };
@@ -168,20 +169,24 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
 // database rather than restating it here.
 
 /// Every delegation update kind, in an inventory the compiler keeps complete.
-fn every_delegation_update_kind() -> Vec<DelegationUpdateKind> {
+fn every_delegation_update_kind() -> Vec<DelegationUpdateStorageKind> {
     let mut kinds = Vec::new();
-    let mut next = Some(DelegationUpdateKind::ChildSpawned);
+    let mut next = Some(DelegationUpdateStorageKind::ChildSpawned);
     while let Some(current) = next {
         next = match current {
-            DelegationUpdateKind::ChildSpawned => Some(DelegationUpdateKind::ChildWaiting),
-            DelegationUpdateKind::ChildWaiting => {
-                Some(DelegationUpdateKind::ChildLifecycleDisposition)
+            DelegationUpdateStorageKind::ChildSpawned => {
+                Some(DelegationUpdateStorageKind::ChildWaiting)
             }
-            DelegationUpdateKind::ChildLifecycleDisposition => {
-                Some(DelegationUpdateKind::ChildResult)
+            DelegationUpdateStorageKind::ChildWaiting => {
+                Some(DelegationUpdateStorageKind::ChildLifecycleDisposition)
             }
-            DelegationUpdateKind::ChildResult => Some(DelegationUpdateKind::SessionMessage),
-            DelegationUpdateKind::SessionMessage => None,
+            DelegationUpdateStorageKind::ChildLifecycleDisposition => {
+                Some(DelegationUpdateStorageKind::ChildResult)
+            }
+            DelegationUpdateStorageKind::ChildResult => {
+                Some(DelegationUpdateStorageKind::SessionMessage)
+            }
+            DelegationUpdateStorageKind::SessionMessage => None,
         };
         kinds.push(current);
     }
@@ -189,13 +194,13 @@ fn every_delegation_update_kind() -> Vec<DelegationUpdateKind> {
 }
 
 /// Every delegation wake subject, in an inventory the compiler keeps complete.
-fn every_delegation_wake_subject() -> Vec<DelegationWakeSubject> {
+fn every_delegation_wake_subject() -> Vec<DelegationWakeStorageKind> {
     let mut subjects = Vec::new();
-    let mut next = Some(DelegationWakeSubject::Result);
+    let mut next = Some(DelegationWakeStorageKind::Result);
     while let Some(current) = next {
         next = match current {
-            DelegationWakeSubject::Result => Some(DelegationWakeSubject::Message),
-            DelegationWakeSubject::Message => None,
+            DelegationWakeStorageKind::Result => Some(DelegationWakeStorageKind::Message),
+            DelegationWakeStorageKind::Message => None,
         };
         subjects.push(current);
     }
@@ -685,23 +690,23 @@ fn row_decoded_families_are_enumerated() {
 fn each_delegation_update_kind_spelling_decodes_to_its_variant() {
     assert_eq!(
         decode_delegation_update_kind("child_spawned").unwrap(),
-        DelegationUpdateKind::ChildSpawned
+        DelegationUpdateStorageKind::ChildSpawned
     );
     assert_eq!(
         decode_delegation_update_kind("child_waiting").unwrap(),
-        DelegationUpdateKind::ChildWaiting
+        DelegationUpdateStorageKind::ChildWaiting
     );
     assert_eq!(
         decode_delegation_update_kind("child_lifecycle_disposition").unwrap(),
-        DelegationUpdateKind::ChildLifecycleDisposition
+        DelegationUpdateStorageKind::ChildLifecycleDisposition
     );
     assert_eq!(
         decode_delegation_update_kind("child_result").unwrap(),
-        DelegationUpdateKind::ChildResult
+        DelegationUpdateStorageKind::ChildResult
     );
     assert_eq!(
         decode_delegation_update_kind("session_message").unwrap(),
-        DelegationUpdateKind::SessionMessage
+        DelegationUpdateStorageKind::SessionMessage
     );
 }
 
@@ -710,11 +715,11 @@ fn each_delegation_update_kind_spelling_decodes_to_its_variant() {
 fn each_delegation_wake_subject_spelling_decodes_to_its_variant() {
     assert_eq!(
         decode_delegation_wake_subject("result").unwrap(),
-        DelegationWakeSubject::Result
+        DelegationWakeStorageKind::Result
     );
     assert_eq!(
         decode_delegation_wake_subject("message").unwrap(),
-        DelegationWakeSubject::Message
+        DelegationWakeStorageKind::Message
     );
 }
 
@@ -1193,6 +1198,10 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
     let lifecycle = Uuid::from_u128(LIFECYCLE_REQUEST_SEED);
     let result = Uuid::from_u128(RESULT_REQUEST_SEED);
     let message_request = Uuid::from_u128(MESSAGE_REQUEST_SEED);
+    // Distinct from the spawning identity: if the arm read
+    // `spawning_tool_request_id` for the awaited request, equal values would
+    // hide it. The real relationship requires them to differ too.
+    let awaiting = Uuid::from_u128(ARBITRARY_AWAITING_REQUEST_SEED);
     let child = Uuid::from_u128(ARBITRARY_CHILD_SESSION_SEED);
     let turn = Uuid::from_u128(ARBITRARY_TURN_SEED);
     let durable = Uuid::from_u128(ARBITRARY_COMMAND_SEED);
@@ -1200,7 +1209,7 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
     let sender = Uuid::from_u128(ARBITRARY_SENDER_SESSION_SEED);
 
     plant_child_spawned(&pool, parent, spawned, child).await?;
-    plant_child_waiting(&pool, parent, waiting, child, waiting).await?;
+    plant_child_waiting(&pool, parent, waiting, child, awaiting).await?;
     plant_child_lifecycle_disposition(&pool, parent, lifecycle, child, turn, durable).await?;
     plant_child_result(&pool, parent, result, child, turn, RESULT_CONTENT).await?;
     plant_session_message(
@@ -1252,7 +1261,7 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
         DispatchedOutboxEventKind::DelegationUpdate(DispatchedDelegationUpdate::ChildWaiting {
             spawning_request: ToolRequestId::from_uuid(waiting),
             child: SessionId::from_uuid(child),
-            awaiting_request: ToolRequestId::from_uuid(waiting),
+            awaiting_request: ToolRequestId::from_uuid(awaiting),
             mode: DispatchedDelegationWaitMode::Foreground,
         })
     );
