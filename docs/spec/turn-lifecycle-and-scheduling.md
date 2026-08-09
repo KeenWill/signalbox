@@ -850,22 +850,32 @@ display-title backfill
 completes the generic recovery scan, marks every prior-process nonterminal
 runner connection lost, and — once the credential-pool child is composed —
 establishes each `codex_home` profile's credential-home identity, resolves every
-prior-process capacity reservation, and runs the legacy family-to-policy
+prior-process capacity reservation, resolves every retained OAuth
+refresh-in-progress marker to a replacement token or a quarantine, scavenges
+every crash-left OAuth scratch home, and runs the legacy family-to-policy
 backfill
 ([configuration and credentials](configuration-and-credentials.md#credential-deliveries)).
-Those three gates sit after the recovery scan so a failure cannot block recovery
+Those five gates sit after the recovery scan so a failure cannot block recovery
 of acknowledged work, and before any socket binding or scheduling so no request
 reaches a historical session whose policy is not yet rewritten and no CLI call
-runs against an unestablished credential home. No present composition performs
-them. It then binds the runner socket, binds the process socket, then
-concurrently admits runner enrollment and protocol requests, dispatches the
-outbox, and schedules eligible work. On a database without the fence migration,
-the guarded first migration creates the fence row before the daemon initializes
-its first fenced pool. No request, dispatch cursor advance, or scheduler pass
-occurs before recovery completes. Any phase failure is a failed startup with a
-classified, key-bearing log line and a failure exit code. Runner recovery-only
-binding and reconciliation remain the committed unimplemented ordering stated
-under [startup scan and recovery](#startup-scan-and-recovery).
+runs against an unestablished credential home. The two OAuth gates are here for
+the same reason and are not optional cleanup. A retained marker names a
+single-flight refresh whose owning daemon is gone, so a preparation that
+admitted work first would either join a flight that no longer exists or reuse a
+generation the provider may already have rotated, which the pinned client treats
+as permanent failure. A crash-left scratch home holds real tokens on disk under
+a directory nothing is now watching, so scavenging it before admitting work is
+what bounds how long those tokens outlive the process that minted them. No
+present composition performs any of the five. It then binds the runner socket,
+binds the process socket, then concurrently admits runner enrollment and
+protocol requests, dispatches the outbox, and schedules eligible work. On a
+database without the fence migration, the guarded first migration creates the
+fence row before the daemon initializes its first fenced pool. No request,
+dispatch cursor advance, or scheduler pass occurs before recovery completes. Any
+phase failure is a failed startup with a classified, key-bearing log line and a
+failure exit code. Runner recovery-only binding and reconciliation remain the
+committed unimplemented ordering stated under
+[startup scan and recovery](#startup-scan-and-recovery).
 
 The dedicated guard connection is checked once per second while the runtime is
 active. Losing that session is a fatal fencing event: admission, dispatch, and

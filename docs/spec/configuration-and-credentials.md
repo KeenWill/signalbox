@@ -94,8 +94,12 @@ one environment variable cannot name the paths of several accounts, and a
 deployment holding two keys for one provider must be able to say so. An operator
 configuring this build still supplies the conditional path.
 
-The complete set of process settings, including the two integration credentials
-of which there is exactly one each, is:
+The complete set of unconditional process settings, including the two
+integration credentials of which there is exactly one each, is below. It is
+complete for settings the daemon always reads; the conditional provider paths
+above — `ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE`, each required
+exactly when a static mapping selects the adapter that needs it — are stated
+there rather than repeated here, and an operator needs both lists.
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -1645,11 +1649,20 @@ sticky or exempt from the exclusion.
 Every trigger action is a derived effect of its exact classified observation.
 The observation-commit transaction atomically stores the terminal observation
 and any profile quarantine, pending displacement, or reset-aware membership
-exclusion it causes. The action record names that observation's correlation and
-cannot exist without it; the observation cannot commit without the configured
-action record. Delivery-layer quarantine that occurs before a provider request
-instead names its own typed refresh or credential-home failure and commits that
-evidence atomically with quarantine.
+exclusion it causes. The correlation runs one way only: an action record names
+the observation that caused it and cannot exist without it. It does not run the
+other way, and this is stated explicitly because reading it as symmetric breaks
+the most common configuration there is. `stay` is the action every omitted
+trigger key selects, and it creates no quarantine, no displacement, no
+membership exclusion, and no chain exclusion — that is what `stay` means. An
+action that creates no durable state writes no record, and the observation
+commits alone; requiring a record from it would make the default configuration
+unable to commit a terminal observation at all, so no turn under it could ever
+terminalize. No generic applied-action row exists for that case either, because
+a row recording that nothing happened would be written on every ordinary failure
+and read by nothing. Delivery-layer quarantine that occurs before a provider
+request instead names its own typed refresh or credential-home failure and
+commits that evidence atomically with quarantine.
 
 Two sessions can observe the same trigger for one profile at the same moment,
 and their session-scheduler locks do not serialize that. Every transaction that

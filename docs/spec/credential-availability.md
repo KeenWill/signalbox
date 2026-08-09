@@ -113,7 +113,7 @@ restate a cell's content for local readability, and must not extend it. Where a
 derived view and a row disagree, the row governs and the derived view is the
 defect.
 
-The projections and their owners, each of which is a column above:
+Each projection below is a column above, and names the page that owns it:
 
 - Turn phase, attempt disposition, and wake conditions —
   [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
