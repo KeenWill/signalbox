@@ -1142,6 +1142,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::os::unix::ffi::OsStrExt;
     #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     use std::{
         collections::BTreeSet,
@@ -1165,8 +1167,11 @@ mod tests {
     use signalbox_application::ToolInputSchema;
     use signalbox_domain::{ToolEffectClass, ToolPermissionDefault};
     use signalbox_model_runtime::{
-        CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
+        CancellationSignal, ConversationMessage, CredentialAccess, CredentialAccessError,
+        CredentialReference, CredentialValue, ModelOperation, ModelRuntime, ModelSettings,
+        Observation, ObservationSink, PreparationOutcome, RequestedTarget, ResolvedTarget,
     };
+    use signalbox_model_runtime_claude_cli::{ClaudeCliConfig, ClaudeCliRuntime};
 
     use super::*;
     use crate::{
@@ -1492,8 +1497,71 @@ mod tests {
     fn bridge_catalog(definitions: &[ToolDefinition]) -> Vec<u8> {
         let projected = signalbox_model_provider_runtime::runtime_tool_definitions(definitions)
             .expect("daemon tool schemas project into runtime definitions");
-        signalbox_model_runtime_claude_cli::serialize_mcp_catalog(&projected)
-            .expect("Claude adapter translates the projected bridge catalog")
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("catalog capture runtime constructs");
+        runtime.block_on(capture_prepared_claude_catalog(projected))
+    }
+
+    async fn capture_prepared_claude_catalog(
+        tools: Vec<signalbox_model_runtime::ToolDefinition>,
+    ) -> Vec<u8> {
+        let workspace = tempfile::tempdir().expect("catalog capture workspace exists");
+        let executable = workspace.path().join(CLAUDE_CATALOG_CAPTURE_EXECUTABLE);
+        let script = CLAUDE_CATALOG_CAPTURE_SCRIPT.replace(
+            CLAUDE_CAPTURE_OUTPUT_MARKER,
+            CLAUDE_CAPTURED_CATALOG_FILENAME,
+        );
+        fs::write(&executable, script).expect("catalog capture executable is written");
+        let mut permissions = fs::metadata(&executable)
+            .expect("catalog capture executable metadata is available")
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions)
+            .expect("catalog capture executable is private and executable");
+        let credential = CredentialReference::new(SYNTHETIC_CLAUDE_CREDENTIAL_REFERENCE);
+        let runtime = ClaudeCliRuntime::new(ClaudeCliConfig::new(
+            &executable,
+            std::env::current_exe().expect("test executable path is available"),
+            workspace.path(),
+            credential.clone(),
+        ))
+        .expect("offline Claude catalog capture runtime constructs");
+        let mut operation = ModelOperation::new(
+            (),
+            credential,
+            RequestedTarget::new(SYNTHETIC_CLAUDE_SELECTION),
+            ResolvedTarget::new(SYNTHETIC_CLAUDE_MODEL),
+            vec![ConversationMessage::user_text(SYNTHETIC_CLAUDE_PROMPT)],
+            ModelSettings::new(256),
+        );
+        operation.tools = tools;
+        let prepared = match runtime
+            .prepare(operation, CancellationSignal::never())
+            .await
+        {
+            PreparationOutcome::Prepared(prepared) => prepared,
+            PreparationOutcome::Cancelled { .. } => panic!("catalog capture was cancelled"),
+            PreparationOutcome::Failed { failure, .. } => {
+                panic!("Claude catalog translation failed: {failure:?}")
+            }
+            PreparationOutcome::Defect { defect, .. } => {
+                panic!("Claude catalog preparation found a defect: {defect:?}")
+            }
+        };
+        let mut observations = DiscardClaudeCatalogObservations;
+        let _report = runtime
+            .execute(prepared, &mut observations, CancellationSignal::never())
+            .await;
+        fs::read(workspace.path().join(CLAUDE_CAPTURED_CATALOG_FILENAME))
+            .expect("the fake CLI captured the prepared Claude catalog")
+    }
+
+    struct DiscardClaudeCatalogObservations;
+
+    impl ObservationSink<()> for DiscardClaudeCatalogObservations {
+        fn observe(&mut self, _observation: Observation<()>) {}
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1673,6 +1741,33 @@ mod tests {
     const SYNTHETIC_CODE_HOST_CREDENTIAL_REFERENCE: &str = "synthetic-code-host";
     const SYNTHETIC_GITHUB_CREDENTIAL_PATH: &str = "github";
     const SYNTHETIC_GITHUB_CREDENTIAL_REFERENCE: &str = "synthetic-github";
+    const SYNTHETIC_CLAUDE_CREDENTIAL_REFERENCE: &str = "synthetic-claude";
+    const SYNTHETIC_CLAUDE_SELECTION: &str = "synthetic-claude-selection";
+    const SYNTHETIC_CLAUDE_MODEL: &str = "synthetic-claude-model";
+    const SYNTHETIC_CLAUDE_PROMPT: &str = "Capture the prepared MCP catalog";
+    const CLAUDE_CATALOG_CAPTURE_EXECUTABLE: &str = "capture-claude-catalog";
+    const CLAUDE_CAPTURED_CATALOG_FILENAME: &str = "captured-tools.json";
+    const CLAUDE_CAPTURE_OUTPUT_MARKER: &str = "__CAPTURE_OUTPUT__";
+    const CLAUDE_CATALOG_CAPTURE_SCRIPT: &str = r#"#!/bin/sh
+set -eu
+mcp_config=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--mcp-config" ]; then
+    shift
+    mcp_config=$1
+  fi
+  shift
+done
+test -n "$mcp_config"
+config=
+IFS= read -r config < "$mcp_config" || test -n "$config"
+catalog=${config#*\"args\":[\"--serve\",\"}
+catalog=${catalog%%\"*}
+test -n "$catalog"
+while IFS= read -r line || test -n "$line"; do
+  printf '%s' "$line"
+done < "$catalog" > __CAPTURE_OUTPUT__
+"#;
 
     #[track_caller]
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
