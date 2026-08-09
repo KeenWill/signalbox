@@ -1646,9 +1646,10 @@ protocol's 8 MiB frame limit even under worst-case JSON escaping. Each
 `[[credential_pools]]` entry carries:
 
 - `name` — the exact pool key, unique in the document.
-- `members` — a nonempty array of tables. Each names one declared `profile`, its
-  `priority` within this pool as an integer from 1 through 4,294,967,295 where a
-  lower value is preferred, and an optional `headroom_reserve_percent`
+- `members` — a nonempty array of inline tables; the array-of-tables spelling
+  `[[credential_pools.members]]` is rejected. Each names one declared `profile`,
+  its `priority` within this pool as an integer from 1 through 4,294,967,295
+  where a lower value is preferred, and an optional `headroom_reserve_percent`
   overriding the pool value for that member alone.
 - `tie_break` — one closed value resolving equal priorities: `first_listed`,
   `round_robin`, or `least_used`.
@@ -1948,14 +1949,16 @@ and any `on_headroom_low` action other than `stay` in this build, because no
 composed runtime observes remaining capacity, and `switch_now` on any
 adapter-and-trigger pair whose adapter supplies no native token for that cause —
 every trigger under `claude_cli` and `codex_cli`, `on_quota_exhausted` under
-`anthropic`, and `on_overloaded` under `openai`. Reporting capacity alone does
-not admit `least_used`: a later accepted adapter contract must first define the
-normalized quantity, observation lifetime, and deterministic secondary tie-break
-it uses. Why: a configured reserve or selection rule that silently never fires —
-or whose metric varies by implementation — would read as protection the
-deployment does not have. The keys are admitted by the grammar so that supplying
-that later contract needs no configuration grammar change; the observation
-itself is routed through
+`anthropic`, and `on_overloaded` under `openai`. The admission gate is the
+capacity report alone, so an adapter that reports capacity admits `least_used`
+and a headroom reserve with no further parser change; the adapter contract that
+flips that answer therefore owes the normalized quantity, observation lifetime,
+and deterministic secondary tie-break in the same change, because this page
+cannot enforce it. Why it is owed: a configured reserve or selection rule that
+silently never fires — or whose metric varies by implementation — would read as
+protection the deployment does not have. The keys are admitted by the grammar so
+that supplying that later contract needs no configuration grammar change; the
+observation itself is routed through
 [model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 
 A one-member pool is the ordinary single-account deployment and requires no
