@@ -310,14 +310,15 @@ async fn run_case(
         .await
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
     let approval_mode = if forced_tool == Some(UNSANDBOXED_EXEC_NAME) {
-        ExecApprovalMode::ApproveExactForced
+        ExecApprovalMode::ApproveOneExactForced
     } else {
         ExecApprovalMode::DenyAll
     };
+    let mut approval_state = ExecApprovalState::new(approval_mode);
     let mut approval_continuations = 0;
     let mut approval_cap_reached = false;
     while database
-        .decide_pending_unsandboxed_requests(session, turn, approval_mode)
+        .decide_pending_unsandboxed_requests(session, turn, &mut approval_state)
         .await?
     {
         if approval_continuations == MAX_NATURAL_APPROVAL_CONTINUATIONS {
@@ -2101,7 +2102,7 @@ impl EvalDatabase {
         &self,
         session: SessionId,
         turn: TurnId,
-        approval_mode: ExecApprovalMode,
+        approval_state: &mut ExecApprovalState,
     ) -> EvalResult<bool> {
         let mut decided_any = false;
         loop {
@@ -2117,11 +2118,7 @@ impl EvalDatabase {
                 .iter()
                 .find(|candidate| candidate.id() == request)
                 .ok_or_else(|| io::Error::other("the pending approval request is absent"))?;
-            let decision = exec_eval_approval_decision(
-                approval_mode,
-                pending.name().as_str(),
-                pending.arguments(),
-            );
+            let decision = approval_state.decision(pending.name().as_str(), pending.arguments());
             let mut service = DecideToolRequestService::new(UuidV7ToolLoopIdGenerator, repository);
             let prepared = service
                 .execute(
@@ -2146,20 +2143,36 @@ impl EvalDatabase {
 #[derive(Clone, Copy)]
 enum ExecApprovalMode {
     DenyAll,
-    ApproveExactForced,
+    ApproveOneExactForced,
 }
 
-fn exec_eval_approval_decision(
-    approval_mode: ExecApprovalMode,
-    name: &str,
-    arguments: &NormalizedToolArguments,
-) -> ToolApprovalDecision {
-    if matches!(approval_mode, ExecApprovalMode::ApproveExactForced)
-        && ExecEvalCase::ForcedUnsandboxed.admits(name, arguments)
-    {
-        ToolApprovalDecision::Approve
-    } else {
-        ToolApprovalDecision::Deny { reason: None }
+struct ExecApprovalState {
+    mode: ExecApprovalMode,
+    exact_forced_approved: bool,
+}
+
+impl ExecApprovalState {
+    const fn new(mode: ExecApprovalMode) -> Self {
+        Self {
+            mode,
+            exact_forced_approved: false,
+        }
+    }
+
+    fn decision(
+        &mut self,
+        name: &str,
+        arguments: &NormalizedToolArguments,
+    ) -> ToolApprovalDecision {
+        if matches!(self.mode, ExecApprovalMode::ApproveOneExactForced)
+            && !self.exact_forced_approved
+            && ExecEvalCase::ForcedUnsandboxed.admits(name, arguments)
+        {
+            self.exact_forced_approved = true;
+            ToolApprovalDecision::Approve
+        } else {
+            ToolApprovalDecision::Deny { reason: None }
+        }
     }
 }
 
@@ -2847,11 +2860,9 @@ struct CargoDiagnosticsEvalStream {
 struct CargoDiagnosticsEvalRecords {
     #[serde(rename = "values")]
     _values: Vec<serde_json::Value>,
-    #[serde(rename = "limit_reached")]
-    _limit_reached: bool,
+    limit_reached: bool,
     provenance: String,
-    #[serde(rename = "known_truncated")]
-    _known_truncated: bool,
+    known_truncated: bool,
 }
 
 /// Whether Cargo diagnostics returned the requested successful pass together
@@ -2869,12 +2880,15 @@ fn cargo_diagnostics_result_passed(result: &serde_json::Value) -> bool {
         && result.execution.cargo_failure.is_null()
         && result.execution.preparation_failure.is_null()
         && result.diagnostics.provenance == "workspace_influenced"
+        && !result.diagnostics.limit_reached
+        && !result.diagnostics.known_truncated
         && result.tests.provenance == "workspace_influenced"
+        && !result.tests.limit_reached
+        && !result.tests.known_truncated
 }
 
 fn cargo_diagnostics_stream_is_valid(stream: &CargoDiagnosticsEvalStream) -> bool {
-    matches!(stream.completeness.as_str(), "complete" | "truncated")
-        && matches!(stream.encoding.as_str(), "utf8" | "lossy_utf8")
+    stream.completeness == "complete" && stream.encoding == "utf8"
 }
 
 fn synthetic_tool_result(
@@ -4255,12 +4269,10 @@ fn forced_unsandboxed_eval_denies_model_argument_drift() {
     )
     .expect("drifted unsandboxed fixture arguments normalize");
 
+    let mut approval_state = ExecApprovalState::new(ExecApprovalMode::ApproveOneExactForced);
+
     assert_eq!(
-        exec_eval_approval_decision(
-            ExecApprovalMode::ApproveExactForced,
-            UNSANDBOXED_EXEC_NAME,
-            &drifted,
-        ),
+        approval_state.decision(UNSANDBOXED_EXEC_NAME, &drifted),
         ToolApprovalDecision::Deny { reason: None }
     );
 }
@@ -4273,12 +4285,29 @@ fn unforced_exec_eval_denies_the_exact_forced_unsandboxed_fixture() {
     ))
     .expect("the exact forced unsandboxed fixture arguments normalize");
 
+    let mut approval_state = ExecApprovalState::new(ExecApprovalMode::DenyAll);
+
     assert_eq!(
-        exec_eval_approval_decision(
-            ExecApprovalMode::DenyAll,
-            UNSANDBOXED_EXEC_NAME,
-            &exact_forced,
-        ),
+        approval_state.decision(UNSANDBOXED_EXEC_NAME, &exact_forced),
+        ToolApprovalDecision::Deny { reason: None }
+    );
+}
+
+#[test]
+fn forced_exec_eval_approves_only_one_exact_unsandboxed_fixture() {
+    let unsandboxed = forced_exec_fixture(UNSANDBOXED_EXEC_NAME);
+    let exact_forced = NormalizedToolArguments::try_from_provider_text(String::from(
+        unsandboxed.expected_arguments,
+    ))
+    .expect("the exact forced unsandboxed fixture arguments normalize");
+    let mut approval_state = ExecApprovalState::new(ExecApprovalMode::ApproveOneExactForced);
+
+    assert_eq!(
+        approval_state.decision(UNSANDBOXED_EXEC_NAME, &exact_forced),
+        ToolApprovalDecision::Approve
+    );
+    assert_eq!(
+        approval_state.decision(UNSANDBOXED_EXEC_NAME, &exact_forced),
         ToolApprovalDecision::Deny { reason: None }
     );
 }
@@ -4631,6 +4660,42 @@ fn forced_cargo_diagnostics_accepts_a_complete_successful_check() {
     );
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Pass);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_truncated_stdout_capture() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["execution"]["stdout"]["completeness"] = serde_json::json!("truncated");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_lossy_stderr_capture() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["execution"]["stderr"]["encoding"] = serde_json::json!("lossy_utf8");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_capped_records() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["limit_reached"] = serde_json::json!(true);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_known_truncated_test_records() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["tests"]["known_truncated"] = serde_json::json!(true);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
 }
 
 #[test]
