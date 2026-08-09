@@ -798,11 +798,21 @@ async fn prepare_in_transaction(
             return Ok((false, PrepareContextCompactionOutcome::FailedReplay));
         }
     }
+    // The arbiter is left unnamed on purpose. `durable_command` carries two
+    // unique indexes over the claimed identity — the `command_id` primary key
+    // and `durable_command_kind_version_key` over
+    // `(command_id, command_kind, storage_version)` — and `DO NOTHING`
+    // suppresses a violation only of the index it arbitrates. Naming
+    // `(command_id)` left the second index unguarded, so a concurrent claimant
+    // whose speculative insertion reached that index before the primary key
+    // saw the winner raised a raw uniqueness violation instead of losing the
+    // claim. An unnamed arbiter covers every unique index on the row, which is
+    // what every other durable command claim in this crate already does.
     let claimed = sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
          VALUES ($1, $2, 1, clock_timestamp())
-         ON CONFLICT (command_id) DO NOTHING",
+         ON CONFLICT DO NOTHING",
     )
     .bind(request.command.into_uuid())
     .bind(COMMAND_KIND)
