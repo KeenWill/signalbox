@@ -1041,6 +1041,9 @@ impl SnapshotReaderAdmission {
             | ClientRequest::ListSessionMetadata { .. }
             | ClientRequest::ListConversations { .. }
             | ClientRequest::ReadImportedConversation { .. }
+            // The metadata point read is not one statement: it opens a
+            // transaction, sets `REPEATABLE READ ONLY`, selects, and commits.
+            | ClientRequest::ReadSessionMetadata { .. }
             // Each review read opens its own `REPEATABLE READ` transaction, and
             // the findings listing opens two and then walks the finding graph.
             | ClientRequest::ReadReviewTarget { .. }
@@ -1063,7 +1066,6 @@ impl SnapshotReaderAdmission {
             | ClientRequest::SendSessionMessage { .. }
             | ClientRequest::ListModelAliases {}
             | ClientRequest::ListModelCapabilities {}
-            | ClientRequest::ReadSessionMetadata { .. }
             | ClientRequest::ReplaceSessionMetadata { .. }
             | ClientRequest::ReplaceSessionDefaults { .. }
             | ClientRequest::ReadSessionDefaults { .. }
@@ -1661,8 +1663,18 @@ where
             .await
         }
         ClientRequest::ReadSessionMetadata { session_id } => {
-            handle_read_session_metadata(writer, version, request_id, session_id, &services.pool)
-                .await
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            handle_read_session_metadata(
+                writer,
+                version,
+                request_id,
+                session_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
         }
         ClientRequest::ReplaceSessionMetadata {
             command_id,
@@ -8631,15 +8643,17 @@ async fn handle_read_session_metadata<Writer>(
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let service = LoadSessionMetadataService::new(SessionMetadataRepository::new(pool.clone()));
-    match service
+    let loaded = service
         .execute(SessionId::from_uuid(session_id.into_uuid()))
-        .await
-    {
+        .await;
+    drop(snapshot_permit);
+    match loaded {
         Ok(Some(snapshot)) => {
             let (metadata, last_writer) =
                 wire_metadata_snapshot(&snapshot).ok_or(ProcessConnectionError::EncodeInvariant)?;
@@ -14863,8 +14877,76 @@ mod tests {
             .collect()
     }
 
-    fn review_read_verb(name: &str) -> bool {
-        name.contains("Review") && (name.starts_with("Read") || name.starts_with("List"))
+    /// The review verbs that read the database, taken from the wire vocabulary.
+    fn review_read_verbs_in_vocabulary() -> BTreeSet<String> {
+        client_request_variant_names(WIRE_VOCABULARY)
+            .into_iter()
+            .filter(|name| {
+                name.contains("Review") && (name.starts_with("Read") || name.starts_with("List"))
+            })
+            .collect()
+    }
+
+    /// The scraper carries logic no assertion can inspect, so it is pinned on
+    /// its own: one name per declaration, single-line and braced forms alike,
+    /// with doc comments and field lines excluded.
+    #[test]
+    fn client_request_variant_names_reads_one_name_per_declaration() {
+        let source = concat!(
+            "pub enum ClientRequest {\n",
+            "    /// Read one target.\n",
+            "    ReadReviewTarget { target_id: CanonicalUuid },\n",
+            "    ListReviewFindings {\n",
+            "        run_id: CanonicalUuid,\n",
+            "    },\n",
+            "    ListTemplates {},\n",
+            "}\n",
+        );
+
+        assert_eq!(
+            client_request_variant_names(source),
+            BTreeSet::from([
+                String::from("ListReviewFindings"),
+                String::from("ListTemplates"),
+                String::from("ReadReviewTarget"),
+            ])
+        );
+    }
+
+    /// One fixture identity. No admission reads an identity's value; the verb
+    /// carrying one is the whole input.
+    fn fixture_identity(seed: u128) -> CanonicalUuid {
+        CanonicalUuid::from_uuid(Uuid::from_u128(seed))
+    }
+
+    fn read_review_target_request() -> ClientRequest {
+        ClientRequest::ReadReviewTarget {
+            target_id: fixture_identity(1),
+        }
+    }
+
+    fn read_review_run_request() -> ClientRequest {
+        ClientRequest::ReadReviewRun {
+            run_id: fixture_identity(2),
+        }
+    }
+
+    fn read_review_finding_request() -> ClientRequest {
+        ClientRequest::ReadReviewFinding {
+            finding_id: fixture_identity(3),
+        }
+    }
+
+    fn list_review_findings_request() -> ClientRequest {
+        ClientRequest::ListReviewFindings {
+            run_id: fixture_identity(4),
+        }
+    }
+
+    fn read_review_orchestration_request() -> ClientRequest {
+        ClientRequest::ReadReviewOrchestration {
+            attempt_id: fixture_identity(5),
+        }
     }
 
     /// Every review verb that reads the database reserves snapshot capacity.
@@ -14873,64 +14955,59 @@ mod tests {
     /// read verb dispatched without it spends that reserve silently.
     #[test]
     fn every_review_read_verb_reserves_snapshot_capacity() {
-        let admissions = [
-            (
-                "ReadReviewTarget",
-                ClientRequest::ReadReviewTarget {
-                    target_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
-                },
-                SnapshotReaderAdmission::OneConnection,
-            ),
-            (
-                "ReadReviewRun",
-                ClientRequest::ReadReviewRun {
-                    run_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
-                },
-                SnapshotReaderAdmission::OneConnection,
-            ),
-            (
-                "ReadReviewFinding",
-                ClientRequest::ReadReviewFinding {
-                    finding_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-                },
-                SnapshotReaderAdmission::OneConnection,
-            ),
-            (
-                "ListReviewFindings",
-                ClientRequest::ListReviewFindings {
-                    run_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
-                },
-                SnapshotReaderAdmission::OneConnection,
-            ),
-            (
-                "ReadReviewOrchestration",
-                ClientRequest::ReadReviewOrchestration {
-                    attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
-                },
-                SnapshotReaderAdmission::CoherentReviewSnapshot,
-            ),
-        ];
-
-        let vocabulary: BTreeSet<String> = client_request_variant_names(WIRE_VOCABULARY)
-            .into_iter()
-            .filter(|name| review_read_verb(name))
-            .collect();
-        let admitted: BTreeSet<String> = admissions
-            .iter()
-            .map(|(name, _, _)| (*name).to_owned())
-            .collect();
         assert_eq!(
-            vocabulary, admitted,
-            "a review read verb has no snapshot-reader admission of its own"
+            review_read_verbs_in_vocabulary(),
+            BTreeSet::from([
+                String::from("ListReviewFindings"),
+                String::from("ReadReviewFinding"),
+                String::from("ReadReviewOrchestration"),
+                String::from("ReadReviewRun"),
+                String::from("ReadReviewTarget"),
+            ]),
+            "a review read verb in the wire vocabulary has no admission of its own"
         );
 
-        for (name, request, expected) in admissions {
-            assert_eq!(
-                SnapshotReaderAdmission::for_request(&request),
-                expected,
-                "{name} must reserve snapshot capacity before it reaches the pool"
-            );
-        }
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&read_review_target_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&read_review_run_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&read_review_finding_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&list_review_findings_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&read_review_orchestration_request()),
+            SnapshotReaderAdmission::CoherentReviewSnapshot
+        );
+    }
+
+    /// A metadata point read opens a transaction, sets `REPEATABLE READ ONLY`,
+    /// selects, and commits, so it holds a pooled connection across statements
+    /// and belongs to the same admission. A defaults read is one statement and
+    /// does not.
+    #[test]
+    fn point_reads_are_admitted_by_how_long_they_hold_a_connection() {
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&ClientRequest::ReadSessionMetadata {
+                session_id: fixture_identity(6),
+            }),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&ClientRequest::ReadSessionDefaults {
+                session_id: fixture_identity(7),
+                defaults_version: None,
+            }),
+            SnapshotReaderAdmission::NotRequired
+        );
     }
 
     #[tokio::test]
@@ -14941,9 +15018,7 @@ mod tests {
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
 
         let permit = admit_snapshot_reader(
-            &ClientRequest::ReadReviewTarget {
-                target_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
-            },
+            &read_review_target_request(),
             Arc::clone(&budget),
             &mut shutdown_receiver,
         )
