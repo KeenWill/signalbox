@@ -211,11 +211,25 @@ extension SnapshotCanvas {
 
 /// Renders a live screen in process, without running the application.
 ///
-/// The accepted cost is fidelity. This hosts one screen in one window; a
-/// running application is what owns scene lifecycle, window chrome, and sheet
-/// presentation, so none of those reach a golden here. Sheet content is
-/// snapshotted as its own standalone screen rather than composited onto a
-/// parent, which is why no presentation seam appears in this file.
+/// The accepted cost is fidelity. This hosts one screen in one window, and a
+/// running application is what owns scene lifecycle and window chrome, so
+/// neither of those reaches a golden here.
+///
+/// Sheet presentation is the exception, and it is supported rather than
+/// absent. A screen that presents its own sheet does so into the canvas
+/// window, and the presented controller is inside the hierarchy
+/// `drawHierarchy` captures, so the sheet and the screen behind it both reach
+/// the golden — `testSessionListPresentingTheCreationSheet` is that case, and
+/// its references show the form over the dimmed list. What does not reach a
+/// golden is a presentation the application never makes: nothing here drives a
+/// sheet onto a screen that did not present one.
+///
+/// Snapshotting sheet content standalone on `SnapshotCanvas.sheet` is the
+/// second way to record a sheet and not a correction of the first. It exists
+/// for content whose declared minimum width the presenting canvas cannot give
+/// it, where the presented rendering would record the form clipped; the two
+/// tests for the creation sheet are the pair, and the note on each says which
+/// question it answers.
 ///
 /// The second cost is the destination, and it is bounded rather than absent.
 /// Everything a layout resolves against is pinned below — size, scale, size

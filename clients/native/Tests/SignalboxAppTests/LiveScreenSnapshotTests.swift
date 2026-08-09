@@ -118,27 +118,48 @@ final class LiveScreenSnapshotTests: XCTestCase {
                 )
             }
         }
+
+        /// Whether this disposition carries a written reason.
+        ///
+        /// A rendered case does not and needs none; a refusal that does not is
+        /// the gap `testTheArtifactPreviewRefusalStatesAReason` reports. The
+        /// `switch` is here rather than in that test body because
+        /// `docs/agents/testing-style.md` rule 2 governs test bodies, and a
+        /// straight-line assertion still needs the branch to happen somewhere.
+        var statesARefusalReason: Bool {
+            switch self {
+            case .rendered:
+                return false
+            case .refused(let reason):
+                return !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+        }
     }
 
-    /// Every refusal states a reason.
+    /// The one refused scenario states a reason.
     ///
     /// The exhaustive switch above is what makes a new case a decision; this is
     /// what keeps `.refused` from being the cheap way to discharge it. It can
     /// only catch an empty string — no assertion can judge whether an argument
     /// is a good one — so it is a floor and the review of the reason is the
     /// rest.
-    func testEveryRefusedScenarioStatesAReason() {
-        for scenario in ScreenshotScenario.allCases {
-            guard case .refused(let reason) = ScenarioDisposition.of(scenario) else { continue }
-            XCTAssertFalse(
-                reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                """
-                \(scenario) is refused without a reason. A scenario this suite \
-                does not render carries the argument for why no golden is the \
-                right outcome; write it, or render the scenario.
-                """
-            )
-        }
+    ///
+    /// One named test rather than a scan over `allCases`:
+    /// `docs/agents/testing-style.md` rule 2 unrolls a loop over same-behaviour
+    /// cases into straight-line calls, and a failure here names the scenario
+    /// that caused it instead of reporting from one anonymous site inside a
+    /// `for` body. `.artifactPreview` is the only case `ScenarioDisposition`
+    /// refuses, so it is the only test; a second refusal gets a second test,
+    /// and the switch is what puts that decision in front of whoever adds one.
+    func testTheArtifactPreviewRefusalStatesAReason() {
+        XCTAssertTrue(
+            ScenarioDisposition.of(.artifactPreview).statesARefusalReason,
+            """
+            .artifactPreview is refused without a reason. A scenario this suite \
+            does not render carries the argument for why no golden is the right \
+            outcome; write it, or render the scenario.
+            """
+        )
     }
 
     func testTransportGateWithoutAConfiguredSocket() async {
@@ -162,13 +183,21 @@ final class LiveScreenSnapshotTests: XCTestCase {
     ///
     /// The phone canvases are skipped because their rendering is broken rather
     /// than merely redundant. A presented sheet lays out against the
-    /// presentation's own metrics, and this sheet's content declares a 420-point
-    /// minimum width — wider than the 390-point phone canvas — so what those two
-    /// record is the form centred and clipped on both edges, reading "cel" and
-    /// "Cr" where its buttons are. That is the canvas cutting into a
-    /// presentation, not the application, and it is the same fact
-    /// `SnapshotCanvas.sheet` exists for. `testSessionCreationSheetContent`
-    /// records the content at a width that fits it.
+    /// presentation's own metrics, and the sheet this screen presents is
+    /// `ProcessSessionCreationSheet`, which declares `minWidth: 520` — wider
+    /// than the 390-point phone canvas — so what those two record is the form
+    /// centred and clipped on both edges, reading "cel" and "Cr" where its
+    /// buttons are. That is the canvas cutting into a presentation, not the
+    /// application, and it is the same fact `SnapshotCanvas.sheet` exists for:
+    /// its 540-point width is what clears that minimum, and a canvas anywhere
+    /// between 390 and 519 would clip the same way.
+    /// `testSessionCreationSheetContent` records the content at that width.
+    ///
+    /// The number is this screen's and not the legacy one's. `CreateSessionSheet`
+    /// declares `minWidth: 420`, and it is what
+    /// `testLegacySessionCreationSheetContent` renders; reading that value here
+    /// would put the clipping threshold 100 points low and make a canvas that
+    /// still clips look like one that fits.
     func testSessionListPresentingTheCreationSheet() async {
         await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPadPortrait)
         await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPadLandscape)
