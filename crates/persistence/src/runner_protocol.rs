@@ -4317,14 +4317,17 @@ async fn prospective_placement_reconstitution_history(
     event_kind: &str,
     placement: &SessionRunnerPlacement,
 ) -> Result<RunnerPlacementReconstitutionHistory, RunnerProtocolStoreError> {
-    if placement.revision() == RunnerGeneration::one()
-        || matches!(
-            placement.state(),
-            SessionRunnerPlacementState::Pinned(_)
-                | SessionRunnerPlacementState::RunnerLost(_)
-                | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(_))
-        )
-    {
+    let retains_pinned_history = match placement.state() {
+        SessionRunnerPlacementState::Pinned(_)
+        | SessionRunnerPlacementState::RunnerLost(_)
+        | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(_)) => true,
+        SessionRunnerPlacementState::Unpinned
+        | SessionRunnerPlacementState::RunnerLostBeforePin(_)
+        | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(_)) => {
+            false
+        }
+    };
+    if placement.revision() == RunnerGeneration::one() || retains_pinned_history {
         return Ok(RunnerPlacementReconstitutionHistory::Initial);
     }
     let prior = prior.ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
