@@ -189,6 +189,8 @@ const GIT_MERGE_MESSAGE: &str = "synthetic forced merge\n";
 const GIT_MERGE_MODE: &str = "";
 const GIT_REGULAR_FILE_MODE: i32 = 0o100644;
 const GIT_REGULAR_INDEX_FILE_MODE: u32 = 0o100644;
+const GIT_INDEX_EXTENDED_FLAG: u16 = 0x4000;
+const GIT_INDEX_SKIP_WORKTREE_FLAG: u16 = 0x4000;
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
 const WORKSPACE_SEED: &str = "alpha\nbeta fixture\nalpha\n";
 const WORKSPACE_EDITED_SEED: &str = "beta\nbeta fixture\nbeta\n";
@@ -294,6 +296,8 @@ const SYNTHETIC_CONTRACTED_FAILURE_REPORT: &str = "The operation wasn't complete
 const SYNTHETIC_NEVER_COMPLETION_REPORT: &str = "Never completed the requested operation.";
 const SYNTHETIC_DEFERRED_COMPLETION_REPORT: &str =
     "The requested operation has yet to be completed.";
+const SYNTHETIC_APPLIED_COMPLETION_REPORT: &str = "The patch was applied successfully.";
+const SYNTHETIC_NOT_APPLIED_REPORT: &str = "The patch was not applied.";
 const SYNTHETIC_NO_ERRORS_COMPLETION_REPORT: &str =
     "Completed the requested operation with no errors.";
 const SYNTHETIC_WITHOUT_FAILURE_COMPLETION_REPORT: &str =
@@ -725,8 +729,10 @@ struct GitFixtureSnapshot {
     modes: BTreeMap<PathBuf, Option<u32>>,
     config: Vec<u8>,
     worktree_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    metadata_root_kind: GitMetadataEntryKind,
     metadata_root_mode: Option<u32>,
     metadata_top_level: BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
+    index_entries: Vec<GitIndexEntrySnapshot>,
     static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reflog_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reference_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
@@ -742,8 +748,9 @@ struct GitObjectSnapshot {
     content: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum GitMetadataEntryKind {
+    #[default]
     Directory,
     File,
     Symlink,
@@ -755,6 +762,15 @@ struct GitMetadataEntrySnapshot {
     kind: GitMetadataEntryKind,
     mode: Option<u32>,
     links: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GitIndexEntrySnapshot {
+    path: Vec<u8>,
+    id: Oid,
+    mode: u32,
+    flags: u16,
+    flags_extended: u16,
 }
 
 type GitReferenceInventory = BTreeMap<Vec<u8>, GitReferenceTarget>;
@@ -1294,6 +1310,25 @@ fn git_forced_case_passed(
     let head = repository.head()?.peel_to_commit()?;
     let seed_commit = repository.find_commit(seed)?;
     let log_target = seed_commit.parent(0)?;
+    let expected_fields: &[&str] = match name {
+        GIT_BRANCH_CREATE_NAME | GIT_BRANCH_SWITCH_NAME => &["branch", "head", EVAL_RECEIPT_FIELD],
+        GIT_CREATE_COMMIT_NAME => &["commit", "state_cleaned", EVAL_RECEIPT_FIELD],
+        GIT_DIFF_NAME => &["patch", "truncated", EVAL_RECEIPT_FIELD],
+        GIT_LOG_NAME => &["commits", "truncated", EVAL_RECEIPT_FIELD],
+        GIT_STAGE_NAME => &["staged_paths", EVAL_RECEIPT_FIELD],
+        GIT_STATUS_NAME => &[
+            "branch",
+            "branch_truncated",
+            "head",
+            "entries",
+            "truncated",
+            EVAL_RECEIPT_FIELD,
+        ],
+        _ => return Ok(false),
+    };
+    if !json_object_has_exact_fields(result, expected_fields) {
+        return Ok(false);
+    }
     let passed = match name {
         GIT_BRANCH_CREATE_NAME => {
             let Some(branch_name) = arguments["name"].as_str() else {
@@ -1407,7 +1442,18 @@ fn git_forced_case_passed(
             result["commits"].as_array().is_some_and(|commits| {
                 u64::try_from(commits.len()).ok() == Some(max_entries)
                     && commits.first().is_some_and(|commit| {
-                        commit["commit"] == log_target.id().to_string()
+                        json_object_has_exact_fields(
+                            commit,
+                            &[
+                                "commit",
+                                "author_name",
+                                "author_name_truncated",
+                                "author_email",
+                                "author_email_truncated",
+                                "message",
+                                "message_truncated",
+                            ],
+                        ) && commit["commit"] == log_target.id().to_string()
                             && commit["author_name"]
                                 == log_target.author().name().unwrap_or_default()
                             && commit["author_name_truncated"] == false
@@ -1483,6 +1529,7 @@ fn git_forced_case_passed(
     };
     Ok(passed
         && git_fixture_snapshot_matches(root, &repository, seed_fixture)?
+        && git_forced_index_matches(&repository, name, seed_fixture)?
         && git_forced_objects_match(
             &repository,
             name,
@@ -1707,7 +1754,8 @@ fn git_status_entries_match(entries: &serde_json::Value) -> bool {
     let expected_paths = expected_git_status_paths();
     entries.len() == EXPECTED_GIT_STATUS_MAX_ENTRIES
         && entries.iter().zip(expected_paths).all(|(entry, path)| {
-            entry["path"] == path
+            json_object_has_exact_fields(entry, &["path", "previous_path", "index", "worktree"])
+                && entry["path"] == path
                 && entry["previous_path"].is_null()
                 && entry["index"] == "unchanged"
                 && entry["worktree"] == "untracked"
@@ -2248,14 +2296,92 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         modes: git_fixture_modes(root)?,
         config: fs::read(repository.path().join(GIT_CONFIG_PATH))?,
         worktree_entries: git_worktree_entries(root)?,
+        metadata_root_kind: git_metadata_root_kind(root)?,
         metadata_root_mode: worktree_mode(repository.path())?,
         metadata_top_level: git_metadata_top_level(root)?,
+        index_entries: git_index_entries(&repository)?,
         static_metadata_entries: git_static_metadata_entries(root)?,
         reflog_entries: git_reflog_entries(root)?,
         reference_entries: git_reference_entries(root)?,
         objects: git_object_inventory(&repository)?,
         object_entries: git_object_entries(root)?,
     })
+}
+
+fn git_metadata_root_kind(root: &Path) -> EvalResult<GitMetadataEntryKind> {
+    let file_type = fs::symlink_metadata(root.join(".git"))?.file_type();
+    Ok(if file_type.is_dir() {
+        GitMetadataEntryKind::Directory
+    } else if file_type.is_file() {
+        GitMetadataEntryKind::File
+    } else if file_type.is_symlink() {
+        GitMetadataEntryKind::Symlink
+    } else {
+        GitMetadataEntryKind::Other
+    })
+}
+
+fn git_index_entries(repository: &Repository) -> EvalResult<Vec<GitIndexEntrySnapshot>> {
+    Ok(repository
+        .index()?
+        .iter()
+        .map(|entry| GitIndexEntrySnapshot {
+            path: entry.path,
+            id: entry.id,
+            mode: entry.mode,
+            flags: entry.flags,
+            flags_extended: entry.flags_extended,
+        })
+        .collect())
+}
+
+fn expected_git_index_entry(path: &str, content: &[u8]) -> EvalResult<GitIndexEntrySnapshot> {
+    let path_bytes = path.as_bytes().to_vec();
+    Ok(GitIndexEntrySnapshot {
+        flags: u16::try_from(path_bytes.len().min(0x0fff))?,
+        path: path_bytes,
+        id: Oid::hash_object(ObjectType::Blob, content)?,
+        mode: GIT_REGULAR_INDEX_FILE_MODE,
+        flags_extended: 0,
+    })
+}
+
+fn git_index_with_expected_file(
+    seed_fixture: &GitFixtureSnapshot,
+    path: &str,
+    content: &[u8],
+) -> EvalResult<Vec<GitIndexEntrySnapshot>> {
+    let mut expected = seed_fixture.index_entries.clone();
+    expected.retain(|entry| entry.path != path.as_bytes());
+    expected.push(expected_git_index_entry(path, content)?);
+    expected.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(expected)
+}
+
+fn git_forced_index_matches(
+    repository: &Repository,
+    case_name: &str,
+    seed_fixture: &GitFixtureSnapshot,
+) -> EvalResult<bool> {
+    let expected = match case_name {
+        GIT_BRANCH_SWITCH_NAME => git_index_with_expected_file(
+            seed_fixture,
+            GIT_SEED_PATH,
+            GIT_SWITCH_CONTENT.as_bytes(),
+        )?,
+        GIT_CREATE_COMMIT_NAME => git_index_with_expected_file(
+            seed_fixture,
+            GIT_COMMIT_PATH,
+            GIT_COMMIT_CONTENT.as_bytes(),
+        )?,
+        GIT_DIFF_NAME | GIT_STAGE_NAME => git_index_with_expected_file(
+            seed_fixture,
+            GIT_STAGE_PATH,
+            GIT_STAGE_CONTENT.as_bytes(),
+        )?,
+        _ => seed_fixture.index_entries.clone(),
+    };
+    Ok(git_index_entries(repository)? == expected)
 }
 
 fn git_object_inventory(repository: &Repository) -> EvalResult<GitObjectInventory> {
@@ -2631,6 +2757,7 @@ fn git_fixture_snapshot_matches(
     };
     Ok(git_fixture_modes_match(root, &expected.modes)?
         && config == expected.config
+        && git_metadata_root_kind(root)? == expected.metadata_root_kind
         && worktree_mode(repository.path())? == expected.metadata_root_mode
         && git_metadata_top_level(root)? == expected.metadata_top_level
         && git_static_metadata_entries(root)? == expected.static_metadata_entries)
@@ -2889,10 +3016,12 @@ fn git_natural_state_passed(
     let commit_changes_only_natural_path = changed_paths == [Path::new(GIT_NATURAL_PATH)];
     let natural_path_is_clean =
         repository.status_file(Path::new(GIT_NATURAL_PATH))? == Status::CURRENT;
-    let index = repository.index()?;
-    let index_contains_only_expected_paths = index.len() == 2
-        && index.get_path(Path::new(GIT_SEED_PATH), 0).is_some()
-        && index.get_path(Path::new(GIT_NATURAL_PATH), 0).is_some();
+    let index_matches = git_index_entries(&repository)?
+        == git_index_with_expected_file(
+            seed_fixture,
+            GIT_NATURAL_PATH,
+            GIT_NATURAL_CONTENT.as_bytes(),
+        )?;
     let commit_adds_expected_natural_fixture = commit_adds_exact_fixture(
         &repository,
         &head,
@@ -2947,7 +3076,7 @@ fn git_natural_state_passed(
         && exactly_one_descendant_commit
         && commit_changes_only_natural_path
         && natural_path_is_clean
-        && index_contains_only_expected_paths
+        && index_matches
         && commit_adds_expected_natural_fixture
         && unrelated_fixtures_unchanged
         && complete_status_matches
@@ -3066,7 +3195,12 @@ fn git_natural_result_payloads_passed(
     };
     let head = Repository::open(root)?.head()?.peel_to_commit()?.id();
     Ok(
-        stage_result["staged_paths"] == GIT_NATURAL_STAGED_PATH_COUNT
+        json_object_has_exact_fields(&stage_result, &["staged_paths", EVAL_RECEIPT_FIELD])
+            && json_object_has_exact_fields(
+                &commit_result,
+                &["commit", "state_cleaned", EVAL_RECEIPT_FIELD],
+            )
+            && stage_result["staged_paths"] == GIT_NATURAL_STAGED_PATH_COUNT
             && commit_result["commit"] == head.to_string()
             && commit_result["state_cleaned"] == true,
     )
@@ -3785,11 +3919,14 @@ impl OperationTracker {
 fn report_affirms_completion(report: &str) -> bool {
     let words = normalized_report_words(report);
     let has_completion = [
+        "applied",
         "committed",
         "completed",
         "created",
         "done",
         "finished",
+        "saved",
+        "updated",
         "written",
         "wrote",
     ]
@@ -3892,6 +4029,7 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
             })
     });
     let negative_outcomes = [
+        "applied",
         "commit",
         "committed",
         "change",
@@ -3909,6 +4047,8 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
         "matched",
         "modified",
         "modify",
+        "saved",
+        "updated",
         "write",
         "written",
         "wrote",
@@ -4126,6 +4266,22 @@ fn final_response_report_rejects_deferred_completion() {
         &synthetic_result_with_receipt(),
     );
     tracker.observe_response_text(SYNTHETIC_DEFERRED_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_an_applied_outcome() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_APPLIED_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_an_unapplied_outcome() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_APPLIED_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
 }
@@ -6277,6 +6433,31 @@ fn git_natural_state_rejects_a_commit_with_drifted_bytes() -> EvalResult {
     Ok(())
 }
 
+#[test]
+fn git_natural_state_rejects_skip_worktree_index_drift() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (seed, seed_refs, seed_fixture) = seed_git_repository_with_refs(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    let repository = Repository::open(workspace.path())?;
+    let mut index = repository.index()?;
+    let mut entry = index
+        .get_path(Path::new(GIT_SEED_PATH), 0)
+        .expect("the seeded index entry exists");
+    entry.flags |= GIT_INDEX_EXTENDED_FLAG;
+    entry.flags_extended |= GIT_INDEX_SKIP_WORKTREE_FLAG;
+    index.add(&entry)?;
+    index.write()?;
+
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+        &seed_fixture,
+    )?);
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn git_natural_state_rejects_an_executable_committed_fixture() -> EvalResult {
@@ -8111,6 +8292,124 @@ fn forced_git_status_verifier_rejects_a_top_level_metadata_hard_link() -> EvalRe
     fs::write(&alias, fs::read(&head)?)?;
     fs::remove_file(&head)?;
     fs::hard_link(&alias, &head)?;
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_status_verifier_rejects_an_unknown_result_field() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        "error": "synthetic contradictory field",
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_status_verifier_rejects_an_unknown_entry_field() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let mut entries = git_status_entries_json();
+    entries[0]["error"] = serde_json::json!("synthetic contradictory field");
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": entries,
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_status_verifier_rejects_skip_worktree_index_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let repository = Repository::open(suite.workspace.path())?;
+    let mut index = repository.index()?;
+    let mut entry = index
+        .get_path(Path::new(GIT_SEED_PATH), 0)
+        .expect("the seeded index entry exists");
+    entry.flags |= GIT_INDEX_EXTENDED_FLAG;
+    entry.flags_extended |= GIT_INDEX_SKIP_WORKTREE_FLAG;
+    index.add(&entry)?;
+    index.write()?;
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_status_verifier_rejects_a_symlinked_metadata_root() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let external = tempfile::tempdir()?;
+    let metadata_root = suite.workspace.path().join(".git");
+    let relocated = external.path().join("repository-metadata");
+    fs::rename(&metadata_root, &relocated)?;
+    std::os::unix::fs::symlink(&relocated, &metadata_root)?;
     let result = serde_json::json!({
         "branch": GIT_BASE_BRANCH,
         "branch_truncated": false,
@@ -10629,6 +10928,37 @@ fn git_natural_result_payloads_accept_the_exact_results() -> EvalResult {
     );
 
     assert!(git_natural_result_payloads_passed(
+        suite.workspace.path(),
+        &snapshot,
+        &tracker,
+    )?);
+    Ok(())
+}
+
+#[test]
+fn git_natural_result_payloads_reject_an_unknown_stage_field() -> EvalResult {
+    let (suite, snapshot, head) = prepared_git_natural_result_case()?;
+    let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &serde_json::json!({
+            "staged_paths": GIT_NATURAL_STAGED_PATH_COUNT,
+            "error": "synthetic contradictory field",
+            EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+        })
+        .to_string(),
+    );
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+        &serde_json::json!({
+            "commit": head,
+            "state_cleaned": true,
+            EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+        })
+        .to_string(),
+    );
+
+    assert!(!git_natural_result_payloads_passed(
         suite.workspace.path(),
         &snapshot,
         &tracker,
