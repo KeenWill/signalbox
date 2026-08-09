@@ -3275,7 +3275,7 @@ fn forced_git_diff_verifier_accepts_the_seeded_worktree_patch() -> EvalResult {
         .iter()
         .find(|case| case.name == GIT_DIFF_NAME)
         .expect("the Git diff fixture exists");
-    suite.prepare_for(case.name)?;
+    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
     let repository = Repository::open(suite.workspace.path())?;
     let result = serde_json::json!({
         "patch": expected_git_worktree_patch(suite.workspace.path())?,
