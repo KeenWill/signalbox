@@ -199,7 +199,11 @@ const SYNTHETIC_CARGO_TEST_NAME: &str = "synthetic_test_name";
 const SYNTHETIC_CARGO_DIAGNOSTIC_MESSAGE: &str = "synthetic compiler diagnostic";
 const CARGO_ERROR_DIAGNOSTIC_LEVEL: &str = "error";
 const CARGO_WARNING_DIAGNOSTIC_LEVEL: &str = "warning";
+const SYNTHETIC_CARGO_DIAGNOSTIC_LINE: u64 = 7;
+const SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN: u64 = 4;
+const SYNTHETIC_CARGO_DIAGNOSTIC_BACKWARDS_END_COLUMN: u64 = 3;
 const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
+const EXEC_NATURAL_OUTPUT: &str = "";
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
 const WEB_QUERY: &str = "Signalbox tool evaluation";
@@ -3104,7 +3108,10 @@ impl CaseOutcome {
         let Ok(execution) = serde_json::from_str::<serde_json::Value>(&result.content) else {
             return false;
         };
-        execution["confinement"]["kind"] == "filesystem_confined" && exited_cleanly(&execution)
+        execution["confinement"]["kind"] == "filesystem_confined"
+            && exited_cleanly(&execution)
+            && captured_stdout_is(&execution, EXEC_NATURAL_OUTPUT)
+            && captured_stderr_is_empty(&execution)
     }
 
     fn forced_result_passed(&self, target: &str) -> bool {
@@ -3321,6 +3328,7 @@ fn cargo_diagnostic_span_is_valid(span: &serde_json::Value) -> bool {
         && span.column_start > 0
         && span.line_end >= span.line_start
         && span.column_end > 0
+        && (span.line_end > span.line_start || span.column_end >= span.column_start)
 }
 
 fn cargo_diagnostics_stream_is_valid(stream: &CargoDiagnosticsEvalStream) -> bool {
@@ -5761,6 +5769,24 @@ fn forced_cargo_diagnostics_rejects_malformed_diagnostics() {
 }
 
 #[test]
+fn forced_cargo_diagnostics_rejects_a_backwards_same_line_span() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["span"] = serde_json::json!({
+        "line_start": SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
+        "column_start": SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN,
+        "line_end": SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
+        "column_end": SYNTHETIC_CARGO_DIAGNOSTIC_BACKWARDS_END_COLUMN,
+    });
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
 fn forced_cargo_diagnostics_rejects_a_truncated_stdout_capture() {
     let mut result = successful_cargo_diagnostics_result();
     result["execution"]["stdout"]["completeness"] = serde_json::json!("truncated");
@@ -5939,11 +5965,35 @@ fn natural_exec_outcome(execution: serde_json::Value) -> CaseOutcome {
 
 #[test]
 fn unforced_exec_tier_passes_a_confined_zero_exit() {
-    let outcome = natural_exec_outcome(confined_exit(""));
+    let outcome = natural_exec_outcome(confined_exit(EXEC_NATURAL_OUTPUT));
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
         EvalDisposition::Pass
+    );
+}
+
+#[test]
+fn unforced_exec_tier_rejects_a_truncated_capture() {
+    let mut execution = confined_exit(EXEC_NATURAL_OUTPUT);
+    execution["stdout"]["completeness"] = serde_json::json!("truncated");
+    let outcome = natural_exec_outcome(execution);
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
+fn unforced_exec_tier_rejects_a_lossy_capture() {
+    let mut execution = confined_exit(EXEC_NATURAL_OUTPUT);
+    execution["stderr"]["encoding"] = serde_json::json!("lossy_utf8");
+    let outcome = natural_exec_outcome(execution);
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Miss
     );
 }
 
