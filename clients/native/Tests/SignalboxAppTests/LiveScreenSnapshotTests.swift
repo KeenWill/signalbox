@@ -162,13 +162,25 @@ final class LiveScreenSnapshotTests: XCTestCase {
         }
     }
 
+    /// The names the rendered dispositions carry, refusals dropped.
+    ///
+    /// Parameterized for the same reason the two detectors below are, and it
+    /// was the gap they left: they are handed the lists this produces, so an
+    /// extraction that dropped every rendered disposition — returning `[]` —
+    /// gave both of them nothing to find and both went green. The known-answer
+    /// tests for the detectors could not see that, because their inputs never
+    /// came through here.
+    static func renderingTestNames(of dispositions: [ScenarioDisposition]) -> [String] {
+        dispositions.compactMap(\.renderingTestName)
+    }
+
     /// The test every rendered scenario names, in `allCases` order.
     ///
-    /// These three are computed properties rather than test bodies because they
+    /// These are computed properties rather than test bodies because they
     /// iterate, and `docs/agents/testing-style.md` rule 2 governs test bodies.
     /// The tests below are the straight-line assertions over what they return.
     private static var claimedRenderingTestNames: [String] {
-        ScreenshotScenario.allCases.compactMap { ScenarioDisposition.of($0).renderingTestName }
+        renderingTestNames(of: ScreenshotScenario.allCases.map(ScenarioDisposition.of))
     }
 
     /// The names in `claimed` that `defined` does not contain.
@@ -219,6 +231,59 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// The names more than one scenario claims.
     private static var claimedNamesUsedMoreThanOnce: [String] {
         namesUsedMoreThanOnce(in: claimedRenderingTestNames)
+    }
+
+    /// The refusal-reason check rejects an empty reason.
+    ///
+    /// Found by mutation rather than by review: neutering
+    /// `statesARefusalReason` to `return true` left
+    /// `testTheArtifactPreviewRefusalStatesAReason` green, because that test
+    /// asserts the property is true of the one refusal the suite has, and a
+    /// property hardcoded to true is true of it. The assertion was reading the
+    /// answer it wanted from an implementation that could no longer be wrong.
+    ///
+    /// This is the known-answer half, and the empty and whitespace cases are
+    /// the whole point of it — they are the inputs a working implementation
+    /// answers `false` for and a broken one cannot.
+    func testTheRefusalReasonCheckRejectsAnEmptyReason() {
+        XCTAssertTrue(ScenarioDisposition.refused(reason: "a stated reason").statesARefusalReason)
+        XCTAssertFalse(ScenarioDisposition.refused(reason: "").statesARefusalReason)
+        XCTAssertFalse(ScenarioDisposition.refused(reason: "   \n\t ").statesARefusalReason)
+        XCTAssertFalse(ScenarioDisposition.rendered(by: "testSessionList").statesARefusalReason)
+    }
+
+    /// The extractor keeps rendered names and drops refusals.
+    ///
+    /// The step between the dispositions and the two detectors, and the one
+    /// place a regression disabled every check downstream without failing any
+    /// of them: both detectors answer `[]` for `[]`, which is the answer they
+    /// want, so an extraction returning nothing left the enforcement off and
+    /// the suite green. A mixture with a non-empty expected result is what
+    /// distinguishes it from that.
+    func testTheNameExtractorKeepsRenderedNamesAndDropsRefusals() {
+        XCTAssertEqual(
+            Self.renderingTestNames(of: [
+                .rendered(by: "a"), .refused(reason: "why not"), .rendered(by: "b"),
+            ]),
+            ["a", "b"]
+        )
+        XCTAssertEqual(Self.renderingTestNames(of: [.rendered(by: "only")]), ["only"])
+        XCTAssertEqual(Self.renderingTestNames(of: [.refused(reason: "why not")]), [])
+        XCTAssertEqual(Self.renderingTestNames(of: []), [])
+    }
+
+    /// The suite's own claimed names are not empty.
+    ///
+    /// The extractor's test covers the function; this covers the wiring into
+    /// it. `claimedRenderingTestNames` maps `allCases` through
+    /// `ScenarioDisposition.of` before the extraction, and a regression there
+    /// is the same silent failure by a different route. Naming one test the
+    /// mapping has to produce is enough to tell an empty list from a real one,
+    /// and `testSessionList` has to exist regardless — the coverage test above
+    /// requires it.
+    func testTheClaimedNamesAreDrawnFromTheScenarios() {
+        XCTAssertTrue(Self.claimedRenderingTestNames.contains("testSessionList"))
+        XCTAssertFalse(Self.claimedRenderingTestNames.isEmpty)
     }
 
     /// The duplicate detector reports a duplicate.
