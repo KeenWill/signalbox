@@ -180,7 +180,9 @@ jobs:
           persist-credentials: false
       - name: Install Bubblewrap and a sandbox-visible Rust toolchain for the exec family
         if: ${{ matrix.family == 'exec' }}
-        run: sudo apt-get install --yes bubblewrap cargo rustc
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap cargo rustc
       - name: Enable unprivileged user namespaces for the exec family
         if: ${{ matrix.family == 'exec' }}
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
