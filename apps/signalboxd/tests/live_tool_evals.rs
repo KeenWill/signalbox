@@ -6885,7 +6885,11 @@ impl CaseOutcome {
         self.snapshot.requests.len() == 1
             && self.snapshot.requests[0].name == target
             && self.snapshot.requests[0].arguments_text == expected_arguments
-            && !self.snapshot.requests[0].attempt_succeeded
+            && (!self.snapshot.requests[0].attempt_succeeded
+                || (matches!(
+                    target,
+                    SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
+                ) && self.tool_results.iter().any(exec_result_is_infrastructure)))
     }
 
     fn forced_disposition(&self) -> EvalDisposition {
@@ -12481,6 +12485,16 @@ fn forced_sandboxed_exec_tier_reports_setup_failure_as_infrastructure() {
         outcome.forced_disposition(),
         EvalDisposition::Infrastructure
     );
+}
+
+#[test]
+fn forced_sandboxed_exec_setup_failure_fails_the_job() {
+    let outcome = forced_exec_outcome(
+        SANDBOXED_EXEC_NAME,
+        direct_exec_result(DirectExecEvidence::sandbox_setup_failure()),
+    );
+
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
 }
 
 #[test]
