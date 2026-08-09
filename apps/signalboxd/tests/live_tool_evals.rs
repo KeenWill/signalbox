@@ -246,6 +246,8 @@ const ARBITRARY_EVAL_MODEL_CALL_ID: u128 = 0x9108;
 const ARBITRARY_SECOND_EVAL_REQUEST_ID: u128 = 0x910a;
 const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x910b;
 const ARBITRARY_EVAL_FRONTIER_ID: u128 = 0x910c;
+const ARBITRARY_THIRD_EVAL_REQUEST_ID: u128 = 0x910d;
+const ARBITRARY_FOURTH_EVAL_REQUEST_ID: u128 = 0x910e;
 const ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX: u64 = 1;
 const ARBITRARY_REQUEST_ENTRY_INDEX: u64 = 2;
 const ARBITRARY_LATE_RESULT_ENTRY_INDEX: u64 = 3;
@@ -4511,8 +4513,8 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
 fn unforced_workspace_tier_rejects_more_than_the_bounded_model_calls() {
     let first = Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID);
     let second = Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID);
-    let third = Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID + 1);
-    let fourth = Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID + 2);
+    let third = Uuid::from_u128(ARBITRARY_THIRD_EVAL_REQUEST_ID);
+    let fourth = Uuid::from_u128(ARBITRARY_FOURTH_EVAL_REQUEST_ID);
     let outcome = CaseOutcome {
         target: None,
         expected_arguments: None,
@@ -7551,7 +7553,7 @@ fn unforced_exec_tier_scores_the_explicit_approval_cap_as_a_miss() {
             requests: vec![
                 denied_unsandboxed_request(Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)),
                 denied_unsandboxed_request(Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID)),
-                denied_unsandboxed_request(Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID + 1)),
+                denied_unsandboxed_request(Uuid::from_u128(ARBITRARY_THIRD_EVAL_REQUEST_ID)),
             ],
             model_calls: MAX_NATURAL_MODEL_CALLS,
         },
@@ -7574,12 +7576,12 @@ fn unforced_exec_tier_keeps_setup_failure_above_the_approval_cap() {
         serde_json::json!({}),
     ));
     outcome.snapshot.requests.push(successful_request(
-        Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID + 1),
+        Uuid::from_u128(ARBITRARY_THIRD_EVAL_REQUEST_ID),
         UNSANDBOXED_EXEC_NAME,
         serde_json::json!({}),
     ));
     outcome.snapshot.requests.push(successful_request(
-        Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID + 2),
+        Uuid::from_u128(ARBITRARY_FOURTH_EVAL_REQUEST_ID),
         UNSANDBOXED_EXEC_NAME,
         serde_json::json!({}),
     ));
