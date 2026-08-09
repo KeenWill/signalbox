@@ -194,6 +194,8 @@ jobs:
           SIGNALBOX_TOOL_EVAL_SUMMARY: ${{ runner.temp }}/tool-eval-summary.md
         run: |
           set -euo pipefail
+          test -n "${OPENAI_API_KEY}" \
+            || { echo "the openai-smoke environment provides no API key"; exit 1; }
           result="${RUNNER_TEMP}/tool-eval-test-output"
           set +e
           "${{ steps.build.outputs.executable }}" \
