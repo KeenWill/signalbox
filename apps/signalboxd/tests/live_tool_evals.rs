@@ -883,6 +883,7 @@ impl FamilySuite {
             }),
             workspace_seed_entries: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
+            git_pre_execution_object_ids: StdMutex::new(None),
         })
     }
 
