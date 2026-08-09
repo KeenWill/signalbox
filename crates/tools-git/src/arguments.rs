@@ -21,7 +21,6 @@ pub struct GitStatusArguments {}
 /// Diff selection: current worktree against HEAD, or two revisions.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
-#[schemars(transform = declare_git_diff_object_root)]
 pub enum GitDiffArguments {
     /// Includes both staged and unstaged worktree changes against HEAD.
     Worktree,
@@ -36,10 +35,6 @@ pub enum GitDiffArguments {
         #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
         head: String,
     },
-}
-
-fn declare_git_diff_object_root(schema: &mut schemars::Schema) {
-    schema.insert("type".to_owned(), serde_json::json!("object"));
 }
 
 pub(super) fn default_log_revision() -> String {

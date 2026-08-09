@@ -112,27 +112,6 @@ fn catalog_declares_every_local_verb_auto() {
 }
 
 #[test]
-fn git_diff_schema_declares_its_closed_union_as_an_object() {
-    let fixture = Fixture::new();
-    let catalog = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
-        .expect("suite constructs")
-        .into_parts()
-        .0;
-    let diff = ToolName::try_new(GIT_DIFF_NAME.to_owned()).expect("fixture name is admitted");
-    let schema: serde_json::Value = serde_json::from_str(
-        catalog
-            .definition(&diff)
-            .expect("definition exists")
-            .input_schema()
-            .as_str(),
-    )
-    .expect("Git diff schema is JSON");
-
-    assert_eq!(schema["type"], serde_json::json!("object"));
-    assert!(schema["oneOf"].is_array());
-}
-
-#[test]
 fn local_catalog_declares_no_remote_verb() {
     assert_eq!(LOCAL_GIT_TOOL_NAMES.len(), 7);
     assert_eq!(LOCAL_GIT_TOOL_NAMES[0], GIT_BRANCH_CREATE_NAME);
