@@ -1373,7 +1373,9 @@ def fixture_cases_by_specification() -> dict[str, list]:
     }
 
 
-def duplicate_specification_identifiers() -> list[str]:
+def duplicate_specification_identifiers(
+    specifications: tuple[PredicateSpec, ...] | None = None,
+) -> list[str]:
     """Identifiers claimed by more than one specification, outside test bodies.
 
     Everything keyed by identifier assumes it names one specification: the
@@ -1381,9 +1383,15 @@ def duplicate_specification_identifiers() -> list[str]:
     specifications sharing a name therefore let one fixture set vouch for both,
     so the second's program counts as covered while nothing drives it — the
     hole this module just closed, reopened by a copied line.
+
+    The registry is an argument so the duplicate branch can be driven from a
+    controlled one. Run only over the real registry, which is unique, this
+    helper would keep reporting nothing if its condition were deleted.
     """
+    if specifications is None:
+        specifications = PREDICATE_SPECS
     seen: dict[str, int] = {}
-    for spec in PREDICATE_SPECS:
+    for spec in specifications:
         seen[spec.identifier] = seen.get(spec.identifier, 0) + 1
     return [
         f"{identifier} names {count} specifications; one fixture set would vouch for all "
@@ -2827,6 +2835,32 @@ class WorkflowReadingTests(unittest.TestCase):
         every test that depends on it instead of failing. Promotion is a
         one-word edit, and this failure is what demands it."""
         self.assertEqual(misdeclared_presence(), [])
+
+    def test_two_specifications_sharing_an_identifier_are_named(self) -> None:
+        """The duplicate branch, driven from a controlled registry: the real
+        one is unique, so running only over it would keep reporting nothing if
+        the condition were deleted."""
+        shared = PredicateSpec(
+            identifier="shared-between-two",
+            workflow=COVERAGE_WORKFLOW.name,
+            presence=PENDING,
+            exercised=False,
+            role="one of two specifications written with the same name",
+            tokens=("irrelevant",),
+        )
+        copied = PredicateSpec(
+            identifier=shared.identifier,
+            workflow=SWIFT_WORKFLOW.name,
+            presence=PENDING,
+            exercised=False,
+            role="the copied line that reuses it",
+            tokens=("irrelevant",),
+        )
+
+        problems = duplicate_specification_identifiers((shared, copied))
+
+        self.assertEqual(len(problems), 1)
+        self.assertIn(shared.identifier, problems[0])
 
     def test_no_two_specifications_share_an_identifier(self) -> None:
         """Everything keyed by identifier assumes it names one specification.
