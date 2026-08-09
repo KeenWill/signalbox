@@ -3564,7 +3564,7 @@ done
     const BRIDGE_CHILD_TEST_TIMEOUT: Duration = Duration::from_millis(25);
     const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
     const BRIDGE_WAIT_CHILD_FIXTURE_LIFETIME: Duration = Duration::from_secs(30);
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     const BRIDGE_STDOUT_DESCENDANT_CLEANUP_LIMIT: Duration = Duration::from_secs(15);
     const BRIDGE_WAIT_DESCENDANT_FIXTURE_LIFETIME: Duration = Duration::from_secs(30);
     #[cfg(target_os = "linux")]
@@ -3597,7 +3597,7 @@ done
             stdout.read_to_end(&mut bytes)?;
             Ok::<_, io::Error>(bytes)
         });
-        let status = match wait_for_child(&mut child, timeout) {
+        let status = match wait_for_owned_process_group(&mut child, timeout) {
             Ok(Some(status)) => status,
             Ok(None) => {
                 terminate_owned_process_group(&mut child);
@@ -3610,7 +3610,6 @@ done
                 return Err(error);
             }
         };
-        terminate_owned_process_group(&mut child);
         let stdout = join_bounded_stdout(reader)?;
         Ok(Some(BoundedCommandOutput { status, stdout }))
     }
@@ -3634,6 +3633,40 @@ done
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn wait_for_owned_process_group(
+        child: &mut Child,
+        timeout: Duration,
+    ) -> io::Result<Option<ExitStatus>> {
+        let pid = rustix::process::Pid::from_raw(child.id() as i32)
+            .ok_or_else(|| io::Error::other("owned child has an invalid process id"))?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            let status = rustix::process::waitid(
+                rustix::process::WaitId::Pid(pid),
+                rustix::process::WaitIdOptions::EXITED
+                    | rustix::process::WaitIdOptions::NOHANG
+                    | rustix::process::WaitIdOptions::NOWAIT,
+            )?;
+            if status.is_some() {
+                kill_owned_process_group(child);
+                return child.wait().map(Some);
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            thread::sleep(CHILD_POLL_INTERVAL);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn wait_for_owned_process_group(
+        child: &mut Child,
+        timeout: Duration,
+    ) -> io::Result<Option<ExitStatus>> {
+        wait_for_child(child, timeout)
+    }
+
     fn terminate_child(child: &mut Child) {
         let _ = child.kill();
         let _ = child.wait();
@@ -3646,12 +3679,27 @@ done
         let _ = command;
     }
 
-    fn terminate_owned_process_group(child: &mut Child) {
+    fn kill_owned_process_group(child: &Child) {
         #[cfg(unix)]
         if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
             let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         }
-        terminate_child(child);
+        #[cfg(not(unix))]
+        let _ = child;
+    }
+
+    fn terminate_owned_process_group(child: &mut Child) -> bool {
+        match child.try_wait() {
+            Ok(None) => {
+                kill_owned_process_group(child);
+                terminate_child(child);
+                true
+            }
+            Ok(Some(_)) | Err(_) => {
+                terminate_child(child);
+                false
+            }
+        }
     }
 
     #[test]
@@ -3687,7 +3735,7 @@ done
             .expect("bounded-wait descendant is observed");
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "subprocess fixture that exits after leaving a stdout descendant"]
     #[expect(
@@ -3746,7 +3794,7 @@ done
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn bounded_command_output_cleans_up_stdout_descendants_after_parent_exit() {
         let current = std::env::current_exe().expect("test executable path is available");
@@ -3762,6 +3810,23 @@ done
                 .is_some()
         );
         assert!(started.elapsed() < BRIDGE_STDOUT_DESCENDANT_CLEANUP_LIMIT);
+    }
+
+    #[test]
+    fn owned_process_group_cleanup_skips_a_reaped_child() {
+        let current = std::env::current_exe().expect("test executable path is available");
+        let mut child_command = Command::new(current);
+        child_command
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_owned_process_group(&mut child_command);
+        let mut child = child_command.spawn().expect("short-lived child starts");
+        let status = child.wait().expect("short-lived child is reaped");
+
+        assert!(status.success());
+        assert!(!terminate_owned_process_group(&mut child));
     }
 
     #[cfg(unix)]
@@ -3851,14 +3916,13 @@ done
         let (messages, reader) = response_reader(BufReader::new(
             build.stdout.take().expect("Cargo build stdout is piped"),
         ));
-        let Some(status) = wait_for_child(&mut build, BRIDGE_BUILD_TIMEOUT)
+        let Some(status) = wait_for_owned_process_group(&mut build, BRIDGE_BUILD_TIMEOUT)
             .expect("bridge binary build is observed")
         else {
             terminate_owned_process_group(&mut build);
             reader.join().expect("Cargo build output reader exits");
             panic!("bridge binary build exceeded its timeout");
         };
-        terminate_owned_process_group(&mut build);
         reader.join().expect("Cargo build output reader exits");
         assert!(status.success(), "bridge binary build succeeds");
         let executable = cargo_bridge_executable(messages);
