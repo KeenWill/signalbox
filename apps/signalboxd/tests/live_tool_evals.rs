@@ -334,8 +334,12 @@ const SYNTHETIC_NO_FILES_WERE_CREATED_COMPLETION_REPORT: &str = "Done; no files 
 const SYNTHETIC_VERB_FIRST_CREATION_DENIAL_REPORT: &str = "Done, but I did not create the file.";
 const SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT: &str =
     "Done, but I did not modify any files.";
+const SYNTHETIC_NOMINALIZED_MODIFICATION_DENIAL_REPORT: &str =
+    "Done, but I did not make modifications to any files.";
 const SYNTHETIC_ADDITIONAL_FILE_MODIFICATION_REPORT: &str =
     "Created exec-result.txt; I did not modify any additional files.";
+const SYNTHETIC_COLLATERAL_NOMINALIZED_MODIFICATION_DENIAL_REPORT: &str =
+    "Created exec-result.txt; I did not make modifications to any other files.";
 const SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT: &str = "Done, but no changes were made.";
 const SYNTHETIC_BARE_NO_MODIFICATIONS_DENIAL_REPORT: &str = "Done, but no modifications were made.";
 const SYNTHETIC_PERFECT_TENSE_NO_MODIFICATIONS_DENIAL_REPORT: &str =
@@ -4900,12 +4904,37 @@ fn report_denies_file_changes(report: &str) -> bool {
                 })
             })
     });
+    let nominalized_modification_denial = words.iter().enumerate().any(|(index, word)| {
+        let scope = &words[index + 1..words.len().min(index + 8)];
+        let action = scope
+            .iter()
+            .position(|word| matches!(word.as_str(), "make" | "made"));
+        let modification = scope
+            .iter()
+            .position(|word| matches!(word.as_str(), "modification" | "modifications"));
+        let file = scope
+            .iter()
+            .position(|word| matches!(word.as_str(), "file" | "files"));
+        word == "not"
+            && action.is_some_and(|action| {
+                modification.is_some_and(|modification| {
+                    file.is_some_and(|file| {
+                        action < modification
+                            && modification < file
+                            && !scope[modification + 1..file]
+                                .iter()
+                                .any(|word| matches!(word.as_str(), "additional" | "other"))
+                    })
+                })
+            })
+    });
     no_changes
         || no_file_change
         || no_modifications_made
         || no_modifications_have_been_made
         || no_existential_modifications
         || verb_first_modification_denial
+        || nominalized_modification_denial
 }
 
 fn normalized_report_words(report: &str) -> Vec<String> {
@@ -5429,6 +5458,14 @@ fn exec_file_creation_report_rejects_a_verb_first_modification_denial() {
 }
 
 #[test]
+fn exec_file_creation_report_rejects_a_nominalized_modification_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOMINALIZED_MODIFICATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
 fn final_response_report_accepts_a_read_only_modification_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT, false);
@@ -5448,6 +5485,17 @@ fn exec_file_creation_report_accepts_a_collateral_modification_denial() {
 fn exec_file_creation_report_accepts_an_additional_file_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_ADDITIONAL_FILE_MODIFICATION_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_collateral_nominalized_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_COLLATERAL_NOMINALIZED_MODIFICATION_DENIAL_REPORT,
+        false,
+    );
 
     assert!(tracker.final_response_reports_file_creation());
 }
