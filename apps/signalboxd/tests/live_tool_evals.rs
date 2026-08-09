@@ -1234,6 +1234,7 @@ impl FamilySuite {
             git_pre_execution_metadata_top_level: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
+            git_pre_execution_object_modified_times: StdMutex::new(None),
         })
     }
 
