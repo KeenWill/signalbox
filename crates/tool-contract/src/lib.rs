@@ -408,14 +408,18 @@ fn merged_property(
     let mut constraints: Option<serde_json::Map<String, serde_json::Value>> = None;
     let mut described: Vec<(Vec<String>, String)> = Vec::new();
     for (variant, tag_value) in variants.iter().zip(tag_values) {
-        let Some(declared) = variant
-            .properties
-            .get(name)
-            .and_then(serde_json::Value::as_object)
-        else {
+        let Some(present) = variant.properties.get(name) else {
             continue;
         };
-        let mut declared = declared.clone();
+        // Absent and present-but-boolean are different answers and only the
+        // first is a skip. `true` and `false` are valid JSON Schemas — one
+        // admits every value, the other none — and neither merges with another
+        // variant's object. Reading a `true` as undeclared would narrow the
+        // merged property to the object branch alone, refusing values this
+        // branch admits; reading a `false` that way would advertise a property
+        // this branch prohibits outright. Neither is expressible in one merged
+        // object, so the fold declines.
+        let mut declared = present.as_object()?.clone();
         let description = declared.remove("description");
         match &constraints {
             Some(agreed) if *agreed != declared => return None,
@@ -1207,6 +1211,35 @@ mod tests {
                 {
                     "properties": {"mode": {"const": "tenanted"}},
                     "required": ["mode", "tenant"],
+                    "type": "object"
+                }
+            ]
+        });
+
+        assert_eq!(object_rooted_schema(declared.clone()), declared);
+    }
+
+    /// A payload property declared as a boolean schema declines the fold
+    /// instead of reading as undeclared.
+    ///
+    /// `true` and `false` are both valid JSON Schemas — one admits every
+    /// value, the other none — so a branch declaring `"label": true` has
+    /// declared it, and skipping it would narrow the merged property to the
+    /// object branch alone, refusing values the boolean branch admits. A
+    /// `false` skipped the same way would advertise a property that branch
+    /// prohibits. Absence is the only thing that may be skipped here.
+    #[test]
+    fn a_boolean_payload_schema_declines_the_fold() {
+        let declared = serde_json::json!({
+            "oneOf": [
+                {
+                    "properties": {"label": true, "mode": {"const": "open"}},
+                    "required": ["label", "mode"],
+                    "type": "object"
+                },
+                {
+                    "properties": {"label": {"type": "string"}, "mode": {"const": "typed"}},
+                    "required": ["label", "mode"],
                     "type": "object"
                 }
             ]
