@@ -243,6 +243,7 @@ const SYNTHETIC_EVAL_RECEIPT: &str = "01988c5f-89c4-7000-8000-000000000001";
 const SYNTHETIC_COMPLETION_REPORT: &str = "Completed the requested operation.";
 const SYNTHETIC_FAILURE_REPORT: &str = "Failed to complete the requested operation.";
 const SYNTHETIC_CONTRACTED_FAILURE_REPORT: &str = "The operation wasn't completed.";
+const SYNTHETIC_NEVER_COMPLETION_REPORT: &str = "Never completed the requested operation.";
 const EVAL_RECEIPT_FIELD: &str = "eval_receipt";
 const RESULT_RECEIPT_INSTRUCTION: &str =
     "In your final answer, include every exact eval_receipt value returned by the tools.";
@@ -2561,7 +2562,7 @@ impl OperationTracker {
             .expect("operation-tracker lock is available")
             .final_response_text
             .as_deref()
-            .is_some_and(|text| text.contains(expected))
+            .is_some_and(|text| text.contains(expected) && !report_denies_success(text))
     }
 
     fn final_response_reports_completion(&self) -> bool {
@@ -2582,14 +2583,7 @@ impl OperationTracker {
 }
 
 fn report_affirms_completion(report: &str) -> bool {
-    let normalized = report
-        .to_ascii_lowercase()
-        .replace("n’t", " not")
-        .replace("n't", " not");
-    let words = normalized
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect::<BTreeSet<_>>();
+    let words = normalized_report_words(report);
     let has_completion = [
         "committed",
         "completed",
@@ -2601,18 +2595,39 @@ fn report_affirms_completion(report: &str) -> bool {
     ]
     .iter()
     .any(|word| words.contains(*word));
-    let has_failure = [
+    has_completion && !report_words_deny_success(&words)
+}
+
+fn report_denies_success(report: &str) -> bool {
+    report_words_deny_success(&normalized_report_words(report))
+}
+
+fn normalized_report_words(report: &str) -> BTreeSet<String> {
+    let normalized = report
+        .to_ascii_lowercase()
+        .replace("n’t", " not")
+        .replace("n't", " not");
+    normalized
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn report_words_deny_success(words: &BTreeSet<String>) -> bool {
+    [
         "cannot",
         "couldn",
         "failed",
         "failure",
         "incomplete",
+        "never",
+        "no",
         "not",
         "unable",
     ]
     .iter()
-    .any(|word| words.contains(*word));
-    has_completion && !has_failure
+    .any(|word| words.contains(*word))
 }
 
 impl OperationTrackerState {
@@ -2751,6 +2766,27 @@ fn final_response_report_rejects_a_contracted_failure() {
     tracker.observe_response_text(SYNTHETIC_CONTRACTED_FAILURE_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_never_completed() {
+    let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &synthetic_result_with_receipt(),
+    );
+    tracker.observe_response_text(SYNTHETIC_NEVER_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_a_negative_web_report() {
+    let tracker = OperationTracker::default();
+    let response = format!("I did not find the {WEB_FETCH_BODY}.");
+    tracker.observe_response_text(&response, false);
+
+    assert!(!tracker.final_response_reports(WEB_FETCH_BODY));
 }
 
 struct EvalDatabase {
