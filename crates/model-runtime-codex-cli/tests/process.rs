@@ -3614,10 +3614,29 @@ fn stdout_closing_cli(directory: &Path) -> std::path::PathBuf {
 }
 
 /// Writes an executable shell-script fake CLI and returns its path.
+///
+/// Every scripted CLI consumes the request upload before its own body runs.
+/// The adapter writes the rendered request to the child's stdin and only then
+/// begins reading stdout, so a script that exits without reading stdin races
+/// that write. The leader is the sole holder of the pipe's read end — POSIX
+/// hands an asynchronous list `/dev/null` for stdin, so a backgrounded
+/// descendant never inherits it — and once the leader exits, the adapter's
+/// write fails with `EPIPE`. The adapter records that as an incomplete request
+/// upload, which demotes an otherwise complete exchange to boundary loss and
+/// displaces the message of a bare nonzero exit. Draining first makes every
+/// scripted exit lose that race by construction, so these fixtures assert on
+/// the behaviour they name rather than on process scheduling.
+///
+/// Fixtures that must leave the upload incomplete — `stderr_holding_incomplete_upload_cli`
+/// closes stdin outright — write their own executable instead of using this helper.
 #[cfg(unix)]
 fn script_cli(directory: &Path, name: &str, script: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
+    let body = script
+        .strip_prefix("#!/bin/sh\n")
+        .expect("a scripted fake CLI opens with the POSIX shell shebang");
+    let script = format!("#!/bin/sh\ncat >/dev/null\n{body}");
     let executable = directory.join(name);
     std::fs::write(&executable, script).expect("the scripted fake CLI is written");
     let mut permissions = std::fs::metadata(&executable)

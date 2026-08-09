@@ -1793,7 +1793,10 @@ mod tests {
             )),
             Some(ToolAttemptDispositionStorageKind::Ambiguous)
         );
-        assert_eq!(tool_attempt_disposition_from_str("unknown"), None);
+        assert_eq!(
+            tool_attempt_disposition_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
     }
     use crate::approval_judge::FailedApprovalJudgeDisposition;
 
