@@ -3949,6 +3949,9 @@ fn report_denies_success(report: &str) -> bool {
 
 fn report_denies_file_changes(report: &str) -> bool {
     let words = normalized_report_words(report);
+    let no_changes = words
+        .windows(2)
+        .any(|claim| claim[0] == "no" && matches!(claim[1].as_str(), "change" | "changes"));
     let no_file_change = words.iter().enumerate().any(|(index, word)| {
         word == "no"
             && words
@@ -3985,7 +3988,8 @@ fn report_denies_file_changes(report: &str) -> bool {
             && claim[2] == "no"
             && matches!(claim[3].as_str(), "modification" | "modifications")
     });
-    no_file_change
+    no_changes
+        || no_file_change
         || no_modifications_made
         || no_modifications_have_been_made
         || no_existential_modifications
@@ -4013,15 +4017,7 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
                 )
             })
     });
-    let negative_no_objects = [
-        "answer",
-        "change",
-        "changes",
-        "commit",
-        "completion",
-        "match",
-        "result",
-    ];
+    let negative_no_objects = ["answer", "commit", "completion", "match", "result"];
     let negative_no_claim = words
         .windows(2)
         .any(|pair| pair[0] == "no" && negative_no_objects.contains(&pair[1].as_str()));
@@ -4414,6 +4410,14 @@ fn exec_file_creation_report_rejects_a_bare_no_changes_denial() {
     tracker.observe_response_text(SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn final_response_report_accepts_completion_with_bare_no_changes() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
 }
 
 #[test]
