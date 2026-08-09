@@ -2086,6 +2086,8 @@ mod tests {
     };
     use signalbox_domain::ResolvedProviderTarget;
 
+    const SYNTHETIC_MALFORMED_TOOL_SCHEMA: &str = "{";
+
     fn call() -> ModelCallId {
         ModelCallId::from_uuid(Uuid::from_u128(1))
     }
@@ -3397,7 +3399,7 @@ mod tests {
 
     #[test]
     fn invalid_runtime_tool_schema_retains_its_json_source() {
-        let source = serde_json::from_str::<serde_json::Value>("{")
+        let source = serde_json::from_str::<serde_json::Value>(SYNTHETIC_MALFORMED_TOOL_SCHEMA)
             .expect_err("synthetic schema is invalid JSON");
         let expected_source = source.to_string();
         let error = InvalidRuntimeToolSchema { source };

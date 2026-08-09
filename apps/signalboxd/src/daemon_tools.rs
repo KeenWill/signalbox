@@ -1661,6 +1661,7 @@ mod tests {
         debug_profile: &'a str,
         configured_target_dir: Option<&'a Path>,
         default_target_dir: &'a Path,
+        artifact_target_dir: Option<&'a Path>,
         known_targets: &'a BTreeSet<OsString>,
     }
 
@@ -1697,6 +1698,7 @@ mod tests {
             debug_profile: CARGO_TEST_PROFILE,
             configured_target_dir: configured_target_dir.as_deref(),
             default_target_dir: &default_target_dir,
+            artifact_target_dir: artifact_target_dir.as_deref(),
             known_targets: &known_targets,
         })
     }
@@ -2091,8 +2093,11 @@ mod tests {
                 )
             }
         } else {
+            let artifact_target_dir = input.artifact_target_dir.map(lexically_normalized);
             let recognized_target = artifact_parent.file_name().filter(|name| {
-                artifact_parent != default_target_dir && input.known_targets.contains(*name)
+                artifact_parent != default_target_dir
+                    && artifact_target_dir.as_deref() != Some(artifact_parent)
+                    && input.known_targets.contains(*name)
             });
             recognized_target.map_or_else(
                 || (artifact_parent.to_path_buf(), None),
@@ -2137,6 +2142,7 @@ mod tests {
             debug_profile: expectation.debug_profile,
             configured_target_dir: expectation.configured_target_dir,
             default_target_dir: expectation.default_target_dir,
+            artifact_target_dir: Some(expectation.target_dir),
             known_targets: &known_targets,
         });
 
@@ -2305,6 +2311,23 @@ mod tests {
             expected_profile: CARGO_TEST_PROFILE,
             expected_target: None,
             recognized_target: None,
+        });
+    }
+
+    #[test]
+    fn bridge_artifact_selection_keeps_a_recognized_name_as_a_cli_host_root() {
+        let cli_target_dir = Path::new(SYNTHETIC_CARGO_TARGET);
+        let executable = cli_target_dir.join("debug/deps/daemon-tools-test");
+
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: cli_target_dir,
+            configured_target_dir: None,
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: Some(SYNTHETIC_CARGO_TARGET),
         });
     }
 
