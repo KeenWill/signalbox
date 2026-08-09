@@ -28,6 +28,7 @@ use git2::{
     BranchType, Delta, DiffOptions, IndexAddOption, ObjectType, Oid, Patch, Repository,
     RepositoryState, Signature, Status, Time,
 };
+use sha1::{Digest as _, Sha1};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
@@ -178,6 +179,14 @@ const GIT_REGULAR_FILE_MODE: i32 = 0o100644;
 const GIT_REGULAR_INDEX_FILE_MODE: u32 = 0o100644;
 const GIT_INDEX_EXTENDED_FLAG: u16 = 0x4000;
 const GIT_INDEX_SKIP_WORKTREE_FLAG: u16 = 0x4000;
+const GIT_INDEX_HEADER_BYTES: usize = 12;
+const GIT_INDEX_OBJECT_ID_BYTES: usize = 20;
+const GIT_INDEX_ENTRY_FIELDS_BEFORE_ID_BYTES: usize = 40;
+const GIT_INDEX_ENTRY_FLAGS_BYTES: usize = 2;
+const GIT_INDEX_EXTENDED_FLAGS_BYTES: usize = 2;
+const GIT_INDEX_EXTENSION_HEADER_BYTES: usize = 8;
+const SYNTHETIC_GIT_INDEX_EXTENSION_SIGNATURE: [u8; 4] = *b"ZZZZ";
+const SYNTHETIC_GIT_INDEX_EXTENSION_CONTENT: &[u8] = b"synthetic optional extension";
 const SYNTHETIC_GIT_EXECUTION_STARTED_SECONDS: i64 = 1_700_000_000;
 const SYNTHETIC_GIT_EXECUTION_FINISHED_SECONDS: i64 = 1_700_000_002;
 const SYNTHETIC_GIT_EXECUTION_RECORDED_SECONDS: i64 = 1_700_000_001;
@@ -656,6 +665,7 @@ struct GitFixtureSnapshot {
     metadata_root_mode: Option<u32>,
     metadata_top_level: BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
     index_entries: Vec<GitIndexEntrySnapshot>,
+    index_extensions: Vec<GitIndexExtensionSnapshot>,
     static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reflog_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reference_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
@@ -694,6 +704,12 @@ struct GitIndexEntrySnapshot {
     mode: u32,
     flags: u16,
     flags_extended: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GitIndexExtensionSnapshot {
+    signature: [u8; 4],
+    content: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2346,6 +2362,7 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         metadata_root_mode: worktree_mode(repository.path())?,
         metadata_top_level: git_metadata_top_level(root)?,
         index_entries: git_index_entries(&repository)?,
+        index_extensions: git_index_extensions(&repository)?,
         static_metadata_entries: git_static_metadata_entries(root)?,
         reflog_entries: git_reflog_entries(root)?,
         reference_entries: git_reference_entries(root)?,
@@ -2379,6 +2396,141 @@ fn git_index_entries(repository: &Repository) -> EvalResult<Vec<GitIndexEntrySna
             flags_extended: entry.flags_extended,
         })
         .collect())
+}
+
+fn git_index_extensions(repository: &Repository) -> EvalResult<Vec<GitIndexExtensionSnapshot>> {
+    let bytes = fs::read(repository.path().join("index"))?;
+    git_index_extension_records(&bytes)
+}
+
+fn git_index_extension_records(bytes: &[u8]) -> EvalResult<Vec<GitIndexExtensionSnapshot>> {
+    let invalid_index = || io::Error::new(io::ErrorKind::InvalidData, "invalid Git index");
+    let extension_end = bytes
+        .len()
+        .checked_sub(GIT_INDEX_OBJECT_ID_BYTES)
+        .filter(|end| *end >= GIT_INDEX_HEADER_BYTES)
+        .ok_or_else(invalid_index)?;
+    if bytes.get(..4) != Some(b"DIRC") {
+        return Err(invalid_index().into());
+    }
+    let version = u32::from_be_bytes(bytes.get(4..8).ok_or_else(invalid_index)?.try_into()?);
+    if !(2..=4).contains(&version) {
+        return Err(invalid_index().into());
+    }
+    let entry_count = usize::try_from(u32::from_be_bytes(
+        bytes
+            .get(8..GIT_INDEX_HEADER_BYTES)
+            .ok_or_else(invalid_index)?
+            .try_into()?,
+    ))?;
+    let mut cursor = GIT_INDEX_HEADER_BYTES;
+    for _entry in 0..entry_count {
+        let entry_start = cursor;
+        let flags_offset = cursor
+            .checked_add(GIT_INDEX_ENTRY_FIELDS_BEFORE_ID_BYTES + GIT_INDEX_OBJECT_ID_BYTES)
+            .filter(|offset| offset.saturating_add(GIT_INDEX_ENTRY_FLAGS_BYTES) <= extension_end)
+            .ok_or_else(invalid_index)?;
+        let flags = u16::from_be_bytes(
+            bytes
+                .get(flags_offset..flags_offset + GIT_INDEX_ENTRY_FLAGS_BYTES)
+                .ok_or_else(invalid_index)?
+                .try_into()?,
+        );
+        cursor = flags_offset + GIT_INDEX_ENTRY_FLAGS_BYTES;
+        if flags & GIT_INDEX_EXTENDED_FLAG != 0 {
+            cursor = cursor
+                .checked_add(GIT_INDEX_EXTENDED_FLAGS_BYTES)
+                .filter(|cursor| *cursor <= extension_end)
+                .ok_or_else(invalid_index)?;
+        }
+        if version == 4 {
+            let mut prefix_bytes = 0_usize;
+            loop {
+                let byte = *bytes.get(cursor).ok_or_else(invalid_index)?;
+                cursor += 1;
+                prefix_bytes += 1;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+                if prefix_bytes == 10 {
+                    return Err(invalid_index().into());
+                }
+            }
+            let suffix = bytes.get(cursor..extension_end).ok_or_else(invalid_index)?;
+            let nul = suffix
+                .iter()
+                .position(|byte| *byte == 0)
+                .ok_or_else(invalid_index)?;
+            cursor = cursor.checked_add(nul + 1).ok_or_else(invalid_index)?;
+        } else {
+            let stated_path_bytes = usize::from(flags & 0x0fff);
+            if stated_path_bytes < 0x0fff {
+                let nul = cursor
+                    .checked_add(stated_path_bytes)
+                    .filter(|nul| bytes.get(*nul) == Some(&0))
+                    .ok_or_else(invalid_index)?;
+                cursor = nul + 1;
+            } else {
+                let path = bytes.get(cursor..extension_end).ok_or_else(invalid_index)?;
+                let nul = path
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .ok_or_else(invalid_index)?;
+                cursor = cursor.checked_add(nul + 1).ok_or_else(invalid_index)?;
+            }
+            let entry_bytes = cursor.checked_sub(entry_start).ok_or_else(invalid_index)?;
+            cursor = entry_start
+                .checked_add((entry_bytes + 7) & !7)
+                .filter(|cursor| *cursor <= extension_end)
+                .ok_or_else(invalid_index)?;
+        }
+    }
+    let mut extensions = Vec::new();
+    while cursor < extension_end {
+        let header_end = cursor
+            .checked_add(GIT_INDEX_EXTENSION_HEADER_BYTES)
+            .filter(|end| *end <= extension_end)
+            .ok_or_else(invalid_index)?;
+        let signature = bytes
+            .get(cursor..cursor + 4)
+            .ok_or_else(invalid_index)?
+            .try_into()?;
+        let content_bytes = usize::try_from(u32::from_be_bytes(
+            bytes
+                .get(cursor + 4..header_end)
+                .ok_or_else(invalid_index)?
+                .try_into()?,
+        ))?;
+        let content_end = header_end
+            .checked_add(content_bytes)
+            .filter(|end| *end <= extension_end)
+            .ok_or_else(invalid_index)?;
+        extensions.push(GitIndexExtensionSnapshot {
+            signature,
+            content: bytes[header_end..content_end].to_vec(),
+        });
+        cursor = content_end;
+    }
+    Ok(extensions)
+}
+
+fn append_synthetic_git_index_extension(repository: &Repository) -> EvalResult {
+    let path = repository.path().join("index");
+    let mut bytes = fs::read(&path)?;
+    let checksum_start = bytes
+        .len()
+        .checked_sub(GIT_INDEX_OBJECT_ID_BYTES)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid Git index"))?;
+    bytes.truncate(checksum_start);
+    bytes.extend_from_slice(&SYNTHETIC_GIT_INDEX_EXTENSION_SIGNATURE);
+    bytes.extend_from_slice(
+        &u32::try_from(SYNTHETIC_GIT_INDEX_EXTENSION_CONTENT.len())?.to_be_bytes(),
+    );
+    bytes.extend_from_slice(SYNTHETIC_GIT_INDEX_EXTENSION_CONTENT);
+    let checksum = Sha1::digest(&bytes);
+    bytes.extend_from_slice(&checksum);
+    fs::write(path, bytes)?;
+    Ok(())
 }
 
 fn expected_git_index_entry(path: &str, content: &[u8]) -> EvalResult<GitIndexEntrySnapshot> {
@@ -2427,7 +2579,8 @@ fn git_forced_index_matches(
         )?,
         _ => seed_fixture.index_entries.clone(),
     };
-    Ok(git_index_entries(repository)? == expected)
+    Ok(git_index_entries(repository)? == expected
+        && git_index_extensions(repository)? == seed_fixture.index_extensions)
 }
 
 fn git_object_inventory(repository: &Repository) -> EvalResult<GitObjectInventory> {
@@ -3116,7 +3269,8 @@ fn git_natural_state_passed_in_window(
             seed_fixture,
             GIT_NATURAL_PATH,
             GIT_NATURAL_CONTENT.as_bytes(),
-        )?;
+        )?
+        && git_index_extensions(&repository)? == seed_fixture.index_extensions;
     let commit_adds_expected_natural_fixture = commit_adds_exact_fixture(
         &repository,
         &head,
@@ -5833,6 +5987,23 @@ fn git_natural_state_rejects_skip_worktree_index_drift() -> EvalResult {
     Ok(())
 }
 
+#[test]
+fn git_natural_state_rejects_index_extension_drift() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (seed, seed_refs, seed_fixture) = seed_git_repository_with_refs(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    append_synthetic_git_index_extension(&Repository::open(workspace.path())?)?;
+
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+        &seed_fixture,
+    )?);
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn git_natural_state_rejects_an_executable_committed_fixture() -> EvalResult {
@@ -7753,6 +7924,32 @@ fn forced_git_status_verifier_rejects_skip_worktree_index_drift() -> EvalResult 
     entry.flags_extended |= GIT_INDEX_SKIP_WORKTREE_FLAG;
     index.add(&entry)?;
     index.write()?;
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_status_verifier_rejects_index_extension_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    append_synthetic_git_index_extension(&Repository::open(suite.workspace.path())?)?;
     let result = serde_json::json!({
         "branch": GIT_BASE_BRANCH,
         "branch_truncated": false,
