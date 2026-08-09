@@ -94,6 +94,18 @@ def written(directory: str, name: str, content: str) -> Path:
     return path
 
 
+def total_of_document(document: dict) -> Summary:
+    """The aggregate summary an export document reduces to, outside test bodies.
+
+    Extracted so the tests below stay straight-line calls rather than each
+    repeating the extract-then-sum loop inline (testing-style rule 2); a
+    nontrivial helper earns its own tests, but this one is exactly the two
+    functions it composes, `read_file_summaries` and `total_of`, both already
+    covered elsewhere in this file.
+    """
+    return total_of([summary for _, summary in read_file_summaries(document)])
+
+
 class CrateAttributionTests(unittest.TestCase):
     def test_files_under_one_crate_directory_aggregate_into_one_row(self) -> None:
         """Two files under crates/domain report as a single crate whose
@@ -704,10 +716,9 @@ class BaselineLoadingTests(unittest.TestCase):
             coverage_file("/repo/crates/domain/src/b.rs", lines=10, covered=10),
         )
         del baseline_document["data"][0]["files"][1]["summary"]["functions"]
-        summaries = [summary for _, summary in read_file_summaries(baseline_document)]
-        total = total_of(summaries)
+        total = total_of_document(baseline_document)
 
-        row = measure_row("Functions", Counter(count=20, covered=10), total.functions)
+        row = measure_row("Functions", current=Counter(count=20, covered=10), baseline=total.functions)
 
         self.assertIn("not in baseline", row)
         self.assertNotIn(" pp", row)
@@ -725,10 +736,9 @@ class BaselineLoadingTests(unittest.TestCase):
                 "summary": {"lines": {"count": 100}},
             }
         )
-        summaries = [summary for _, summary in read_file_summaries(baseline_document)]
-        total = total_of(summaries)
+        total = total_of_document(baseline_document)
 
-        row = measure_row("Lines", Counter(count=100, covered=60), total.lines)
+        row = measure_row("Lines", current=Counter(count=100, covered=60), baseline=total.lines)
 
         self.assertIn("not in baseline", row)
         self.assertNotIn(" pp", row)
@@ -747,10 +757,9 @@ class BaselineLoadingTests(unittest.TestCase):
                 "summary": {"lines": {"count": 1.5, "covered": 0.5}},
             }
         )
-        summaries = [summary for _, summary in read_file_summaries(baseline_document)]
-        total = total_of(summaries)
+        total = total_of_document(baseline_document)
 
-        row = measure_row("Lines", Counter(count=100, covered=60), total.lines)
+        row = measure_row("Lines", current=Counter(count=100, covered=60), baseline=total.lines)
 
         self.assertIn("not in baseline", row)
         self.assertNotIn(" pp", row)
@@ -766,10 +775,9 @@ class BaselineLoadingTests(unittest.TestCase):
                 "summary": {"lines": {"count": True, "covered": False}},
             }
         )
-        summaries = [summary for _, summary in read_file_summaries(baseline_document)]
-        total = total_of(summaries)
+        total = total_of_document(baseline_document)
 
-        row = measure_row("Lines", Counter(count=100, covered=60), total.lines)
+        row = measure_row("Lines", current=Counter(count=100, covered=60), baseline=total.lines)
 
         self.assertIn("not in baseline", row)
         self.assertNotIn(" pp", row)
@@ -781,10 +789,9 @@ class BaselineLoadingTests(unittest.TestCase):
             coverage_file("/repo/crates/domain/src/a.rs", lines=10, covered=10),
             coverage_file("/repo/crates/domain/src/b.rs", lines=10, covered=10),
         )
-        summaries = [summary for _, summary in read_file_summaries(baseline_document)]
-        total = total_of(summaries)
+        total = total_of_document(baseline_document)
 
-        row = measure_row("Functions", Counter(count=20, covered=10), total.functions)
+        row = measure_row("Functions", current=Counter(count=20, covered=10), baseline=total.functions)
 
         self.assertIn(" pp", row)
         self.assertNotIn("not in baseline", row)

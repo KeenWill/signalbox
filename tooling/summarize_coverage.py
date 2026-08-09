@@ -274,7 +274,7 @@ def percent(counter: Counter) -> str:
     return f"{counter.percent:.2f}%"
 
 
-def delta(current: Counter, baseline: Counter) -> str:
+def delta(*, current: Counter, baseline: Counter) -> str:
     """Render one signed difference between two coverage percentages.
 
     The unit is percentage points, not percent: the difference between two
@@ -282,6 +282,13 @@ def delta(current: Counter, baseline: Counter) -> str:
     would overstate or understate it by the ratio of the two denominators.
     The sign is always shown, including on an exact zero, so a reader can tell
     "measured, unchanged" from "not measured".
+
+    Both arguments are keyword-only: they are two adjacent values of the same
+    `Counter` type, so a positional call lets a transposition read as valid
+    Python and silently invert the sign, turning an improvement into a
+    regression or the reverse. Neither argument's type states its role the
+    way `measure_row`'s `name` does, so there is no positional argument left
+    to anchor a convention on; both take the label.
     """
     return f"{current.percent - baseline.percent:+.2f} pp"
 
@@ -494,7 +501,7 @@ def least_covered_files(files: list[tuple[str, Summary]], repo_root: Path, limit
     ]
 
 
-def measure_row(name: str, current: Counter, baseline: "Counter | None") -> str:
+def measure_row(name: str, *, current: Counter, baseline: "Counter | None") -> str:
     """Render one totals row, with its delta column only when there is one.
 
     A baseline counter of zero gets no delta. `read_counter` defaults a counter
@@ -511,11 +518,18 @@ def measure_row(name: str, current: Counter, baseline: "Counter | None") -> str:
     part of the baseline. `Counter.present` carries that distinction through
     the sum, and an incomplete measure gets no delta for the same reason an
     absent one does not.
+
+    `current` and `baseline` are keyword-only. Both are `Counter`, so a
+    positional call lets a transposition read as valid Python and silently
+    invert the reported delta, turning an improvement into a regression or the
+    reverse (docs/style.md principle 2, "position may carry meaning only where
+    types do"). `name` keeps its position, being the one argument whose type
+    states it.
     """
     cells = [name, str(current.covered), str(current.count), percent(current)]
     if baseline is not None:
         comparable = baseline.count and baseline.present
-        cells.append(delta(current, baseline) if comparable else "not in baseline")
+        cells.append(delta(current=current, baseline=baseline) if comparable else "not in baseline")
     return "| " + " | ".join(cells) + " |"
 
 
@@ -573,16 +587,20 @@ def render(
             "",
             "| " + " | ".join(header) + " |",
             "| " + " | ".join(alignment) + " |",
-            measure_row("Lines", total.lines, None if baseline_total is None else baseline_total.lines),
+            measure_row(
+                "Lines",
+                current=total.lines,
+                baseline=None if baseline_total is None else baseline_total.lines,
+            ),
             measure_row(
                 "Functions",
-                total.functions,
-                None if baseline_total is None else baseline_total.functions,
+                current=total.functions,
+                baseline=None if baseline_total is None else baseline_total.functions,
             ),
             measure_row(
                 "Regions",
-                total.regions,
-                None if baseline_total is None else baseline_total.regions,
+                current=total.regions,
+                baseline=None if baseline_total is None else baseline_total.regions,
             ),
             "",
             "### Per crate, least-covered first",
