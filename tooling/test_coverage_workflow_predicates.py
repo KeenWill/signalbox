@@ -1609,6 +1609,25 @@ def empty_first_element_export() -> dict:
     }
 
 
+def null_data_element_export() -> dict:
+    """An export whose first data element is `null` rather than merely empty.
+
+    Adjacent to `empty_first_element_export()` on purpose: an absent `files`
+    key and a `null` element look interchangeable at a glance, and only differ
+    in what `element.get("files", [])` does with them. An empty object still
+    has a `.get`; `None` does not, and raises `AttributeError` where the
+    predicate must refuse rather than pass.
+    """
+    return {
+        "type": EXPORT_TYPE,
+        "version": "2.0.1",
+        "data": [
+            None,
+            {"files": [coverage_file(HEALTHY_FILE, lines=HEALTHY_LINES, covered=HEALTHY_COVERED)]},
+        ],
+    }
+
+
 def native_source(path: str, *, covered: int, executable: int) -> dict:
     """One source file inside an xccov target."""
     return {"path": path, "coveredLines": covered, "executableLines": executable}
@@ -1993,6 +2012,13 @@ RUST_DOCUMENTS: tuple[RecordedDocument, ...] = (
         document=empty_first_element_export(),
         loader_reads=True,
         predicate_accepts=True,
+        divergence=AGREEMENT_REQUIRED,
+    ),
+    RecordedDocument(
+        name="null first data element",
+        document=null_data_element_export(),
+        loader_reads=False,
+        predicate_accepts=False,
         divergence=AGREEMENT_REQUIRED,
     ),
     RecordedDocument(

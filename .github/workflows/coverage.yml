@@ -471,14 +471,29 @@ jobs:
                   # loader reads without complaint — `data: [{}, {<valid>}]` —
                   # and discarded a usable artifact in favour of an older one,
                   # or of none. Keyed on presence rather than value, so an
-                  # explicit `null` is still refused: the loader would fail on
-                  # that, and the two must agree.
+                  # explicit `files: null` is still refused: the loader would
+                  # fail on that, and the two must agree.
+                  #
+                  # The element itself is required to be an object first. On a
+                  # null input `has(k)` returns false rather than erroring, so
+                  # a bare `if has("files") then .files else [] end` treated a
+                  # null array element the same as an empty object — taking
+                  # the else branch and passing — while `element.get("files",
+                  # [])` in the loader raises `AttributeError` on that same
+                  # input, since None carries no `.get`. Every other
+                  # non-object element already failed here before this
+                  # change: `has` errors outright on a string, a number, an
+                  # array, or a boolean, which fails the whole predicate. Null
+                  # alone passed through silently, so this closes that one
+                  # gap by name rather than leaving it to an accident of what
+                  # `has` happens to raise on.
                   #
                   # No apostrophes in this comment, deliberately: the whole
                   # program is a single-quoted shell word, so one would end it.
                   and all(.data[];
-                        (if has("files") then .files else [] end)
-                        | type == "array")
+                        (type == "object")
+                        and ((if has("files") then .files else [] end)
+                             | type == "array"))
                   and all(.data[]?.files[]?; has("filename"))
                   and all(.data[]?.files[]?;
                         (if has("summary") then .summary else {} end)
