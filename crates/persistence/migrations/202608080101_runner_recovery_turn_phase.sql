@@ -59,11 +59,31 @@ BEGIN
              WHERE attempt.attempt_id =
                     placement.interrupted_tool_attempt_id
                AND attempt.session_id = placement.session_id
-               AND attempt.state_kind = 'terminal'
-               AND attempt.terminal_disposition_kind = 'ambiguous'
-               AND lease_event.state_kind IN (
-                    'lost_execution_possible',
-                    'lost_claimed'
+               AND (
+                    (
+                        attempt.state_kind = 'in_flight'
+                        AND (
+                            lease_event.state_kind = 'lost_unclaimed'
+                            OR (
+                                lease_event.state_kind IN (
+                                    'lost_execution_possible',
+                                    'lost_claimed'
+                                )
+                                AND lease.effect_class IN (
+                                    'pure', 'idempotent'
+                                )
+                            )
+                        )
+                    )
+                    OR (
+                        attempt.state_kind = 'terminal'
+                        AND attempt.terminal_disposition_kind = 'ambiguous'
+                        AND lease_event.state_kind IN (
+                            'lost_execution_possible',
+                            'lost_claimed'
+                        )
+                        AND lease.effect_class = 'side_effecting'
+                    )
                )
                AND lease.runner_id = placement.lost_runner_id
                AND leased_placement.event_ordinal < placement.event_ordinal
@@ -343,6 +363,13 @@ BEGIN
                 ON lease.lease_id = binding.lease_id
                AND lease.attempt_id = attempt.attempt_id
                AND lease.session_id = attempt.session_id
+              JOIN runner_current_lease_event AS current_lease
+                ON current_lease.lease_id = lease.lease_id
+               AND current_lease.generation = lease.generation
+              JOIN runner_lease_event AS lease_event
+                ON lease_event.lease_id = current_lease.lease_id
+               AND lease_event.generation = current_lease.generation
+               AND lease_event.event_ordinal = current_lease.event_ordinal
               JOIN runner_session_placement_record AS leased_placement
                 ON leased_placement.session_id = lease.session_id
                AND leased_placement.event_ordinal =
@@ -351,8 +378,32 @@ BEGIN
                     lifecycle.runner_recovery_tool_attempt_id
                AND attempt.turn_id = checked_turn_id
                AND attempt.session_id = checked_session_id
-               AND attempt.state_kind = 'terminal'
-               AND attempt.terminal_disposition_kind = 'ambiguous'
+               AND (
+                    (
+                        attempt.state_kind = 'in_flight'
+                        AND (
+                            lease_event.state_kind = 'lost_unclaimed'
+                            OR (
+                                lease_event.state_kind IN (
+                                    'lost_execution_possible',
+                                    'lost_claimed'
+                                )
+                                AND lease.effect_class IN (
+                                    'pure', 'idempotent'
+                                )
+                            )
+                        )
+                    )
+                    OR (
+                        attempt.state_kind = 'terminal'
+                        AND attempt.terminal_disposition_kind = 'ambiguous'
+                        AND lease_event.state_kind IN (
+                            'lost_execution_possible',
+                            'lost_claimed'
+                        )
+                        AND lease.effect_class = 'side_effecting'
+                    )
+               )
                AND request.producing_model_call_id =
                     lifecycle.active_tool_round_call_id
                AND yielded_attempt.state_kind = 'ended'

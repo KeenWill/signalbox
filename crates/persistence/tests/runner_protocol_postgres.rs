@@ -7473,6 +7473,92 @@ async fn s32_inv009_inv044_pinned_runner_recovery_wait_round_trips_exact_loss()
     Ok(())
 }
 
+/// INV-009 / INV-044: execution-possible loss of retryable pure work parks the
+/// turn with its exact in-flight source attempt for successor reissuance.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_retryable_pure_loss_wait_retains_in_flight_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_execution_possible_lease_loss(&pool, &pin.lease).await?;
+    insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await?;
+    let loaded_wait = store
+        .load_runner_recovery_wait(session)
+        .await?
+        .expect("the retryable pure loss retains its runner recovery wait");
+
+    assert_eq!(loaded_wait.turn(), turn);
+    assert_eq!(loaded_wait.runner(), expected_enrollment.runner());
+    assert_eq!(loaded_wait.placement_revision(), pin.placement.revision());
+    assert_eq!(
+        loaded_wait.interrupted_tool_attempt(),
+        Some(interrupted_attempt)
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: durable no-execution proof keeps even side-effecting
+/// work retryable and parks the turn with its exact in-flight source attempt.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_unclaimed_loss_wait_retains_in_flight_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_no_execution_lease_loss(&pool, &pin.lease).await?;
+    insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await?;
+    let loaded_wait = store
+        .load_runner_recovery_wait(session)
+        .await?
+        .expect("the unclaimed loss retains its runner recovery wait");
+
+    assert_eq!(loaded_wait.turn(), turn);
+    assert_eq!(loaded_wait.runner(), expected_enrollment.runner());
+    assert_eq!(loaded_wait.placement_revision(), pin.placement.revision());
+    assert_eq!(
+        loaded_wait.interrupted_tool_attempt(),
+        Some(interrupted_attempt)
+    );
+    drop(pool);
+    Ok(())
+}
+
 /// INV-009 / INV-044: a pre-pin loss may park the turn without fabricating a
 /// physical attempt, and that nullable arm reads back distinctly.
 #[tokio::test]

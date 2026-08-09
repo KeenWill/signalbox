@@ -6188,7 +6188,7 @@ mod tests {
         assert!(matches!(&error, ClientError::RunnerRecoveryRequired));
         assert_eq!(
             error.to_string(),
-            "the submitted turn awaits lost-runner replacement or abandonment"
+            "the submitted turn awaits lost-runner replacement or stop_turn before abandonment"
         );
     }
 

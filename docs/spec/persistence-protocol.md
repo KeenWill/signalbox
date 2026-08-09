@@ -379,31 +379,33 @@ Representation rules, all enforced in the schema:
   exact lost runner, the positive placement revision the loss was projected
   against, and a nullable tool attempt naming the physical attempt the loss
   interrupted. Deferred checks require that runner and revision to name the
-  session's current lost placement. A present tool attempt must also be terminal
-  and ambiguous, be the current physical attempt for its request, be the attempt
-  the loss recorded, and carry runner-lease lineage to that exact runner and
-  placement revision; its issuing turn attempt must be the same yielded
-  chain-tip that authorizes the wait, and its producing call must be the exact
-  active tool-round boundary retained by that wait. A nullable
-  interrupted-attempt arm admits a retained tool round only when its current
-  attempt inventory contains no prepared, in-flight, or ambiguous physical
-  attempt; retired claimed-retry predecessors are historical inventory and do
-  not block that arm. A present interrupted attempt must be the round's sole
-  current prepared, in-flight, or ambiguous attempt. Lifecycle-side and
-  placement-side checks lock the shared session-scheduler row before evaluating
-  the relationship, so a concurrent placement advance cannot validate against a
-  stale loss. The lifecycle transition matrix admits the phase from an
-  already-active running boundary only after that exact live attempt has ended
-  by yielding to a durable wait, never directly from queued work, and restart
-  reconstitutes it from those correlated facts rather than from the stored
-  discriminator. An interrupt closing the wait extends the retained active tool
-  round's exact yielded frontier, or the turn's starting frontier when no tool
-  round exists; the authenticated interrupt-effect record rejects any other
-  same-session frontier. A retained round with no interrupted physical attempt
-  appends its proposal-ordered tool closures before the cancellation entry. When
-  loss interrupted an ambiguous physical attempt, the same stop instead commits
-  the existing tool-reconciliation terminal shape, so cancellation never erases
-  or reclassifies the ambiguity. Without this shape the loss transaction has
+  session's current lost placement. A present tool attempt must be either the
+  in-flight source retained by an exact retryable lease loss or the terminal
+  ambiguous source of a side-effecting execution-possible loss. It must also be
+  the current physical attempt for its request, be the attempt the loss
+  recorded, and carry runner-lease lineage to that exact runner and placement
+  revision; its issuing turn attempt must be the same yielded chain-tip that
+  authorizes the wait, and its producing call must be the exact active
+  tool-round boundary retained by that wait. A nullable interrupted-attempt arm
+  admits a retained tool round only when its current attempt inventory contains
+  no prepared, in-flight, or ambiguous physical attempt; retired claimed-retry
+  predecessors are historical inventory and do not block that arm. A present
+  interrupted attempt must be the round's sole current prepared, in-flight, or
+  ambiguous attempt. Lifecycle-side and placement-side checks lock the shared
+  session-scheduler row before evaluating the relationship, so a concurrent
+  placement advance cannot validate against a stale loss. The lifecycle
+  transition matrix admits the phase from an already-active running boundary
+  only after that exact live attempt has ended by yielding to a durable wait,
+  never directly from queued work, and restart reconstitutes it from those
+  correlated facts rather than from the stored discriminator. An interrupt
+  closing the wait extends the retained active tool round's exact yielded
+  frontier, or the turn's starting frontier when no tool round exists; the
+  authenticated interrupt-effect record rejects any other same-session frontier.
+  A retained round with no interrupted physical attempt appends its
+  proposal-ordered tool closures before the cancellation entry. When loss
+  interrupted an ambiguous physical attempt, the same stop instead commits the
+  existing tool-reconciliation terminal shape, so cancellation never erases or
+  reclassifies the ambiguity. Without this shape the loss transaction has
   nowhere to store the phase and restart cannot rebuild it. The same migration
   adds the optional interrupted-attempt fact to the exact placement-loss record,
   and the runner persistence read boundary round-trips both nullable arms.
