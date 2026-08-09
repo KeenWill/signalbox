@@ -1267,7 +1267,7 @@ async fn append_runner_registration_loss_projection(
     transaction.commit().await
 }
 
-async fn insert_same_runner_replacement_record(
+async fn append_same_runner_replacement_projection(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session: SessionId,
 ) -> Result<(), sqlx::Error> {
@@ -1317,6 +1317,42 @@ async fn insert_same_runner_replacement_record(
                   FROM runner_current_session_placement
                  WHERE session_id = $1
             )",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_tool
+         SELECT session_id, event_ordinal + 1, tool_name, runner_required
+           FROM runner_session_placement_tool
+          WHERE session_id = $1
+            AND event_ordinal = (
+                SELECT event_ordinal
+                  FROM runner_current_session_placement
+                 WHERE session_id = $1
+            )",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_permission_override
+         SELECT session_id, event_ordinal + 1, tool_name, permission_kind
+           FROM runner_session_placement_permission_override
+          WHERE session_id = $1
+            AND event_ordinal = (
+                SELECT event_ordinal
+                  FROM runner_current_session_placement
+                 WHERE session_id = $1
+            )",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = $1",
     )
     .bind(session.into_uuid())
     .execute(&mut **transaction)
@@ -3727,13 +3763,57 @@ async fn s32_inv044_checked_runner_replacement_requires_a_live_successor_connect
 async fn s32_inv044_registration_loss_admits_same_runner_replacement_shape()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the credentialless registration pins the placement");
+    store.store_pin(&pin, &registration).await?;
     append_runner_registration_loss_projection(&pool, pin.placement.session()).await?;
-    let mut prospective = pool.begin().await?;
+    let mut replacement = pool.begin().await?;
+    append_same_runner_replacement_projection(&mut replacement, pin.placement.session()).await?;
+    replacement.commit().await?;
+    let loaded_replacement = store
+        .load_placement(pin.placement.session())
+        .await?
+        .expect("the committed same-runner replacement remains loadable");
 
-    insert_same_runner_replacement_record(&mut prospective, pin.placement.session()).await?;
-
-    prospective.rollback().await?;
+    assert_eq!(
+        loaded_replacement.placement().state(),
+        pin.placement.state()
+    );
+    assert_eq!(
+        loaded_replacement.placement().request(),
+        pin.placement.request()
+    );
+    assert_eq!(loaded_replacement.registration(), Some(&registration));
+    assert_eq!(loaded_replacement.grant(), None);
     drop(pool);
     Ok(())
 }
@@ -3747,9 +3827,10 @@ async fn s32_inv044_connection_loss_rejects_same_runner_replacement_shape()
     let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
     append_runner_lost_projection(&pool, pin.placement.session()).await?;
     let mut malformed = pool.begin().await?;
-    let rejected = insert_same_runner_replacement_record(&mut malformed, pin.placement.session())
-        .await
-        .expect_err("only registration loss may retain the runner identity");
+    let rejected =
+        append_same_runner_replacement_projection(&mut malformed, pin.placement.session())
+            .await
+            .expect_err("only registration loss may retain the runner identity");
 
     assert_check_violation(rejected);
     drop(malformed);
