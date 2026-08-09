@@ -1288,10 +1288,12 @@ fn bwrap_request(
         // Building a TLS client reads the trust store even when nothing will be
         // connected to: reqwest depends on `rustls-platform-verifier`, which
         // loads the native store on Linux, so workspace tests that construct an
-        // HTTPS client would meet an empty root store without it. It grants no
-        // egress, because `--unshare-net` leaves the namespace no route to any
-        // peer; the only reachable listener is one inside this same namespace,
-        // which could supply its own trust material anyway.
+        // HTTPS client would meet an empty root store without it. Binding it
+        // adds no transport and no IP route, so it grants no reach the profile
+        // did not already have — it only lets a client finish constructing.
+        // What this profile does and does not fence, including the non-IP
+        // transports that survive `--unshare-net`, is owned by
+        // `docs/spec/configuration-and-credentials.md`.
         //
         // `/etc/resolv.conf` is deliberately absent. Resolving a name needs the
         // network that `--unshare-net` removes, so it is genuinely inert, and
