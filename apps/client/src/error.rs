@@ -211,8 +211,10 @@ impl fmt::Display for ClientError {
             Self::TurnRecoveryRequired => formatter.write_str(
                 "the submitted turn requires model-call recovery that the terminal cannot perform",
             ),
-            Self::RunnerRecoveryRequired => formatter
-                .write_str("the submitted turn awaits lost-runner replacement or abandonment"),
+            Self::RunnerRecoveryRequired => formatter.write_str(
+                "the submitted turn awaits lost-runner replacement or stop_turn before \
+                     abandonment",
+            ),
             Self::TurnFailed(None) => formatter.write_str("the submitted turn failed"),
             Self::TurnFailed(Some(cause)) => write!(
                 formatter,
