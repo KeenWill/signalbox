@@ -1757,14 +1757,6 @@ mod tests {
         assert_eq!(arguments, r#"{"path":"[redacted]"}"#);
     }
 
-    /// The reconstructed arguments for one tool index, as a reader of the
-    /// stream would see them.
-    ///
-    /// INV-035 constrains the *content* a consumer reassembles — safe bytes
-    /// preserved, credential absent — not how the scrubber chops it into
-    /// deltas. Asserting exact fragment boundaries would fail a
-    /// behaviour-preserving change that buffered the safe prefix or coalesced
-    /// it with the replacement, while producing identical secure output.
     /// Which of a correlation's parallel delta streams a fragment extends.
     ///
     /// Part of the reassembly key: two facts may share a correlation and an
@@ -1776,19 +1768,6 @@ mod tests {
         ToolArguments,
     }
 
-    /// Asserts `secret` is unrecoverable from every stream the sink emitted.
-    ///
-    /// [`joined_arguments`] deliberately projects one correlation and one tool
-    /// index, so a credential forwarded on a *different* correlation or index
-    /// is invisible to it. Checking each observation on its own is not enough
-    /// either: a leak split across two deltas — `fixture/sec` then `ret` — is
-    /// recoverable by any consumer that concatenates the stream while no
-    /// single fragment contains the credential. So every emitted fragment is
-    /// grouped by the stream it extends and the absence check runs on each
-    /// reconstruction, which is what a consumer actually sees.
-    ///
-    /// Exhaustive over `ObservationFact` so a new text-bearing fact cannot be
-    /// added without deciding whether the credential could ride out on it.
     /// How a consumer reads one emitted value on its way out.
     ///
     /// A JSON-bearing value is decoded before anyone sees it, so a credential
@@ -2088,6 +2067,16 @@ mod tests {
         }
     }
 
+    /// Asserts `secret` is unrecoverable from every stream the sink emitted.
+    ///
+    /// [`joined_arguments`] deliberately projects one correlation and one tool
+    /// index, so a credential forwarded on a *different* correlation or index
+    /// is invisible to it. Checking each observation on its own is not enough
+    /// either: a leak split across two deltas — `fixture/sec` then `ret` — is
+    /// recoverable by any consumer that concatenates the stream while no
+    /// single fragment contains the credential. So every emitted fragment is
+    /// grouped by the stream it extends and the absence check runs on each
+    /// reconstruction, which is what a consumer actually sees.
     #[track_caller]
     fn assert_no_stream_carries(observed: &[Observation<String>], secret: &str) {
         for ((correlation, stream, index), reconstructed) in &reconstructed_streams(observed) {
@@ -2286,6 +2275,14 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
+    /// The reconstructed arguments for one tool index, as a reader of the
+    /// stream would see them.
+    ///
+    /// INV-035 constrains the *content* a consumer reassembles — safe bytes
+    /// preserved, credential absent — not how the scrubber chops it into
+    /// deltas. Asserting exact fragment boundaries would fail a
+    /// behaviour-preserving change that buffered the safe prefix or coalesced
+    /// it with the replacement, while producing identical secure output.
     fn joined_arguments(observed: &[Observation<String>], correlation: &str, index: u32) -> String {
         observed
             .iter()
