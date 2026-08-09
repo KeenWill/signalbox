@@ -1582,7 +1582,7 @@ mod tests {
             .then(|| servers.values().next())
             .flatten()?;
         let arguments = server.get("args")?.as_array()?;
-        (arguments.len() == 3 && arguments.first()?.as_str()? == "--serve")
+        (arguments.len() == 3 && arguments.first()?.as_str()? == CLAUDE_MCP_BRIDGE_SERVE_OPTION)
             .then(|| arguments.get(1)?.as_str().map(PathBuf::from))
             .flatten()
     }
@@ -1631,7 +1631,7 @@ mod tests {
 
     impl ListedBridgeResponse {
         fn into_tools(self, request_id: u64) -> Option<Vec<ComparableBridgeTool>> {
-            (self.jsonrpc == "2.0" && self.id == request_id && !self.error_present)
+            (self.jsonrpc == MCP_JSON_RPC_VERSION && self.id == request_id && !self.error_present)
                 .then_some(self.result?)
                 .map(|result| {
                     result
@@ -1709,7 +1709,7 @@ mod tests {
             "mcpServers": {
                 (SYNTHETIC_MCP_SERVER_NAME): {
                     "args": [
-                        "--serve",
+                        CLAUDE_MCP_BRIDGE_SERVE_OPTION,
                         SYNTHETIC_CAPTURED_CATALOG_PATH,
                         SYNTHETIC_MCP_IGNORED_ARGUMENT,
                     ]
@@ -1773,18 +1773,23 @@ mod tests {
     }
 
     const CLAUDE_MCP_BRIDGE_BINARY: &str = "signalbox-claude-mcp-bridge";
+    const CLAUDE_MCP_BRIDGE_SERVE_OPTION: &str = "--serve";
+    const CLAUDE_MCP_BRIDGE_WAIT_READY_OPTION: &str = "--wait-ready";
     const CARGO_TARGET_DIRECTORY_MARKER_FILENAME: &str = "CACHEDIR.TAG";
     const EMPTY_CARGO_TARGET_DIRECTORY_MARKER: &[u8] = b"";
     const CARGO_TEST_PROFILE: &str = "test";
     const CARGO_DEV_PROFILE: &str = "dev";
     const CARGO_BENCH_PROFILE: &str = "bench";
     const CARGO_RELEASE_PROFILE: &str = "release";
+    const CARGO_DEBUG_PROFILE_DIRECTORY: &str = "debug";
     const CARGO_TEST_SUBCOMMAND: &str = "test";
     const CARGO_TEST_SUBCOMMAND_ALIAS: &str = "t";
     const CARGO_PROGRAM_STEM: &str = "cargo";
     const CARGO_PROFILE_OPTION: &str = "--profile";
     const CARGO_PROFILE_OPTION_PREFIX: &str = "--profile=";
     const CARGO_RELEASE_OPTION: &str = "--release";
+    const MCP_JSON_RPC_VERSION: &str = "2.0";
+    const SYNTHETIC_WRONG_JSON_RPC_VERSION: &str = "1.0";
     #[cfg(target_os = "linux")]
     const PROC_FILESYSTEM_ROOT: &str = "/proc";
     #[cfg(target_os = "linux")]
@@ -2288,8 +2293,9 @@ done
             .file_name()
             .expect("Cargo profile directory has a name");
         let profile = match profile_dir_name.to_str() {
-            Some("debug") => OsString::from(input.debug_profile),
-            Some(CARGO_RELEASE_PROFILE) => OsString::from(input.debug_profile),
+            Some(CARGO_DEBUG_PROFILE_DIRECTORY) | Some(CARGO_RELEASE_PROFILE) => {
+                OsString::from(input.debug_profile)
+            }
             _ => profile_dir_name.to_os_string(),
         };
         let artifact_parent = profile_dir
@@ -3888,7 +3894,7 @@ done
         #[track_caller]
         fn spawn(config: McpBridgeSpawn<'_>) -> Self {
             let mut child = Command::new(config.executable)
-                .arg("--serve")
+                .arg(CLAUDE_MCP_BRIDGE_SERVE_OPTION)
                 .arg(config.catalog)
                 .arg(config.ready)
                 .current_dir(config.workspace)
@@ -3986,7 +3992,7 @@ done
             .response
             .get("jsonrpc")
             .and_then(serde_json::Value::as_str)
-            == Some("2.0")
+            == Some(MCP_JSON_RPC_VERSION)
             && envelope.response.get("id") == Some(envelope.request_id)
             && has_result != has_error
     }
@@ -3994,8 +4000,11 @@ done
     #[test]
     fn mcp_response_envelope_rejects_a_wrong_protocol_version() {
         let request_id = serde_json::json!(MCP_ENVELOPE_REQUEST_ID);
-        let response =
-            serde_json::json!({"jsonrpc": "1.0", "id": request_id.clone(), "result": {}});
+        let response = serde_json::json!({
+            "jsonrpc": SYNTHETIC_WRONG_JSON_RPC_VERSION,
+            "id": request_id.clone(),
+            "result": {},
+        });
 
         assert!(!valid_mcp_response_envelope(McpResponseEnvelope {
             response: &response,
@@ -4006,8 +4015,11 @@ done
     #[test]
     fn mcp_response_envelope_rejects_a_mismatched_request_identity() {
         let request_id = serde_json::json!(MCP_ENVELOPE_REQUEST_ID);
-        let response =
-            serde_json::json!({"jsonrpc": "2.0", "id": MCP_OTHER_REQUEST_ID, "result": {}});
+        let response = serde_json::json!({
+            "jsonrpc": MCP_JSON_RPC_VERSION,
+            "id": MCP_OTHER_REQUEST_ID,
+            "result": {},
+        });
 
         assert!(!valid_mcp_response_envelope(McpResponseEnvelope {
             response: &response,
@@ -4019,7 +4031,7 @@ done
     fn mcp_response_envelope_rejects_result_and_error_together() {
         let request_id = serde_json::json!(MCP_ENVELOPE_REQUEST_ID);
         let response = serde_json::json!({
-            "jsonrpc": "2.0",
+            "jsonrpc": MCP_JSON_RPC_VERSION,
             "id": request_id.clone(),
             "result": {},
             "error": {
@@ -4037,7 +4049,7 @@ done
     #[test]
     fn raw_list_response_rejects_result_and_error_together() {
         let response = format!(
-            r#"{{"jsonrpc":"2.0","id":{MCP_LIST_TOOLS_REQUEST_ID},"result":{{"tools":[]}},"error":{{"code":{SYNTHETIC_JSON_RPC_ERROR_CODE},"message":"{SYNTHETIC_JSON_RPC_ERROR_MESSAGE}"}}}}"#
+            r#"{{"jsonrpc":"{MCP_JSON_RPC_VERSION}","id":{MCP_LIST_TOOLS_REQUEST_ID},"result":{{"tools":[]}},"error":{{"code":{SYNTHETIC_JSON_RPC_ERROR_CODE},"message":"{SYNTHETIC_JSON_RPC_ERROR_MESSAGE}"}}}}"#
         );
         let response: ListedBridgeResponse =
             serde_json::from_str(&response).expect("synthetic list response is valid JSON");
@@ -4048,7 +4060,7 @@ done
     #[test]
     fn raw_list_response_rejects_result_and_null_error_together() {
         let response = format!(
-            r#"{{"jsonrpc":"2.0","id":{MCP_LIST_TOOLS_REQUEST_ID},"result":{{"tools":[]}},"error":null}}"#
+            r#"{{"jsonrpc":"{MCP_JSON_RPC_VERSION}","id":{MCP_LIST_TOOLS_REQUEST_ID},"result":{{"tools":[]}},"error":null}}"#
         );
         let response: ListedBridgeResponse =
             serde_json::from_str(&response).expect("synthetic list response is valid JSON");
@@ -4060,7 +4072,7 @@ done
     fn mcp_response_envelope_rejects_neither_result_nor_error() {
         let request_id = serde_json::json!(MCP_ENVELOPE_REQUEST_ID);
         let response = serde_json::json!({
-            "jsonrpc": "2.0",
+            "jsonrpc": MCP_JSON_RPC_VERSION,
             "id": request_id.clone(),
         });
 
@@ -4096,7 +4108,7 @@ done
         #[track_caller]
         fn start(config: McpBridgeReadyWaiterSpawn<'_>) -> Self {
             let child = Command::new(config.executable)
-                .arg("--wait-ready")
+                .arg(CLAUDE_MCP_BRIDGE_WAIT_READY_OPTION)
                 .arg(config.ready)
                 .current_dir(config.workspace)
                 .stdin(Stdio::null())
@@ -4217,7 +4229,7 @@ done
             let executable = ensure_claude_mcp_bridge_executable();
             let mut command = Command::new(&executable);
             command
-                .arg("--serve")
+                .arg(CLAUDE_MCP_BRIDGE_SERVE_OPTION)
                 .arg(&catalog_path)
                 .arg(&ready_path)
                 .current_dir(support.path())
@@ -4230,7 +4242,7 @@ done
             write_blocking_bridge_message(
                 &mut input,
                 &serde_json::json!({
-                    "jsonrpc": "2.0",
+                    "jsonrpc": MCP_JSON_RPC_VERSION,
                     "id": MCP_INITIALIZE_REQUEST_ID,
                     "method": "initialize",
                     "params": {
@@ -4246,14 +4258,14 @@ done
             write_blocking_bridge_message(
                 &mut input,
                 &serde_json::json!({
-                    "jsonrpc": "2.0",
+                    "jsonrpc": MCP_JSON_RPC_VERSION,
                     "method": "notifications/initialized",
                 }),
             );
             write_blocking_bridge_message(
                 &mut input,
                 &serde_json::json!({
-                    "jsonrpc": "2.0",
+                    "jsonrpc": MCP_JSON_RPC_VERSION,
                     "id": MCP_BLOCKING_LIST_REQUEST_ID,
                     "method": "tools/list",
                     "params": {},
@@ -4836,7 +4848,7 @@ done
                 .as_mut()
                 .expect("bridge remains active")
                 .notify(&serde_json::json!({
-                    "jsonrpc": "2.0",
+                    "jsonrpc": MCP_JSON_RPC_VERSION,
                     "method": "notifications/initialized",
                 }));
             initialized
@@ -4848,7 +4860,7 @@ done
                 .as_mut()
                 .expect("bridge remains active")
                 .request(&serde_json::json!({
-                    "jsonrpc": "2.0",
+                    "jsonrpc": MCP_JSON_RPC_VERSION,
                     "id": MCP_INITIALIZE_REQUEST_ID,
                     "method": "initialize",
                     "params": {
@@ -4869,7 +4881,7 @@ done
                 .as_mut()
                 .expect("bridge remains active")
                 .raw_response(&serde_json::json!({
-                    "jsonrpc": "2.0",
+                    "jsonrpc": MCP_JSON_RPC_VERSION,
                     "id": MCP_LIST_TOOLS_REQUEST_ID,
                     "method": "tools/list",
                     "params": {},
@@ -4887,7 +4899,7 @@ done
                 .as_mut()
                 .expect("bridge remains active")
                 .request(&serde_json::json!({
-                    "jsonrpc": "2.0",
+                    "jsonrpc": MCP_JSON_RPC_VERSION,
                     "id": MCP_SYNCHRONIZATION_REQUEST_ID,
                     "method": "ping",
                     "params": {},
@@ -4900,7 +4912,7 @@ done
                 .as_mut()
                 .expect("bridge remains active")
                 .request(&serde_json::json!({
-                    "jsonrpc": "2.0",
+                    "jsonrpc": MCP_JSON_RPC_VERSION,
                     "id": MCP_CALL_WRITE_FILE_REQUEST_ID,
                     "method": "tools/call",
                     "params": {
@@ -4919,7 +4931,7 @@ done
                 .as_mut()
                 .expect("bridge remains active")
                 .request(&serde_json::json!({
-                    "jsonrpc": "2.0",
+                    "jsonrpc": MCP_JSON_RPC_VERSION,
                     "id": MCP_UNDECLARED_TOOL_REQUEST_ID,
                     "method": "tools/call",
                     "params": {
@@ -4935,7 +4947,7 @@ done
                 .as_mut()
                 .expect("bridge remains active")
                 .request(&serde_json::json!({
-                    "jsonrpc": "2.0",
+                    "jsonrpc": MCP_JSON_RPC_VERSION,
                     "id": MCP_NON_OBJECT_ARGUMENTS_REQUEST_ID,
                     "method": "tools/call",
                     "params": {
