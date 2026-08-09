@@ -63,7 +63,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
         /// Rendered by the named test, on the canvases named there.
         ///
         /// The name is checked rather than decorative:
-        /// `testEveryRenderedScenarioNamesATestThatExists` fails when no test on
+        /// `testEveryRenderedScenarioNamesASnapshotProducingTest` fails when no test on
         /// this class defines it, and
         /// `testNoTwoRenderedScenariosClaimTheSameTest` fails when a second
         /// scenario points at a test that already answers for another. Together
@@ -224,13 +224,88 @@ final class LiveScreenSnapshotTests: XCTestCase {
     }
 
     /// The names no test on this class defines.
+    /// The test a golden's file name belongs to, or `nil` if it names none.
+    ///
+    /// A golden is written as `<test>.<canvas>.png`, so the first
+    /// dot-separated component is the method that recorded it. The `test`
+    /// prefix is required because a directory holds other files —
+    /// `MANIFEST.sha256` next door is one — and a name that cannot be a test
+    /// method should not become an entry in an inventory of them.
+    static func testName(fromGoldenNamed fileName: String) -> String? {
+        guard fileName.hasSuffix(".png") else { return nil }
+        guard let first = fileName.split(separator: ".").first else { return nil }
+        let name = String(first)
+        return name.hasPrefix("test") ? name : nil
+    }
+
+    /// The tests that have at least one committed golden.
+    ///
+    /// Read off `__Snapshots__` rather than listed, because a list would be the
+    /// hand-maintained inventory this file has twice replaced with something
+    /// derived. The directory is the same one the assertions read their
+    /// references from — `#filePath` locates it exactly as
+    /// `assertSnapshot` does — so a name is in here when, and only when, a
+    /// rendering for it is committed.
+    private static var snapshotProducingTestNames: Set<String> {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("__Snapshots__")
+        let manager = FileManager.default
+        let suiteDirectories =
+            (try? manager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        return Set(
+            suiteDirectories
+                .flatMap { (try? manager.contentsOfDirectory(atPath: $0.path)) ?? [] }
+                .compactMap(testName(fromGoldenNamed:))
+        )
+    }
+
+    /// The claimed names that no committed rendering answers for.
+    ///
+    /// The defined set is intersected with the snapshot-producing one, and that
+    /// intersection is the whole point. `defaultTestSuite` admits every method
+    /// on this class, which by now includes the detector tests, the refusal
+    /// test and the legacy screens' — so a scenario added later could have
+    /// named `testTheDuplicateDetectorReportsADuplicate`, satisfied both guards
+    /// (it exists, and no other scenario had claimed it) and still rendered
+    /// nothing. Requiring a golden is what makes the claim mean what it says.
     private static var claimedNamesMissingFromTheSuite: [String] {
-        names(in: claimedRenderingTestNames, missingFrom: definedTestNames)
+        names(
+            in: claimedRenderingTestNames,
+            missingFrom: definedTestNames.intersection(snapshotProducingTestNames)
+        )
     }
 
     /// The names more than one scenario claims.
     private static var claimedNamesUsedMoreThanOnce: [String] {
         namesUsedMoreThanOnce(in: claimedRenderingTestNames)
+    }
+
+    /// Inputs for the helper tests below, whose spellings are arbitrary.
+    ///
+    /// `docs/style.md` section 1: a literal at a use site claims that exact
+    /// value matters, and none of these do — the detectors read repetition and
+    /// membership, never the characters. Spelled `"a"` and `"b"` inline they
+    /// were indistinguishable from the load-bearing names elsewhere in this
+    /// file, where `"testSessionList"` has to be exactly that. Named here, the
+    /// reader can tell the two apart without checking either.
+    ///
+    /// What is deliberately *not* named is the empty and whitespace-only
+    /// reasons in `testTheRefusalReasonCheckRejectsAnEmptyReason`: those are
+    /// load-bearing, and the same section says to spell a load-bearing literal
+    /// at the assertion.
+    private enum ArbitraryClaim {
+        /// Arbitrary; only that it is distinct from `second` matters, and that
+        /// the duplicate cases can repeat it.
+        static let first = "first-claim"
+        /// Arbitrary; only that it is distinct from `first` matters. Sorts
+        /// after it, which is the order the detectors return.
+        static let second = "second-claim"
+        /// Arbitrary; only that no defined set in these tests contains it.
+        /// Sorts before both of the others.
+        static let absent = "absent-claim"
+        /// Arbitrary; only that it is non-empty matters.
+        static let statedReason = "a stated reason"
     }
 
     /// The refusal-reason check rejects an empty reason.
@@ -246,10 +321,14 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// the whole point of it — they are the inputs a working implementation
     /// answers `false` for and a broken one cannot.
     func testTheRefusalReasonCheckRejectsAnEmptyReason() {
-        XCTAssertTrue(ScenarioDisposition.refused(reason: "a stated reason").statesARefusalReason)
+        XCTAssertTrue(
+            ScenarioDisposition.refused(reason: ArbitraryClaim.statedReason).statesARefusalReason
+        )
         XCTAssertFalse(ScenarioDisposition.refused(reason: "").statesARefusalReason)
         XCTAssertFalse(ScenarioDisposition.refused(reason: "   \n\t ").statesARefusalReason)
-        XCTAssertFalse(ScenarioDisposition.rendered(by: "testSessionList").statesARefusalReason)
+        XCTAssertFalse(
+            ScenarioDisposition.rendered(by: ArbitraryClaim.first).statesARefusalReason
+        )
     }
 
     /// The extractor keeps rendered names and drops refusals.
@@ -263,12 +342,20 @@ final class LiveScreenSnapshotTests: XCTestCase {
     func testTheNameExtractorKeepsRenderedNamesAndDropsRefusals() {
         XCTAssertEqual(
             Self.renderingTestNames(of: [
-                .rendered(by: "a"), .refused(reason: "why not"), .rendered(by: "b"),
+                .rendered(by: ArbitraryClaim.first),
+                .refused(reason: ArbitraryClaim.statedReason),
+                .rendered(by: ArbitraryClaim.second),
             ]),
-            ["a", "b"]
+            [ArbitraryClaim.first, ArbitraryClaim.second]
         )
-        XCTAssertEqual(Self.renderingTestNames(of: [.rendered(by: "only")]), ["only"])
-        XCTAssertEqual(Self.renderingTestNames(of: [.refused(reason: "why not")]), [])
+        XCTAssertEqual(
+            Self.renderingTestNames(of: [.rendered(by: ArbitraryClaim.first)]),
+            [ArbitraryClaim.first]
+        )
+        XCTAssertEqual(
+            Self.renderingTestNames(of: [.refused(reason: ArbitraryClaim.statedReason)]),
+            []
+        )
         XCTAssertEqual(Self.renderingTestNames(of: []), [])
     }
 
@@ -303,9 +390,25 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// the names carry no meaning here — what is under test is counting, not
     /// the suite's mapping, which is what the coverage tests check.
     func testTheDuplicateDetectorReportsADuplicate() {
-        XCTAssertEqual(Self.namesUsedMoreThanOnce(in: ["a", "b", "a"]), ["a"])
-        XCTAssertEqual(Self.namesUsedMoreThanOnce(in: ["a", "a", "b", "b"]), ["a", "b"])
-        XCTAssertEqual(Self.namesUsedMoreThanOnce(in: ["a", "b"]), [])
+        XCTAssertEqual(
+            Self.namesUsedMoreThanOnce(
+                in: [ArbitraryClaim.first, ArbitraryClaim.second, ArbitraryClaim.first]
+            ),
+            [ArbitraryClaim.first]
+        )
+        XCTAssertEqual(
+            Self.namesUsedMoreThanOnce(
+                in: [
+                    ArbitraryClaim.first, ArbitraryClaim.first,
+                    ArbitraryClaim.second, ArbitraryClaim.second,
+                ]
+            ),
+            [ArbitraryClaim.first, ArbitraryClaim.second]
+        )
+        XCTAssertEqual(
+            Self.namesUsedMoreThanOnce(in: [ArbitraryClaim.first, ArbitraryClaim.second]),
+            []
+        )
         XCTAssertEqual(Self.namesUsedMoreThanOnce(in: []), [])
     }
 
@@ -315,20 +418,66 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// they are separate helpers answering separate questions, and a failure
     /// should name which enforcement stopped working.
     func testTheMembershipDetectorReportsAMissingName() {
-        XCTAssertEqual(Self.names(in: ["a", "b"], missingFrom: ["a"]), ["b"])
-        XCTAssertEqual(Self.names(in: ["b", "a"], missingFrom: []), ["a", "b"])
-        XCTAssertEqual(Self.names(in: ["a"], missingFrom: ["a", "b"]), [])
-        XCTAssertEqual(Self.names(in: [], missingFrom: ["a"]), [])
+        XCTAssertEqual(
+            Self.names(
+                in: [ArbitraryClaim.first, ArbitraryClaim.absent],
+                missingFrom: [ArbitraryClaim.first]
+            ),
+            [ArbitraryClaim.absent]
+        )
+        XCTAssertEqual(
+            Self.names(in: [ArbitraryClaim.second, ArbitraryClaim.first], missingFrom: []),
+            [ArbitraryClaim.first, ArbitraryClaim.second]
+        )
+        XCTAssertEqual(
+            Self.names(
+                in: [ArbitraryClaim.first],
+                missingFrom: [ArbitraryClaim.first, ArbitraryClaim.second]
+            ),
+            []
+        )
+        XCTAssertEqual(Self.names(in: [], missingFrom: [ArbitraryClaim.first]), [])
     }
 
-    /// Every rendered scenario names a test that exists.
+    /// The golden-name parser reads the test out of a file name.
+    ///
+    /// Known-answer half of the inventory: the directory scan below is what
+    /// makes the claim structural, and this is the part of it that can be
+    /// wrong quietly.
+    func testTheGoldenNameParserReadsTheTestName() {
+        XCTAssertEqual(
+            Self.testName(fromGoldenNamed: "testSessionList.iphone-portrait.png"),
+            "testSessionList"
+        )
+        XCTAssertEqual(
+            Self.testName(fromGoldenNamed: "testSessionCreationSheetContent.sheet.png"),
+            "testSessionCreationSheetContent"
+        )
+        XCTAssertNil(Self.testName(fromGoldenNamed: "MANIFEST.sha256"))
+        XCTAssertNil(Self.testName(fromGoldenNamed: "notATestMethod.iphone-portrait.png"))
+    }
+
+    /// The inventory holds the tests that record goldens, and only those.
+    ///
+    /// The second assertion is the finding itself, written down: a detector
+    /// test is a method on this class and would satisfy `definedTestNames`, so
+    /// if it were also in here the restriction would buy nothing and a future
+    /// scenario could claim it without rendering anything.
+    func testTheSnapshotInventoryHoldsOnlyRenderingTests() {
+        XCTAssertTrue(Self.snapshotProducingTestNames.contains("testSessionList"))
+        XCTAssertFalse(
+            Self.snapshotProducingTestNames.contains("testTheDuplicateDetectorReportsADuplicate")
+        )
+    }
+
+    /// Every rendered scenario names a test that records a golden.
     ///
     /// This is what makes `.rendered` cost something. Without it the case was a
     /// bare tag: a scenario added later cleared the compile error by returning
     /// it, no snapshot had to exist, and the suite went on reporting exhaustive
     /// coverage — the same failure the count had, one level along. The cheapest
     /// way to discharge the decision is now writing the test.
-    func testEveryRenderedScenarioNamesATestThatExists() {
+    func testEveryRenderedScenarioNamesASnapshotProducingTest() {
         XCTAssertEqual(
             Self.claimedNamesMissingFromTheSuite,
             [],
@@ -583,8 +732,14 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// Templates section — a golden of it would be a reference for a screen no
     /// reader can reach and would go on passing after the section gained a tab.
     func testTemplatesCapabilityGate() async {
-        await assertLiveScreenSnapshot(of: templatesRootView(), canvas: .iPadPortrait)
-        await assertLiveScreenSnapshot(of: templatesRootView(), canvas: .iPadLandscape)
+        await assertLiveScreenSnapshot(
+            of: rootView(for: .sessions, selecting: .templates),
+            canvas: .iPadPortrait
+        )
+        await assertLiveScreenSnapshot(
+            of: rootView(for: .sessions, selecting: .templates),
+            canvas: .iPadLandscape
+        )
     }
 
     /// The sheet's content as its own screen, on the canvas a sheet declares
@@ -597,22 +752,33 @@ final class LiveScreenSnapshotTests: XCTestCase {
         await assertLiveScreenSnapshot(of: processCreationSheet(), canvas: .sheet)
     }
 
+    /// `RootView` on the section the scenario itself selects.
+    ///
+    /// The common case, and the one where naming the section at the call site
+    /// would restate what the scenario already decides: `AppCoordinator` sets
+    /// `selectedSection` from `screenshotScenario.selectedSection`, so a
+    /// section named here would agree with it or silently disagree.
     private func rootView(for scenario: ScreenshotScenario) -> some View {
-        RootView()
-            .environmentObject(
-                AppCoordinator(
-                    isMockMode: scenario.requiresMockService,
-                    screenshotScenario: scenario
-                )
-            )
+        rootView(for: scenario, selecting: scenario.selectedSection)
     }
 
-    private func templatesRootView() -> some View {
+    /// `RootView` on a section the scenario does not select.
+    ///
+    /// Both values stay at the call site because both decide what is
+    /// snapshotted: the scenario picks the fixtures, and the section picks the
+    /// screen they are shown on. This helper wires the coordinator and nothing
+    /// else — `docs/agents/testing-style.md` rule 16 — and it has no branch, so
+    /// the overload above is what supplies the ordinary section rather than a
+    /// default argument deciding it here.
+    private func rootView(
+        for scenario: ScreenshotScenario,
+        selecting section: AppSection
+    ) -> some View {
         let coordinator = AppCoordinator(
-            isMockMode: ScreenshotScenario.sessions.requiresMockService,
-            screenshotScenario: .sessions
+            isMockMode: scenario.requiresMockService,
+            screenshotScenario: scenario
         )
-        coordinator.selectedSection = .templates
+        coordinator.selectedSection = section
         return RootView().environmentObject(coordinator)
     }
 
