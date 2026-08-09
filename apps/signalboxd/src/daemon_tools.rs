@@ -1864,12 +1864,14 @@ mod tests {
             .and_then(Path::parent)
             .and_then(Path::parent)
             .expect("test executable has a Cargo artifact parent");
+        if artifact_parent == default_target_dir {
+            return;
+        }
         let artifact_parent_name = artifact_parent
             .file_name()
             .expect("Cargo artifact parent has a name");
         assert!(
-            artifact_parent == default_target_dir
-                || input.known_targets.contains(artifact_parent_name),
+            input.known_targets.contains(artifact_parent_name),
             "custom Cargo target specifications are unsupported by the nested bridge build"
         );
     }
