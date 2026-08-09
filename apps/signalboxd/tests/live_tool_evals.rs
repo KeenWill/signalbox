@@ -6764,6 +6764,7 @@ fn forced_cargo_diagnostics_rejects_a_backwards_same_line_span() {
     let mut diagnostic =
         serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
             .expect("producer Cargo diagnostics serialize");
+    diagnostic["file"] = serde_json::json!(SYNTHETIC_CARGO_DIAGNOSTIC_FILE);
     diagnostic["span"] = serde_json::json!({
         "line_start": SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
         "column_start": SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN,
