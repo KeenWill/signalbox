@@ -2007,8 +2007,8 @@ done
             configured
         } else {
             std::env::var_os("PWD")
-                .and_then(|directory| {
-                    resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
+                .map(|directory| {
+                    resolved_or_executable_configured_target_dir(RelativeConfiguredTargetDirInput {
                         current_executable: current,
                         configured: &configured,
                         invocation_directory: Path::new(&directory),
@@ -2054,6 +2054,22 @@ done
                     known_targets: input.known_targets,
                 })
             })
+    }
+
+    #[track_caller]
+    fn resolved_or_executable_configured_target_dir(
+        input: RelativeConfiguredTargetDirInput<'_>,
+    ) -> PathBuf {
+        let current_executable = input.current_executable;
+        let configured = input.configured;
+        let known_targets = input.known_targets;
+        resolved_relative_configured_target_dir(input).unwrap_or_else(|| {
+            configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
+                current_executable,
+                configured,
+                known_targets,
+            })
+        })
     }
 
     fn configured_target_matches_executable(input: ConfiguredTargetMatchInput<'_>) -> bool {
@@ -3194,18 +3210,11 @@ done
         let executable = actual_target.join("debug/deps/daemon-tools-test");
 
         let target_dir =
-            resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
+            resolved_or_executable_configured_target_dir(RelativeConfiguredTargetDirInput {
                 current_executable: &executable,
                 configured,
                 invocation_directory: &stale_invocation,
                 known_targets: &BTreeSet::new(),
-            })
-            .unwrap_or_else(|| {
-                configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
-                    current_executable: &executable,
-                    configured,
-                    known_targets: &BTreeSet::new(),
-                })
             });
 
         assert_eq!(target_dir, actual_target);
