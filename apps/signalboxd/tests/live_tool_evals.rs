@@ -804,7 +804,7 @@ impl FamilySuite {
             workspace,
             git_seed: None,
             git_seed_refs: BTreeMap::new(),
-            git_seed_fixture_modes: BTreeMap::new(),
+            git_seed_fixture: GitFixtureSnapshot::default(),
             catalog: MergedCatalog::try_new([
                 sandboxed_catalog,
                 unsandboxed_catalog,
