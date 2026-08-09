@@ -371,6 +371,7 @@ const SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT: &str = "Read completed; no f
 const SYNTHETIC_READ_COMPLETION_REPORT: &str = "brief.txt was read successfully.";
 const SYNTHETIC_SWITCH_COMPLETION_REPORT: &str = "The branch was switched successfully.";
 const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
+const SYNTHETIC_NOTHING_CHANGED_REPORT: &str = "Done; nothing was changed.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
 const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
@@ -1491,7 +1492,18 @@ impl FamilySuite {
                 &result,
             ),
             EvalFamily::Web => Ok(web_forced_case_passed(case.name, &arguments, &result)),
-            EvalFamily::Exec => Ok(exec_forced_case_passed(case.name, &result)),
+            EvalFamily::Exec => {
+                let result_matches = exec_forced_case_passed(case.name, &result);
+                if !result_matches || case.name == CARGO_DIAGNOSTICS_NAME {
+                    Ok(result_matches)
+                } else {
+                    exec_workspace_matches_seed(
+                        self.workspace.path(),
+                        &self.workspace_seed_entries,
+                        &self.workspace_seed_modified_times,
+                    )
+                }
+            }
         }
     }
 
@@ -1599,6 +1611,15 @@ fn exec_natural_entries_match(
     Ok(result_matches
         && actual == *seed_entries
         && actual_modified_times == expected_modified_times)
+}
+
+fn exec_workspace_matches_seed(
+    root: &Path,
+    seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
+) -> EvalResult<bool> {
+    Ok(workspace_entries(root)? == *seed_entries
+        && workspace_modified_times(root)? == *seed_modified_times)
 }
 
 fn workspace_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntrySnapshot>> {
@@ -5152,6 +5173,14 @@ fn report_denies_file_changes(report: &str) -> bool {
             });
         word == "made" && modification_denied && !collateral
     });
+    let nothing_changed = words.iter().enumerate().any(|(index, word)| {
+        word == "nothing"
+            && words
+                .iter()
+                .skip(index + 1)
+                .take(3)
+                .any(|word| matches!(word.as_str(), "change" | "changed" | "modified"))
+    });
     let unchanged_file = report
         .split([';', '.', ',', '!', '?', '\n'])
         .map(normalized_report_words)
@@ -5179,6 +5208,7 @@ fn report_denies_file_changes(report: &str) -> bool {
         || verb_first_modification_denial
         || nominalized_modification_denial
         || inverted_modification_denial
+        || nothing_changed
         || unchanged_file
 }
 
@@ -5259,10 +5289,16 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                     })
         });
     let negative_nothing_claim = words.iter().enumerate().any(|(index, word)| {
+        let read_only_change_denial = words
+            .iter()
+            .skip(index + 1)
+            .take(3)
+            .any(|word| matches!(word.as_str(), "change" | "changed" | "modified"));
         word == "nothing"
             && !words.get(index + 1).is_some_and(|qualifier| {
                 matches!(qualifier.as_str(), "else" | "failed" | "failure" | "other")
             })
+            && !read_only_change_denial
     });
     let negative_outcomes = [
         "applied",
@@ -6003,6 +6039,26 @@ fn final_response_report_rejects_a_nothing_written_claim() {
     tracker.observe_response_text(SYNTHETIC_NOTHING_WRITTEN_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn forced_read_only_exec_report_accepts_nothing_changed() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOTHING_CHANGED_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        UNSANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn exec_file_creation_report_rejects_nothing_changed() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOTHING_CHANGED_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
 }
 
 #[test]
@@ -13024,19 +13080,65 @@ fn git_natural_result_payloads_require_cleanup() -> EvalResult {
     Ok(())
 }
 
-type PreparedExecNaturalWorkspace = (
+type PreparedExecWorkspace = (
     TempDir,
     BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     BTreeMap<PathBuf, SystemTime>,
 );
 
-fn prepared_exec_natural_workspace() -> EvalResult<PreparedExecNaturalWorkspace> {
+fn prepared_exec_seed_workspace() -> EvalResult<PreparedExecWorkspace> {
     let workspace = tempfile::tempdir()?;
     seed_exec_workspace(workspace.path())?;
     let seed_entries = workspace_entries(workspace.path())?;
     let seed_modified_times = workspace_modified_times(workspace.path())?;
+    Ok((workspace, seed_entries, seed_modified_times))
+}
+
+fn prepared_exec_natural_workspace() -> EvalResult<PreparedExecWorkspace> {
+    let (workspace, seed_entries, seed_modified_times) = prepared_exec_seed_workspace()?;
     fs::write(workspace.path().join(EXEC_RESULT_PATH), EXEC_RESULT)?;
     Ok((workspace, seed_entries, seed_modified_times))
+}
+
+#[test]
+fn forced_direct_exec_workspace_accepts_the_unchanged_seed() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times) = prepared_exec_seed_workspace()?;
+
+    assert!(exec_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+    )?);
+    Ok(())
+}
+
+#[test]
+fn forced_direct_exec_workspace_rejects_a_mutated_seed_file() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times) = prepared_exec_seed_workspace()?;
+    fs::write(workspace.path().join("src/lib.rs"), "pub fn drifted() {}\n")?;
+
+    assert!(!exec_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+    )?);
+    Ok(())
+}
+
+#[test]
+fn forced_direct_exec_workspace_rejects_a_collateral_path() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times) = prepared_exec_seed_workspace()?;
+    fs::write(
+        workspace.path().join("collateral.txt"),
+        "collateral fixture\n",
+    )?;
+
+    assert!(!exec_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+    )?);
+    Ok(())
 }
 
 #[test]
