@@ -155,6 +155,7 @@ const GIT_COLLATERAL_DIRECTORY: &str = "collateral-directory";
 const GIT_HOOKS_DIRECTORY: &str = "hooks";
 const GIT_INFO_DIRECTORY: &str = "info";
 const GIT_LOGS_DIRECTORY: &str = "logs";
+const GIT_REFS_DIRECTORY: &str = "refs";
 const GIT_DESCRIPTION_PATH: &str = "description";
 const GIT_PRE_COMMIT_HOOK_PATH: &str = "hooks/pre-commit";
 const GIT_PRE_COMMIT_HOOK_CONTENT: &str = "#!/bin/sh\nexit 1\n";
@@ -264,6 +265,7 @@ const SYNTHETIC_NO_ERRORS_COMPLETION_REPORT: &str =
 const SYNTHETIC_WITHOUT_FAILURE_COMPLETION_REPORT: &str =
     "Completed the requested operation without failure.";
 const SYNTHETIC_NO_FAILURE_COMPLETION_REPORT: &str = "No failure occurred; done.";
+const SYNTHETIC_NOTHING_FAILED_COMPLETION_REPORT: &str = "Nothing failed; completed successfully.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
@@ -641,6 +643,7 @@ struct GitFixtureSnapshot {
     metadata_top_level: BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
     static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reflog_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    reference_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     objects: GitObjectInventory,
     object_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
 }
@@ -1335,6 +1338,7 @@ fn git_forced_case_passed(
             seed_fixture,
             pre_execution_object_entries,
         )?
+        && git_forced_reference_entries_match(root, name, arguments, &head, seed_fixture)?
         && git_forced_reflogs_match(root, name, seed, head.id(), seed_fixture)?
         && git_forced_worktree_matches(root, name, seed_fixture, pre_execution_worktree_entries)?)
 }
@@ -1951,6 +1955,66 @@ fn git_reference_inventory(repository: &Repository) -> EvalResult<GitReferenceIn
     Ok(targets)
 }
 
+fn git_reference_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntrySnapshot>> {
+    let repository = Repository::open(root)?;
+    filesystem_entries(&repository.path().join(GIT_REFS_DIRECTORY), None)
+}
+
+fn direct_git_reference_entry(
+    template: &WorkspaceEntrySnapshot,
+    target: Oid,
+) -> Option<WorkspaceEntrySnapshot> {
+    let WorkspaceEntrySnapshot::File { mode, links, .. } = template else {
+        return None;
+    };
+    Some(WorkspaceEntrySnapshot::File {
+        content: format!("{target}\n").into_bytes(),
+        mode: *mode,
+        links: *links,
+    })
+}
+
+fn git_forced_reference_entries_match(
+    root: &Path,
+    case_name: &str,
+    arguments: &serde_json::Value,
+    head: &git2::Commit<'_>,
+    seed_fixture: &GitFixtureSnapshot,
+) -> EvalResult<bool> {
+    let repository = Repository::open(root)?;
+    let mut expected = seed_fixture.reference_entries.clone();
+    let base_path = Path::new("heads").join(GIT_BASE_BRANCH);
+    match case_name {
+        GIT_BRANCH_CREATE_NAME => {
+            let Some(branch_name) = arguments["name"].as_str() else {
+                return Ok(false);
+            };
+            let reference = repository.find_reference(&format!("refs/heads/{branch_name}"))?;
+            let Some(target) = reference.target() else {
+                return Ok(false);
+            };
+            let Some(template) = expected.get(&base_path) else {
+                return Ok(false);
+            };
+            let Some(entry) = direct_git_reference_entry(template, target) else {
+                return Ok(false);
+            };
+            expected.insert(Path::new("heads").join(branch_name), entry);
+        }
+        GIT_CREATE_COMMIT_NAME => {
+            let Some(template) = expected.get(&base_path) else {
+                return Ok(false);
+            };
+            let Some(entry) = direct_git_reference_entry(template, head.id()) else {
+                return Ok(false);
+            };
+            expected.insert(base_path, entry);
+        }
+        _ => {}
+    }
+    Ok(git_reference_entries(root)? == expected)
+}
+
 fn git_fixture_modes(root: &Path) -> EvalResult<BTreeMap<PathBuf, Option<u32>>> {
     let mut modes = BTreeMap::new();
     for path in [
@@ -1974,6 +2038,7 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         metadata_top_level: git_metadata_top_level(root)?,
         static_metadata_entries: git_static_metadata_entries(root)?,
         reflog_entries: git_reflog_entries(root)?,
+        reference_entries: git_reference_entries(root)?,
         objects: git_object_inventory(&repository)?,
         object_entries: git_object_entries(root)?,
     })
@@ -2639,6 +2704,8 @@ fn git_natural_state_passed(
         GitReferenceTarget::Direct(head.id()),
     );
     let complete_ref_inventory_matches = git_reference_inventory(&repository)? == expected_refs;
+    let complete_reference_entry_inventory_matches =
+        git_natural_reference_entries_match(root, &head, seed_fixture)?;
     let complete_object_inventory_matches =
         git_natural_objects_match(&repository, &head, seed_fixture)?;
     let complete_object_entry_inventory_matches =
@@ -2667,6 +2734,7 @@ fn git_natural_state_passed(
         && complete_status_matches
         && operation_state_is_clean
         && complete_ref_inventory_matches
+        && complete_reference_entry_inventory_matches
         && complete_object_inventory_matches
         && complete_object_entry_inventory_matches
         && fixture_matches
@@ -2711,6 +2779,23 @@ fn git_natural_object_entries_match(
         head.id(),
     ];
     git_object_entry_inventory_matches(root, &seed_fixture.object_entries, &allowed, seed_fixture)
+}
+
+fn git_natural_reference_entries_match(
+    root: &Path,
+    head: &git2::Commit<'_>,
+    seed_fixture: &GitFixtureSnapshot,
+) -> EvalResult<bool> {
+    let mut expected = seed_fixture.reference_entries.clone();
+    let base_path = Path::new("heads").join(GIT_BASE_BRANCH);
+    let Some(template) = expected.get(&base_path) else {
+        return Ok(false);
+    };
+    let Some(entry) = direct_git_reference_entry(template, head.id()) else {
+        return Ok(false);
+    };
+    expected.insert(base_path, entry);
+    Ok(git_reference_entries(root)? == expected)
 }
 
 fn git_natural_status_matches(repository: &Repository) -> EvalResult<bool> {
@@ -3351,13 +3436,15 @@ fn normalized_report_words(report: &str) -> Vec<String> {
 }
 
 fn report_words_deny_success(report: &str, words: &[String]) -> bool {
-    let explicit_failure =
-        words.iter().enumerate().any(|(index, word)| {
-            ["cannot", "failed", "failure", "incomplete", "unable"].contains(&word.as_str())
-                && !words[..index].iter().rev().take(2).any(|qualifier| {
-                    matches!(qualifier.as_str(), "never" | "no" | "not" | "without")
-                })
-        });
+    let explicit_failure = words.iter().enumerate().any(|(index, word)| {
+        ["cannot", "failed", "failure", "incomplete", "unable"].contains(&word.as_str())
+            && !words[..index].iter().rev().take(2).any(|qualifier| {
+                matches!(
+                    qualifier.as_str(),
+                    "never" | "no" | "not" | "nothing" | "without"
+                )
+            })
+    });
     let negative_no_objects = ["answer", "commit", "completion", "match", "result"];
     let negative_no_claim = words
         .windows(2)
@@ -3377,9 +3464,9 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
     });
     let negative_nothing_claim = words.iter().enumerate().any(|(index, word)| {
         word == "nothing"
-            && !words
-                .get(index + 1)
-                .is_some_and(|qualifier| matches!(qualifier.as_str(), "else" | "other"))
+            && !words.get(index + 1).is_some_and(|qualifier| {
+                matches!(qualifier.as_str(), "else" | "failed" | "failure" | "other")
+            })
     });
     let negative_outcomes = [
         "commit",
@@ -3624,6 +3711,14 @@ fn final_response_report_accepts_completion_without_failure() {
 fn final_response_report_accepts_completion_after_no_failure() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NO_FAILURE_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_completion_after_nothing_failed() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOTHING_FAILED_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
 }
@@ -6777,6 +6872,40 @@ fn forced_git_status_verifier_rejects_seed_object_mode_drift() -> EvalResult {
     let mut permissions = fs::metadata(&object_path)?.permissions();
     permissions.set_mode(permissions.mode() ^ GROUP_WRITE_MODE_BIT);
     fs::set_permissions(object_path, permissions)?;
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_status_verifier_rejects_seed_reference_mode_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let reference_path = Repository::open(suite.workspace.path())?
+        .path()
+        .join(GIT_REFS_DIRECTORY)
+        .join("heads")
+        .join(GIT_BASE_BRANCH);
+    let mut permissions = fs::metadata(&reference_path)?.permissions();
+    permissions.set_mode(permissions.mode() ^ GROUP_WRITE_MODE_BIT);
+    fs::set_permissions(reference_path, permissions)?;
     let result = serde_json::json!({
         "branch": GIT_BASE_BRANCH,
         "branch_truncated": false,
