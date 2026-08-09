@@ -931,6 +931,51 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
             f"There are **{STALE_SCENARIO_COUNT}** scenarios."
         )
 
+    def test_a_slash_separated_citation_suffix_is_not_read(self) -> None:
+        """This repository's own shorthand names two catalog rows: the scan
+        restarted after the slash and read the second identifier as a stated
+        total, which agrees with the invariant catalog and passes silently."""
+        self.assert_no_count_read_from(
+            f"The INV-025/0{STALE_INVARIANT_COUNT} invariants are enforced"
+        )
+
+    def test_a_between_and_range_is_not_read_as_its_upper_bound(self) -> None:
+        """"between 5 and N scenarios" states a range, not a total, and N
+        agrees with the catalog — so reading it passed in silence."""
+        self.assert_no_count_read_from(
+            f"There are between 5 and {STALE_SCENARIO_COUNT} scenarios"
+        )
+
+    def test_a_between_without_a_lower_bound_still_states_a_total(self) -> None:
+        """The guard that keeps `and` narrow: `between` alone does not make a
+        range, so this really is a stated total."""
+        self.assert_stale_scenario_count_caught(
+            f"The gap between releases and {STALE_SCENARIO_COUNT} scenarios"
+        )
+
+    def test_a_formatted_count_continuing_as_a_decimal_is_not_read(self) -> None:
+        """The trailing mirror of the grouped-prefix case: the lookahead saw
+        the closing `**` where the reader sees `.`, so a decimal's integer part
+        was captured as a total."""
+        self.assert_no_count_read_from(
+            f"scenario count: **{STALE_SCENARIO_COUNT}**.5"
+        )
+
+    def test_a_linked_count_continuing_as_a_grouped_number_is_not_read(self) -> None:
+        """A link's destination is blanked in place, so the separator survives
+        behind a run of spaces rather than delimiters."""
+        self.assert_no_count_read_from(
+            f"scenario count: [{STALE_SCENARIO_COUNT}](catalog.md),500"
+        )
+
+    def test_a_sentence_final_period_still_states_a_total(self) -> None:
+        """The guard on both trailing cases: a separator only continues a
+        number when a digit follows it directly, so ordinary punctuation after
+        a count leaves the count readable."""
+        self.assert_stale_scenario_count_caught(
+            f"scenario count: {STALE_SCENARIO_COUNT}. The next sentence."
+        )
+
     def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
         """A tracked path can vanish between `git ls-files` and the read.
 

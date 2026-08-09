@@ -174,7 +174,15 @@ NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 # silence, which is the same defect the unformatted "12,037" case already
 # closed. The delimiters render as nothing, so the boundary has to be judged
 # through them.
-NUMBER_BOUNDARY = re.compile(r"[0-9A-Za-z.,]")
+#
+# `/` joins the class for the repository's own citation shorthand.
+# "INV-025/050 invariants" names two catalog rows, and the scan restarted after
+# the slash to read `050` as a stated total of fifty — which agrees with the
+# 50-invariant catalog and passes in silence, while any other trailing
+# identifier would have produced a false stale-count failure instead. A digit
+# run continuing a token across a slash states no total, the same way one
+# continuing across a comma or a decimal point does.
+NUMBER_BOUNDARY = re.compile(r"[0-9A-Za-z.,/]")
 MARKUP_CHARACTERS = frozenset("*_~`[]")
 
 # The whitespace a range terminus may be separated from either of its bounds
@@ -196,9 +204,14 @@ MARKUP_CHARACTERS = frozenset("*_~`[]")
 RANGE_GAP = rf"{MARKUP}[ \t]*(?:\r?\n[ \t]*(?:>[ \t]*)*)?[ \t]*{MARKUP}"
 
 # A number that is only one bound of a range states no total, so the text on
-# both sides of a candidate is examined. `and` is deliberately absent from both
-# patterns, being ordinary conjunction far more often than a range terminus:
-# "3 sessions and 37 scenarios" states a real total.
+# both sides of a candidate is examined.
+#
+# `and` is a terminus in exactly one shape: `between <number> and`. On its own
+# it is ordinary conjunction far more often than a range terminus — "3 sessions
+# and 37 scenarios" states a real total — so admitting it unconditionally would
+# discard genuine counts wholesale. Requiring the `between` and its lower bound
+# is what tells the two apart, and "between 5 and 37 scenarios" is ordinary
+# enough prose that leaving it unrecognised reported an upper bound as a total.
 #
 # Both are applied by searching the text around a candidate match rather than as
 # lookarounds, because Python lookbehinds must be fixed width and these are not:
@@ -224,7 +237,9 @@ RANGE_GAP = rf"{MARKUP}[ \t]*(?:\r?\n[ \t]*(?:>[ \t]*)*)?[ \t]*{MARKUP}"
 # on the very citations AGENTS.md requires. What the dash needs instead is the
 # list-bullet exception below, which is about position, not arithmetic.
 RANGE_PREFIX = re.compile(
-    rf"(?:[0-9]{RANGE_GAP}\b(?:to|through|thru)\b|[-\u2010-\u2015]){RANGE_GAP}$",
+    rf"(?:\bbetween\b{RANGE_GAP}[0-9]+{RANGE_GAP}\band\b"
+    rf"|[0-9]{RANGE_GAP}\b(?:to|through|thru)\b"
+    rf"|[-\u2010-\u2015]){RANGE_GAP}$",
     re.IGNORECASE,
 )
 
@@ -284,7 +299,7 @@ LIST_BULLET_LEAD = re.compile(r"[ \t]*(?:>[ \t]*)*")
 # snake_case identifier written as bare prose, which this repository formats as
 # inline code — masked above before any of these patterns run.
 NUMBER_BEFORE_NOUN = re.compile(
-    rf"(?<![0-9A-Za-z.,])"
+    rf"(?<![0-9A-Za-z.,/])"
     rf"(?P<number>[0-9]{{1,4}}){NOT_PARTIAL_NUMBER}{WRAPPED_GAP}"
     rf"(?P<noun>invariants?|scenarios?)(?![0-9A-Za-z-])",
     re.IGNORECASE,
@@ -513,6 +528,39 @@ def opens_mid_number(text: str, number_start: int) -> bool:
     return NUMBER_BOUNDARY.match(text[position]) is not None
 
 
+def closes_mid_number(text: str, number_end: int) -> bool:
+    """Whether the digits ending at `number_end` continue into a larger number.
+
+    The mirror of `opens_mid_number`, and needed for the same reason on the
+    other side: `NOT_PARTIAL_NUMBER` is a raw-character lookahead, so in
+    "scenario count: **37**.5" it sees `*` where the reader sees `.`, and 37 was
+    captured out of a decimal — a number agreeing with a 37-scenario catalog,
+    which is the reading that passes in silence.
+
+    Horizontal whitespace is stepped over as well as markup, which the opening
+    side does not need. A link's destination is blanked in place by
+    `mask_link_metadata`, so "[37](catalog.md),500" reaches here as `37` then a
+    run of spaces then `,500`: the separator is real, and only the masking
+    stands between. Stepping over that run costs the contrived "37 ,500", which
+    renders as two tokens and states no total either — a statement skipped, not
+    a total invented.
+
+    A separator only continues a number when a digit follows it directly, so
+    "scenario count: 37. The next" and "37, and then" keep their totals.
+    """
+    position = number_end
+    while position < len(text) and (
+        text[position] in MARKUP_CHARACTERS or text[position] in " \t"
+    ):
+        position += 1
+    if position >= len(text):
+        return False
+    following = text[position]
+    if following.isdigit():
+        return True
+    return following in ".," and text[position + 1 : position + 2].isdigit()
+
+
 def bounds_a_range(text: str, match: re.Match[str]) -> bool:
     """Whether the captured number is one bound of a range rather than a total.
 
@@ -600,7 +648,9 @@ def find_stated_counts(path: Path) -> list[tuple[int, str, int, str]]:
                 continue
             # A number that continues a larger one states no total either, and
             # the separator that makes it one may be behind markup.
-            if opens_mid_number(text, match.start("number")):
+            if opens_mid_number(text, match.start("number")) or closes_mid_number(
+                text, match.end("number")
+            ):
                 continue
             noun = (
                 "invariant"
