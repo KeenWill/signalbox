@@ -1080,6 +1080,7 @@ fn git_forced_case_passed(
                 && repository.head()?.shorthand().ok() == Some(branch_name)
                 && fs::read_to_string(root.join(GIT_SEED_PATH))? == GIT_SWITCH_CONTENT
                 && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
+                && git_local_branch_targets(&repository)? == *seed_refs
         }
         GIT_CREATE_COMMIT_NAME => {
             let base = repository.find_branch(GIT_BASE_BRANCH, BranchType::Local)?;
@@ -4984,6 +4985,32 @@ fn forced_git_branch_switch_verifier_rejects_rewriting_the_base_branch() -> Eval
         true,
         GIT_RESTORE_BRANCH_REFLOG_MESSAGE,
     )?;
+    let result = serde_json::json!({
+        "branch": "switch-target",
+        "head": target.id().to_string(),
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_branch_switch_verifier_rejects_an_extra_branch() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_BRANCH_SWITCH_NAME)
+        .expect("the Git branch-switch fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("switch-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    repository.set_head("refs/heads/switch-target")?;
+    repository.checkout_head(None)?;
+    repository.branch("collateral-branch", &target, false)?;
     let result = serde_json::json!({
         "branch": "switch-target",
         "head": target.id().to_string(),
