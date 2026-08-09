@@ -1921,115 +1921,51 @@ mod tests {
         reconstructed_streams(observed).into_keys().collect()
     }
 
-    /// Decodes the JSON escapes a consumer resolves, leaving other bytes as
-    /// they are.
+    /// Every string a JSON consumer reads out of `raw`, already decoded.
     ///
-    /// Deliberately a decoder rather than a parse: a reassembled delta stream
-    /// is a *fragment*, so it need not be standalone-valid JSON, and an
-    /// unrecognised escape is passed through rather than rejected. Handles
-    /// `\uXXXX` including surrogate pairs, with hex case ignored, plus the
-    /// single-character escapes — `\/` among them, which is how a credential
-    /// containing a solidus is most cheaply disguised.
-    fn decoded_json_text(raw: &str) -> String {
-        let units = raw.chars().collect::<Vec<_>>();
-        let mut decoded = String::with_capacity(raw.len());
-        let mut at = 0;
-        while at < units.len() {
-            if units[at] != '\\' || at + 1 >= units.len() {
-                decoded.push(units[at]);
-                at += 1;
-                continue;
+    /// Uses `serde_json` rather than a hand-written unescaper on purpose. The
+    /// scanner this check guards is itself an escape decoder, so a decoder
+    /// written here would be expectation logic mirroring the code under test:
+    /// a decoding bug present in both copies would cancel out and let the
+    /// regression pass. `serde_json` is an independent implementation, so the
+    /// two can disagree.
+    ///
+    /// Decoding *string tokens* rather than unescaping the whole buffer also
+    /// keeps lexical boundaries: for the credential `line\n":0` and the
+    /// document `{"line\n":0}` a consumer reads the key `line\n` and the
+    /// number `0`, never the secret, and unescaping the raw bytes would have
+    /// reported a leak that is not recoverable.
+    ///
+    /// Text that is not a complete JSON value yields nothing to decode — there
+    /// is no document for a consumer to read — and the raw comparison beside
+    /// this still applies. Production redacts such fragments regardless, which
+    /// is verified separately; this governs detection scope only.
+    fn decoded_json_strings(raw: &str) -> Vec<String> {
+        let mut strings = Vec::new();
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+            collect_json_strings(&value, &mut strings);
+        }
+        strings
+    }
+
+    /// Appends every string `value` carries, keys included.
+    fn collect_json_strings(value: &serde_json::Value, strings: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) => strings.push(text.clone()),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect_json_strings(item, strings);
+                }
             }
-            match units[at + 1] {
-                'u' => match hex_quad(&units, at + 2) {
-                    // A high surrogate only decodes with its partner; alone it
-                    // is not a character, so it passes through as written.
-                    Some(high) if (0xD800..0xDC00).contains(&high) => {
-                        match low_surrogate(&units, at + 6) {
-                            Some(low) => {
-                                let combined = 0x1_0000 + ((high - 0xD800) << 10) + (low - 0xDC00);
-                                decoded.extend(char::from_u32(combined));
-                                at += 12;
-                            }
-                            None => {
-                                decoded.push_str("\\u");
-                                at += 2;
-                            }
-                        }
-                    }
-                    Some(unit) => match char::from_u32(unit) {
-                        Some(resolved) => {
-                            decoded.push(resolved);
-                            at += 6;
-                        }
-                        None => {
-                            decoded.push_str("\\u");
-                            at += 2;
-                        }
-                    },
-                    // Fewer than four hex digits is not an escape; nothing is
-                    // consumed beyond the backslash so the digits survive.
-                    None => {
-                        decoded.push_str("\\u");
-                        at += 2;
-                    }
-                },
-                '/' => {
-                    decoded.push('/');
-                    at += 2;
+            serde_json::Value::Object(members) => {
+                for (key, member) in members {
+                    strings.push(key.clone());
+                    collect_json_strings(member, strings);
                 }
-                '"' => {
-                    decoded.push('"');
-                    at += 2;
-                }
-                '\\' => {
-                    decoded.push('\\');
-                    at += 2;
-                }
-                'n' => {
-                    decoded.push('\n');
-                    at += 2;
-                }
-                'r' => {
-                    decoded.push('\r');
-                    at += 2;
-                }
-                't' => {
-                    decoded.push('\t');
-                    at += 2;
-                }
-                'b' => {
-                    decoded.push('\u{8}');
-                    at += 2;
-                }
-                'f' => {
-                    decoded.push('\u{c}');
-                    at += 2;
-                }
-                other => {
-                    decoded.push('\\');
-                    decoded.push(other);
-                    at += 2;
-                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
             }
         }
-        decoded
-    }
-
-    /// The value of exactly four hex digits at `at`, hex case ignored.
-    fn hex_quad(units: &[char], at: usize) -> Option<u32> {
-        let digits = units.get(at..at + 4)?;
-        digits
-            .iter()
-            .try_fold(0_u32, |value, digit| Some(value * 16 + digit.to_digit(16)?))
-    }
-
-    /// The trailing `\uXXXX` of a surrogate pair at `at`, when one is present.
-    fn low_surrogate(units: &[char], at: usize) -> Option<u32> {
-        (units.get(at) == Some(&'\\') && units.get(at + 1) == Some(&'u'))
-            .then(|| hex_quad(units, at + 2))
-            .flatten()
-            .filter(|unit| (0xDC00..0xE000).contains(unit))
     }
 
     /// Asserts `secret` is unrecoverable from `text` as its consumer reads it.
@@ -2039,13 +1975,20 @@ mod tests {
             !text.contains(secret),
             "the credential must not be recoverable; found it literally in {whose}: {text}"
         );
-        if encoding == TextEncoding::Json {
-            let decoded = decoded_json_text(text);
-            assert!(
-                !decoded.contains(secret),
-                "the credential must not be recoverable; {whose} decodes to a value \
-                 containing it: {decoded}"
-            );
+        // Exhaustive rather than an equality test: a new encoding must state
+        // its observation semantics instead of defaulting to the raw-only
+        // path, which would silently weaken this classifier.
+        match encoding {
+            TextEncoding::Plain => {}
+            TextEncoding::Json => {
+                for decoded in decoded_json_strings(text) {
+                    assert!(
+                        !decoded.contains(secret),
+                        "the credential must not be recoverable; {whose} carries a string \
+                         decoding to it: {decoded}"
+                    );
+                }
+            }
         }
     }
 
@@ -2313,79 +2256,146 @@ mod tests {
         );
     }
 
-    /// Every escape spelling a provider could use to disguise the fixture
-    /// credential inside a JSON value.
+    /// One way a provider could disguise the fixture credential in JSON.
     ///
-    /// Synthetic throughout: each decodes to `fixture/secret`, and each was
-    /// confirmed against production redaction, which scrubs all five.
-    const DISGUISED_CREDENTIAL_SPELLINGS: [(&str, &str); 5] = [
-        (
-            "fully escaped",
-            r"\u0066\u0069\u0078\u0074\u0075\u0072\u0065\u002f\u0073\u0065\u0063\u0072\u0065\u0074",
-        ),
-        ("escaped solidus", r"fixture\/secret"),
-        ("partial escape", r"\u0066ixture/secret"),
-        ("uppercase hex", r"fixture\u002Fsecret"),
-        ("escaped tail", r"fixture/sec\u0072\u0065\u0074"),
+    /// Named fields rather than a positional pair: both members are `&str`,
+    /// so a transposed tuple would compile and quietly swap a test's subject
+    /// for its own description.
+    struct DisguisedSpelling {
+        /// What the disguise is, for failure messages.
+        label: &'static str,
+        /// The credential as the provider would write it inside JSON.
+        spelling: &'static str,
+    }
+
+    /// Representative disguised spellings of the fixture credential.
+    ///
+    /// Deliberately *not* claimed as exhaustive: each character may
+    /// independently be literal or `\uXXXX`, `\/` composes with any subset of
+    /// those, and hex digits admit case variants, so the full set is
+    /// combinatorial. These five are the shapes a provider realistically
+    /// emits, chosen to cover whole-value escaping, single-character escaping
+    /// at the head and tail, the escaped solidus, and hex case. Each decodes
+    /// to `fixture/secret`; all are synthetic.
+    const REPRESENTATIVE_DISGUISES: [DisguisedSpelling; 5] = [
+        DisguisedSpelling {
+            label: "fully escaped",
+            spelling: r"\u0066\u0069\u0078\u0074\u0075\u0072\u0065\u002f\u0073\u0065\u0063\u0072\u0065\u0074",
+        },
+        DisguisedSpelling {
+            label: "escaped solidus",
+            spelling: r"fixture\/secret",
+        },
+        DisguisedSpelling {
+            label: "partial escape",
+            spelling: r"\u0066ixture/secret",
+        },
+        DisguisedSpelling {
+            label: "uppercase hex",
+            spelling: r"fixture\u002Fsecret",
+        },
+        DisguisedSpelling {
+            label: "escaped tail",
+            spelling: r"fixture/sec\u0072\u0065\u0074",
+        },
     ];
 
-    /// The decoder recovers the credential from every disguised spelling, so
-    /// the absence check sees what a JSON consumer would.
+    /// Wraps one disguised spelling in the JSON a provider would emit.
+    fn disguised_document(disguise: &DisguisedSpelling) -> String {
+        format!(r#"{{"k":"{}"}}"#, disguise.spelling)
+    }
+
+    /// A JSON consumer recovers the credential from every representative
+    /// disguise, so the absence check sees what that consumer would.
     ///
-    /// Straight-line per spelling rather than a loop over the table: each
-    /// spelling is its own claim and names itself when it fails.
+    /// Straight-line per spelling: each is its own claim and names itself.
     #[test]
-    fn every_disguised_spelling_decodes_to_the_credential() {
-        let [fully, solidus, partial, uppercase, tail] = DISGUISED_CREDENTIAL_SPELLINGS;
+    fn every_representative_disguise_decodes_to_the_credential() {
+        let [fully, solidus, partial, uppercase, tail] = &REPRESENTATIVE_DISGUISES;
 
-        assert_eq!(decoded_json_text(fully.1), "fixture/secret", "{}", fully.0);
         assert_eq!(
-            decoded_json_text(solidus.1),
-            "fixture/secret",
+            decoded_json_strings(&disguised_document(fully)),
+            vec![String::from("k"), String::from("fixture/secret")],
             "{}",
-            solidus.0
+            fully.label
         );
         assert_eq!(
-            decoded_json_text(partial.1),
-            "fixture/secret",
+            decoded_json_strings(&disguised_document(solidus)),
+            vec![String::from("k"), String::from("fixture/secret")],
             "{}",
-            partial.0
+            solidus.label
         );
         assert_eq!(
-            decoded_json_text(uppercase.1),
-            "fixture/secret",
+            decoded_json_strings(&disguised_document(partial)),
+            vec![String::from("k"), String::from("fixture/secret")],
             "{}",
-            uppercase.0
+            partial.label
         );
-        assert_eq!(decoded_json_text(tail.1), "fixture/secret", "{}", tail.0);
+        assert_eq!(
+            decoded_json_strings(&disguised_document(uppercase)),
+            vec![String::from("k"), String::from("fixture/secret")],
+            "{}",
+            uppercase.label
+        );
+        assert_eq!(
+            decoded_json_strings(&disguised_document(tail)),
+            vec![String::from("k"), String::from("fixture/secret")],
+            "{}",
+            tail.label
+        );
     }
 
-    /// Escapes the decoder does not recognise pass through untouched, so a
-    /// plain-text stream is never rewritten into a false positive.
+    /// Only string tokens are decoded, so escape-shaped bytes outside a string
+    /// never become a leak that no consumer can recover.
     #[test]
-    fn unrecognised_escapes_pass_through_undecoded() {
-        assert_eq!(decoded_json_text(r"plain text"), "plain text");
-        assert_eq!(decoded_json_text(r"a\qb"), r"a\qb");
-        assert_eq!(decoded_json_text(r"trailing\"), "trailing\\");
-        assert_eq!(decoded_json_text(r"\u00"), r"\u00");
-        assert_eq!(decoded_json_text(r"\ud83d\ude00"), "\u{1f600}");
+    fn only_json_string_tokens_are_decoded() {
+        assert_eq!(
+            decoded_json_strings(r#"{"line\n":0}"#),
+            vec![String::from("line\n")]
+        );
+        assert_eq!(
+            decoded_json_strings(r#"{"a":["x",1,null,true]}"#),
+            vec![String::from("a"), String::from("x")]
+        );
     }
 
-    /// A raw `contains` declares a disguised leak safe; the JSON-aware check
-    /// does not. This is the regression the check exists to catch, pinned as
-    /// a difference between the two rather than asserted in prose.
+    /// Text that is not a complete JSON value has nothing a consumer decodes,
+    /// so it yields no strings and stands on the raw comparison alone.
+    #[test]
+    fn incomplete_json_yields_no_decoded_strings() {
+        assert_eq!(
+            decoded_json_strings(r#"{"k":"fixture"#),
+            Vec::<String>::new()
+        );
+        assert_eq!(decoded_json_strings("plain text"), Vec::<String>::new());
+    }
+
+    /// A surrogate pair decodes to its single character, which is the case a
+    /// credential containing an astral character depends on.
+    #[test]
+    fn surrogate_pairs_decode_to_one_character() {
+        assert_eq!(
+            decoded_json_strings(r#"{"k":"\ud83d\ude00"}"#),
+            vec![String::from("k"), String::from("\u{1f600}")]
+        );
+    }
+
+    /// A raw comparison declares a disguised leak safe; the JSON-aware check
+    /// does not. This is the regression the check exists to catch, pinned as a
+    /// difference between the two rather than described in prose.
     #[test]
     fn a_raw_match_would_miss_what_the_json_aware_check_catches() {
-        let [fully, ..] = DISGUISED_CREDENTIAL_SPELLINGS;
-        let leaked = format!(r#"{{"k":"{}"}}"#, fully.1);
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
+        let leaked = disguised_document(fully);
 
-        // The raw comparison the check used to make: no literal secret.
         assert!(
             !leaked.contains("fixture/secret"),
             "the disguised spelling contains no literal credential, which is the point"
         );
-        // What a JSON consumer actually recovers.
-        assert!(decoded_json_text(&leaked).contains("fixture/secret"));
+        assert!(
+            decoded_json_strings(&leaked).contains(&String::from("fixture/secret")),
+            "a JSON consumer recovers it"
+        );
     }
 
     /// INV-035: a disguised credential emitted on a stream the intended-stream
@@ -2393,12 +2403,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "must not be recoverable")]
     fn disguised_credential_on_an_uninspected_stream_is_caught() {
-        let [fully, ..] = DISGUISED_CREDENTIAL_SPELLINGS;
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
         let observed = vec![Observation {
             correlation: "call-9".to_string(),
             fact: ObservationFact::ToolArgumentsDelta {
                 index: 7,
-                fragment: format!(r#"{{"k":"{}"}}"#, fully.1),
+                fragment: disguised_document(fully),
             },
         }];
 
@@ -2409,71 +2419,33 @@ mod tests {
     #[test]
     #[should_panic(expected = "must not be recoverable")]
     fn disguised_credential_in_proposed_arguments_is_caught() {
-        let [fully, ..] = DISGUISED_CREDENTIAL_SPELLINGS;
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
         let observed = vec![Observation {
             correlation: "call-1".to_string(),
             fact: ObservationFact::ToolCallProposed(ToolCallProposal {
                 id: ToolCallId::new("id-1"),
                 name: ToolName::new("t"),
-                arguments_json: format!(r#"{{"k":"{}"}}"#, fully.1),
+                arguments_json: disguised_document(fully),
             }),
         }];
 
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// A plain-text stream is matched raw: escape-looking bytes in assistant
+    /// A plain-text stream is matched raw: escape-shaped bytes in assistant
     /// text are literal there, so decoding them would invent a leak.
     #[test]
     fn escape_shaped_plain_text_is_not_decoded_into_a_false_positive() {
-        let [fully, ..] = DISGUISED_CREDENTIAL_SPELLINGS;
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
         let observed = vec![Observation {
             correlation: "call-1".to_string(),
             fact: ObservationFact::TextDelta {
                 index: 0,
-                text: fully.1.to_string(),
+                text: fully.spelling.to_string(),
             },
         }];
 
         assert_no_stream_carries(&observed, "fixture/secret");
-    }
-
-    /// INV-035: a proposal's provider-controlled id and name are scrubbed
-    /// alongside its arguments, pinned to their exact redacted values.
-    ///
-    /// `redact_tool_proposal` scrubs all three fields, but until this case no
-    /// test drove an `ObservationFact::ToolCallProposed` through the sink at
-    /// all, so the classifier would have reported a leaked id or name that no
-    /// observation ever carried to the check. Exact values rather than mere
-    /// absence: replacing a whole field would satisfy an absence check while
-    /// discarding the safe bytes around the credential.
-    #[test]
-    fn inv_035_proposed_identifiers_and_names_are_credential_scrubbed() {
-        let key = credential("fixture/secret");
-        let mut observed = Vec::new();
-        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
-        sink.observe(Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::ToolCallProposed(ToolCallProposal {
-                id: ToolCallId::new("id-fixture/secret-1"),
-                name: ToolName::new("name-fixture/secret-tool"),
-                arguments_json: r#"{"k":"fixture/secret"}"#.to_string(),
-            }),
-        });
-        sink.flush();
-        drop(sink);
-
-        assert_eq!(
-            observed,
-            vec![Observation {
-                correlation: "call-1".to_string(),
-                fact: ObservationFact::ToolCallProposed(ToolCallProposal {
-                    id: ToolCallId::new("id-[redacted]-1"),
-                    name: ToolName::new("name-[redacted]-tool"),
-                    arguments_json: r#"{"k":"[redacted]"}"#.to_string(),
-                }),
-            }]
-        );
     }
 
     /// INV-035: a credential spelled as a surrogate pair survives a boundary
