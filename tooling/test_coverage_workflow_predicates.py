@@ -738,6 +738,124 @@ def invocation_forms() -> set[tuple[str, str]]:
     }
 
 
+GH_TOKEN = re.compile(r"gh(?![-\w])")
+# The flag that makes `gh api` follow Link headers. A sticky comment older than
+# the first page is invisible without it, and the workflow then posts a second
+# comment beside the one it meant to rewrite.
+PAGINATION_FLAG = "--paginate"
+REQUEST_BODY_FLAG = "--input"
+
+
+def gh_api_commands(script: str) -> list[list[str]]:
+    """Every `gh api` command in a script, as words, outside test bodies."""
+    found: list[list[str]] = []
+    index, length = 0, len(script)
+    while index < length:
+        character = script[index]
+        if character == "\\":
+            index += 2
+            continue
+        if character == "'":
+            closing = script.find("'", index + 1)
+            if closing < 0:
+                break
+            index = closing + 1
+            continue
+        if character == "#" and (index == 0 or script[index - 1] in " \t\n"):
+            newline = script.find("\n", index)
+            index = length if newline < 0 else newline
+            continue
+        in_command_position = index == 0 or script[index - 1] in COMMAND_POSITION_PREFIXES
+        token = GH_TOKEN.match(script, index)
+        if token and in_command_position:
+            words, following = read_command_words(script, token.end())
+            if words and words[0] == "api":
+                found.append(words)
+            index = following + 1 if following > index else index + 1
+            continue
+        index += 1
+    return found
+
+
+def gh_command_carrying(identifier: str) -> list[str]:
+    """The `gh api` command that runs one extracted filter, outside test bodies."""
+    program = one_program_for(identifier)
+    workflow = SELECTOR_WORKFLOWS[identifier]
+    for block in read_run_blocks(workflow):
+        for words in gh_api_commands(block.script):
+            if program in words:
+                return words
+    raise AssertionError(
+        f"no gh api command in {workflow.name} runs the {identifier!r} filter; the "
+        "surrounding call moved and the flags it carries are no longer under test"
+    )
+
+
+def unpaginated_selectors() -> list[str]:
+    """Selectors whose gh api call would read only the first page, outside test bodies."""
+    return [
+        identifier
+        for identifier in SELECTOR_WORKFLOWS
+        if PAGINATION_FLAG not in gh_command_carrying(identifier)
+    ]
+
+
+def payload_handoff_problems() -> list[str]:
+    """Payload files written somewhere the API request does not read from.
+
+    Runs outside test bodies. The workflow writes the payload by redirecting jq
+    into a file and then hands that file to `gh api --input`. Nothing connects
+    the two but the name, so a redirection that lost its target, or an
+    `--input` naming something else, leaves the request with no body while jq
+    still exits zero and this module still sees a well-formed payload.
+    """
+    problems: list[str] = []
+    for identifier, workflow in (
+        (RUST_COMMENT_PAYLOAD, COVERAGE_WORKFLOW),
+        (NATIVE_COMMENT_PAYLOAD, SWIFT_WORKFLOW),
+    ):
+        program = one_program_for(identifier)
+        for block in read_run_blocks(workflow):
+            if program not in block.script:
+                continue
+            written = redirect_target_after(block.script, program)
+            if written is None:
+                problems.append(
+                    f"{workflow.name}: the payload command does not redirect its output to a "
+                    "file, so nothing writes the body the API request reads"
+                )
+                continue
+            read_back = [
+                words[words.index(REQUEST_BODY_FLAG) + 1]
+                for words in gh_api_commands(block.script)
+                if REQUEST_BODY_FLAG in words
+                and words.index(REQUEST_BODY_FLAG) + 1 < len(words)
+            ]
+            if written not in read_back:
+                problems.append(
+                    f"{workflow.name}: the payload is written to {written!r} but the request "
+                    f"reads {read_back!r}, so the comment would be posted with no body"
+                )
+    return problems
+
+
+def redirect_target_after(script: str, program: str) -> str | None:
+    """The file a command redirects into, read after its filter, outside test bodies."""
+    position = script.find(program)
+    if position < 0:
+        return None
+    tail = script[position + len(program) :]
+    line = tail.split("\n", 1)[0]
+    if ">" not in line:
+        return None
+    target, kind, _ = read_shell_word(line, line.index(">") + 1)
+    if kind == "end-of-command":
+        return None
+    # Normalised the same way the command words are, so the file written and the
+    # file read are compared as the same name rather than as two spellings of it.
+    return substitute_shell_variables(target)
+
+
 def unreadable_invocations() -> list[str]:
     """Every jq invocation in either workflow whose filter cannot be read.
 
@@ -1217,9 +1335,7 @@ UNREPRODUCIBLE = "unreproducible"
 # Words that appear at the head of a command inside a producer group without
 # writing any of the comment. Anything else that does is an emitter this
 # composer does not know, and is refused rather than skipped.
-NON_EMITTING_SHELL_WORDS = frozenset(
-    {"if", "then", "else", "elif", "fi", "[", "test", ":", "true", "cat"}
-)
+NON_EMITTING_SHELL_WORDS = frozenset({"if", "then", "else", "elif", "fi", "[", "test", ":", "true"})
 
 
 @dataclass(frozen=True)
@@ -1721,10 +1837,15 @@ def pointless_divergence_notes(documents: tuple[RecordedDocument, ...]) -> list[
 # Running jq
 # --------------------------------------------------------------------------
 
-# jq's exit status for a runtime error, as distinct from a filter that ran and
-# selected nothing. The difference is the whole of one recorded divergence: a
-# program that errors has not decided about its input, it has fallen over.
-JQ_RUNTIME_ERROR = 5
+# jq's documented exit statuses under `-e`, which is how the workflows run a
+# predicate. Zero means it produced a value; 1 means the last output was false
+# or null; 4 means it produced no output. Those three are decisions. Every other
+# status is jq falling over rather than deciding — 5 for a runtime error, and
+# whatever a filter chooses for itself through `halt_error`, which is not 5.
+JQ_PRODUCED_A_VALUE = 0
+JQ_LAST_OUTPUT_WAS_FALSE = 1
+JQ_PRODUCED_NO_OUTPUT = 4
+JQ_DECISION_STATUSES = (JQ_PRODUCED_A_VALUE, JQ_LAST_OUTPUT_WAS_FALSE, JQ_PRODUCED_NO_OUTPUT)
 
 # One jq program over one synthetic document is sub-second work. A program that
 # runs past this has not decided about its input, it has hung, and the harness
@@ -1754,7 +1875,14 @@ class JqResult:
 
     @property
     def errored(self) -> bool:
-        return self.status == JQ_RUNTIME_ERROR
+        """Whether jq fell over rather than deciding about its input.
+
+        Any status outside the documented three is a failure, not a rejection.
+        A predicate reaching `halt_error(7)` exits 7, and reading that as an
+        ordinary rejection would hide a filter that aborts the publishing step
+        for exactly the documents it is supposed to refuse quietly.
+        """
+        return self.status not in JQ_DECISION_STATUSES
 
 
 def run_jq(program: str, document: str, *arguments: str) -> JqResult:
@@ -2353,6 +2481,22 @@ class WorkflowReadingTests(unittest.TestCase):
         new form arrives, and only for that form."""
         self.assertEqual(invocation_forms(), RECORDED_INVOCATION_FORMS)
 
+    def test_the_selectors_are_run_over_every_page(self) -> None:
+        """A sticky comment older than the first API page is invisible without
+        `--paginate`, and the workflow then posts a second comment beside the
+        one it meant to rewrite. Nothing in the filter itself says so, and a
+        fixture is always one preassembled array, so the flag is asserted on
+        the `gh api` call that carries the filter rather than inferred."""
+        self.assertEqual(unpaginated_selectors(), [])
+
+    def test_the_payload_is_written_where_the_request_reads_it(self) -> None:
+        """The workflow redirects jq into a file and then hands that file to
+        `gh api --input`. Only the name connects them, so a lost redirection or
+        an `--input` naming something else leaves the request with no body
+        while jq still exits zero and a well-formed payload still exists
+        here."""
+        self.assertEqual(payload_handoff_problems(), [])
+
     def test_every_jq_invocation_in_the_workflows_is_readable(self) -> None:
         """The exhaustiveness check is only worth as much as the scan beneath
         it. An invocation whose filter is built at run time, read from a file,
@@ -2472,7 +2616,12 @@ class CommentPayloadTests(JqBackedTestCase):
         with tempfile.TemporaryDirectory() as workspace:
             body_path = Path(workspace) / COMMENT_FILE
             body_path.write_text(body, encoding="utf-8")
+            payload_path = Path(workspace) / "payload.json"
             result = run_jq(extracted.program, "", *replayed_arguments(extracted, body_path))
+            # Replays the workflow's `> "$payload"`: the request body is a file
+            # the next command reads, not jq's stdout.
+            payload_path.write_text(result.stdout, encoding="utf-8")
+            written = payload_path.read_text(encoding="utf-8")
 
         self.assertEqual(result.status, 0, f"jq failed: {result.stderr}")
         self.assertTrue(
@@ -2480,7 +2629,7 @@ class CommentPayloadTests(JqBackedTestCase):
             "the workflow's own invocation wrote no payload while exiting zero, which is "
             "what dropping -n from a --rawfile invocation does",
         )
-        payload = json.loads(result.stdout)
+        payload = json.loads(written)
         self.assertEqual(list(payload), ["body"], "the API takes exactly one field")
         return payload["body"]
 
@@ -2813,6 +2962,21 @@ class JqNumericContractTests(JqBackedTestCase):
         result = run_jq(".count + 0", json.dumps({"count": FIRST_INTEGER_A_DOUBLE_CANNOT_HOLD}))
 
         self.assertEqual(result.stdout.strip(), str(FIRST_INTEGER_A_DOUBLE_CANNOT_HOLD - 1))
+
+    def test_only_the_documented_statuses_read_as_a_decision(self) -> None:
+        """Pinned against the real binary, because the whole accept/reject
+        reading rests on it. Under `-e` jq exits 0 with a value, 1 when the
+        last output was false or null, and 4 when there was none; those are
+        decisions. A runtime error is 5, and a filter can choose its own status
+        through `halt_error`, which is why anything outside the three counts as
+        falling over rather than as a quiet rejection."""
+        document = json.dumps({"a": 1})
+
+        self.assertFalse(run_jq("select(.a)", document, "-e").errored)
+        self.assertFalse(run_jq("select(.b)", document, "-e").errored)
+        self.assertFalse(run_jq("false", document, "-e").errored)
+        self.assertTrue(run_jq('error("boom")', document, "-e").errored)
+        self.assertTrue(run_jq("halt_error(7)", document, "-e").errored)
 
     def test_a_suffix_test_refuses_a_non_string_name(self) -> None:
         """The mechanism behind the recorded non-string target name: jq raises
