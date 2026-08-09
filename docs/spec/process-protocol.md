@@ -44,6 +44,10 @@ The session-metadata last-writer actor inventory, its native and terminal-client
 projections, and the totality of the daemon projection that produces it are
 verified against this PR (`fix/review-read-snapshot-permit`).
 
+The coherent review-orchestration snapshot's single-transaction construction,
+the pool capacity it draws, and the writer independence that follows from both
+are verified against this PR (`agent/review-snapshot-mvcc`).
+
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
 implemented in this tree. The version field remains required on every frame and
