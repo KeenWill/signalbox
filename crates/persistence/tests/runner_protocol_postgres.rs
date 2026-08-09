@@ -10291,6 +10291,45 @@ async fn s32_inv032_inv044_runner_working_directory_changed_outbox_round_trips()
     Ok(())
 }
 
+/// INV-032 / INV-044: a same-runner directory relocation has exactly one
+/// follower state and cannot also masquerade as an ordinary replacement.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_directory_relocation_rejects_replaced_state()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_registration_loss_projection(&pool, session).await?;
+    let replacement_directory = replacement_runner_directory();
+    let mut replacement = pool.begin().await?;
+    append_same_runner_replacement_projection(
+        &mut replacement,
+        session,
+        Some(&replacement_directory),
+    )
+    .await?;
+    replacement.commit().await?;
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "runner_replaced").await?;
+    let rejected = append_runner_state_transition_for_test(
+        &pool,
+        session,
+        pin.lease.runner(),
+        placement_revision,
+        pin.placement.request().sandbox,
+        Some(replacement_directory),
+        DispatchedRunnerState::Replaced,
+        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+    )
+    .await
+    .expect_err("a directory relocation cannot publish an ordinary replacement state");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-032 / INV-044: abandonment dispatches from its exact terminal
 /// placement record while retaining the lost runner identity.
 #[tokio::test]

@@ -92,7 +92,6 @@ CREATE TABLE runner_state_transition_outbox_event (
         UNIQUE NULLS NOT DISTINCT (
             session_id,
             placement_event_ordinal,
-            state_kind,
             connection_enrollment_id,
             connection_epoch,
             connection_event_ordinal
@@ -217,6 +216,22 @@ BEGIN
         ELSIF placement.event_kind = 'runner_replaced'
               AND placement.state_kind = 'pinned'
         THEN
+            SELECT *
+              INTO prior
+              FROM runner_session_placement_record
+             WHERE session_id = placement.session_id
+               AND event_ordinal = placement.event_ordinal - 1;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'runner replacement outbox source lacks its predecessor'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF prior.lost_runner_id IS NOT DISTINCT FROM placement.pinned_runner_id
+               AND prior.requested_working_directory IS DISTINCT FROM
+                    placement.requested_working_directory
+            THEN
+                RAISE EXCEPTION 'same-runner directory relocation requires its exact outbox state'
+                    USING ERRCODE = '23514';
+            END IF;
             expected_runner := placement.pinned_runner_id;
         ELSE
             RAISE EXCEPTION 'runner replacement outbox source is not replacement'
@@ -224,10 +239,14 @@ BEGIN
         END IF;
     ELSIF NEW.state_kind = 'working_directory_changed' THEN
         SELECT *
-          INTO STRICT prior
+          INTO prior
           FROM runner_session_placement_record
          WHERE session_id = placement.session_id
            AND event_ordinal = placement.event_ordinal - 1;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'working-directory outbox source lacks its predecessor'
+                USING ERRCODE = '23514';
+        END IF;
         expected_runner := placement.pinned_runner_id;
         IF placement.event_kind <> 'runner_replaced'
            OR placement.state_kind <> 'pinned'
