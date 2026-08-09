@@ -653,6 +653,42 @@ class BaselineLoadingTests(unittest.TestCase):
         self.assertEqual(reason, "")
         self.assertIsNotNone(baseline)
 
+    def test_compensating_impossible_files_report_a_reason(self) -> None:
+        """Invalid rows cancel in a sum: a file at (covered 2, count 1) and
+        another at (0, 1) total to (2, 2), which passes every aggregate test
+        while the document describes nothing real. The workflow predicate has
+        always checked per file; the loader now does too."""
+        document = export(
+            coverage_file("/repo/crates/domain/src/a.rs", lines=1, covered=2),
+            coverage_file("/repo/crates/domain/src/b.rs", lines=1, covered=0),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "summary.json", json.dumps(document))
+
+            baseline, reason = load_baseline(
+                path, label=BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
+            )
+
+        self.assertIsNone(baseline)
+        self.assertIn("impossible", reason)
+
+    def test_two_healthy_files_are_still_accepted(self) -> None:
+        """The guard: per-file checking must not start refusing ordinary
+        multi-file exports."""
+        document = export(
+            coverage_file("/repo/crates/domain/src/a.rs", lines=100, covered=50),
+            coverage_file("/repo/crates/domain/src/b.rs", lines=100, covered=60),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "summary.json", json.dumps(document))
+
+            baseline, reason = load_baseline(
+                path, label=BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
+            )
+
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(baseline)
+
     def test_a_missing_baseline_file_reports_a_reason(self) -> None:
         """An extraction that produced nothing leaves no file, and reading
         one that is not there is an expected outcome here."""

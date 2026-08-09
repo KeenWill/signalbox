@@ -593,6 +593,42 @@ class BaselineLoadingTests(unittest.TestCase):
         self.assertEqual(reason, "")
         self.assertIsNotNone(baseline)
 
+    def test_compensating_impossible_targets_report_a_reason(self) -> None:
+        """Invalid targets cancel in a sum: one at (covered 2, executable 1)
+        and another at (0, 1) total to (2, 2), which passes every aggregate
+        test while describing nothing real."""
+        document = report(
+            target("A.app", source_file("/repo/A.swift", executable=1, covered=2)),
+            target("B.app", source_file("/repo/B.swift", executable=1, covered=0)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "coverage.json", json.dumps(document))
+
+            baseline, reason = summarize_coverage.load_baseline(
+                path, label=summarize_coverage.BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
+            )
+
+        self.assertIsNone(baseline)
+        self.assertIn("impossible", reason)
+
+    def test_an_impossible_test_bundle_is_ignored_like_any_other(self) -> None:
+        """The guard on which targets are checked: `.xctest` bundles are
+        excluded from the measurement, so they are excluded from its validity
+        too — the same split `product_totals` and the workflow filter make."""
+        document = report(
+            target("T.xctest", source_file("/repo/T.swift", executable=1, covered=2)),
+            target("A.app", source_file("/repo/A.swift", executable=100, covered=50)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "coverage.json", json.dumps(document))
+
+            baseline, reason = summarize_coverage.load_baseline(
+                path, label=summarize_coverage.BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
+            )
+
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(baseline)
+
     def test_a_missing_baseline_file_reports_a_reason(self) -> None:
         """An extraction that produced nothing leaves no file, and reading
         one that is not there is an expected outcome here."""

@@ -106,6 +106,26 @@ def product_totals(document: dict) -> tuple[int, int]:
     )
 
 
+def impossible_product_targets(document: dict) -> list[str]:
+    """Name the product targets whose counters cannot describe a measurement.
+
+    Per target rather than against the sum, because invalid targets cancel: one
+    at `(covered 2, executable 1)` and another at `(0, 1)` total to `(2, 2)`,
+    which passes every aggregate test while describing nothing real. Checking
+    each target also makes the aggregate test redundant, since targets that are
+    individually sane cannot sum to an insane total.
+    """
+    impossible = []
+    for target in document.get("targets", []):
+        if is_test_bundle(target):
+            continue
+        covered = int(target["coveredLines"])
+        executable = int(target["executableLines"])
+        if covered < 0 or executable < 0 or covered > executable:
+            impossible.append(str(target.get("name", "<unnamed>")))
+    return impossible
+
+
 def load_baseline(path: Path, *, label: str, sha: str, date: str) -> tuple["Baseline | None", str]:
     """Read a baseline report, or say why it cannot be read.
 
@@ -154,12 +174,17 @@ def load_baseline(path: Path, *, label: str, sha: str, date: str) -> tuple["Base
         # documented contract permits.
         if not isfinite(percent_value(covered, executable)):
             return None, "the baseline report has a counter that cannot be rendered"
-        # More covered than executable, or a negative total, is a corrupt
+        # More covered than executable, or a negative count, is a corrupt
         # measurement rather than a low one: it renders a complete current run
         # as a fabricated regression instead of degrading to the note below.
-        # Same guard, same reason, as the Rust loader.
-        if covered < 0 or executable < 0 or covered > executable:
-            return None, "the baseline report reports impossible product-line counters"
+        # Same guard, same reason, and now the same granularity as the Rust
+        # loader — per target, because invalid targets cancel in the sum.
+        impossible = impossible_product_targets(document)
+        if impossible:
+            return None, (
+                "the baseline report reports impossible counters for "
+                f"{', '.join(impossible)}"
+            )
     except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError) as error:
         return None, f"the baseline report could not be read ({error.__class__.__name__})"
     # A report with no executable product line is not a measurement to compare

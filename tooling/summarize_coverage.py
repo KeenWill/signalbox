@@ -215,6 +215,32 @@ def delta(current: Counter, baseline: Counter) -> str:
     return f"{current.percent - baseline.percent:+.2f} pp"
 
 
+def impossible_counters(summary: Summary) -> list[str]:
+    """Name the counters in `summary` that cannot describe a real measurement.
+
+    A negative counter, or one reporting more covered than exist, is corrupt
+    rather than merely low. Applied per file rather than to the total, because
+    invalid rows cancel: a file at `(covered 2, count 1)` and another at
+    `(0, 1)` sum to `(2, 2)`, which passes every aggregate test while the
+    document it came from describes nothing real.
+
+    Checking each row also makes the aggregate check redundant — rows that are
+    individually sane cannot sum to an insane total — so this replaces it
+    rather than joining it.
+    """
+    return [
+        name
+        for name, counter in (
+            ("lines", summary.lines),
+            ("functions", summary.functions),
+            ("regions", summary.regions),
+        )
+        if counter.count < 0
+        or counter.covered < 0
+        or counter.covered > counter.count
+    ]
+
+
 def load_baseline(path: Path, *, label: str, sha: str, date: str) -> tuple["Baseline | None", str]:
     """Read a baseline export, or say why it cannot be read.
 
@@ -245,7 +271,8 @@ def load_baseline(path: Path, *, label: str, sha: str, date: str) -> tuple["Base
     """
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
-        total = total_of([summary for _, summary in read_file_summaries(document)])
+        summaries = [summary for _, summary in read_file_summaries(document)]
+        total = total_of(summaries)
         # Rendering is what these totals are *for*, so a total that cannot be
         # rendered is one this cannot read. `int()` accepts a 400-digit decimal
         # string, so the loader used to return a `Baseline` that raised
@@ -274,17 +301,13 @@ def load_baseline(path: Path, *, label: str, sha: str, date: str) -> tuple["Base
         # collapse. The workflow predicate has refused this shape for several
         # rounds; the loader has to refuse it too, because the CLI contract
         # permits direct use and a fabricated number is worse than no delta.
-        impossible = [
-            name
-            for name, counter in (
-                ("lines", total.lines),
-                ("functions", total.functions),
-                ("regions", total.regions),
-            )
-            if counter.count < 0
-            or counter.covered < 0
-            or counter.covered > counter.count
-        ]
+        #
+        # Per file, matching the predicate, because invalid rows cancel in a
+        # sum: an aggregate test passes a document whose rows are individually
+        # impossible.
+        impossible = sorted(
+            {name for summary in summaries for name in impossible_counters(summary)}
+        )
         if impossible:
             return None, (
                 "the baseline summary reports impossible counters "
