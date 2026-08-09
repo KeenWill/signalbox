@@ -164,6 +164,8 @@ const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x9109;
 const ARBITRARY_SECOND_EVAL_REQUEST_ID: u128 = 0x910a;
 const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
 const SYNTHETIC_EXECUTOR_FAILURE: &str = "synthetic executor failure";
+const DRIFTED_APPLY_PATCH_ARGUMENTS: &str =
+    r#"{"patch":"*** Begin Patch\n*** Add File: other.txt\n+drifted by eval\n*** End Patch"}"#;
 const SYNTHETIC_EVAL_RECEIPT: &str = "01988c5f-89c4-7000-8000-000000000001";
 const EVAL_RECEIPT_FIELD: &str = "eval_receipt";
 const RESULT_RECEIPT_INSTRUCTION: &str =
@@ -298,24 +300,56 @@ async fn run_case(
         .await
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
     let snapshot = CaseSnapshot::read(&database.pool, session, turn).await?;
-    let execution_completed = match (forced_case, snapshot.requests.as_slice()) {
-        (None, _) => true,
-        (Some(case), [request]) => match tracker.result_content(request.request_id) {
-            Some(content) => suite.forced_case_result_passed(case, &content)?,
-            None => false,
-        },
-        (Some(_), _) => false,
+    let expected_arguments = forced_case
+        .map(|case| normalized_arguments_text(case.expected_arguments))
+        .transpose()?;
+    let execution_completed = match (
+        forced_case,
+        snapshot.requests.as_slice(),
+        expected_arguments.as_deref(),
+    ) {
+        (None, _, _) => true,
+        (Some(case), [request], Some(expected_arguments)) => {
+            match tracker.result_content(request.request_id) {
+                Some(content) => forced_execution_completed(
+                    suite,
+                    case,
+                    ForcedExecutionEvidence {
+                        persisted_arguments: &request.arguments_text,
+                        expected_arguments,
+                        result_content: &content,
+                    },
+                )?,
+                None => false,
+            }
+        }
+        (Some(_), _, _) => false,
     };
     Ok(CaseOutcome {
         target: forced_tool.map(str::to_owned),
-        expected_arguments: forced_case
-            .map(|case| normalized_arguments_text(case.expected_arguments))
-            .transpose()?,
+        expected_arguments,
         execution_completed,
         result_round_trips: tracker.result_round_trips(),
         round_tripped_request_ids: tracker.round_tripped_request_ids(),
         snapshot,
     })
+}
+
+struct ForcedExecutionEvidence<'a> {
+    persisted_arguments: &'a str,
+    expected_arguments: &'a str,
+    result_content: &'a str,
+}
+
+fn forced_execution_completed(
+    suite: &FamilySuite,
+    case: &ForcedCase,
+    evidence: ForcedExecutionEvidence<'_>,
+) -> EvalResult<bool> {
+    if evidence.persisted_arguments != evidence.expected_arguments {
+        return Ok(false);
+    }
+    suite.forced_case_result_passed(case, evidence.result_content)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -606,8 +640,12 @@ impl FamilySuite {
     }
 
     fn prepare_for(&self, tool: &str) -> EvalResult {
-        if self.family == EvalFamily::Git && tool == GIT_CREATE_COMMIT_NAME {
-            stage_path(self.workspace.path(), GIT_COMMIT_PATH)?;
+        if self.family == EvalFamily::Git {
+            match tool {
+                GIT_CREATE_COMMIT_NAME => stage_path(self.workspace.path(), GIT_COMMIT_PATH)?,
+                GIT_DIFF_NAME => stage_path(self.workspace.path(), GIT_STAGE_PATH)?,
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -1025,7 +1063,7 @@ fn web_forced_case_passed(
                 && result["status"] == 200
                 && result["content_type"] == "text/plain"
                 && result["body"] == WEB_FETCH_BODY
-                && result["truncated"] == false
+                && result["truncated"] == true
         }
         WEB_SEARCH_NAME => {
             result["results"].as_array().is_some_and(|results| {
@@ -1371,7 +1409,7 @@ impl WebFetchTransport for FixtureWebFetchTransport {
             200,
             Some(String::from("text/plain")),
             WEB_FETCH_BODY.as_bytes().to_vec(),
-            WebFetchBodyCompleteness::Complete,
+            WebFetchBodyCompleteness::Truncated,
         )
         .ok_or(WebFetchTransportFailure::DispatchUnknown)
     }
@@ -3237,6 +3275,8 @@ fn forced_git_diff_verifier_accepts_the_seeded_worktree_patch() -> EvalResult {
         .iter()
         .find(|case| case.name == GIT_DIFF_NAME)
         .expect("the Git diff fixture exists");
+    suite.prepare_for(case.name)?;
+    let repository = Repository::open(suite.workspace.path())?;
     let result = serde_json::json!({
         "patch": expected_git_worktree_patch(suite.workspace.path())?,
         "truncated": false,
@@ -3244,6 +3284,10 @@ fn forced_git_diff_verifier_accepts_the_seeded_worktree_patch() -> EvalResult {
     })
     .to_string();
 
+    assert_eq!(
+        repository.status_file(Path::new(GIT_STAGE_PATH))?,
+        Status::INDEX_NEW
+    );
     assert!(suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
@@ -3621,6 +3665,49 @@ fn forced_web_search_verifier_accepts_distinct_incomplete_evidence() -> EvalResu
     .to_string();
 
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_web_fetch_verifier_accepts_truncated_body_evidence() -> EvalResult {
+    let suite = FamilySuite::web()?;
+    let case = WEB_CASES
+        .iter()
+        .find(|case| case.name == WEB_FETCH_NAME)
+        .expect("the web fetch fixture exists");
+    let result = serde_json::json!({
+        "url": WEB_URL,
+        "status": 200,
+        "content_type": "text/plain",
+        "body": WEB_FETCH_BODY,
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_execution_classifies_argument_drift_before_state_verification() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == APPLY_PATCH_NAME)
+        .expect("the apply-patch fixture exists");
+    let expected_arguments = normalized_arguments_text(case.expected_arguments)?;
+    let persisted_arguments = normalized_arguments_text(DRIFTED_APPLY_PATCH_ARGUMENTS)?;
+
+    assert!(!forced_execution_completed(
+        &suite,
+        case,
+        ForcedExecutionEvidence {
+            persisted_arguments: &persisted_arguments,
+            expected_arguments: &expected_arguments,
+            result_content: r#"{"operations_applied":1}"#,
+        },
+    )?);
     Ok(())
 }
 
