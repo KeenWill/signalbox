@@ -1657,9 +1657,20 @@ pub struct InvalidRuntimeToolSchema {
     source: serde_json::Error,
 }
 
+impl InvalidRuntimeToolSchema {
+    /// Returns the safe application tool name whose schema was rejected.
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
+}
+
 impl fmt::Display for InvalidRuntimeToolSchema {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("application tool schema is invalid at the runtime bridge")
+        write!(
+            formatter,
+            "application tool schema is invalid at the runtime bridge: {}",
+            self.tool_name
+        )
     }
 }
 
@@ -3442,9 +3453,13 @@ mod tests {
             source,
         };
 
-        expect!["application tool schema is invalid at the runtime bridge"]
-            .assert_eq(&error.to_string());
-        assert_eq!(error.tool_name, SYNTHETIC_INVALID_TOOL_NAME);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "application tool schema is invalid at the runtime bridge: {SYNTHETIC_INVALID_TOOL_NAME}"
+            )
+        );
+        assert_eq!(error.tool_name(), SYNTHETIC_INVALID_TOOL_NAME);
         assert_eq!(
             std::error::Error::source(&error).map(ToString::to_string),
             Some(expected_source)
