@@ -130,9 +130,187 @@ JOB_HEADING = re.compile(r"^[ ]{2}(?P<name>[A-Za-z_][A-Za-z0-9_-]*):[ ]*$")
 STEP_NAME = re.compile(r"^[ ]*-?[ ]*name:[ ]+(?P<name>.+?)[ ]*$")
 
 # jq is reached two ways in these workflows: the binary, and `gh api`'s `--jq`
-# flag. Both take the program as the next single-quoted word.
+# flag. The binary takes its filter as the first operand that is neither an
+# option nor an option's value, so finding it means knowing which options
+# consume following words. Taking "the next single-quoted word" instead reads
+# `--arg marker '<!-- x -->' '.filter'` as the filter `<!-- x -->`.
 JQ_TOKEN = re.compile(r"(?:--jq|jq)(?![-\w])")
-WORD_CHARACTER = re.compile(r"[-\w]")
+# A jq token only starts a command where a command can start. Without this a
+# filter named `filter.jq` reads as an invocation, because the dot before it is
+# not a word character.
+COMMAND_POSITION_PREFIXES = " \t\n(;|&"
+JQ_OPTIONS_TAKING_A_NAME_AND_A_VALUE = ("--arg", "--argjson", "--slurpfile", "--rawfile")
+JQ_OPTIONS_TAKING_ONE_VALUE = ("-f", "--from-file", "--indent", "-L")
+JQ_OPTIONS_READING_THE_FILTER_FROM_A_FILE = ("-f", "--from-file")
+
+# Terminators that end a shell word, and the subset that ends a whole command.
+WORD_TERMINATORS = " \t;|&\n()<>"
+LITERAL_WORD_KINDS = ("single-quoted", "double-quoted", "bare")
+
+
+@dataclass(frozen=True)
+class ScannedInvocation:
+    """One jq invocation found in a script, either read or refused.
+
+    A refusal carries its reason. The alternative to recording one is dropping
+    the invocation, which would leave a predicate the workflow really runs
+    absent from the inventory while the exhaustiveness check still passed — the
+    exact vacuous pass this module exists to rule out.
+    """
+
+    program: str | None
+    reason: str
+    excerpt: str
+
+    @property
+    def readable(self) -> bool:
+        return self.program is not None
+
+
+def read_shell_word(script: str, index: int) -> tuple[str, str, int]:
+    """Read one shell word, returning its text, how it was written, and the next index.
+
+    Runs outside test bodies. The "how" is what decides whether a filter can be
+    tested: a single- or double-quoted literal is the program itself, while a
+    word carrying a shell expansion only names something this module cannot see.
+    """
+    length = len(script)
+    while index < length:
+        if script[index] in " \t":
+            index += 1
+            continue
+        if script[index] == "\\" and script[index + 1 : index + 2] == "\n":
+            index += 2
+            continue
+        break
+
+    if index >= length or script[index] in WORD_TERMINATORS:
+        return "", "end-of-command", index
+
+    parts: list[str] = []
+    kinds: set[str] = set()
+    while index < length and script[index] not in WORD_TERMINATORS:
+        character = script[index]
+
+        if character == "\\":
+            if script[index + 1 : index + 2] == "\n":
+                index += 2
+                continue
+            parts.append(script[index + 1 : index + 2])
+            kinds.add("bare")
+            index += 2
+            continue
+
+        if character == "'":
+            closing = script.find("'", index + 1)
+            if closing < 0:
+                return "", "unterminated-quote", length
+            parts.append(script[index + 1 : closing])
+            kinds.add("single")
+            index = closing + 1
+            continue
+
+        if character == '"':
+            cursor = index + 1
+            buffer: list[str] = []
+            while cursor < length and script[cursor] != '"':
+                if script[cursor] == "\\":
+                    buffer.append(script[cursor + 1 : cursor + 2])
+                    cursor += 2
+                    continue
+                if script[cursor] == "$":
+                    kinds.add("expansion")
+                buffer.append(script[cursor])
+                cursor += 1
+            if cursor >= length:
+                return "", "unterminated-quote", length
+            parts.append("".join(buffer))
+            kinds.add("double")
+            index = cursor + 1
+            continue
+
+        if character == "$":
+            kinds.add("expansion")
+            if script.startswith("$(", index):
+                depth = 0
+                cursor = index
+                while cursor < length:
+                    if script[cursor] == "(":
+                        depth += 1
+                    elif script[cursor] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            cursor += 1
+                            break
+                    cursor += 1
+                parts.append(script[index:cursor])
+                index = cursor
+                continue
+
+        parts.append(character)
+        kinds.add("bare")
+        index += 1
+
+    text = "".join(parts)
+    if "expansion" in kinds:
+        return text, "shell-expansion", index
+    if kinds == {"single"}:
+        return text, "single-quoted", index
+    if kinds == {"double"}:
+        return text, "double-quoted", index
+    return text, "bare", index
+
+
+def read_jq_invocation(script: str, index: int, *, through_gh_flag: bool) -> ScannedInvocation:
+    """Read the filter belonging to one jq invocation, outside test bodies.
+
+    `gh api --jq` takes its filter as the very next word. The jq binary takes
+    the first operand that is not an option or an option's value, so the option
+    table above is walked rather than guessed at.
+    """
+    excerpt = " ".join(script[index : index + 70].split())
+    if through_gh_flag:
+        text, kind, _ = read_shell_word(script, index)
+        if kind in LITERAL_WORD_KINDS:
+            return ScannedInvocation(program=text, reason="", excerpt=excerpt)
+        return ScannedInvocation(
+            program=None, reason=f"the --jq filter is written as {kind}", excerpt=excerpt
+        )
+
+    filter_comes_from_a_file = False
+    cursor = index
+    while True:
+        text, kind, following = read_shell_word(script, cursor)
+
+        if kind == "end-of-command":
+            return ScannedInvocation(
+                program=None, reason="the invocation ends before naming a filter", excerpt=excerpt
+            )
+        if kind == "unterminated-quote":
+            return ScannedInvocation(
+                program=None, reason="an unterminated quote", excerpt=excerpt
+            )
+
+        if kind == "bare" and text.startswith("-") and text != "-":
+            if text in JQ_OPTIONS_READING_THE_FILTER_FROM_A_FILE:
+                filter_comes_from_a_file = True
+            if text in JQ_OPTIONS_TAKING_A_NAME_AND_A_VALUE:
+                _, _, following = read_shell_word(script, following)
+                _, _, following = read_shell_word(script, following)
+            elif text in JQ_OPTIONS_TAKING_ONE_VALUE:
+                _, _, following = read_shell_word(script, following)
+            cursor = following
+            continue
+
+        if filter_comes_from_a_file:
+            return ScannedInvocation(
+                program=None, reason="the filter is read from a file", excerpt=excerpt
+            )
+        if kind in LITERAL_WORD_KINDS:
+            return ScannedInvocation(program=text, reason="", excerpt=excerpt)
+        return ScannedInvocation(
+            program=None, reason=f"the filter is written as {kind}", excerpt=excerpt
+        )
 
 
 @dataclass(frozen=True)
@@ -221,19 +399,21 @@ def read_run_blocks(path: Path) -> list[RunBlock]:
     return blocks
 
 
-def jq_programs_in(script: str) -> list[str]:
-    """Extract every jq program from one shell script, outside test bodies.
+def scan_jq_invocations(script: str) -> list[ScannedInvocation]:
+    """Find every jq invocation in one shell script, outside test bodies.
 
     The scan tracks shell quoting rather than pattern-matching the text, and it
     has to. These scripts carry comments that mention jq, and the programs
     themselves carry comments that mention jq; a scan that ignored quoting would
     take the word inside a program's own comment for a fresh invocation and
-    extract the surrounding shell as if it were a filter. A single-quoted shell
-    word cannot contain a single quote, so a program's extent is unambiguous
-    once the scan knows it is looking at one.
+    extract the surrounding shell as if it were a filter.
+
+    Every invocation is returned, including the ones whose filter this module
+    cannot read. Dropping those would be the worse failure: the workflow would
+    still run the predicate, while the exhaustiveness check reported that every
+    predicate in the file was accounted for.
     """
-    programs: list[str] = []
-    awaiting_program = False
+    invocations: list[ScannedInvocation] = []
     index = 0
     length = len(script)
     # Command substitution reopens shell quoting inside a double-quoted word,
@@ -273,9 +453,6 @@ def jq_programs_in(script: str) -> list[str]:
             closing = script.find("'", index + 1)
             if closing < 0:
                 break
-            if awaiting_program:
-                programs.append(script[index + 1 : closing])
-                awaiting_program = False
             index = closing + 1
             continue
 
@@ -284,33 +461,109 @@ def jq_programs_in(script: str) -> list[str]:
             index = length if newline < 0 else newline
             continue
 
-        # An unescaped newline or semicolon ends the command, so a jq
-        # invocation that never reached a program does not capture the next
-        # unrelated quoted word in the script.
-        if character in ";\n":
-            awaiting_program = False
-            index += 1
-            continue
-
-        preceded_by_word = index > 0 and WORD_CHARACTER.match(script[index - 1]) is not None
+        in_command_position = index == 0 or script[index - 1] in COMMAND_POSITION_PREFIXES
         token = JQ_TOKEN.match(script, index)
-        if token and not preceded_by_word:
-            awaiting_program = True
+        if token and in_command_position:
+            invocations.append(
+                read_jq_invocation(
+                    script, token.end(), through_gh_flag=token.group().startswith("--")
+                )
+            )
             index = token.end()
             continue
 
         index += 1
-    return programs
+    return invocations
+
+
+def jq_programs_in(script: str) -> list[str]:
+    """Every readable jq filter in one shell script, outside test bodies."""
+    return [
+        invocation.program
+        for invocation in scan_jq_invocations(script)
+        if invocation.program is not None
+    ]
 
 
 def extract_jq_programs(blocks: list[RunBlock]) -> list[ExtractedProgram]:
-    """Extract every jq program from the given run blocks, outside test bodies."""
+    """Extract every readable jq program from the given run blocks, outside test bodies."""
     return [
         ExtractedProgram(
             workflow=block.workflow, job=block.job, step=block.step, program=program
         )
         for block in blocks
         for program in jq_programs_in(block.script)
+    ]
+
+
+# The HTML comment a workflow stamps on the report it writes, and the one its
+# selector later looks for. Both are read out of the workflow rather than
+# trusted to match a constant here: a producer whose marker changed while its
+# selector did not would keep passing a round trip built from a local copy,
+# while real runs stopped finding the old comment and posted a second one
+# beside it on every push.
+EMITTED_MARKER = re.compile(r"<!--[^>]*-->")
+SELECTED_MARKER = re.compile(r'startswith\("(?P<marker>[^"]*)"\)')
+
+
+def emitted_markers(workflow: Path) -> set[str]:
+    """Every sticky-comment marker the workflow's shell writes, outside test bodies."""
+    return {
+        marker
+        for block in read_run_blocks(workflow)
+        for marker in EMITTED_MARKER.findall(block.script)
+    }
+
+
+def emitted_marker(workflow: Path) -> str:
+    """The single marker a workflow stamps on its report, outside test bodies.
+
+    Raises when a workflow emits none or several. One workflow owns one sticky
+    comment, and a second marker would mean a second comment nobody rewrites.
+    """
+    markers = emitted_markers(workflow)
+    if len(markers) != 1:
+        raise AssertionError(
+            f"expected exactly one sticky-comment marker emitted by {workflow.name}, "
+            f"found {sorted(markers)}"
+        )
+    return markers.pop()
+
+
+def selected_marker(identifier: str) -> str:
+    """The marker one extracted selector searches for, outside test bodies."""
+    program = one_program_for(identifier)
+    found = SELECTED_MARKER.search(program)
+    if found is None:
+        raise AssertionError(
+            f"the selector {identifier!r} no longer tests a marker with startswith: {program!r}"
+        )
+    return found.group("marker")
+
+
+def refusal_reasons(script: str) -> list[str]:
+    """Why the scanner refused each unreadable invocation in a script, outside test bodies."""
+    return [
+        invocation.reason
+        for invocation in scan_jq_invocations(script)
+        if not invocation.readable
+    ]
+
+
+def unreadable_invocations() -> list[str]:
+    """Every jq invocation in either workflow whose filter cannot be read.
+
+    Runs outside test bodies. This is the escape hatch the exhaustiveness check
+    would otherwise have: an invocation whose filter is built at run time, read
+    from a file, or hidden behind an option this table does not know is a
+    predicate that CI executes and this module never sees.
+    """
+    return [
+        f"{block.workflow}/{block.job}/{block.step!r}: {invocation.reason} "
+        f"({invocation.excerpt!r})"
+        for block in read_run_blocks(COVERAGE_WORKFLOW) + read_run_blocks(SWIFT_WORKFLOW)
+        for invocation in scan_jq_invocations(block.script)
+        if not invocation.readable
     ]
 
 
@@ -336,11 +589,28 @@ def comment_payload_blocks() -> list[RunBlock]:
 # specification means a predicate was added without fixtures, which is exactly
 # the state that produced every divergence recorded in this module.
 #
-# PENDING is for a program this repository expects but does not carry yet. The
-# coverage-delta work on #484 owns both workflow files and adds seven programs
-# between them; each is registered here in advance, by role, so that landing
-# them neither fails this module nor leaves them untested. The document
-# predicates among them pick up the whole fixture table below on arrival.
+# PENDING is for a program this repository expects but does not carry yet, and
+# it is a waiting room rather than a resting place. Two rules keep it honest,
+# because a state that merely records an expectation would quietly become a way
+# to claim coverage without having any:
+#
+#   Arrival promotes. A pending specification whose program has landed fails
+#   this module until it is set PRESENT. Left pending it would be permanently
+#   optional — nothing requires a pending program to match — so a later rewrite
+#   or deletion would retire its tests in silence instead of failing.
+#
+#   Registration is not coverage. A specification matches on token substrings,
+#   which says a program of roughly the right shape arrived, not that it does
+#   the right thing. Only `exercised` specifications, the ones with fixtures
+#   that actually run, satisfy the exhaustiveness check; a program that lands
+#   covered by nothing else fails as though it were unregistered.
+#
+# The coverage-delta work on #484 owns both workflow files and adds seven
+# programs between them. All seven are registered here by role so the failure
+# that greets them names each one and what it needs. The two document
+# predicates arrive with the whole fixture table below already written and need
+# only promotion; the five baseline-selection filters need fixtures of their
+# own, which belong with the work that introduces them.
 PRESENT = "present"
 PENDING = "pending"
 
@@ -358,6 +628,7 @@ class PredicateSpec:
     identifier: str
     workflow: str
     presence: str
+    exercised: bool
     role: str
     tokens: tuple[str, ...]
 
@@ -377,6 +648,7 @@ NATIVE_STICKY_SELECTOR = "native-sticky-selector"
 PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     PredicateSpec(
         identifier=RUST_COMMENT_PAYLOAD,
+        exercised=True,
         workflow=COVERAGE_WORKFLOW.name,
         presence=PRESENT,
         role="wraps the rendered report as the GitHub comment payload",
@@ -384,6 +656,7 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         identifier=RUST_STICKY_SELECTOR,
+        exercised=True,
         workflow=COVERAGE_WORKFLOW.name,
         presence=PRESENT,
         role="finds this workflow's own sticky comment by its marker",
@@ -391,6 +664,7 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         identifier=NATIVE_COMMENT_PAYLOAD,
+        exercised=True,
         workflow=SWIFT_WORKFLOW.name,
         presence=PRESENT,
         role="wraps the rendered native report as the GitHub comment payload",
@@ -398,6 +672,7 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         identifier=NATIVE_STICKY_SELECTOR,
+        exercised=True,
         workflow=SWIFT_WORKFLOW.name,
         presence=PRESENT,
         role="finds this workflow's own sticky comment by its marker",
@@ -405,6 +680,7 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         identifier="rust-baseline-candidate-selection",
+        exercised=False,
         workflow=COVERAGE_WORKFLOW.name,
         presence=PENDING,
         role="orders the main-branch runs a baseline may be taken from",
@@ -412,6 +688,7 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         identifier="rust-baseline-artifact-lookup",
+        exercised=False,
         workflow=COVERAGE_WORKFLOW.name,
         presence=PENDING,
         role="finds the coverage artifact uploaded by one candidate run",
@@ -419,6 +696,7 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         identifier=RUST_DOCUMENT_PREDICATE,
+        exercised=True,
         workflow=COVERAGE_WORKFLOW.name,
         presence=PENDING,
         role="decides whether a baseline llvm-cov export is one the summarizer can read",
@@ -426,6 +704,7 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         identifier="native-baseline-candidate-selection",
+        exercised=False,
         workflow=SWIFT_WORKFLOW.name,
         presence=PENDING,
         role="orders the main-branch runs a baseline may be taken from",
@@ -433,6 +712,7 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         identifier="native-baseline-artifact-lookup",
+        exercised=False,
         workflow=SWIFT_WORKFLOW.name,
         presence=PENDING,
         role="finds the coverage artifact uploaded by one candidate run",
@@ -440,6 +720,7 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         identifier="native-test-step-conclusion",
+        exercised=False,
         workflow=SWIFT_WORKFLOW.name,
         presence=PENDING,
         role="judges whether a candidate run finished the tests its measurement rests on",
@@ -447,6 +728,7 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     ),
     PredicateSpec(
         identifier=NATIVE_DOCUMENT_PREDICATE,
+        exercised=True,
         workflow=SWIFT_WORKFLOW.name,
         presence=PENDING,
         role="decides whether a baseline xccov report is one the summarizer can read",
@@ -478,25 +760,48 @@ def one_program_for(identifier: str) -> str:
     return matches[0].program
 
 
-def missing_present_specs() -> list[str]:
-    """Every PRESENT specification matching no program, outside test bodies."""
-    extracted = all_extracted_programs()
-    return [
-        f"{spec.identifier} ({spec.role}) matched "
-        f"{len([p for p in extracted if spec.matches(p)])} programs in {spec.workflow}"
-        for spec in PREDICATE_SPECS
-        if spec.presence == PRESENT
-        and len([program for program in extracted if spec.matches(program)]) != 1
-    ]
+def unexercised_programs() -> list[str]:
+    """Every extracted program no fixture-backed specification covers, outside test bodies.
 
-
-def unregistered_programs() -> list[str]:
-    """Every extracted program matching no specification, outside test bodies."""
+    A specification alone does not make a program tested. Matching on token
+    substrings says only that somebody expected a program of roughly this
+    shape; a filter that carries the right tokens and still selects the wrong
+    runs would satisfy a registry that counted mere registration as coverage.
+    So only a specification whose fixtures actually run counts here, and a
+    program that lands with none fails as if it were unregistered.
+    """
     return [
         program.describe()
         for program in all_extracted_programs()
-        if not any(spec.matches(program) for spec in PREDICATE_SPECS)
+        if not any(spec.matches(program) for spec in PREDICATE_SPECS if spec.exercised)
     ]
+
+
+def misdeclared_presence() -> list[str]:
+    """Specifications whose declared presence disagrees with the workflows.
+
+    Runs outside test bodies, and closes the pending state in both directions.
+    A pending specification whose program has landed must be promoted, or it
+    stays permanently optional and a later deletion would silently retire its
+    tests rather than fail. A present one whose program is gone means the
+    program was deleted or extraction broke.
+    """
+    extracted = all_extracted_programs()
+    misdeclared: list[str] = []
+    for spec in PREDICATE_SPECS:
+        found = len([program for program in extracted if spec.matches(program)])
+        if spec.presence == PENDING and found:
+            misdeclared.append(
+                f"{spec.identifier} is declared {PENDING} but {found} matching program(s) "
+                f"have landed in {spec.workflow}. Set presence={PRESENT!r} so a later "
+                "deletion fails this module, and give it fixtures if it has none"
+            )
+        if spec.presence == PRESENT and found != 1:
+            misdeclared.append(
+                f"{spec.identifier} is declared {PRESENT} but matched {found} programs in "
+                f"{spec.workflow}: extraction broke, or the program was removed"
+            )
+    return misdeclared
 
 
 # --------------------------------------------------------------------------
@@ -648,9 +953,14 @@ def native_renders(document: dict) -> bool:
 
 
 def rust_comment_body() -> str:
-    """Rebuild `comment.md` the way the coverage workflow's own shell does."""
+    """Rebuild `comment.md` the way the coverage workflow's own shell does.
+
+    The marker comes out of the workflow rather than from the constant above,
+    so a producer that changed it without changing its selector fails the round
+    trip instead of passing one built from a local copy of the old value.
+    """
     report = render(healthy_export(), FIXTURE_REPO_ROOT, RUST_TOP_UNCOVERED, RUST_REPORT_TITLE)
-    return f"{RUST_MARKER}\n\n{report}"
+    return f"{emitted_marker(COVERAGE_WORKFLOW)}\n\n{report}"
 
 
 def native_comment_body() -> str:
@@ -661,7 +971,7 @@ def native_comment_body() -> str:
         NATIVE_TOP_UNCOVERED,
         NATIVE_REPORT_TITLE,
     )
-    return f"{NATIVE_MARKER}\n\n{report}"
+    return f"{emitted_marker(SWIFT_WORKFLOW)}\n\n{report}"
 
 
 def comments_page(*comments: dict) -> str:
@@ -926,6 +1236,19 @@ def pointless_divergence_notes(documents: tuple[RecordedDocument, ...]) -> list[
 # program that errors has not decided about its input, it has fallen over.
 JQ_RUNTIME_ERROR = 5
 
+# One jq program over one synthetic document is sub-second work. A program that
+# runs past this has not decided about its input, it has hung, and the harness
+# names it rather than letting the whole job run out its own limit and report a
+# timeout that points at nothing.
+JQ_TIMEOUT_SECONDS = 30
+
+# jq 1.7 stopped converting untouched number literals to doubles on the way
+# through. The recorded counter divergences rest on that: under jq 1.6 an
+# untouched 2^53+1 comes back already rounded, and the test that distinguishes
+# reading a counter from computing with one would pass for the wrong reason.
+MINIMUM_JQ_VERSION = (1, 7)
+JQ_VERSION = re.compile(r"jq-(?P<major>\d+)\.(?P<minor>\d+)")
+
 
 @dataclass(frozen=True)
 class JqResult:
@@ -952,6 +1275,7 @@ def run_jq(program: str, document: str, *arguments: str) -> JqResult:
         capture_output=True,
         text=True,
         check=False,
+        timeout=JQ_TIMEOUT_SECONDS,
     )
     return JqResult(
         status=completed.returncode, stdout=completed.stdout, stderr=completed.stderr
@@ -1028,13 +1352,34 @@ class JqBackedTestCase(unittest.TestCase):
                 "and runs them; this skip is a local-machine gap, not a pass."
             )
         probe = subprocess.run(
-            [JQ_BINARY, "--version"], capture_output=True, text=True, check=False
+            [JQ_BINARY, "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=JQ_TIMEOUT_SECONDS,
         )
         if probe.returncode != 0:
             self.fail(
                 f"jq is present at {JQ_BINARY} but cannot run: status {probe.returncode}, "
                 f"stderr {probe.stderr.strip()!r}. Refusing to skip, because a broken jq "
                 "would let every predicate below pass without executing."
+            )
+
+        reported = probe.stdout.strip() or probe.stderr.strip()
+        version = JQ_VERSION.match(reported)
+        if version is None:
+            self.fail(
+                f"jq at {JQ_BINARY} reported a version this module cannot parse: "
+                f"{reported!r}. The recorded counter divergences depend on which jq is "
+                "running, so an unknown one is failed rather than assumed recent."
+            )
+        if (int(version.group("major")), int(version.group("minor"))) < MINIMUM_JQ_VERSION:
+            self.fail(
+                f"jq at {JQ_BINARY} reports {reported!r}, older than "
+                f"{MINIMUM_JQ_VERSION[0]}.{MINIMUM_JQ_VERSION[1]}. Before 1.7 an untouched "
+                "number literal was converted to a double on the way through, so the "
+                "counter divergences recorded here would be measured against different "
+                "behaviour and would pass or fail for the wrong reason."
             )
 
 
@@ -1116,6 +1461,43 @@ class WorkflowReadingTests(unittest.TestCase):
 
         self.assertEqual(jq_programs_in(script), [".[] | .id"])
 
+    def test_an_option_value_is_not_mistaken_for_the_filter(self) -> None:
+        """jq takes its filter as the first operand that is not an option or an
+        option's value. A scan that took the next quoted word instead would read
+        this invocation's `--arg` value as the filter and test a string that is
+        not a predicate at all, while reporting the real one as absent."""
+        script = "jq --arg marker '<!-- x -->' '.[] | select(.body)'"
+
+        self.assertEqual(jq_programs_in(script), [".[] | select(.body)"])
+
+    def test_a_double_quoted_filter_is_read(self) -> None:
+        """A filter written in double quotes is still a literal the harness can
+        run, so it is read rather than refused."""
+        self.assertEqual(jq_programs_in('jq ".targets[] | .name" report.json'), [".targets[] | .name"])
+
+    def test_a_filter_built_by_the_shell_is_refused(self) -> None:
+        """A filter that only exists at run time cannot be tested here. It is
+        recorded as unreadable rather than dropped: dropping it would leave the
+        exhaustiveness check reporting that every predicate in the file was
+        accounted for while this one ran untested."""
+        refusals = refusal_reasons('jq "$PROGRAM" report.json')
+
+        self.assertEqual(refusals, ["the filter is written as shell-expansion"])
+
+    def test_a_filter_read_from_a_file_is_refused(self) -> None:
+        """`-f` moves the filter into a file, so the operand that follows is
+        input rather than a program. Reading that operand as the filter would
+        put a filename under test."""
+        refusals = refusal_reasons("jq -f filter.jq report.json")
+
+        self.assertEqual(refusals, ["the filter is read from a file"])
+
+    def test_a_filename_ending_in_jq_is_not_an_invocation(self) -> None:
+        """The scanner looks for a command, not for the letters. A file called
+        `filter.jq` names no invocation, and treating it as one would refuse a
+        script that is perfectly readable."""
+        self.assertEqual(scan_jq_invocations("cat filter.jq"), [])
+
     def test_the_rust_comment_payload_program_is_found(self) -> None:
         """The loud failure this module is built around, for one program: a
         predicate renamed, rewritten, or moved out of a `run:` block stops
@@ -1137,23 +1519,68 @@ class WorkflowReadingTests(unittest.TestCase):
         """The same guard for the native selector."""
         self.assertEqual(len(programs_for(NATIVE_STICKY_SELECTOR)), 1)
 
-    def test_no_expected_program_is_missing(self) -> None:
-        """Stated once over the whole registry, so a specification added later
-        is guarded without anybody remembering to add a test for it."""
-        self.assertEqual(missing_present_specs(), [])
+    def test_declared_presence_matches_the_workflows(self) -> None:
+        """The registry's claim about what is on disk, checked against disk in
+        both directions.
 
-    def test_every_extracted_program_is_registered(self) -> None:
-        """The direction that closes the defect class. A jq program added to
-        either workflow with no specification here fails this test, so a
-        predicate cannot reach main untested by the route every divergence
-        recorded in this module took."""
+        A specification declared present whose program is gone means extraction
+        broke or the program was deleted. One declared pending whose program has
+        arrived must be promoted: left pending it is permanently optional, since
+        nothing requires it to match, and a later rewrite would quietly retire
+        every test that depends on it instead of failing. Promotion is a
+        one-word edit, and this failure is what demands it."""
+        self.assertEqual(misdeclared_presence(), [])
+
+    def test_every_extracted_program_is_exercised(self) -> None:
+        """The direction that closes the defect class. A jq program that no
+        fixture-backed specification covers fails this test, so a predicate
+        cannot reach main untested by the route every divergence recorded in
+        this module took.
+
+        Registration alone does not count. A specification matches on token
+        substrings, which says a program of roughly the right shape arrived, not
+        that it does the right thing; only fixtures decide that."""
         self.assertEqual(
-            unregistered_programs(),
+            unexercised_programs(),
             [],
-            "unregistered jq program in a coverage workflow: add a PredicateSpec with "
-            "fixtures covering it. A predicate with no fixtures is how every divergence "
-            "recorded in this module happened.",
+            "a jq program in a coverage workflow that no fixture-backed specification "
+            "covers: give it a PredicateSpec with fixtures and exercised=True. A "
+            "predicate with no fixtures is how every divergence recorded here happened.",
         )
+
+    def test_every_jq_invocation_in_the_workflows_is_readable(self) -> None:
+        """The exhaustiveness check is only worth as much as the scan beneath
+        it. An invocation whose filter is built at run time, read from a file,
+        or hidden behind an option the scanner does not know would be absent
+        from the inventory entirely, so every other check here would pass while
+        the workflow ran a predicate this module never saw."""
+        self.assertEqual(
+            unreadable_invocations(),
+            [],
+            "a jq invocation whose filter this module cannot read. Teach the scanner "
+            "that form, or write the filter as a literal, but do not leave it "
+            "unreadable: an unreadable predicate is an untested one.",
+        )
+
+    def test_the_coverage_workflow_selects_the_marker_it_emits(self) -> None:
+        """Producer and consumer read out of the same file and compared. The
+        shell stamps a marker on the report it writes and the selector looks
+        for one later; nothing in the workflow makes those the same string, and
+        a change to either alone leaves runs unable to find the comment they
+        wrote, posting a fresh one on every push instead of rewriting it."""
+        self.assertEqual(emitted_marker(COVERAGE_WORKFLOW), selected_marker(RUST_STICKY_SELECTOR))
+
+    def test_the_swift_workflow_selects_the_marker_it_emits(self) -> None:
+        """The same pairing in the native workflow, which carries its own copy
+        of both halves."""
+        self.assertEqual(emitted_marker(SWIFT_WORKFLOW), selected_marker(NATIVE_STICKY_SELECTOR))
+
+    def test_the_recorded_markers_are_the_ones_the_workflows_use(self) -> None:
+        """The constants in this module are a convenience for reading the tests
+        below, never the source of truth. Checked against the workflows so they
+        cannot quietly describe a marker the pipeline stopped using."""
+        self.assertEqual(emitted_marker(COVERAGE_WORKFLOW), RUST_MARKER)
+        self.assertEqual(emitted_marker(SWIFT_WORKFLOW), NATIVE_MARKER)
 
     def test_the_two_sticky_markers_are_distinct(self) -> None:
         """Both workflows comment on the same pull request. Were one marker a
@@ -1240,6 +1667,19 @@ class StickySelectorTests(JqBackedTestCase):
     and the sibling workflow's must not.
     """
 
+    def assert_selection(self, result: JqResult, expected: str) -> None:
+        """Assert what the selector printed and that it also exited cleanly.
+
+        The workflow reads this filter through
+        `existing="$(gh api ... --jq ...)"`, in a step GitHub runs under
+        `bash -e`. A filter that printed the right comment id and then failed
+        would abort the step before the id was ever used, so comparing output
+        alone would call a broken selector correct — which is how the one
+        recorded live defect in this file behaves.
+        """
+        self.assertEqual(result.status, 0, f"the selector failed: {result.stderr.strip()}")
+        self.assertEqual(result.stdout.strip(), expected)
+
     def test_the_rust_selector_finds_the_comment_the_coverage_workflow_wrote(self) -> None:
         """The end-to-end agreement this module exists for: the real summarizer
         renders, the workflow's own marker shell wraps, and the workflow's own
@@ -1248,7 +1688,7 @@ class StickySelectorTests(JqBackedTestCase):
 
         result = run_jq(one_program_for(RUST_STICKY_SELECTOR), page)
 
-        self.assertEqual(result.stdout.strip(), str(MARKER_COMMENT_ID))
+        self.assert_selection(result, str(MARKER_COMMENT_ID))
 
     def test_the_native_selector_finds_the_comment_the_swift_workflow_wrote(self) -> None:
         """The same round trip through the native renderer and the native
@@ -1257,7 +1697,7 @@ class StickySelectorTests(JqBackedTestCase):
 
         result = run_jq(one_program_for(NATIVE_STICKY_SELECTOR), page)
 
-        self.assertEqual(result.stdout.strip(), str(MARKER_COMMENT_ID))
+        self.assert_selection(result, str(MARKER_COMMENT_ID))
 
     def test_the_rust_selector_ignores_the_native_comment(self) -> None:
         """The workflows state that their two sticky comments never collide.
@@ -1268,7 +1708,7 @@ class StickySelectorTests(JqBackedTestCase):
 
         result = run_jq(one_program_for(RUST_STICKY_SELECTOR), page)
 
-        self.assertEqual(result.stdout.strip(), "")
+        self.assert_selection(result, "")
 
     def test_the_native_selector_ignores_the_rust_comment(self) -> None:
         """The other direction of the same claim, which is not implied by the
@@ -1277,7 +1717,7 @@ class StickySelectorTests(JqBackedTestCase):
 
         result = run_jq(one_program_for(NATIVE_STICKY_SELECTOR), page)
 
-        self.assertEqual(result.stdout.strip(), "")
+        self.assert_selection(result, "")
 
     def test_a_comment_merely_quoting_the_marker_is_not_selected(self) -> None:
         """The selector anchors at the start of a body, and it must: a review
@@ -1288,7 +1728,7 @@ class StickySelectorTests(JqBackedTestCase):
 
         result = run_jq(one_program_for(RUST_STICKY_SELECTOR), page)
 
-        self.assertEqual(result.stdout.strip(), "")
+        self.assert_selection(result, "")
 
     def test_the_oldest_marker_comment_is_reported_first(self) -> None:
         """The shell keeps only the first line of the selector's output. Should
@@ -1302,6 +1742,7 @@ class StickySelectorTests(JqBackedTestCase):
 
         result = run_jq(one_program_for(RUST_STICKY_SELECTOR), page)
 
+        self.assertEqual(result.status, 0, f"the selector failed: {result.stderr.strip()}")
         self.assertEqual(
             result.stdout.split(), [str(MARKER_COMMENT_ID), str(SECOND_MARKER_COMMENT_ID)]
         )
