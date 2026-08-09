@@ -325,6 +325,7 @@ const SYNTHETIC_LONG_NEGATED_ERRORS_COMPLETION_REPORT: &str =
 const SYNTHETIC_NEGATED_ERRORS_THEN_FAILURE_REPORT: &str =
     "Completed without errors but later failed.";
 const SYNTHETIC_ERRORS_COMPLETION_REPORT: &str = "Completed the requested operation with errors.";
+const SYNTHETIC_ERROR_FREE_COMPLETION_REPORT: &str = "Done error-free.";
 const SYNTHETIC_WITHOUT_FAILURE_COMPLETION_REPORT: &str =
     "Completed the requested operation without failure.";
 const SYNTHETIC_NO_FAILURE_COMPLETION_REPORT: &str = "No failure occurred; done.";
@@ -355,6 +356,7 @@ const SYNTHETIC_PERFECT_TENSE_NO_MODIFICATIONS_DENIAL_REPORT: &str =
     "Done, but no modifications have been made.";
 const SYNTHETIC_EXISTENTIAL_NO_MODIFICATIONS_DENIAL_REPORT: &str =
     "Done, but there were no modifications.";
+const SYNTHETIC_UNCHANGED_FILE_DENIAL_REPORT: &str = "Done, but the file was left unchanged.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_NO_FILES_WRITTEN_REPORT: &str = "Done; no files were written.";
 const SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT: &str = "Read completed; no file was created.";
@@ -5052,6 +5054,25 @@ fn report_denies_file_changes(report: &str) -> bool {
                 })
             })
     });
+    let unchanged_file = report
+        .split([';', '.', ',', '!', '?', '\n'])
+        .map(normalized_report_words)
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let scope = &clause[index.saturating_sub(6)..index];
+                let file = scope
+                    .iter()
+                    .rposition(|word| matches!(word.as_str(), "file" | "files"));
+                word == "unchanged"
+                    && file.is_some_and(|file| {
+                        !scope[..file]
+                            .iter()
+                            .rev()
+                            .take(3)
+                            .any(|word| matches!(word.as_str(), "additional" | "other"))
+                    })
+            })
+        });
     no_changes
         || no_file_change
         || no_modifications_made
@@ -5059,6 +5080,7 @@ fn report_denies_file_changes(report: &str) -> bool {
         || no_existential_modifications
         || verb_first_modification_denial
         || nominalized_modification_denial
+        || unchanged_file
 }
 
 fn normalized_report_words(report: &str) -> Vec<String> {
@@ -5079,6 +5101,8 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         .map(normalized_report_words)
         .any(|clause| {
             clause.iter().enumerate().any(|(index, word)| {
+                let affirmative_error_free = matches!(word.as_str(), "error" | "errors")
+                    && clause.get(index + 1).is_some_and(|suffix| suffix == "free");
                 [
                     "cannot",
                     "error",
@@ -5092,6 +5116,7 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                 ]
                 .contains(&word.as_str())
                     && !failure_term_is_negated(&clause, index)
+                    && !affirmative_error_free
             })
         });
     let negative_no_objects = [
@@ -5477,6 +5502,14 @@ fn final_response_report_accepts_completion_with_no_errors() {
 }
 
 #[test]
+fn final_response_report_accepts_error_free_completion() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ERROR_FREE_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
 fn final_response_report_accepts_longer_negated_failure_phrases() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_LONG_NEGATED_ERRORS_COMPLETION_REPORT, false);
@@ -5710,6 +5743,14 @@ fn exec_file_creation_report_rejects_a_perfect_tense_no_modifications_denial() {
 fn exec_file_creation_report_rejects_an_existential_no_modifications_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_EXISTENTIAL_NO_MODIFICATIONS_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_unchanged_file_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_UNCHANGED_FILE_DENIAL_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
 }
