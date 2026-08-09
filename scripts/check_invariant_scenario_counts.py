@@ -615,40 +615,62 @@ def closes_mid_number(text: str, number_end: int) -> bool:
     return following in ".," and text[position + 1 : position + 2].isdigit()
 
 
-def spaced_dash_without_a_bound(text: str, index: int) -> bool:
-    """Whether the dash at `index` is sentence punctuation rather than a range.
-
-    "Summary \u2014 9 scenarios are catalogued" opens a count with a dash used as
-    punctuation. Read as a range terminus it discarded the count, hiding it when
-    stale — the same class of loss as the list bullet, from a different cause.
-
-    Three positions tell the uses apart, and all three existing behaviours have
-    to survive the distinction:
-
-    * A dash with no whitespace before it is joined to what precedes it: an
-      identifier's tail (`INV-002`) or a closed range (`5\u201337`). Still a
-      terminus, unconditionally.
-    * A dash with whitespace before but not after is a sign, not a separator:
-      `-9` states no total either. Still a terminus.
-    * A dash spaced on both sides is punctuation *unless* a number precedes it.
-      `5 \u2013 37` is a range; `Summary \u2014 9` is a sentence.
-
-    So only the third case asks for a lower bound, which is what keeps this from
-    reopening the citation and negative-number readings that the unconditional
-    dash rejection exists to prevent.
-    """
-    if text[index] not in DASH_CHARACTERS:
-        return False
-    before = text[index - 1] if index > 0 else ""
-    after = text[index + 1] if index + 1 < len(text) else ""
-    if before not in " \t" or after not in " \t":
-        return False
+def preceded_by_a_number(text: str, index: int) -> bool:
+    """Whether a number sits before `index`, across whitespace and markup."""
     position = index - 1
     while position >= 0 and (
         text[position] in " \t" or text[position] in MARKUP_CHARACTERS
     ):
         position -= 1
-    return position < 0 or not text[position].isdigit()
+    return position >= 0 and text[position].isdigit()
+
+
+def punctuation_dash(text: str, index: int) -> bool:
+    """Whether the dash at `index` is sentence punctuation rather than a range.
+
+    "Summary — 9 scenarios are catalogued" opens a count with a dash used as
+    punctuation. Read as a range terminus it discarded the count, hiding it
+    when stale — the same class of loss as the list bullet, from a different
+    cause.
+
+    Which dash it is decides how much evidence a range needs, because the two
+    kinds carry different readings in this repository:
+
+    * The ASCII hyphen also spells identifiers (`INV-002`), closed ranges
+      (`5-37`) and signs (`-9`), so spacing has to do the separating: only a
+      hyphen spaced on both sides is a candidate for punctuation at all.
+    * A typographic dash spells only ranges and punctuation here, and the
+      punctuation is routinely unspaced. So it asks for a numeric lower bound
+      whatever its spacing.
+
+    Either way the question is the same once asked: a number before the dash
+    makes it a range, and its absence makes it a sentence.
+    """
+    character = text[index]
+    if character not in DASH_CHARACTERS:
+        return False
+    if character == "-":
+        # The ASCII hyphen carries the identifier and sign readings, so only
+        # a hyphen spaced on *both* sides can be punctuation at all. Glued to
+        # what precedes it, it is `INV-002` or a closed range; spaced before
+        # but not after, it is the sign in `-9`. Both stay termini without
+        # asking for a bound, which is what keeps the citations this checker
+        # protects from reading as totals.
+        before = text[index - 1] if index > 0 else ""
+        after = text[index + 1] if index + 1 < len(text) else ""
+        if before not in " \t" or after not in " \t":
+            return False
+    # A typographic dash asks for a bound whatever its spacing, because this
+    # repository writes unspaced em dashes as ordinary sentence punctuation:
+    # "retains that connection—and therefore the session-level lock—until
+    # shutdown" in docs/spec/process-protocol.md, one of 14 such uses across 5
+    # tracked documents. Requiring the bound separates that from a range, and
+    # costs none of the ranges the corpus actually writes: all eight of its
+    # dash-before-digit occurrences are en dashes with a numeric lower bound
+    # (`1–64`, `9–12`, `1–4,096`), each still refused. No identifier here
+    # uses a typographic dash — those are ASCII hyphens without exception — so
+    # nothing else depended on the old reading.
+    return not preceded_by_a_number(text, index)
 
 
 def bounds_a_range(text: str, match: re.Match[str]) -> bool:
@@ -667,7 +689,7 @@ def bounds_a_range(text: str, match: re.Match[str]) -> bool:
     if (
         before is not None
         and not opens_a_list_item(text, before.start())
-        and not spaced_dash_without_a_bound(text, before.start())
+        and not punctuation_dash(text, before.start())
     ):
         return True
     after = RANGE_SUFFIX.match(text, match.end("number"))

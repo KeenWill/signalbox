@@ -77,6 +77,18 @@ def git(root: Path, *arguments: str) -> None:
     )
 
 
+def findings_for(name: str, report: str) -> int:
+    """Return how many findings the report names for one file.
+
+    A named helper rather than a comprehension at each call site: the two
+    cardinality tests are about *how many* findings one statement produces, so
+    the counting is plumbing and the number is the claim. Inline, the filtering
+    read as expectation logic and the first test compared its own observation
+    against a slice of itself, which states the expected count nowhere.
+    """
+    return sum(1 for line in report.splitlines() if name in line)
+
+
 def run_checker(root: Path, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(CHECKER)],
@@ -841,10 +853,9 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
             result = run_checker(root)
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        findings = [line for line in result.stdout.splitlines() if "example.md" in line]
-        self.assertEqual(findings, findings[:1], result.stdout)
+        self.assertEqual(findings_for("example.md", result.stdout), 1, result.stdout)
         # The surviving phrase quotes the wider of the two readings.
-        self.assertIn(f"scenario count: {STALE_SCENARIO_COUNT}", findings[0])
+        self.assertIn(f"scenario count: {STALE_SCENARIO_COUNT}", result.stdout)
 
     def test_two_distinct_statements_of_one_total_are_both_reported(self) -> None:
         """The guard on the case above: deduplication is by overlap, not by
@@ -864,8 +875,7 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
             result = run_checker(root)
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        findings = [line for line in result.stdout.splitlines() if "example.md" in line]
-        self.assertEqual(len(findings), 2, result.stdout)
+        self.assertEqual(findings_for("example.md", result.stdout), 2, result.stdout)
 
     def test_a_long_delimiter_run_does_not_stall_the_scan(self) -> None:
         """Two markup repetitions that can each consume the same delimiters let
@@ -1028,6 +1038,35 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
             result = run_checker(root, timeout=10)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_an_unspaced_punctuation_dash_still_states_a_total(self) -> None:
+        """This repository writes unspaced em dashes as ordinary sentence
+        punctuation, so spacing alone could not tell punctuation from a range.
+        Read as a terminus, the dash discarded the count and hid it when
+        stale."""
+        self.assert_stale_scenario_count_caught(
+            f"Summary—{STALE_SCENARIO_COUNT} scenarios are catalogued"
+        )
+
+    def test_an_unspaced_en_dash_range_is_still_refused(self) -> None:
+        """The guard: every dash-before-digit occurrence in this repository is
+        an en-dash range with a lower bound (`1–64`, `9–12`), and all of them
+        must stay refused."""
+        self.assert_no_count_read_from(
+            f"The name is 1–{STALE_SCENARIO_COUNT} scenarios"
+        )
+
+    def test_an_unspaced_em_dash_range_is_still_refused(self) -> None:
+        self.assert_no_count_read_from(
+            f"There are 5—{STALE_SCENARIO_COUNT} scenarios"
+        )
+
+    def test_a_hyphen_identifier_is_unaffected_by_the_dash_rule(self) -> None:
+        """The ASCII hyphen keeps its unconditional handling, which is what
+        stops `INV-NNN` citations reading as stated totals."""
+        self.assert_no_count_read_from(
+            f"The INV-0{STALE_INVARIANT_COUNT} invariants are enforced"
+        )
 
     def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
         """A tracked path can vanish between `git ls-files` and the read.
