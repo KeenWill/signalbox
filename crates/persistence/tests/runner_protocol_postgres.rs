@@ -49,8 +49,8 @@ use signalbox_persistence::{
         append_runner_state_transition_for_test,
     },
     runner_protocol::{
-        RunnerConnectionTransition, RunnerProtocolCorruption, RunnerProtocolStore,
-        RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
+        RunnerConnectionState, RunnerConnectionTransition, RunnerProtocolCorruption,
+        RunnerProtocolStore, RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
     },
     session_credentials::{SessionCredentialPin, SessionModelCredential},
     start_eligible_turn::StartEligibleTurnRepository,
@@ -921,6 +921,13 @@ async fn insert_session(pool: &PgPool) -> Result<(), sqlx::Error> {
 async fn dispatch_next_outbox_event(
     pool: &PgPool,
 ) -> Result<DispatchedOutboxEvent, Box<dyn Error>> {
+    dispatch_next_outbox_event_at(pool, 1).await
+}
+
+async fn dispatch_next_outbox_event_at(
+    pool: &PgPool,
+    expected_sequence: u64,
+) -> Result<DispatchedOutboxEvent, Box<dyn Error>> {
     let mut dispatched = None;
     let outcome = OutboxDispatcher::new(pool.clone())
         .dispatch_next(|event| {
@@ -928,7 +935,12 @@ async fn dispatch_next_outbox_event(
             OutboxDeliveryDecision::Delivered
         })
         .await?;
-    assert_eq!(outcome, OutboxDispatchOutcome::Delivered { sequence: 1 });
+    assert_eq!(
+        outcome,
+        OutboxDispatchOutcome::Delivered {
+            sequence: expected_sequence,
+        }
+    );
     Ok(dispatched.expect("the delivered outcome carries its decoded event"))
 }
 
@@ -951,29 +963,6 @@ async fn placement_outbox_facts(
     let placement_revision = RunnerGeneration::try_from_u64(placement_revision)
         .expect("the persisted placement fixture has a positive revision");
     Ok((event_ordinal, placement_revision))
-}
-
-async fn connection_outbox_source(
-    pool: &PgPool,
-    placement_event_ordinal: u64,
-    enrollment: RunnerEnrollmentId,
-    cause_kind: &str,
-) -> Result<RunnerStateTransitionOutboxTestSource, Box<dyn Error>> {
-    let (connection_epoch, event_ordinal): (Decimal, Decimal) = sqlx::query_as(
-        "SELECT connection_epoch, event_ordinal
-           FROM runner_connection_event
-          WHERE enrollment_id = $1 AND cause_kind = $2",
-    )
-    .bind(enrollment.into_uuid())
-    .bind(cause_kind)
-    .fetch_one(pool)
-    .await?;
-    Ok(RunnerStateTransitionOutboxTestSource::connection(
-        placement_event_ordinal,
-        enrollment,
-        u64::try_from(connection_epoch.mantissa())?,
-        u64::try_from(event_ordinal.mantissa())?,
-    ))
 }
 
 async fn insert_physical_attempt(
@@ -9973,8 +9962,7 @@ async fn s32_inv032_inv044_runner_suspect_outbox_round_trips() -> Result<(), Box
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
-    let (placement_event_ordinal, placement_revision) =
-        placement_outbox_facts(&pool, session, "pinned").await?;
+    let (_, placement_revision) = placement_outbox_facts(&pool, session, "pinned").await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
         .await?;
@@ -9985,31 +9973,11 @@ async fn s32_inv032_inv044_runner_suspect_outbox_round_trips() -> Result<(), Box
             RunnerConnectionTransition::HeartbeatMissed,
         )
         .await?;
-    let source = connection_outbox_source(
-        &pool,
-        placement_event_ordinal,
-        expected_enrollment.enrollment(),
-        "heartbeat_missed",
-    )
-    .await?;
-    append_runner_state_transition_for_test(
-        &pool,
-        RunnerStateTransitionOutboxTestEvent::new(
-            session,
-            pin.lease.runner(),
-            placement_revision,
-            pin.placement.request().sandbox,
-            None,
-            DispatchedRunnerState::Suspect,
-            source,
-        ),
-    )
-    .await?;
     store
         .transition_connection(
             expected_enrollment.enrollment(),
             connection.epoch(),
-            RunnerConnectionTransition::HeartbeatRecovered,
+            RunnerConnectionTransition::HeartbeatMissed,
         )
         .await?;
     let event = dispatch_next_outbox_event(&pool).await?;
@@ -10030,6 +9998,68 @@ async fn s32_inv032_inv044_runner_suspect_outbox_round_trips() -> Result<(), Box
     Ok(())
 }
 
+/// INV-032 / INV-044: a follower-event refusal rolls the exact connection
+/// transition back rather than leaving durable health without its update.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_suspect_outbox_failure_rolls_back_connection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    sqlx::query(
+        "CREATE FUNCTION reject_runner_health_outbox_for_test()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected runner outbox refusal'
+                 USING ERRCODE = '23514';
+         END;
+         $$",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER reject_runner_health_outbox_for_test
+         BEFORE INSERT ON runner_state_transition_outbox_event
+         FOR EACH ROW EXECUTE FUNCTION reject_runner_health_outbox_for_test()",
+    )
+    .execute(&pool)
+    .await?;
+    let rejected = store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await
+        .expect_err("connection health and its follower event share one commit boundary");
+    sqlx::query(
+        "DROP TRIGGER reject_runner_health_outbox_for_test
+         ON runner_state_transition_outbox_event",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("DROP FUNCTION reject_runner_health_outbox_for_test()")
+        .execute(&pool)
+        .await?;
+    let retained = store
+        .load_connection(expected_enrollment.enrollment())
+        .await?
+        .expect("the established connection remains current");
+    let event_count: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox_event")
+        .fetch_one(&pool)
+        .await?;
+
+    assert_store_check_violation(rejected);
+    assert_eq!(retained.state(), RunnerConnectionState::Connected);
+    assert_eq!(retained.event_ordinal(), 1);
+    assert_eq!(event_count, 0);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-032 / INV-044: heartbeat recovery dispatches from the exact recovered
 /// connection event rather than the mutable current connection head.
 #[tokio::test]
@@ -10038,8 +10068,7 @@ async fn s32_inv032_inv044_runner_connected_outbox_round_trips() -> Result<(), B
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
-    let (placement_event_ordinal, placement_revision) =
-        placement_outbox_facts(&pool, session, "pinned").await?;
+    let (_, placement_revision) = placement_outbox_facts(&pool, session, "pinned").await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
         .await?;
@@ -10050,6 +10079,7 @@ async fn s32_inv032_inv044_runner_connected_outbox_round_trips() -> Result<(), B
             RunnerConnectionTransition::HeartbeatMissed,
         )
         .await?;
+    let suspect = dispatch_next_outbox_event(&pool).await?;
     store
         .transition_connection(
             expected_enrollment.enrollment(),
@@ -10057,29 +10087,10 @@ async fn s32_inv032_inv044_runner_connected_outbox_round_trips() -> Result<(), B
             RunnerConnectionTransition::HeartbeatRecovered,
         )
         .await?;
-    let source = connection_outbox_source(
-        &pool,
-        placement_event_ordinal,
-        expected_enrollment.enrollment(),
-        "heartbeat_recovered",
-    )
-    .await?;
-    append_runner_state_transition_for_test(
-        &pool,
-        RunnerStateTransitionOutboxTestEvent::new(
-            session,
-            pin.lease.runner(),
-            placement_revision,
-            pin.placement.request().sandbox,
-            None,
-            DispatchedRunnerState::Connected,
-            source,
-        ),
-    )
-    .await?;
-    let event = dispatch_next_outbox_event(&pool).await?;
+    let event = dispatch_next_outbox_event_at(&pool, 2).await?;
 
-    assert_eq!(event.sequence(), 1);
+    assert_eq!(suspect.sequence(), 1);
+    assert_eq!(event.sequence(), 2);
     assert_eq!(event.session(), session);
     assert_eq!(
         event.kind(),
