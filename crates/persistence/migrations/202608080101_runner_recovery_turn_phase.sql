@@ -736,29 +736,6 @@ BEGIN
                            AND cancelled.terminal_model_call_id IS NULL
                     )
                 )
-                OR (
-                    stopped_attempt.state_kind = 'ended'
-                    AND stopped_attempt.end_variant = 'without_stop'
-                    AND stopped_attempt.end_disposition = 'yielded_to_durable_wait'
-                    AND stopped_attempt.interrupt_command_id IS NULL
-                    AND stopped_attempt.interrupt_predecessor_turn_id IS NULL
-                    AND EXISTS (
-                        SELECT 1
-                          FROM turn_runner_recovery_interrupt_effect AS effect
-                          JOIN turn_lifecycle AS cancelled
-                            ON cancelled.turn_id = effect.turn_id
-                           AND cancelled.session_id = effect.session_id
-                         WHERE effect.command_id = NEW.command_id
-                           AND effect.turn_id = NEW.expected_active_turn_id
-                           AND effect.session_id = NEW.session_id
-                           AND effect.yielded_turn_attempt_id =
-                                stopped_attempt.turn_attempt_id
-                           AND cancelled.state_kind = 'terminal'
-                           AND cancelled.terminal_disposition_kind = 'cancelled'
-                           AND cancelled.terminal_attempt_id IS NULL
-                           AND cancelled.terminal_model_call_id IS NULL
-                    )
-                )
            )
          WHERE accepted.accepting_command_id = NEW.command_id
            AND accepted.accepted_input_id = NEW.result_accepted_input_id

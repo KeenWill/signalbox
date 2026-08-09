@@ -1957,12 +1957,14 @@ The client applies the same behavior to `active_awaiting_tool_recovery` and to
 `active_awaiting_runner_recovery` turn likewise ends the follow with its typed
 lost-runner replacement-or-abandonment diagnostic. A model-call recovery wait
 has one process-protocol writer that completes it — `reconcile_turn`, which the
-diagnostic's operator runs next; the tool and runner recovery waits still have
-none. An `active_awaiting_tool_approval` turn remains an ordinary nonterminal
-wait that `send` keeps waiting through; `decide_tool_request` is its resolving
-writer, issued from a second connection while the waiting client's transcript
-names the pending request and its proposing tool. A client disconnect never
-cancels model or tool work.
+diagnostic's operator runs next. A runner recovery wait has `stop_turn`, which
+terminalizes the parked turn as cancelled or reconciliation-required while
+preserving any tool ambiguity; the tool recovery wait still has no writer. An
+`active_awaiting_tool_approval` turn remains an ordinary nonterminal wait that
+`send` keeps waiting through; `decide_tool_request` is its resolving writer,
+issued from a second connection while the waiting client's transcript names the
+pending request and its proposing tool. A client disconnect never cancels model
+or tool work.
 
 An `active_awaiting_child` turn is likewise a nonterminal wait. Its three
 identifiers are required together, and clients keep waiting until the delivered
