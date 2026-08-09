@@ -1702,6 +1702,20 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[track_caller]
+    fn synthetic_deep_bridge_tool_definition() -> ToolDefinition {
+        ToolDefinition::new(
+            ToolName::try_new(String::from(SYNTHETIC_BRIDGE_TOOL_NAME))
+                .expect("synthetic bridge tool name is valid"),
+            String::from(SYNTHETIC_BRIDGE_TOOL_DESCRIPTION),
+            ToolInputSchema::try_new(synthetic_deep_bridge_tool_schema())
+                .expect("deep synthetic bridge schema is admitted"),
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::EffectFree,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn bridge_catalog_projects_definition_fields_into_mcp_shape() {
         let definition = synthetic_bridge_tool_definition();
@@ -1744,6 +1758,7 @@ mod tests {
     struct CargoTestInvocation {
         profile: OsString,
         config_overrides: Vec<OsString>,
+        invocation_directory: PathBuf,
     }
 
     struct ConfiguredCargoTargetDirInput<'a> {
@@ -1871,7 +1886,7 @@ done
         invocation: &CargoTestInvocation,
     ) -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
-        let known_targets = rustc_target_names();
+        let known_targets = rustc_target_names(&invocation.invocation_directory);
         let configured_target_dir = configured_cargo_target_dir(&current, &known_targets);
         let default_target_dir = configured_target_dir
             .clone()
@@ -2009,6 +2024,7 @@ done
         found_test_subcommand.then(|| CargoTestInvocation {
             profile: profile.unwrap_or_else(|| OsString::from(CARGO_TEST_PROFILE)),
             config_overrides,
+            invocation_directory: invocation_directory.to_path_buf(),
         })
     }
 
@@ -2270,8 +2286,9 @@ done
     }
 
     #[track_caller]
-    fn rustc_target_names() -> BTreeSet<OsString> {
-        let rustc = normalized_rustc_override().unwrap_or_else(|| PathBuf::from("rustc"));
+    fn rustc_target_names(invocation_directory: &Path) -> BTreeSet<OsString> {
+        let rustc = normalized_rustc_override(invocation_directory)
+            .unwrap_or_else(|| PathBuf::from("rustc"));
         let mut command = Command::new(rustc);
         command.args(["--print", "target-list"]);
         let Some(output) = bounded_command_output(&mut command, BRIDGE_DISCOVERY_TIMEOUT)
@@ -2287,52 +2304,19 @@ done
             .collect()
     }
 
-    fn normalized_rustc_override() -> Option<PathBuf> {
+    fn normalized_rustc_override(invocation_directory: &Path) -> Option<PathBuf> {
         let configured = std::env::var_os("RUSTC")?;
-        let invocation_directory = verified_compiler_invocation_directory();
         let configured_path = Path::new(&configured);
         assert!(
             configured_path.is_absolute()
                 || is_bare_program_name(configured_path)
-                || invocation_directory.is_some(),
-            "relative RUSTC requires verified workspace-root invocation provenance"
+                || invocation_directory.is_absolute(),
+            "relative RUSTC requires absolute parent Cargo invocation provenance"
         );
         Some(rustc_command_for(
             Some(&configured),
-            invocation_directory.as_deref(),
+            Some(invocation_directory),
         ))
-    }
-
-    fn verified_compiler_invocation_directory() -> Option<PathBuf> {
-        let reported = PathBuf::from(std::env::var_os("PWD")?);
-        let actual = std::env::current_dir().ok()?;
-        let package = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let workspace = package.parent().and_then(Path::parent)?;
-        verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
-            reported: &reported,
-            actual: &actual,
-            workspace,
-            package,
-        })
-    }
-
-    struct CompilerInvocationDirectories<'a> {
-        reported: &'a Path,
-        actual: &'a Path,
-        workspace: &'a Path,
-        package: &'a Path,
-    }
-
-    fn verified_compiler_invocation_directory_for(
-        directories: CompilerInvocationDirectories<'_>,
-    ) -> Option<PathBuf> {
-        let reported = fs::canonicalize(directories.reported).ok()?;
-        let actual = fs::canonicalize(directories.actual).ok()?;
-        let workspace = fs::canonicalize(directories.workspace).ok()?;
-        let package = fs::canonicalize(directories.package).ok()?;
-        ((reported == workspace && (actual == workspace || actual == package))
-            || (reported == package && actual == package))
-            .then_some(reported)
     }
 
     fn rustc_command_for(
@@ -2362,7 +2346,11 @@ done
             && components.next().is_none()
     }
 
-    fn configure_compiler_wrapper(command: &mut Command, variable: &'static str) {
+    fn configure_compiler_wrapper(
+        command: &mut Command,
+        variable: &'static str,
+        invocation_directory: &Path,
+    ) {
         let Some(configured) = std::env::var_os(variable) else {
             return;
         };
@@ -2370,10 +2358,9 @@ done
             command.env_remove(variable);
             return;
         }
-        let invocation_directory = verified_compiler_invocation_directory();
-        let wrapper = compiler_wrapper_command_for(&configured, invocation_directory.as_deref())
+        let wrapper = compiler_wrapper_command_for(&configured, Some(invocation_directory))
             .unwrap_or_else(|| {
-                panic!("relative {variable} requires verified workspace-root invocation provenance")
+                panic!("relative {variable} requires parent Cargo invocation provenance")
             });
         command.env(variable, wrapper);
     }
@@ -2673,6 +2660,19 @@ done
                 .expect("synthetic process working-directory link resolves"),
             invocation_directory.path()
         );
+    }
+
+    #[test]
+    fn cargo_test_invocation_retains_the_parent_working_directory() {
+        let invocation_directory = Path::new("/synthetic/parent-cargo-cwd");
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new(CARGO_TEST_SUBCOMMAND),
+        ];
+        let invocation = cargo_test_invocation_from_arguments(&arguments, invocation_directory)
+            .expect("the synthetic Cargo test invocation is admitted");
+
+        assert_eq!(invocation.invocation_directory, invocation_directory);
     }
 
     #[test]
@@ -3438,105 +3438,6 @@ done
     }
 
     #[test]
-    fn bridge_compiler_invocation_rejects_an_unrelated_report() {
-        let fixture = tempfile::tempdir().expect("fixture root exists");
-        let workspace = fixture.path().join("workspace");
-        let stale = fixture.path().join("stale");
-        let package = workspace.join("package");
-        fs::create_dir(&workspace).expect("workspace fixture exists");
-        fs::create_dir(&stale).expect("stale fixture exists");
-        fs::create_dir(&package).expect("package fixture exists");
-        assert_eq!(
-            verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
-                reported: &stale,
-                actual: &stale,
-                workspace: &workspace,
-                package: &package,
-            }),
-            None
-        );
-    }
-
-    #[test]
-    fn bridge_compiler_invocation_accepts_a_matching_workspace_report() {
-        let fixture = tempfile::tempdir().expect("fixture root exists");
-        let workspace = fixture.path().join("workspace");
-        let package = workspace.join("package");
-        fs::create_dir(&workspace).expect("workspace fixture exists");
-        fs::create_dir(&package).expect("package fixture exists");
-        let expected_workspace = fs::canonicalize(&workspace).expect("workspace canonicalizes");
-
-        assert_eq!(
-            verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
-                reported: &workspace,
-                actual: &workspace,
-                workspace: &workspace,
-                package: &package,
-            }),
-            Some(expected_workspace)
-        );
-    }
-
-    #[test]
-    fn bridge_compiler_invocation_preserves_workspace_report_from_package_cwd() {
-        let fixture = tempfile::tempdir().expect("fixture root exists");
-        let workspace = fixture.path().join("workspace");
-        let package = workspace.join("package");
-        fs::create_dir_all(&package).expect("package fixture exists");
-        let expected_workspace = fs::canonicalize(&workspace).expect("workspace canonicalizes");
-
-        assert_eq!(
-            verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
-                reported: &workspace,
-                actual: &package,
-                workspace: &workspace,
-                package: &package,
-            }),
-            Some(expected_workspace)
-        );
-    }
-
-    #[test]
-    fn bridge_compiler_invocation_preserves_package_root_for_package_invocation() {
-        let fixture = tempfile::tempdir().expect("fixture root exists");
-        let workspace = fixture.path().join("workspace");
-        let package = workspace.join("package");
-        fs::create_dir_all(&package).expect("package fixture exists");
-        let expected_package = fs::canonicalize(&package).expect("package canonicalizes");
-
-        assert_eq!(
-            verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
-                reported: &package,
-                actual: &package,
-                workspace: &workspace,
-                package: &package,
-            }),
-            Some(expected_package)
-        );
-    }
-
-    #[test]
-    fn bridge_compiler_invocation_rejects_a_stale_workspace_pwd() {
-        let fixture = tempfile::tempdir().expect("fixture root exists");
-        let workspace = fixture.path().join("workspace");
-        let actual = fixture.path().join("actual-invocation");
-        let package = workspace.join("package");
-        fs::create_dir(&workspace).expect("workspace fixture exists");
-        fs::create_dir(&actual).expect("actual invocation fixture exists");
-        fs::create_dir(&package).expect("package fixture exists");
-
-        assert_eq!(
-            verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
-                reported: &workspace,
-                actual: &actual,
-                workspace: &workspace,
-                package: &package,
-            }),
-            None
-        );
-    }
-
-    #[test]
     fn bridge_artifact_selection_resolves_a_parent_only_relative_directory() {
         let target_dir = Path::new("synthetic-parent");
         let executable = target_dir.join("debug/deps/daemon-tools-test");
@@ -3931,11 +3832,19 @@ done
             .current_dir(workspace)
             .stdout(Stdio::piped());
         apply_cargo_config_overrides(&mut build_command, &invocation.config_overrides);
-        if let Some(rustc) = normalized_rustc_override() {
+        if let Some(rustc) = normalized_rustc_override(&invocation.invocation_directory) {
             build_command.env("RUSTC", rustc);
         }
-        configure_compiler_wrapper(&mut build_command, "RUSTC_WRAPPER");
-        configure_compiler_wrapper(&mut build_command, "RUSTC_WORKSPACE_WRAPPER");
+        configure_compiler_wrapper(
+            &mut build_command,
+            "RUSTC_WRAPPER",
+            &invocation.invocation_directory,
+        );
+        configure_compiler_wrapper(
+            &mut build_command,
+            "RUSTC_WORKSPACE_WRAPPER",
+            &invocation.invocation_directory,
+        );
         if let Some(target) = &selection.target {
             build_command.arg("--target").arg(target);
         }
@@ -5373,6 +5282,21 @@ done
     #[test]
     fn claude_mcp_bridge_lists_the_exact_daemon_catalog() {
         let mut fixture = McpBridgeFixture::start();
+        fixture.initialize();
+        let expected = fixture.expected_tools.clone();
+        let listed = fixture.list_tools();
+        fixture.finish();
+
+        assert_eq!(listed, expected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn claude_mcp_bridge_lists_a_domain_admitted_deep_schema() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        let definitions = [synthetic_deep_bridge_tool_definition()];
+        let mut fixture =
+            McpBridgeFixture::start_with_workspace_and_definitions(workspace, &definitions);
         fixture.initialize();
         let expected = fixture.expected_tools.clone();
         let listed = fixture.list_tools();
