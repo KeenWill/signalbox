@@ -194,10 +194,13 @@ the socket boundary and single-daemon guard are
 [process-protocol](process-protocol.md) material.
 
 The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL` and
-`SIGNALBOX_CONFIG_FILE` in its `--anthropic` mode, taking the Anthropic key path
-from the configured profile exactly as the daemon does. It does not compose the
-daemon tool catalog and does not read `GITHUB_TOKEN_FILE`; it is a development
-driver, not the client protocol.
+`SIGNALBOX_CONFIG_FILE` in its `--anthropic` mode, and on this build also
+requires `ANTHROPIC_API_KEY_FILE`, from which it builds its credential access
+directly. Taking that path from the configured profile instead is committed
+unimplemented functionality that lands with the same child that replaces the
+daemon's conditional channels. It does not compose the daemon tool catalog and
+does not read `GITHUB_TOKEN_FILE`; it is a development driver, not the client
+protocol.
 
 ## Telemetry export
 
@@ -466,7 +469,12 @@ fail-closed:
   a single operator who edits it; carrying a second decoder would preserve a
   shape no deployment is entitled to keep working. The rejection is typed and
   names the missing field, so the edit an operator must make is the error
-  message, and `config/signalboxd.example.toml` is the worked example.
+  message. The checked-in `config/signalboxd.example.toml` is not yet an example
+  of this grammar — it still declares profiles without `adapter` and `delivery`,
+  maps families through `credential_profile`, and has no `[[credential_pools]]`
+  — because the child that installs this grammar in the parser updates it in the
+  same change. Until then it documents the shape this build's parser actually
+  accepts, and an operator writing for the new grammar follows the rules here.
 - At least one `[[models]]` entry is required: an absent, mistyped, or empty
   models array is rejected (`MissingModels`), so a document containing only
   `version = 1` fails startup.
@@ -873,34 +881,67 @@ acknowledged work.
 
 Identity alone is not enough, because a directory another local principal can
 write is an authentication-material substitution surface that never changes the
-device and inode the recheck compares. Under the same descriptor-relative walk,
-startup therefore also requires — from `fstat` on the descriptors it already
-holds, never from a second lookup by path — that the final home be owned by the
-daemon's effective user and carry no group-write or other-write permission bit,
-and that every regular file directly within it be owned by that same user and
-likewise not group- or other-writable. A home failing either test is rejected
-exactly as a symlinked component is: scheduling is blocked and no invocation
-starts against it. Why this is stated as effective-user and mode rather than
-"unwritable": those are the two facts the daemon can verify at open time from
-the descriptor it holds, without racing a path lookup, and together they are
-what excludes every principal but the daemon's own user. A more permissive home
-would let another principal replace the CLI's login files between two successful
-identity rechecks, so the child would read attacker-supplied credentials and
-write refreshed ones back where that principal could read them.
+device and inode the recheck compares. The walk therefore verifies the whole
+path, not the endpoint, and it verifies objects rather than names.
 
-Every per-invocation recheck repeats the ownership and mode tests together with
-the identity comparison, so a home that becomes writable after startup fails the
-next preparation rather than the next restart. Two `codex_home` profiles may not
-resolve to the same identity even when their lexically normalized paths differ.
-The daemon repeats that no-symlink walk before every invocation and requires the
-same identity; replacement or aliasing is a typed pre-send
-credential-configuration failure and starts no child. That walk runs in
-off-transaction capability preparation, after the reservation and the call's
-`Prepared` record have committed — not before them. Why that order: the member
-and its reservation are chosen atomically under the capacity locks, so doing the
-walk first would decide against exclusion and capacity facts that the selecting
-transaction may then contradict, while doing it inside that transaction would
-hold a database transaction across filesystem I/O, which
+Starting from a descriptor for the filesystem root, the daemon opens each
+component in turn with `openat` on the descriptor it already holds, refusing to
+follow symlinks and requiring a directory, and keeps every descriptor open
+through the walk. Each component is judged by `fstat` on the descriptor just
+opened — never by a second lookup of the same name, which is precisely the step
+an attacker races. For every ancestor directory the daemon requires that it be
+owned by the daemon's effective user or by `root`, and that it be neither
+group-writable nor other-writable *unless* it carries the sticky bit, which is
+what makes a shared directory like `/tmp` safe: sticky permits creating entries
+but forbids renaming or removing one you do not own. For the final home the
+daemon requires ownership by its own effective user and no group-write or
+other-write bit at all, with no sticky exemption, and requires every regular
+file directly within it to be owned by that same user and likewise not group- or
+other-writable. Then it records the home's device and inode as the profile's
+credential-home identity. A path failing any of these is rejected exactly as a
+symlinked component is: scheduling is blocked and no invocation starts against
+it.
+
+Why ancestors and not just the home: `CODEX_HOME` reaches the child as a path,
+and the child resolves that path itself. A principal who can write any ancestor
+can rename the verified home aside, put a directory of their own in its place,
+let the CLI resolve it, and restore the original afterward — a substitution no
+later identity comparison sees, because by then the original is back. Requiring
+exclusive namespace control over every component is what makes the path the
+child resolves denote the object the daemon verified. Why
+effective-user-and-mode rather than "unwritable": those are the facts the daemon
+can establish at open time from a descriptor it holds, without racing a lookup.
+
+What this does not prove is worth stating. It does not defend against `root` or
+any principal holding equivalent capability: a root-writable ancestor is
+accepted because the superuser can replace any component and can read the
+credential regardless, so treating that as a rejection would fail every ordinary
+deployment while protecting nothing. It does not defend against mount-point
+substitution, where a principal with mount privilege changes what a path
+resolves to while every directory's ownership and mode stay correct; the next
+per-invocation identity comparison detects that the target changed, but not
+within the window. And it ends at spawn: the child resolves the path once more
+in its own address space, so the guarantee is that no unprivileged principal
+could have changed the answer between the daemon's walk and the child's
+resolution, not that the daemon handed over an object directly. Handing the
+child a descriptor-pinned spelling instead would close even that gap, but the
+CLI accepts only a path, so this contract buys the same property through
+namespace control.
+
+Every per-invocation recheck repeats the complete walk — every ancestor's
+ownership, mode, and sticky exemption, the home's own ownership and mode, its
+files, and the identity comparison — so a path that becomes writable after
+startup fails the next preparation rather than the next restart. Two
+`codex_home` profiles may not resolve to the same identity even when their
+lexically normalized paths differ. The daemon repeats that no-symlink walk
+before every invocation and requires the same identity; replacement or aliasing
+is a typed pre-send credential-configuration failure and starts no child. That
+walk runs in off-transaction capability preparation, after the reservation and
+the call's `Prepared` record have committed — not before them. Why that order:
+the member and its reservation are chosen atomically under the capacity locks,
+so doing the walk first would decide against exclusion and capacity facts that
+the selecting transaction may then contradict, while doing it inside that
+transaction would hold a database transaction across filesystem I/O, which
 [staged execution](model-call-execution.md#staged-execution) forbids. A mismatch
 therefore fails the call in preparation and releases its reservation through the
 ordinary guarded pre-send closure, exactly as a spawn failure does. It exists so
@@ -1048,18 +1089,25 @@ lazily refreshes it. This keeps access tokens out of the database and preserves
 configuration-independent recovery even when a token endpoint is unavailable.
 
 Dispatch supplies each invocation a scratch credential home carrying a
-daemon-minted access token. It uses the same restrictive root, file modes,
-descriptor-relative operations, normal cleanup, and pre-work startup scavenging
-as provisioning and explicitly forces the CLI's file or ephemeral backend to
-that home while disabling ambient, keyring, helper, and external stores. Failure
-to enforce that selection is a typed pre-send delivery failure and starts no CLI
-child. The access token is otherwise retained only in memory. The refresh token
-is not absent from the design — it is the whole of it — but it stays with the
-daemon and is never copied into a scratch home. Withholding it is what buys the
-concurrency: a CLI process holding a refresh token could decide to refresh, so N
-concurrent processes could race exactly as they do under `codex_home`. Holding
-none, they share no mutable authorization state, and the daemon refreshes once
-under its row lock on behalf of all of them.
+daemon-minted access token together with the non-secret account identity
+harvested at provisioning. Both are required: the CLI's stored authentication
+shape carries an account identifier beside the token, and a subscription request
+forms a per-account header from it, so a store holding only an access token
+cannot produce a well-formed request. The identity is configuration-grade rather
+than secret, and including it changes nothing about what is withheld — the
+refresh token still never reaches a scratch home. It uses the same restrictive
+root, file modes, descriptor-relative operations, normal cleanup, and pre-work
+startup scavenging as provisioning and explicitly forces the CLI's file or
+ephemeral backend to that home while disabling ambient, keyring, helper, and
+external stores. Failure to enforce that selection is a typed pre-send delivery
+failure and starts no CLI child. The access token is otherwise retained only in
+memory. The refresh token is not absent from the design — it is the whole of it
+— but it stays with the daemon and is never copied into a scratch home.
+Withholding it is what buys the concurrency: a CLI process holding a refresh
+token could decide to refresh, so N concurrent processes could race exactly as
+they do under `codex_home`. Holding none, they share no mutable authorization
+state, and the daemon refreshes once under its row lock on behalf of all of
+them.
 
 Before the token is written or any child starts, preparation seeds the CLI
 adapter's exact-value redactor with that access token. The redactor covers the
@@ -1449,20 +1497,28 @@ deployment-side rules that code cannot enforce are stated in
   reference is a configured profile name this build never spells.
 
 - **File-based supply, reread per preparation.** Each `FileCredentialAccess`
-  instance binds one consumer-scoped map of references to deployment paths: a
-  model adapter receives the complete catalog of that adapter's `file` profiles,
-  while web search and code-host operations each receive a singleton map under
-  their fixed integration constant. A model-profile name equal to an integration
-  constant therefore remains a distinct reference in a different consumer's map;
-  no lookup or insertion crosses those boundaries. The selected instance reads
-  the file for every model call, web search, code-host operation, or
-  pull-request tool operation preparation that resolves one; nothing is cached.
-  Why: atomic file replacement rotates any credential without restarting
-  signalboxd, and an in-flight operation keeps the value it authenticated with.
-  Resolution stays reference-scoped: a reference absent from the map fails typed
-  `Unmapped`; a missing file is `Unavailable`; an unreadable file is
-  `Unreadable` — all reference-only errors, so a failure names an account
-  without disclosing which path served it.
+  instance binds one consumer-scoped map of references to deployment paths. In
+  this build every such map is a singleton: each model provider gets one entry
+  built from its conditional environment path and fixed reference, and web
+  search and code-host operations each get one under their fixed integration
+  constant.
+
+- **Committed unimplemented functionality — catalog-backed model credential
+  maps.** No present composition gives a model adapter the complete catalog of
+  that adapter's `file` profiles; the singleton construction above is what
+  ships. The child that removes the conditional channels builds that complete
+  map instead, and the consumer-scoping rule below is written for both shapes: A
+  model-profile name equal to an integration constant therefore remains a
+  distinct reference in a different consumer's map; no lookup or insertion
+  crosses those boundaries. The selected instance reads the file for every model
+  call, web search, code-host operation, or pull-request tool operation
+  preparation that resolves one; nothing is cached. Why: atomic file replacement
+  rotates any credential without restarting signalboxd, and an in-flight
+  operation keeps the value it authenticated with. Resolution stays
+  reference-scoped: a reference absent from the map fails typed `Unmapped`; a
+  missing file is `Unavailable`; an unreadable file is `Unreadable` — all
+  reference-only errors, so a failure names an account without disclosing which
+  path served it.
 
 - **External and daemon-owned CLI logins.** An `ambient` profile leaves login
   resolution to the CLI under the adapter's existing child-environment contract.
