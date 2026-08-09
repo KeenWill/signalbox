@@ -59,6 +59,7 @@ def owner_page(
     columns: tuple[str, ...] = COLUMNS,
     blank_cell: tuple[int, int] | None = None,
     placeholder: str = "",
+    cell_text: dict[tuple[int, int], str] | None = None,
 ) -> str:
     """Render an owner page whose table can be perturbed one axis at a time."""
     lines = [
@@ -78,8 +79,11 @@ def owner_page(
     for row_index, row in enumerate(rows):
         cells = [f"**`{row}`**"]
         for column_index in range(1, len(columns)):
+            override = (cell_text or {}).get((row_index, column_index))
             if blank_cell == (row_index, column_index):
                 cells.append(placeholder)
+            elif override is not None:
+                cells.append(override)
             else:
                 cells.append(f"stated for {row}")
         lines.append("| " + " | ".join(cells) + " |")
@@ -156,6 +160,42 @@ class TableTotalityTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("Rows are declared in order", result.stdout)
+
+    def test_escaped_pipe_in_a_cell_passes(self) -> None:
+        """A cell may contain a pipe by escaping it; GFM renders eight columns.
+
+        Splitting on every pipe counted this row as nine cells and failed a
+        table that is correct, which is how a gate gets deleted rather than
+        fixed.
+        """
+        result = check(
+            cell_text={(1, 2): r"released by `Prepared \| InFlight` completion"}
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_escaped_backslash_leaves_the_next_pipe_a_delimiter(self) -> None:
+        """`\\\\` is a literal backslash, so the pipe after it still splits."""
+        result = check(cell_text={(1, 2): "ends with a backslash \\\\"})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_genuine_extra_column_still_fails(self) -> None:
+        """The escape fix must not stop a real extra cell being caught."""
+        result = check(cell_text={(1, 2): "one | two"})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("cells, not 8", result.stdout)
+
+    def test_an_escaped_pipe_does_not_hide_an_empty_cell(self) -> None:
+        result = check(
+            blank_cell=(2, 3),
+            placeholder="",
+            cell_text={(2, 1): r"phase `a \| b`"},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("is empty for ending", result.stdout)
 
     def test_missing_table_fails(self) -> None:
         result = run_checker(
@@ -243,6 +283,109 @@ class SoleOwnershipTests(unittest.TestCase):
 
     def test_owner_page_does_not_have_to_link_to_itself(self) -> None:
         result = check()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_bare_filename_mention_fails(self) -> None:
+        """Naming the file is not linking to it.
+
+        This is the hole worth a fixture of its own: a block asserting that the
+        owner page does *not* cover a newly stated outcome contains the
+        filename, and a substring test accepted it — so the gate was satisfied
+        by exactly the competing, unlinked projection it exists to prevent.
+        """
+        result = check(
+            {
+                "docs/spec/persistence-protocol.md": (
+                    "# Persistence\n\n"
+                    "A `fail` pool consults `on_pool_exhausted`. Note that "
+                    "credential-availability.md does not cover this outcome.\n"
+                )
+            }
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("without a link whose destination resolves", result.stdout)
+
+    def test_filename_inside_a_code_span_fails(self) -> None:
+        result = check(
+            {
+                "docs/spec/persistence-protocol.md": (
+                    "# Persistence\n\n"
+                    "A `fail` pool consults `on_pool_exhausted`, as "
+                    "`credential-availability.md` says.\n"
+                )
+            }
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_reference_style_link_passes(self) -> None:
+        result = check(
+            {
+                "docs/spec/persistence-protocol.md": (
+                    "# Persistence\n\n"
+                    "A `fail` pool consults `on_pool_exhausted` as "
+                    "[the machine][machine] states.\n\n"
+                    "[machine]: credential-availability.md\n"
+                )
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_link_from_a_parent_directory_resolves(self) -> None:
+        result = check(
+            {
+                "docs/scenarios.md": (
+                    "# Scenarios\n\n"
+                    "An `availability successor` is owned by "
+                    "[the machine](spec/credential-availability.md).\n"
+                )
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_link_to_a_same_named_file_elsewhere_fails(self) -> None:
+        """Resolution, not filename matching, decides."""
+        result = check(
+            {
+                "docs/spec/persistence-protocol.md": (
+                    "# Persistence\n\n"
+                    "A `fail` pool consults `on_pool_exhausted`, see "
+                    "[elsewhere](../notes/credential-availability.md).\n"
+                ),
+                "docs/notes/credential-availability.md": "# Notes\n",
+            }
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_fragment_only_link_fails(self) -> None:
+        result = check(
+            {
+                "docs/spec/persistence-protocol.md": (
+                    "# Persistence\n\n"
+                    "A `fail` pool consults `on_pool_exhausted`, see "
+                    "[below](#the-credential-availability-machine).\n"
+                )
+            }
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_link_with_a_fragment_passes(self) -> None:
+        result = check(
+            {
+                "docs/spec/persistence-protocol.md": (
+                    "# Persistence\n\n"
+                    "A `fail` pool consults `on_pool_exhausted` as "
+                    "[the machine](credential-availability.md#the-credential-availability-machine) "
+                    "states.\n"
+                )
+            }
+        )
 
         self.assertEqual(result.returncode, 0, result.stdout)
 

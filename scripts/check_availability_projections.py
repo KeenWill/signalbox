@@ -65,6 +65,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 OWNER_PAGE = Path("docs/spec/credential-availability.md")
 
@@ -137,6 +138,16 @@ GENERATED_FILES = (Path("docs/invariants.md"),)
 
 FENCE = re.compile(r"^\s*(```|~~~)")
 
+# Link extraction. A block satisfies rule 3 by carrying a navigable link whose
+# destination resolves to the owner page — never by merely containing its
+# filename, since a block asserting that the owner does not cover something
+# would otherwise satisfy the very gate it violates.
+CODE_SPAN = re.compile(r"`+[^`]*`+")
+INLINE_DESTINATION = re.compile(r"\]\(\s*<?([^)\s>]+)")
+REFERENCE_DEFINITION = re.compile(r"^ {0,3}\[([^\]]+)\]:\s*<?([^\s>]+)", re.M)
+COLLAPSED_REFERENCE = re.compile(r"\]\[([^\]]*)\]")
+SHORTCUT_REFERENCE = re.compile(r"\[([^\]^]+)\](?![\(\[:])")
+
 
 def content_lines(text: str) -> list[tuple[int, str]]:
     """Yield (line number, line) outside fenced code blocks.
@@ -157,18 +168,55 @@ def content_lines(text: str) -> list[tuple[int, str]]:
     return result
 
 
-def split_row(line: str) -> list[str]:
-    """Split one GFM table row into its cells.
+def is_escaped(text: str, index: int) -> bool:
+    """Report whether the character at ``index`` is backslash-escaped."""
+    backslashes = 0
+    position = index - 1
+    while position >= 0 and text[position] == "\\":
+        backslashes += 1
+        position -= 1
+    return backslashes % 2 == 1
 
-    The leading and trailing pipes that mdformat always emits are dropped
-    before splitting, so a well-formed row yields exactly its cells.
+
+def split_row(line: str) -> list[str]:
+    """Split one GFM table row into its cells, honouring escaped pipes.
+
+    A cell may legitimately contain a pipe by escaping it, and GFM resolves the
+    escape before rendering, so such a row has one fewer column than a naive
+    split reports. Splitting on every pipe would fail a table that renders with
+    exactly the declared eight columns — a checker blocking CI over a document
+    that is correct, which is the way a gate gets deleted rather than fixed.
+
+    The leading and trailing pipes mdformat always emits are dropped first, and
+    a trailing pipe closes the row only when it is not itself escaped. Escapes
+    resolve during the scan, so an escaped pipe contributes a literal pipe to
+    the cell while an escaped backslash contributes a backslash and leaves any
+    following pipe to act as a delimiter.
     """
     stripped = line.strip()
     if stripped.startswith("|"):
         stripped = stripped[1:]
-    if stripped.endswith("|"):
+    if stripped.endswith("|") and not is_escaped(stripped, len(stripped) - 1):
         stripped = stripped[:-1]
-    return [cell.strip() for cell in stripped.split("|")]
+
+    cells: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(stripped):
+        character = stripped[index]
+        if character == "\\" and index + 1 < len(stripped):
+            current.append(stripped[index + 1])
+            index += 2
+            continue
+        if character == "|":
+            cells.append("".join(current).strip())
+            current = []
+            index += 1
+            continue
+        current.append(character)
+        index += 1
+    cells.append("".join(current).strip())
+    return cells
 
 
 def is_delimiter_row(cells: list[str]) -> bool:
@@ -285,6 +333,62 @@ def blocks(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
     return result
 
 
+def reference_definitions(text: str) -> dict[str, str]:
+    """Collect a page's reference-link definitions by lowercased label.
+
+    Definitions are gathered per page rather than per block because a
+    reference-style link is routinely defined far from where it is used, and a
+    gate that ignored them would reject a correctly linked page.
+    """
+    return {
+        match.group(1).strip().lower(): match.group(2)
+        for match in REFERENCE_DEFINITION.finditer(text)
+    }
+
+
+def resolves_to_owner(destination: str, page: Path) -> bool:
+    """Report whether a link destination names the owner page.
+
+    Resolution is relative to the linking page, so `credential-availability.md`
+    from within `docs/spec` and `spec/credential-availability.md` from `docs`
+    both count, and a same-named file in another directory does not. A fragment
+    is dropped first; a destination that is only a fragment points inside the
+    linking page and never at the owner.
+    """
+    target = destination.split("#", 1)[0].strip()
+    if not target:
+        return False
+    parsed = urlsplit(target)
+    if parsed.scheme or target.startswith("//"):
+        return False
+    try:
+        resolved = (page.parent / unquote(target)).resolve()
+    except (OSError, ValueError):
+        return False
+    return resolved == OWNER_PAGE.resolve()
+
+
+def links_to_owner(block: str, page: Path, definitions: dict[str, str]) -> bool:
+    """Report whether a block carries a real link to the owner page.
+
+    Code spans are removed first, so a backticked mention of the filename — or
+    of link-looking punctuation inside a code sample — cannot satisfy the rule.
+    Token detection deliberately does not do this: a projection is almost
+    always named in backticks, so stripping code spans there would blind the
+    rule it exists to enforce.
+    """
+    text = CODE_SPAN.sub(" ", block)
+
+    destinations = [match.group(1) for match in INLINE_DESTINATION.finditer(text)]
+    for pattern in (COLLAPSED_REFERENCE, SHORTCUT_REFERENCE):
+        for match in pattern.finditer(text):
+            label = match.group(1).strip().lower()
+            if label in definitions:
+                destinations.append(definitions[label])
+
+    return any(resolves_to_owner(target, page) for target in destinations)
+
+
 def check_links(failures: list[str]) -> int:
     checked = 0
     pages = sorted(Path("docs").rglob("*.md"))
@@ -297,6 +401,7 @@ def check_links(failures: list[str]) -> int:
             failures.append(f"{page}: unreadable ({error})")
             continue
         checked += 1
+        definitions = reference_definitions(text)
         for start, block in blocks(content_lines(text)):
             # A heading names a topic; it does not state a projection, and
             # requiring a link inside one would put the owner's URL in every
@@ -308,15 +413,16 @@ def check_links(failures: list[str]) -> int:
             present = [token for token in PROJECTION_TOKENS if token in lowered]
             if not present:
                 continue
-            if "credential-availability.md" in prose:
+            if links_to_owner(prose, page, definitions):
                 continue
             listing = ", ".join(repr(token) for token in present)
             failures.append(
                 f"{page}:{start}: states the credential-availability projection "
-                f"{listing} without linking to "
+                f"{listing} without a link whose destination resolves to "
                 f"docs/spec/credential-availability.md. Name the column this page "
                 f"projects and link the owner, rather than authoring a second "
-                f"account of the row"
+                f"account of the row (naming the file without linking it does not "
+                f"satisfy this)"
             )
     return checked
 

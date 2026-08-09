@@ -205,6 +205,55 @@ class SpecTierCheckerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_implemented_cell_inside_a_committed_section_fails(self) -> None:
+        """A tier column and a tier heading must not disagree.
+
+        This is the drift the first version of this checker could not see, and
+        it points the opposite way to the one it was built for: not unbuilt
+        behavior claimed as current, but built behavior filed under a heading
+        saying nothing here exists. When the column and the heading disagree
+        the row carries two tiers and the positional convention buys nothing.
+        """
+        result = check_config(
+            "# Configuration\n\n"
+            "## Deliveries\n\n"
+            "Opening prose.\n\n"
+            "### Committed unimplemented functionality — pools\n\n"
+            "No present composition parses a pool.\n\n"
+            "| Outcome | Tier |\n"
+            "| --- | --- |\n"
+            "| `terminal` | **Implemented** for the no-pool case. |\n"
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("classifying its row as implemented", result.stdout)
+
+    def test_committed_tier_column_passes(self) -> None:
+        """The ordinary tier cell must not trip the rule it lives beside."""
+        result = check_config(
+            "# Configuration\n\n"
+            "## Deliveries\n\n"
+            "Opening prose.\n\n"
+            "### Committed unimplemented functionality — pools\n\n"
+            "No present composition parses a pool.\n\n"
+            "| Outcome | Tier |\n"
+            "| --- | --- |\n"
+            "| `terminal` | Committed unimplemented — successor calls. |\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_implemented_cell_inside_an_implemented_section_passes(self) -> None:
+        result = check_config(
+            "# Configuration\n\n"
+            "## Deliveries\n\n"
+            "| Field | Tier |\n"
+            "| --- | --- |\n"
+            "| `name` | Implemented, and read at startup. |\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_missing_enrolled_page_fails(self) -> None:
         result = run_checker({CONFIG_PAGE: "# Configuration\n"})
 
