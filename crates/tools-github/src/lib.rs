@@ -2952,8 +2952,9 @@ mod tests {
         ToolCatalog, ToolExecutionServiceError, ToolExecutionServiceOutcome,
     };
     use signalbox_domain::{
-        SessionId, ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
-        ToolDispatchGeneration, ToolName, ToolRequestId, TurnAttemptId, TurnId,
+        SessionId, ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd,
+        ToolAttemptId, ToolDispatchGeneration, ToolExecutionErrorKind, ToolName, ToolRequestId,
+        TurnAttemptId, TurnId,
     };
     use signalbox_model_runtime::CredentialAccessFailure;
 
@@ -3540,18 +3541,29 @@ mod tests {
         assert_eq!(
             outcome.evidence,
             Some(ToolExecutorEvidence::KnownFailed {
-                detail: Some(expected)
+                detail: Some(expected.clone())
             })
         );
-        assert!(
-            matches!(
-                outcome.result,
-                Ok(ToolExecutionServiceOutcome::ObservationCommitted(_))
-            ),
-            "definitive evidence commits an observation rather than stalling the batch, \
-             got {:?}",
-            outcome.result
-        );
+        // Committing is not the claim on its own: evidence mapped to the wrong
+        // terminal observation still commits, leaving the durable attempt
+        // marked completed or ambiguous while both the recorder and the
+        // outcome shape look right. Assert the relation this path claims — the
+        // same definitive detail, ending the attempt known-failed.
+        let Ok(ToolExecutionServiceOutcome::ObservationCommitted(ended)) = outcome.result else {
+            panic!(
+                "definitive evidence commits an observation rather than stalling the batch, \
+                 got {:?}",
+                outcome.result
+            )
+        };
+        let ToolAttemptEnd::KnownFailed { error } = ended.end() else {
+            panic!(
+                "a definitive rejection ends the attempt known-failed, got {:?}",
+                ended.end()
+            )
+        };
+        assert_eq!(error.kind(), ToolExecutionErrorKind::ExecutionFailed);
+        assert_eq!(error.detail(), Some(&expected));
     }
 
     /// INV-025: the same path refuses to bind *any* evidence when GitHub

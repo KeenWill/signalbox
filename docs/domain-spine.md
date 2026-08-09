@@ -3862,8 +3862,11 @@ impl StoppedToolRoundModelCallIdentities {
     ) -> Self;
 }
 pub struct FailedModelCallTurnIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...),
-// failure_entry() and terminal_frontier()
+impl FailedModelCallTurnIdentities {
+    pub const fn failure_entry(&self) -> SemanticTranscriptEntryId;
+    pub const fn terminal_frontier(&self) -> ContextFrontierId;
+}
+// constructor plus with_pending_steering_reclassifications(...)
 pub struct CancelledModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...) and into_ambiguous()
 pub struct PhysicalCancellationModelCallTurnIdentities { /* private */ }

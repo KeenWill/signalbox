@@ -1687,10 +1687,31 @@ fn every_subject() -> Result<Vec<ReactionSubject>, Box<dyn Error>> {
 }
 
 /// The subject one reaction event carries, for the inventory assertion.
+///
+/// Exhaustive over `RepoWatchEventKindV1` rather than closed with a wildcard:
+/// the inventory test's coverage claim is only as good as the set of kinds
+/// this projection considered, and a wildcard would let a new variant join the
+/// enum without the claim being revisited. Deliberately dependency-free — a
+/// new kind makes this match non-exhaustive and stops the crate compiling.
 fn reacted_subject(event: &RepoWatchEvent) -> Result<ReactionSubject, Box<dyn Error>> {
     match event.kind() {
         RepoWatchEventKindV1::ReactionChanged { subject, .. } => Ok(*subject),
-        other => Err(format!("expected a reaction event, got {other:?}").into()),
+        other @ (RepoWatchEventKindV1::PullRequestOpened
+        | RepoWatchEventKindV1::PullRequestClosed
+        | RepoWatchEventKindV1::PullRequestMerged
+        | RepoWatchEventKindV1::HeadChanged { .. }
+        | RepoWatchEventKindV1::MergeableStateChanged { .. }
+        | RepoWatchEventKindV1::ChecksCompleted { .. }
+        | RepoWatchEventKindV1::CheckRunCompleted { .. }
+        | RepoWatchEventKindV1::BranchWorkflowRunCompleted { .. }
+        | RepoWatchEventKindV1::ReviewSubmitted { .. }
+        | RepoWatchEventKindV1::ThreadOpened { .. }
+        | RepoWatchEventKindV1::ThreadResolved { .. }
+        | RepoWatchEventKindV1::Labeled { .. }
+        | RepoWatchEventKindV1::Unlabeled { .. }
+        | RepoWatchEventKindV1::BaseAdvanced { .. }) => {
+            Err(format!("expected a reaction event, got {other:?}").into())
+        }
     }
 }
 

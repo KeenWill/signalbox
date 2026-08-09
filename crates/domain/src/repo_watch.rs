@@ -1826,31 +1826,97 @@ const fn check_conclusion_name(conclusion: CheckConclusion) -> &'static str {
 #[cfg(test)]
 mod tests {
 
-    /// The successor chain and its predecessor pair must stay mutual
-    /// inverses, so a link written in one direction only shortens nothing
-    /// silently. Exhaustiveness forces the arms to exist; this forces them to
-    /// agree.
+    /// The inventory is pinned as a literal, and every edge of the successor
+    /// chain is checked against its predecessor one assertion at a time.
+    ///
+    /// Straight-line on purpose: each edge stays independently attributable,
+    /// so a broken link names itself instead of surfacing as one loop
+    /// iteration. The literal also pins order, membership, and count at once —
+    /// adding a variant fails here until the claim is revisited, which is the
+    /// point.
     #[test]
     fn every_event_kind_is_linked_into_the_inventory() {
-        let all = RepoWatchEventKindNameV1::all();
+        assert_eq!(
+            RepoWatchEventKindNameV1::all(),
+            vec![
+                RepoWatchEventKindNameV1::PullRequestOpened,
+                RepoWatchEventKindNameV1::PullRequestClosed,
+                RepoWatchEventKindNameV1::PullRequestMerged,
+                RepoWatchEventKindNameV1::HeadChanged,
+                RepoWatchEventKindNameV1::MergeableStateChanged,
+                RepoWatchEventKindNameV1::ChecksCompleted,
+                RepoWatchEventKindNameV1::CheckRunCompleted,
+                RepoWatchEventKindNameV1::BranchWorkflowRunCompleted,
+                RepoWatchEventKindNameV1::ReviewSubmitted,
+                RepoWatchEventKindNameV1::ThreadOpened,
+                RepoWatchEventKindNameV1::ThreadResolved,
+                RepoWatchEventKindNameV1::Labeled,
+                RepoWatchEventKindNameV1::Unlabeled,
+                RepoWatchEventKindNameV1::BaseAdvanced,
+                RepoWatchEventKindNameV1::ReactionChanged,
+            ]
+        );
 
         assert_eq!(
-            all.first().and_then(|head| head.inventory_predecessor()),
-            None,
-            "the inventory head has no predecessor"
+            RepoWatchEventKindNameV1::PullRequestOpened.inventory_predecessor(),
+            None
         );
-        for (current, next) in all.iter().zip(all.iter().skip(1)) {
-            assert_eq!(
-                next.inventory_predecessor(),
-                Some(*current),
-                "{next:?} must name {current:?} as its predecessor"
-            );
-        }
-        let unique = all
-            .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(unique.len(), all.len(), "the inventory lists no kind twice");
+        assert_eq!(
+            RepoWatchEventKindNameV1::PullRequestClosed.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::PullRequestOpened)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::PullRequestMerged.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::PullRequestClosed)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::HeadChanged.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::PullRequestMerged)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::MergeableStateChanged.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::HeadChanged)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::ChecksCompleted.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::MergeableStateChanged)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::CheckRunCompleted.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::ChecksCompleted)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::BranchWorkflowRunCompleted.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::CheckRunCompleted)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::ReviewSubmitted.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::ThreadOpened.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::ReviewSubmitted)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::ThreadResolved.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::ThreadOpened)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::Labeled.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::ThreadResolved)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::Unlabeled.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::Labeled)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::BaseAdvanced.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::Unlabeled)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::ReactionChanged.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::BaseAdvanced)
+        );
     }
     use std::{error::Error, num::NonZeroU64, time::Duration};
 

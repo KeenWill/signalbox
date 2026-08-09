@@ -10262,6 +10262,44 @@ fn announcement_for(
     }
 }
 
+/// Role-aware identities for the classifier's straight-line cases.
+///
+/// The classifier reads only the turn and producing call it is asked about, so
+/// its fixture needs distinct identities rather than particular ones. Minting
+/// them by role keeps that fact visible and leaves no arbitrary hexadecimal in
+/// the test body.
+#[derive(Default)]
+struct ClassifierFixtureIds {
+    next: u128,
+}
+
+impl ClassifierFixtureIds {
+    fn next_value(&mut self) -> Uuid {
+        self.next += 1;
+        Uuid::from_u128(0x9100 + self.next)
+    }
+
+    fn next_turn(&mut self) -> TurnId {
+        TurnId::from_uuid(self.next_value())
+    }
+
+    fn next_call(&mut self) -> ModelCallId {
+        ModelCallId::from_uuid(self.next_value())
+    }
+
+    fn next_tool_attempt(&mut self) -> ToolAttemptId {
+        ToolAttemptId::from_uuid(self.next_value())
+    }
+
+    fn next_frontier(&mut self) -> ContextFrontierId {
+        ContextFrontierId::from_uuid(self.next_value())
+    }
+
+    fn next_entry(&mut self) -> SemanticTranscriptEntryId {
+        SemanticTranscriptEntryId::from_uuid(self.next_value())
+    }
+}
+
 /// The batch states announced for `turn`/`call`, in dispatch order.
 fn announced_batch_states(
     dispatched: &[DispatchedOutboxEventKind],
@@ -10294,12 +10332,16 @@ fn announces_a_definitive_turn_outcome(
 /// kind that bears on neither.
 #[test]
 fn announcement_for_classifies_each_outcome() {
-    let turn = TurnId::from_uuid(Uuid::from_u128(0x9101));
-    let other_turn = TurnId::from_uuid(Uuid::from_u128(0x9102));
-    let call = ModelCallId::from_uuid(Uuid::from_u128(0x9103));
-    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(0x9104));
-    let frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x9105));
-    let entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x9106));
+    // Named by role. Only distinctness and which identity plays which part
+    // matter here — no assertion depends on a particular hexadecimal value,
+    // and spelling the numbers inline would present each as load-bearing.
+    let mut ids = ClassifierFixtureIds::default();
+    let turn = ids.next_turn();
+    let other_turn = ids.next_turn();
+    let call = ids.next_call();
+    let attempt = ids.next_tool_attempt();
+    let frontier = ids.next_frontier();
+    let entry = ids.next_entry();
 
     assert_eq!(
         announcement_for(

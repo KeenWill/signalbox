@@ -28,12 +28,12 @@ use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, CorrelatedToolAttemptObservation, CurrentToolAttempt,
     DecideToolRequest, DurableCommandId, EndedToolAttempt, ModelCallId, NormalizedToolArguments,
     ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId, SessionId,
-    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolAttemptCrashOutcome,
-    ToolAttemptDispatchCorrelation, ToolAttemptId, ToolAttemptReconstitutionInput,
-    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
-    ToolBatchReconstitutionInput, ToolDispatchAuthority, ToolDispatchGeneration, ToolEffectClass,
-    ToolExecutionError, ToolName, ToolRequestId, ToolRequestOrdinal,
-    ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
+    ToolApprovalDecision, ToolApprovalPosture, ToolApprovalResolutionReconstitutionInput,
+    ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchAuthority,
+    ToolDispatchGeneration, ToolEffectClass, ToolExecutionError, ToolName, ToolRequestId,
+    ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
 };
 
 use crate::{
@@ -125,6 +125,15 @@ pub fn prepared_single_attempt_batch(
         proposal.name,
         proposal.arguments,
     )
+    // The stored posture is part of what made the attempt admissible, so it
+    // follows the approval rather than the reconstitution default: a
+    // policy-auto approval on a `Human`-posture request is a pairing the
+    // application never records, and reconstitution admitting it would let an
+    // auto-approved adapter test pass against speculative authority.
+    .with_approval_posture(match proposal.approval {
+        PreparedAttemptApproval::PolicyAuto => ToolApprovalPosture::Auto,
+        PreparedAttemptApproval::UserConfirmation { .. } => ToolApprovalPosture::Human,
+    })
     .into_request();
     let approval = match proposal.approval {
         PreparedAttemptApproval::PolicyAuto => {
