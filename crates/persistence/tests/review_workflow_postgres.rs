@@ -9247,6 +9247,64 @@ async fn review_orchestration_snapshot_excludes_a_write_committed_after_it_began
     Ok(())
 }
 
+/// A snapshot under construction blocks no writer.
+///
+/// This is the regression the redesign exists for. The read previously held
+/// `SHARE` locks over 34 tables for its whole duration, two of which were
+/// `accepted_input` and `turn_lifecycle` — so daemon-wide and across every
+/// session, no user could submit input, no queued turn could start, no
+/// in-flight turn could advance, and no approval could be recorded until a
+/// client-facing read finished.
+///
+/// The snapshot is held mid-construction on a table lock, and a real input
+/// submission that starts a turn must complete anyway. Against the lock-guarded
+/// form this times out: that form takes `accepted_input` first in its lock
+/// inventory, so it is still holding it while it waits for the rest.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_snapshot_does_not_block_input_or_turns() -> Result<(), Box<dyn Error>>
+{
+    const WRITER_SESSION: u128 = 0x7e0;
+    const WRITER_INPUT: u128 = 0x7e1;
+    const WRITER_TURN: u128 = 0x7e2;
+    const WRITER_OFFSET: u128 = 0x7e3;
+
+    let (_container, pool) = migrated_postgres_with_max_connections(6).await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+
+    let mut blocker = pool.begin().await?;
+    sqlx::query("LOCK TABLE review_orchestration_import IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await?;
+
+    let reader = fixture.store.clone();
+    let attempt_id = fixture.attempt_id;
+    let reading = tokio::spawn(async move { reader.load_snapshot(attempt_id).await });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the snapshot must be mid-construction before the writer runs"
+    );
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        insert_active_turn_with_offset(
+            &pool,
+            SessionId::from_uuid(uuid(WRITER_SESSION)),
+            AcceptedInputId::from_uuid(uuid(WRITER_INPUT)),
+            TurnId::from_uuid(uuid(WRITER_TURN)),
+            WRITER_OFFSET,
+        ),
+    )
+    .await
+    .expect("a snapshot under construction must not delay input submission or turn start");
+
+    blocker.rollback().await?;
+    tokio::time::timeout(std::time::Duration::from_secs(60), reading)
+        .await???
+        .expect("the sealed attempt has a snapshot");
+    Ok(())
+}
+
 /// The snapshot holds exactly one pooled connection for its whole construction.
 ///
 /// A single connection is a single transaction, which is what makes the read

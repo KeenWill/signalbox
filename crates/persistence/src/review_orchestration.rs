@@ -116,9 +116,12 @@ impl PostgresReviewOrchestrationStore {
         &self,
         attempt: ReviewOrchestrationAttemptId,
     ) -> Result<Option<ReviewOrchestrationAttempt>, ReviewOrchestrationStoreError> {
-        let mut connection = self.pool.acquire().await?;
-        self.load_attempt_on_connection(&mut connection, attempt)
-            .await
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .load_attempt_on_connection(&mut transaction, attempt)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
     }
 
     async fn load_attempt_on_connection(
@@ -276,15 +279,18 @@ impl PostgresReviewOrchestrationStore {
         &self,
         attempt: ReviewOrchestrationAttemptId,
     ) -> Result<Option<ReviewOrchestrationCurrentStage>, ReviewOrchestrationStoreError> {
-        let mut connection = self.pool.acquire().await?;
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
         let Some(immutable) = self
-            .load_attempt_on_connection(&mut connection, attempt)
+            .load_attempt_on_connection(&mut transaction, attempt)
             .await?
         else {
+            transaction.commit().await?;
             return Ok(None);
         };
         let mut facts = AttemptFacts::new(self, attempt, immutable);
-        Ok(Some(facts.current_stage(&mut connection).await?))
+        let stage = facts.current_stage(&mut transaction).await?;
+        transaction.commit().await?;
+        Ok(Some(stage))
     }
 
     /// Loads every daemon adapter fact from one coherent database snapshot.
@@ -894,9 +900,12 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
         &self,
         attempt: ReviewOrchestrationAttemptId,
     ) -> Result<Option<ReviewImportOutcome>, Self::Error> {
-        let mut connection = self.pool.acquire().await?;
-        self.load_import_on_connection(&mut connection, attempt)
-            .await
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .load_import_on_connection(&mut transaction, attempt)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
     }
 
     async fn record_import(
@@ -947,9 +956,12 @@ impl ReviewOrchestrationAttemptStore for PostgresReviewOrchestrationStore {
         &self,
         attempt: ReviewOrchestrationAttemptId,
     ) -> Result<Vec<ReviewConcernClaim>, Self::Error> {
-        let mut connection = self.pool.acquire().await?;
-        self.load_concern_claims_on_connection(&mut connection, attempt)
-            .await
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .load_concern_claims_on_connection(&mut transaction, attempt)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
     }
 
     async fn record_concern_claim(
@@ -1287,9 +1299,12 @@ impl PostgresReviewOrchestrationStore {
         &self,
         pass_id: ReviewPassId,
     ) -> Result<(ReviewPassEvidence, ReviewRunEvidence), ReviewOrchestrationStoreError> {
-        let mut connection = self.pool.acquire().await?;
-        self.load_evidence_on_connection(&mut connection, pass_id)
-            .await
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .load_evidence_on_connection(&mut transaction, pass_id)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
     }
 
     async fn load_evidence_on_connection(
@@ -1318,9 +1333,12 @@ impl PostgresReviewOrchestrationStore {
         attempt: ReviewOrchestrationAttemptId,
         row: &PgRow,
     ) -> Result<ReviewConcernClaim, ReviewOrchestrationStoreError> {
-        let mut connection = self.pool.acquire().await?;
-        self.decode_concern_claim_on_connection(&mut connection, attempt, row)
-            .await
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .decode_concern_claim_on_connection(&mut transaction, attempt, row)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
     }
 
     async fn decode_concern_claim_on_connection(
@@ -1381,8 +1399,10 @@ impl PostgresReviewOrchestrationStore {
         &self,
         pass: Option<ReviewPassId>,
     ) -> Result<ReviewPassRef, ReviewOrchestrationStoreError> {
-        let mut connection = self.pool.acquire().await?;
-        self.pass_ref_on_connection(&mut connection, pass).await
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self.pass_ref_on_connection(&mut transaction, pass).await?;
+        transaction.commit().await?;
+        Ok(loaded)
     }
 
     async fn pass_ref_on_connection(
@@ -1631,8 +1651,10 @@ async fn load_judgment_plan_impl(
     store: &PostgresReviewOrchestrationStore,
     attempt: ReviewOrchestrationAttemptId,
 ) -> Result<Option<ReviewJudgmentPlan>, ReviewOrchestrationStoreError> {
-    let mut connection = store.pool.acquire().await?;
-    load_judgment_plan_on_connection(store, &mut connection, attempt).await
+    let mut transaction = begin_repeatable_read(&store.pool).await?;
+    let loaded = load_judgment_plan_on_connection(store, &mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(loaded)
 }
 
 async fn load_judgment_plan_on_connection(
@@ -1704,8 +1726,10 @@ async fn load_applied_effects_impl(
     store: &PostgresReviewOrchestrationStore,
     attempt: ReviewOrchestrationAttemptId,
 ) -> Result<Vec<ReviewJudgmentEffectId>, ReviewOrchestrationStoreError> {
-    let mut connection = store.pool.acquire().await?;
-    load_applied_effects_on_connection(&mut connection, attempt).await
+    let mut transaction = begin_repeatable_read(&store.pool).await?;
+    let loaded = load_applied_effects_on_connection(&mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(loaded)
 }
 
 async fn load_applied_effects_on_connection(
@@ -1833,8 +1857,10 @@ async fn load_finding_inventory(
     attempt: ReviewOrchestrationAttemptId,
     stage: &'static str,
 ) -> Result<Option<Vec<ReviewFindingRef>>, ReviewOrchestrationStoreError> {
-    let mut connection = store.pool.acquire().await?;
-    load_finding_inventory_on_connection(&mut connection, attempt, stage).await
+    let mut transaction = begin_repeatable_read(&store.pool).await?;
+    let loaded = load_finding_inventory_on_connection(&mut transaction, attempt, stage).await?;
+    transaction.commit().await?;
+    Ok(loaded)
 }
 
 async fn load_finding_inventory_on_connection(
@@ -1950,8 +1976,10 @@ async fn load_repairs(
     store: &PostgresReviewOrchestrationStore,
     attempt: ReviewOrchestrationAttemptId,
 ) -> Result<Option<Vec<ReviewRepairMemberOutcome>>, ReviewOrchestrationStoreError> {
-    let mut connection = store.pool.acquire().await?;
-    load_repairs_on_connection(store, &mut connection, attempt).await
+    let mut transaction = begin_repeatable_read(&store.pool).await?;
+    let loaded = load_repairs_on_connection(store, &mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(loaded)
 }
 
 async fn load_repairs_on_connection(
@@ -2100,8 +2128,10 @@ async fn load_publications(
     store: &PostgresReviewOrchestrationStore,
     attempt: ReviewOrchestrationAttemptId,
 ) -> Result<Option<Vec<ReviewPublicationMemberOutcome>>, ReviewOrchestrationStoreError> {
-    let mut connection = store.pool.acquire().await?;
-    load_publications_on_connection(store, &mut connection, attempt).await
+    let mut transaction = begin_repeatable_read(&store.pool).await?;
+    let loaded = load_publications_on_connection(store, &mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(loaded)
 }
 
 async fn load_publications_on_connection(
@@ -2770,4 +2800,42 @@ impl From<ReviewWorkflowStoreError> for ReviewOrchestrationStoreError {
 
 const fn corruption(detail: &'static str) -> ReviewOrchestrationStoreError {
     ReviewOrchestrationStoreError::Corruption(detail)
+}
+
+#[cfg(test)]
+mod tests {
+    /// No loader in this file may reach the database on a bare pooled
+    /// connection.
+    ///
+    /// The `*_on_connection` helpers exist so `load_snapshot` can run the whole
+    /// projection inside one `REPEATABLE READ` transaction. Handed a connection
+    /// checked straight out of the pool instead, those same helpers run each of
+    /// their statements as a separate `READ COMMITTED` autocommit statement.
+    /// That silently drops the per-loader coherence the standalone entry points
+    /// used to inherit from `ReviewWorkflowStore`'s own transactions — a
+    /// multi-statement external-link or pass load could then straddle a
+    /// concurrent commit and return exactly the torn external-link projection
+    /// that `docs/spec/review-workflows.md` rules out.
+    ///
+    /// Every standalone entry point must therefore open and commit a
+    /// transaction, so this holds for the file as a whole rather than for a
+    /// list of functions that a new loader could be added beside.
+    #[test]
+    fn no_loader_reaches_the_database_on_a_bare_pooled_connection() {
+        // Assembled rather than written out, so this test does not match itself.
+        let bare = concat!("pool", ".acquire()");
+        let offenders = include_str!("review_orchestration.rs")
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(bare))
+            .map(|(index, _)| index + 1)
+            .collect::<Vec<_>>();
+
+        assert!(
+            offenders.is_empty(),
+            "review_orchestration.rs reaches the database on a bare pooled \
+             connection at line(s) {offenders:?}; a standalone loader must open a \
+             repeatable-read transaction so its statements share one snapshot"
+        );
+    }
 }
