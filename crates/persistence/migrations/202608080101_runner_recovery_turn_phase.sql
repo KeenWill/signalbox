@@ -392,6 +392,42 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
     IF lifecycle.runner_recovery_tool_attempt_id IS NULL
+       AND lifecycle.active_tool_round_call_id IS NULL
+       AND EXISTS (
+            SELECT 1
+              FROM turn_attempt AS yielded_attempt
+              JOIN model_call AS producing_call
+                ON producing_call.turn_attempt_id =
+                    yielded_attempt.turn_attempt_id
+               AND producing_call.turn_id = yielded_attempt.turn_id
+               AND producing_call.session_id = yielded_attempt.session_id
+              JOIN tool_round AS round
+                ON round.producing_model_call_id =
+                    producing_call.model_call_id
+               AND round.turn_id = producing_call.turn_id
+               AND round.session_id = producing_call.session_id
+             WHERE yielded_attempt.turn_id = lifecycle.turn_id
+               AND yielded_attempt.session_id = lifecycle.session_id
+               AND yielded_attempt.state_kind = 'ended'
+               AND yielded_attempt.end_variant = 'without_stop'
+               AND yielded_attempt.end_disposition =
+                    'yielded_to_durable_wait'
+               AND yielded_attempt.interrupt_command_id IS NULL
+               AND yielded_attempt.interrupt_predecessor_turn_id IS NULL
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM turn_attempt AS continuation
+                     WHERE continuation.continued_from_attempt_id =
+                            yielded_attempt.turn_attempt_id
+               )
+               AND round.boundary_kind = 'continuing'
+       )
+    THEN
+        RAISE EXCEPTION
+            'runner recovery wait cannot hide its yielded tool round'
+            USING ERRCODE = '23514';
+    END IF;
+    IF lifecycle.runner_recovery_tool_attempt_id IS NULL
        AND lifecycle.active_tool_round_call_id IS NOT NULL
        AND (
             NOT EXISTS (
