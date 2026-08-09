@@ -384,8 +384,11 @@ Representation rules, all enforced in the schema:
   placement revision; its issuing turn attempt must be the same yielded
   chain-tip that authorizes the wait, and its producing call must be the exact
   active tool-round boundary retained by that wait. A nullable
-  interrupted-attempt arm admits a retained tool round only when the round
-  contains no in-flight or ambiguous physical attempt. Lifecycle-side and
+  interrupted-attempt arm admits a retained tool round only when its current
+  attempt inventory contains no prepared, in-flight, or ambiguous physical
+  attempt; retired claimed-retry predecessors are historical inventory and do
+  not block that arm. A present interrupted attempt must be the round's sole
+  current prepared, in-flight, or ambiguous attempt. Lifecycle-side and
   placement-side checks lock the shared session-scheduler row before evaluating
   the relationship, so a concurrent placement advance cannot validate against a
   stale loss. The lifecycle transition matrix admits the phase from an

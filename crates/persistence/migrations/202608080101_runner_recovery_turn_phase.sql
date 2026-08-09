@@ -290,7 +290,7 @@ BEGIN
             OR EXISTS (
                 SELECT 1
                   FROM tool_request AS request
-                  JOIN tool_attempt AS attempt
+                  JOIN runner_current_tool_attempt AS attempt
                     ON attempt.request_id = request.request_id
                    AND attempt.turn_id = request.turn_id
                    AND attempt.session_id = request.session_id
@@ -299,7 +299,7 @@ BEGIN
                    AND request.turn_id = checked_turn_id
                    AND request.session_id = checked_session_id
                    AND (
-                        attempt.state_kind = 'in_flight'
+                        attempt.state_kind IN ('prepared', 'in_flight')
                         OR (
                             attempt.state_kind = 'terminal'
                             AND attempt.terminal_disposition_kind = 'ambiguous'
@@ -313,7 +313,8 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
     IF lifecycle.runner_recovery_tool_attempt_id IS NOT NULL
-       AND NOT EXISTS (
+       AND (
+        NOT EXISTS (
             SELECT 1
               FROM tool_attempt AS attempt
               JOIN tool_request AS request
@@ -361,6 +362,28 @@ BEGIN
                AND leased_placement.state_kind = 'pinned'
                AND leased_placement.pinned_runner_id =
                     lifecycle.runner_recovery_runner_id
+        )
+        OR EXISTS (
+            SELECT 1
+              FROM tool_request AS request
+              JOIN runner_current_tool_attempt AS attempt
+                ON attempt.request_id = request.request_id
+               AND attempt.turn_id = request.turn_id
+               AND attempt.session_id = request.session_id
+             WHERE request.producing_model_call_id =
+                    lifecycle.active_tool_round_call_id
+               AND request.turn_id = checked_turn_id
+               AND request.session_id = checked_session_id
+               AND attempt.attempt_id <>
+                    lifecycle.runner_recovery_tool_attempt_id
+               AND (
+                    attempt.state_kind IN ('prepared', 'in_flight')
+                    OR (
+                        attempt.state_kind = 'terminal'
+                        AND attempt.terminal_disposition_kind = 'ambiguous'
+                    )
+               )
+        )
        )
     THEN
         RAISE EXCEPTION
