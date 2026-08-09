@@ -1373,7 +1373,10 @@ def fixture_cases_by_specification() -> dict[str, list]:
     }
 
 
-def misdeclared_exercised_specs() -> list[str]:
+def misdeclared_exercised_specs(
+    specifications: tuple[PredicateSpec, ...] | None = None,
+    cases: dict[str, list] | None = None,
+) -> list[str]:
     """Specifications whose `exercised` flag disagrees with their fixtures.
 
     Runs outside test bodies, and checks both directions. A flag set without
@@ -1381,10 +1384,18 @@ def misdeclared_exercised_specs() -> list[str]:
     the silent pass this module is built to prevent, turned inward. A flag left
     unset while fixtures exist is the opposite mistake: the exhaustiveness check
     keeps demanding work that is already done.
+
+    The registry and its fixture map are arguments so both branches can be
+    driven from controlled inputs. Called against the real ones they report
+    nothing, which is the answer that proves least: a helper only ever run over
+    a correct registry would keep passing if either branch were deleted.
     """
-    cases = fixture_cases_by_specification()
+    if specifications is None:
+        specifications = PREDICATE_SPECS
+    if cases is None:
+        cases = fixture_cases_by_specification()
     problems: list[str] = []
-    for spec in PREDICATE_SPECS:
+    for spec in specifications:
         backing = cases.get(spec.identifier, [])
         if spec.exercised and not backing:
             problems.append(
@@ -2796,6 +2807,44 @@ class WorkflowReadingTests(unittest.TestCase):
         every test that depends on it instead of failing. Promotion is a
         one-word edit, and this failure is what demands it."""
         self.assertEqual(misdeclared_presence(), [])
+
+    def test_a_specification_claiming_fixtures_it_lacks_is_named(self) -> None:
+        """The branch that closes the reported hole, driven from a controlled
+        registry rather than from the repository's own, which is correct and so
+        exercises neither branch."""
+        claimed = PredicateSpec(
+            identifier="claims-fixtures-it-lacks",
+            workflow=COVERAGE_WORKFLOW.name,
+            presence=PENDING,
+            exercised=True,
+            role="a specification whose flag is set and whose fixtures are not written",
+            tokens=("irrelevant",),
+        )
+
+        problems = misdeclared_exercised_specs((claimed,), {})
+
+        self.assertEqual(len(problems), 1)
+        self.assertIn("claims-fixtures-it-lacks", problems[0])
+        self.assertIn("exercised=True", problems[0])
+
+    def test_a_specification_hiding_fixtures_it_has_is_named(self) -> None:
+        """The other branch. Fixtures written against a specification still
+        declaring itself uncovered leave the exhaustiveness check demanding
+        work that is already done."""
+        hidden = PredicateSpec(
+            identifier="hides-fixtures-it-has",
+            workflow=COVERAGE_WORKFLOW.name,
+            presence=PENDING,
+            exercised=False,
+            role="a specification with cases behind it and its flag unset",
+            tokens=("irrelevant",),
+        )
+
+        problems = misdeclared_exercised_specs((hidden,), {"hides-fixtures-it-has": ["a case"]})
+
+        self.assertEqual(len(problems), 1)
+        self.assertIn("hides-fixtures-it-has", problems[0])
+        self.assertIn("exercised=False", problems[0])
 
     def test_every_exercised_specification_is_backed_by_fixtures(self) -> None:
         """`exercised` decides whether a landed program counts as covered, so
