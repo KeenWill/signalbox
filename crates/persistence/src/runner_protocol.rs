@@ -2302,6 +2302,19 @@ impl RunnerProtocolStore {
                  SELECT 1
                    FROM runner_lease_generation
                   WHERE lease_id = $1 AND predecessor_generation = $2
+                 UNION ALL
+                 SELECT 1
+                   FROM turn_runner_recovery_interrupt_effect AS stopped
+                   JOIN tool_attempt AS source_attempt
+                     ON source_attempt.attempt_id =
+                        stopped.interrupted_tool_attempt_id
+                    AND source_attempt.session_id = stopped.session_id
+                    AND source_attempt.turn_id = stopped.turn_id
+                   JOIN runner_lease_generation AS source_lease
+                     ON source_lease.attempt_id = source_attempt.attempt_id
+                    AND source_lease.session_id = source_attempt.session_id
+                  WHERE source_lease.lease_id = $1
+                    AND source_lease.generation = $2
              )",
         )
         .bind(lease.into_uuid())
@@ -3692,20 +3705,18 @@ async fn decode_placement(
             sandbox: request.sandbox,
             permission_overrides,
         };
-        match state_kind.as_str() {
-            "pinned" => SessionRunnerPlacementState::Pinned(pinned),
-            "runner_lost" => {
+        match (state_kind.as_str(), lost_runner, loss_source) {
+            ("pinned", None, None) => SessionRunnerPlacementState::Pinned(pinned),
+            ("runner_lost", Some(lost), Some(source)) if lost == runner => {
                 SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
-                    pinned,
-                    loss_source.ok_or(RunnerProtocolCorruption::IncompleteInventory)?,
+                    pinned, source,
                 ))
             }
-            "runner_abandoned" => SessionRunnerPlacementState::RunnerAbandoned(
-                AbandonedRunnerPlacement::Pinned(Box::new(LostPinnedRunnerPlacement::from_stored(
-                    pinned,
-                    loss_source.ok_or(RunnerProtocolCorruption::IncompleteInventory)?,
-                ))),
-            ),
+            ("runner_abandoned", Some(lost), Some(source)) if lost == runner => {
+                SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(
+                    Box::new(LostPinnedRunnerPlacement::from_stored(pinned, source)),
+                ))
+            }
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
     };

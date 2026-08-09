@@ -4071,7 +4071,7 @@ pub(crate) async fn load_scheduling_projection(
         terminal_frontier_id: Uuid,
         direct_selection_id: Uuid,
     }
-    let preceding_non_accepted_terminal = sqlx::query_as::<_, PrecedingNonAcceptedTerminalRow>(
+    let preceding_non_accepted_terminals = sqlx::query_as::<_, PrecedingNonAcceptedTerminalRow>(
         "SELECT terminal.turn_id AS turn_id,
                 turn_lifecycle_effective_terminal_frontier(
                     terminal.session_id, terminal.turn_id
@@ -4097,13 +4097,12 @@ pub(crate) async fn load_scheduling_projection(
             AND turn_lifecycle_effective_terminal_frontier(
                     terminal.session_id, terminal.turn_id
                 ) IS NOT NULL
-          ORDER BY queued.acceptance_position
-          LIMIT 1",
+          ORDER BY queued.acceptance_position",
     )
     .bind(session_id_to_uuid(session_id))
-    .fetch_optional(&mut *connection)
+    .fetch_all(&mut *connection)
     .await?;
-    if let Some(preceding) = preceding_non_accepted_terminal.as_ref() {
+    for preceding in &preceding_non_accepted_terminals {
         delegated_turns.insert(turn_id_from_uuid(preceding.turn_id));
         required_frontiers.insert(preceding.terminal_frontier_id);
     }
@@ -5114,7 +5113,7 @@ pub(crate) async fn load_scheduling_projection(
     if let Some(imported_session) = imported_session {
         input = input.with_imported_session(imported_session);
     }
-    if let Some(preceding) = preceding_non_accepted_terminal {
+    for preceding in preceding_non_accepted_terminals {
         input = input.with_preceding_non_accepted_terminal(
             session_id,
             TurnId::from_uuid(preceding.turn_id),
