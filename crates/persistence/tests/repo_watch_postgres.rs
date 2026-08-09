@@ -1365,7 +1365,9 @@ fn labeled_event(
 }
 
 /// One fixture `ReactionChanged` event whose only meaningful variation is the
-/// object the configured reviewer reacted to.
+/// object the configured reactor reacted to. The reactor is `REACTOR`, kept
+/// distinct from the context author and from `REVIEW_REVIEWER` on purpose, so
+/// a cross-wired durable column stays visible.
 fn reaction_event(
     ids: &mut FixedEventIds,
     subject: ReactionSubject,

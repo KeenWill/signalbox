@@ -3472,10 +3472,31 @@ mod tests {
         );
     }
 
-    /// Answers a creation dispatch with one fixed transport rejection.
-    #[derive(Clone, Copy, Debug)]
+    /// Answers a creation dispatch with one fixed transport rejection, and
+    /// records that it was reached.
+    ///
+    /// Counting dispatches is what makes the tests below about the *server's*
+    /// rejection: an executor that failed before dispatch — on credentials,
+    /// egress policy, or argument decoding — can produce the same `KnownFailed`
+    /// evidence and the same commit-ambiguous error, so without this the
+    /// assertions would hold for a path that never left the process.
+    #[derive(Clone, Debug)]
     struct RejectingCreateTransport {
         status: u16,
+        dispatches: Arc<Mutex<usize>>,
+    }
+
+    impl RejectingCreateTransport {
+        fn new(status: u16) -> (Self, Arc<Mutex<usize>>) {
+            let dispatches = Arc::new(Mutex::new(0));
+            (
+                Self {
+                    status,
+                    dispatches: Arc::clone(&dispatches),
+                },
+                dispatches,
+            )
+        }
     }
 
     impl GitHubTransport for RejectingCreateTransport {
@@ -3485,6 +3506,10 @@ mod tests {
             _credential: &CredentialValue,
             _policy: &GitHubEgressPolicy,
         ) -> Result<GitHubResult, GitHubTransportFailure> {
+            *self
+                .dispatches
+                .lock()
+                .expect("dispatch counter lock is available") += 1;
             Err(GitHubTransportFailure::rejected(self.status))
         }
     }
@@ -3500,11 +3525,17 @@ mod tests {
     /// variant is what is asserted.
     #[tokio::test]
     async fn inv_025_definitive_create_rejection_binds_known_failure_evidence() {
-        let outcome = create_pull_request_evidence(RejectingCreateTransport {
-            status: FORBIDDEN_STATUS,
-        })
-        .await;
+        let (transport, dispatches) = RejectingCreateTransport::new(FORBIDDEN_STATUS);
+        let outcome = create_pull_request_evidence(transport).await;
         let expected = make_detail(REQUEST_REJECTED_DETAIL).expect("fixed detail is valid");
+
+        assert_eq!(
+            *dispatches
+                .lock()
+                .expect("dispatch counter lock is available"),
+            1,
+            "the evidence must come from exactly one real server rejection"
+        );
 
         assert_eq!(
             outcome.evidence,
@@ -3528,11 +3559,16 @@ mod tests {
     /// reported as a definitive outcome the agent would retry.
     #[tokio::test]
     async fn inv_025_server_side_create_rejection_binds_no_evidence() {
-        let outcome = create_pull_request_evidence(RejectingCreateTransport {
-            status: BAD_GATEWAY_STATUS,
-        })
-        .await;
+        let (transport, dispatches) = RejectingCreateTransport::new(BAD_GATEWAY_STATUS);
+        let outcome = create_pull_request_evidence(transport).await;
 
+        assert_eq!(
+            *dispatches
+                .lock()
+                .expect("dispatch counter lock is available"),
+            1,
+            "the ambiguity must come from exactly one real server rejection"
+        );
         assert_eq!(outcome.evidence, None);
         // Absence of evidence is not the claim. "No evidence, no commit" is
         // equally true when `failure_evidence` returns a *definite* executor

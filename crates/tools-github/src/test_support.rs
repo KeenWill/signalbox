@@ -9,13 +9,14 @@
 
 use signalbox_application::{
     FixtureToolExecutionTransaction, FixtureTransactionFailures, InProcessToolDispatchGate,
-    PreparedAttemptIdentities, PreparedAttemptProposal, RecordingToolExecutor,
-    ToolExecutionService, ToolExecutionServiceError, ToolExecutionServiceOutcome,
-    ToolExecutorEvidence, UuidV7ToolLoopIdGenerator, prepared_single_attempt_batch,
+    PreparedAttemptApproval, PreparedAttemptIdentities, PreparedAttemptProposal,
+    RecordingToolExecutor, ToolExecutionService, ToolExecutionServiceError,
+    ToolExecutionServiceOutcome, ToolExecutorEvidence, UuidV7ToolLoopIdGenerator,
+    prepared_single_attempt_batch,
 };
 use signalbox_domain::{
-    ContextFrontierId, ModelCallId, NormalizedToolArguments, SessionId, ToolAttemptId,
-    ToolEffectClass, ToolName, ToolRequestId, TurnAttemptId, TurnId,
+    ContextFrontierId, DurableCommandId, ModelCallId, NormalizedToolArguments, SessionId,
+    ToolAttemptId, ToolEffectClass, ToolName, ToolRequestId, TurnAttemptId, TurnId,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialAccessError, CredentialValue};
 
@@ -40,6 +41,7 @@ const REQUEST_IDENTITY: u128 = 0x9004;
 const ATTEMPT_IDENTITY: u128 = 0x9005;
 const ISSUING_ATTEMPT_IDENTITY: u128 = 0x9006;
 const FRONTIER_IDENTITY: u128 = 0x9007;
+const APPROVAL_IDENTITY: u128 = 0x9008;
 
 /// Credentials that always resolve to the synthetic fixture token.
 #[derive(Clone, Copy, Debug)]
@@ -147,6 +149,12 @@ fn prepared_create_batch() -> signalbox_domain::ToolBatch {
             // is only built when the prepared attempt agrees, so this class is
             // fixed by the production declaration rather than chosen here.
             effect_class: ToolEffectClass::ExternalEffect,
+            // Creation is declared `ToolPermissionDefault::Confirm`, so policy
+            // alone never admits it; only an explicit decision reaches
+            // dispatch, and that is the path these tests must drive.
+            approval: PreparedAttemptApproval::UserConfirmation {
+                command: DurableCommandId::from_uuid(uuid::Uuid::from_u128(APPROVAL_IDENTITY)),
+            },
         },
     )
 }

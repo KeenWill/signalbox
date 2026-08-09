@@ -4847,7 +4847,7 @@ mod tests {
         let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
-        // The failure must belong to the saturated turn's own session *and*
+        // The failure must belong to the prepared turn's own session *and*
         // name the call that was prepared. Counting the attempt alone would
         // accept a terminal turn written against an unrelated fixture session,
         // and checking the session alone would accept one written against
@@ -4945,7 +4945,7 @@ mod tests {
     /// unbounded paid provider loop the operator never asked for and cannot
     /// stop.
     #[tokio::test]
-    async fn a_turn_at_the_automatic_tool_round_bound_fails_before_provider_entry() {
+    async fn s15_a_turn_at_the_automatic_tool_round_bound_fails_before_provider_entry() {
         let (request, tool_entries, failed) =
             tool_round_saturated_fixture(MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN);
         let session = request.session();

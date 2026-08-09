@@ -26,9 +26,9 @@
 
 use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, CorrelatedToolAttemptObservation, CurrentToolAttempt,
-    EndedToolAttempt, ModelCallId, NormalizedToolArguments,
+    DecideToolRequest, DurableCommandId, EndedToolAttempt, ModelCallId, NormalizedToolArguments,
     ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId, SessionId,
-    ToolApprovalResolutionReconstitutionInput, ToolAttemptCrashOutcome,
+    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolAttemptCrashOutcome,
     ToolAttemptDispatchCorrelation, ToolAttemptId, ToolAttemptReconstitutionInput,
     ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
     ToolBatchReconstitutionInput, ToolDispatchAuthority, ToolDispatchGeneration, ToolEffectClass,
@@ -40,7 +40,8 @@ use crate::{
     ClassifyOperatorFailure, CorrelatedDurableChildWait, CorrelatedToolExecutorEvidence,
     PrepareToolContinuationOutcome, RetainedToolAttemptObservationStatus,
     ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolCrashClosureIdentities,
-    ToolExecutionInvocation, ToolExecutionTransaction, ToolExecutor, ToolExecutorEvidence,
+    ToolExecutionInvocation, ToolExecutionTransaction, ToolExecutor, ToolExecutorDisposition,
+    ToolExecutorEvidence,
 };
 
 use std::sync::{Arc, Mutex};
@@ -77,12 +78,33 @@ pub struct PreparedAttemptProposal {
     pub arguments: NormalizedToolArguments,
     /// Effect class the catalog declared for `name`.
     pub effect_class: ToolEffectClass,
+    /// How this attempt became admissible to dispatch.
+    pub approval: PreparedAttemptApproval,
 }
 
-/// Reconstitutes one policy-approved, prepared, executing single-attempt batch.
+/// The source that admitted a prepared attempt to dispatch.
+///
+/// Stated by the caller rather than assumed, because it has to agree with the
+/// permission default its catalog declares: a tool declared
+/// `ToolPermissionDefault::Confirm` never reaches dispatch on policy alone, so
+/// a fixture pairing it with a policy approval drives a batch the application
+/// cannot produce.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparedAttemptApproval {
+    /// The catalog declares the tool auto-approved and policy admitted it.
+    PolicyAuto,
+    /// A user decision admitted it, as a confirm-by-default tool requires.
+    UserConfirmation {
+        /// Exact durable command carrying the decision's provenance.
+        command: DurableCommandId,
+    },
+}
+
+/// Reconstitutes one approved, prepared, executing single-attempt batch.
 ///
 /// This is the state a provider executor is actually invoked from: one
-/// proposal, an automatic approval, and one prepared attempt awaiting dispatch.
+/// proposal, the approval that admitted it, and one prepared attempt awaiting
+/// dispatch.
 ///
 /// # Panics
 ///
@@ -104,9 +126,21 @@ pub fn prepared_single_attempt_batch(
         proposal.arguments,
     )
     .into_request();
-    let approval = ToolApprovalResolutionReconstitutionInput::policy_auto(request.id())
-        .reconstitute()
-        .expect("policy approval fixture is valid");
+    let approval = match proposal.approval {
+        PreparedAttemptApproval::PolicyAuto => {
+            ToolApprovalResolutionReconstitutionInput::policy_auto(request.id())
+        }
+        PreparedAttemptApproval::UserConfirmation { command } => {
+            ToolApprovalResolutionReconstitutionInput::user_command(
+                DecideToolRequest::try_new(command, request.id(), ToolApprovalDecision::Approve)
+                    .expect("fixture command identity is admitted")
+                    .prepare_applied(&request)
+                    .expect("the command names the exact request"),
+            )
+        }
+    }
+    .reconstitute()
+    .expect("approval fixture is valid");
     let attempt = ToolAttemptReconstitutionInput::new(
         identities.attempt,
         request.id(),
@@ -337,6 +371,14 @@ impl<Executor> RecordingToolExecutor<Executor> {
         };
         (Self { inner, recorded }, handle)
     }
+
+    /// Replaces whatever the previous invocation recorded.
+    fn store(&self, evidence: Option<ToolExecutorEvidence>) {
+        *self
+            .recorded
+            .lock()
+            .expect("recorded evidence lock is available") = evidence;
+    }
 }
 
 impl<Executor> ToolExecutor for RecordingToolExecutor<Executor>
@@ -350,13 +392,43 @@ where
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
         let result = self.inner.execute(invocation).await;
-        if let Ok(correlated) = &result {
-            *self
-                .recorded
-                .lock()
-                .expect("recorded evidence lock is available") =
-                Some(correlated.evidence().clone());
-        }
+        // Replaced on *every* invocation, including errors. Leaving the slot
+        // untouched on failure would let a reused recorder report the previous
+        // invocation's evidence as belonging to the one that bound none.
+        self.store(
+            result
+                .as_ref()
+                .ok()
+                .map(|correlated| correlated.evidence().clone()),
+        );
+        result
+    }
+
+    async fn execute_with_scheduling(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<ToolExecutorDisposition, Self::Error>
+    where
+        Self: Send,
+    {
+        // Forwarded rather than left to the trait default, which would call
+        // `inner.execute` and silently discard the wrapped executor's own
+        // scheduling-aware override — changing the behaviour under test, and
+        // panicking outright for an executor whose plain `execute` is
+        // unreachable by construction.
+        let result = self.inner.execute_with_scheduling(invocation).await;
+        // Only `Completed` carries executor evidence; the durable dispositions
+        // committed their own effect and have none to record.
+        self.store(match &result {
+            Ok(ToolExecutorDisposition::Completed(correlated)) => {
+                Some(correlated.evidence().clone())
+            }
+            Ok(
+                ToolExecutorDisposition::DurableCompletion(_)
+                | ToolExecutorDisposition::DurableChildWait(_),
+            )
+            | Err(_) => None,
+        });
         result
     }
 }
@@ -368,7 +440,11 @@ pub struct RecordedEvidence {
 }
 
 impl RecordedEvidence {
-    /// Returns the recorded evidence, or `None` when the executor bound none.
+    /// Removes and returns the recorded evidence, leaving the slot empty.
+    ///
+    /// Consuming rather than cloning: a caller that reads twice is asking
+    /// about two different invocations, and returning the same value again
+    /// would attribute the first one's evidence to the second.
     ///
     /// # Panics
     ///
@@ -379,6 +455,6 @@ impl RecordedEvidence {
         self.recorded
             .lock()
             .expect("recorded evidence lock is available")
-            .clone()
+            .take()
     }
 }

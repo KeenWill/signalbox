@@ -10254,6 +10254,89 @@ fn announcement_for(
     }
 }
 
+/// The batch states announced for `turn`/`call`, in dispatch order.
+fn announced_batch_states(
+    dispatched: &[DispatchedOutboxEventKind],
+    turn: TurnId,
+    call: ModelCallId,
+) -> Vec<DispatchedToolBatchState> {
+    dispatched
+        .iter()
+        .filter_map(|kind| match announcement_for(kind, turn, call) {
+            AmbiguityAnnouncement::BatchTransition(state) => Some(state),
+            AmbiguityAnnouncement::DefinitiveTurnOutcome | AmbiguityAnnouncement::Unrelated => None,
+        })
+        .collect()
+}
+
+/// Whether anything announced `turn` as definitively resolved.
+fn announces_a_definitive_turn_outcome(
+    dispatched: &[DispatchedOutboxEventKind],
+    turn: TurnId,
+    call: ModelCallId,
+) -> bool {
+    dispatched.iter().any(|kind| {
+        announcement_for(kind, turn, call) == AmbiguityAnnouncement::DefinitiveTurnOutcome
+    })
+}
+
+/// The projection above decides both ambiguity verdicts, so its classification
+/// is pinned directly rather than trusted: a batch transition for the turn
+/// under test, a definitive outcome for it, one for an unrelated turn, and a
+/// kind that bears on neither.
+#[test]
+fn announcement_for_classifies_each_outcome() {
+    let turn = TurnId::from_uuid(Uuid::from_u128(0x9101));
+    let other_turn = TurnId::from_uuid(Uuid::from_u128(0x9102));
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0x9103));
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(0x9104));
+    let frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x9105));
+    let entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x9106));
+
+    assert_eq!(
+        announcement_for(
+            &DispatchedOutboxEventKind::ToolBatchTransition {
+                turn,
+                producing_call: call,
+                state: DispatchedToolBatchState::RecoveryRequired { attempt },
+            },
+            turn,
+            call,
+        ),
+        AmbiguityAnnouncement::BatchTransition(DispatchedToolBatchState::RecoveryRequired {
+            attempt
+        })
+    );
+    assert_eq!(
+        announcement_for(
+            &DispatchedOutboxEventKind::TurnFailed {
+                turn,
+                failure_entry: entry,
+                terminal_frontier: frontier,
+            },
+            turn,
+            call,
+        ),
+        AmbiguityAnnouncement::DefinitiveTurnOutcome
+    );
+    assert_eq!(
+        announcement_for(
+            &DispatchedOutboxEventKind::TurnFailed {
+                turn: other_turn,
+                failure_entry: entry,
+                terminal_frontier: frontier,
+            },
+            turn,
+            call,
+        ),
+        AmbiguityAnnouncement::Unrelated
+    );
+    assert_eq!(
+        announcement_for(&DispatchedOutboxEventKind::SessionCreated, turn, call),
+        AmbiguityAnnouncement::Unrelated
+    );
+}
+
 /// S06 / INV-025 / INV-026: an executor that cannot establish whether its
 /// external effect happened terminalizes the attempt ambiguous and parks the
 /// turn on a durable recovery wait naming that exact attempt, so the effect is
@@ -10336,17 +10419,7 @@ async fn s06_inv025_inv026_ambiguous_external_effect_parks_a_durable_recovery_wa
     // reporting the effect resolved. Pin the whole ordered transition set for
     // this exact turn and producing call — the fixture's proposal, then the
     // recovery — so any additional terminal announcement breaks the shape.
-    let announcements = dispatched
-        .iter()
-        .map(|kind| announcement_for(kind, fixture.turn, fixture.call))
-        .collect::<Vec<_>>();
-    let batch_transitions = announcements
-        .iter()
-        .filter_map(|announcement| match announcement {
-            AmbiguityAnnouncement::BatchTransition(state) => Some(*state),
-            AmbiguityAnnouncement::DefinitiveTurnOutcome | AmbiguityAnnouncement::Unrelated => None,
-        })
-        .collect::<Vec<_>>();
+    let batch_transitions = announced_batch_states(&dispatched, fixture.turn, fixture.call);
     let [
         DispatchedToolBatchState::Proposed { .. },
         DispatchedToolBatchState::RecoveryRequired {
@@ -10368,9 +10441,9 @@ async fn s06_inv025_inv026_ambiguous_external_effect_parks_a_durable_recovery_wa
     // the projection above forces every outbox kind to be classified as
     // definitive or not rather than assumed harmless.
     assert!(
-        !announcements.contains(&AmbiguityAnnouncement::DefinitiveTurnOutcome),
+        !announces_a_definitive_turn_outcome(&dispatched, fixture.turn, fixture.call),
         "an ambiguous external effect must not also report its turn definitively resolved, \
-         got {announcements:?}"
+         got {dispatched:?}"
     );
 
     pool.close().await;

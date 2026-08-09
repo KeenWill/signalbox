@@ -1789,45 +1789,99 @@ mod tests {
     ///
     /// Exhaustive over `ObservationFact` so a new text-bearing fact cannot be
     /// added without deciding whether the credential could ride out on it.
-    #[track_caller]
-    fn assert_no_stream_carries(observed: &[Observation<String>], secret: &str) {
-        let mut streams: BTreeMap<(&str, EmittedStream, u32), String> = BTreeMap::new();
+    /// Where one emitted fact's provider text belongs, if it carries any.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum EmittedText<'a> {
+        /// A fragment extending one identified delta stream.
+        Fragment {
+            stream: EmittedStream,
+            index: u32,
+            text: &'a str,
+        },
+        /// A complete value that stands alone rather than extending a stream.
+        Complete(&'a str),
+        /// Carries no provider text at all.
+        Absent,
+    }
+
+    /// Classifies one fact's provider text.
+    ///
+    /// Exhaustive over `ObservationFact` so a new text-bearing fact cannot be
+    /// added without deciding whether a credential could ride out on it. Named
+    /// and separately tested rather than inlined into a test body, because a
+    /// misclassification here would silently weaken every check built on it.
+    const fn emitted_text(fact: &ObservationFact) -> EmittedText<'_> {
+        match fact {
+            ObservationFact::TextDelta { index, text } => EmittedText::Fragment {
+                stream: EmittedStream::Text,
+                index: *index,
+                text: text.as_str(),
+            },
+            ObservationFact::ThinkingDelta { index, text } => EmittedText::Fragment {
+                stream: EmittedStream::Thinking,
+                index: *index,
+                text: text.as_str(),
+            },
+            ObservationFact::ToolArgumentsDelta { index, fragment } => EmittedText::Fragment {
+                stream: EmittedStream::ToolArguments,
+                index: *index,
+                text: fragment.as_str(),
+            },
+            ObservationFact::ToolCallProposed(proposal) => {
+                EmittedText::Complete(proposal.arguments_json.as_str())
+            }
+            ObservationFact::SendCommenced
+            | ObservationFact::ExchangeEstablished(_)
+            | ObservationFact::ProviderModelReported(_)
+            | ObservationFact::UsageReported(_)
+            | ObservationFact::FinishReported(_) => EmittedText::Absent,
+        }
+    }
+
+    /// Reassembles every emitted delta stream, keyed by the stream it extends.
+    fn reconstructed_streams(
+        observed: &[Observation<String>],
+    ) -> BTreeMap<(String, EmittedStream, u32), String> {
+        let mut streams: BTreeMap<(String, EmittedStream, u32), String> = BTreeMap::new();
         for observation in observed {
-            let correlation = observation.correlation.as_str();
-            match &observation.fact {
-                ObservationFact::TextDelta { index, text } => streams
-                    .entry((correlation, EmittedStream::Text, *index))
+            if let EmittedText::Fragment {
+                stream,
+                index,
+                text,
+            } = emitted_text(&observation.fact)
+            {
+                streams
+                    .entry((observation.correlation.clone(), stream, index))
                     .or_default()
-                    .push_str(text),
-                ObservationFact::ThinkingDelta { index, text } => streams
-                    .entry((correlation, EmittedStream::Thinking, *index))
-                    .or_default()
-                    .push_str(text),
-                ObservationFact::ToolArgumentsDelta { index, fragment } => streams
-                    .entry((correlation, EmittedStream::ToolArguments, *index))
-                    .or_default()
-                    .push_str(fragment),
-                // A decoded proposal is one complete value, not a fragment
-                // stream, so it is checked as it stands.
-                ObservationFact::ToolCallProposed(proposal) => assert!(
-                    !proposal.arguments_json.contains(secret),
-                    "the credential must not be emitted; found it in a proposal on \
-                     correlation {correlation}: {}",
-                    proposal.arguments_json
-                ),
-                ObservationFact::SendCommenced
-                | ObservationFact::ExchangeEstablished(_)
-                | ObservationFact::ProviderModelReported(_)
-                | ObservationFact::UsageReported(_)
-                | ObservationFact::FinishReported(_) => {}
+                    .push_str(text);
             }
         }
-        for ((correlation, stream, index), reconstructed) in &streams {
+        streams
+    }
+
+    /// Names every delta stream the sink emitted, in a stable order.
+    fn emitted_stream_keys(observed: &[Observation<String>]) -> Vec<(String, EmittedStream, u32)> {
+        reconstructed_streams(observed).into_keys().collect()
+    }
+
+    #[track_caller]
+    fn assert_no_stream_carries(observed: &[Observation<String>], secret: &str) {
+        for ((correlation, stream, index), reconstructed) in &reconstructed_streams(observed) {
             assert!(
                 !reconstructed.contains(secret),
                 "the credential must not be recoverable from any emitted stream; \
                  found it on correlation {correlation} {stream:?} index {index}: {reconstructed}"
             );
+        }
+        for observation in observed {
+            if let EmittedText::Complete(text) = emitted_text(&observation.fact) {
+                assert!(
+                    !text.contains(secret),
+                    "the credential must not be emitted; found it in a complete value on \
+                     correlation {}: {text}",
+                    observation.correlation
+                );
+            }
         }
     }
 
@@ -1856,6 +1910,81 @@ mod tests {
             },
         ];
 
+        assert_no_stream_carries(&observed, "fixture/secret");
+    }
+
+    /// The classifier decides which text every later check inspects, so its
+    /// three text-bearing shapes are pinned directly.
+    #[test]
+    fn emitted_text_classifies_each_bearing_fact() {
+        assert_eq!(
+            emitted_text(&ObservationFact::TextDelta {
+                index: 3,
+                text: String::from("answer"),
+            }),
+            EmittedText::Fragment {
+                stream: EmittedStream::Text,
+                index: 3,
+                text: "answer",
+            }
+        );
+        assert_eq!(
+            emitted_text(&ObservationFact::ThinkingDelta {
+                index: 4,
+                text: String::from("reasoning"),
+            }),
+            EmittedText::Fragment {
+                stream: EmittedStream::Thinking,
+                index: 4,
+                text: "reasoning",
+            }
+        );
+        assert_eq!(
+            emitted_text(&ObservationFact::ToolArgumentsDelta {
+                index: 5,
+                fragment: String::from("{\"a\":1}"),
+            }),
+            EmittedText::Fragment {
+                stream: EmittedStream::ToolArguments,
+                index: 5,
+                text: "{\"a\":1}",
+            }
+        );
+        assert_eq!(
+            emitted_text(&ObservationFact::FinishReported(FinishReason::EndTurn)),
+            EmittedText::Absent
+        );
+    }
+
+    /// Facts sharing a correlation and index but not a kind stay distinct
+    /// streams, which is what keeps the reassembly from inventing a leak by
+    /// concatenating text a consumer never joins.
+    #[test]
+    fn same_index_on_different_kinds_reconstructs_separately() {
+        let observed = vec![
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: String::from("fixture/sec"),
+                },
+            },
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 0,
+                    fragment: String::from("ret"),
+                },
+            },
+        ];
+
+        assert_eq!(
+            emitted_stream_keys(&observed),
+            vec![
+                (String::from("call-1"), EmittedStream::Text, 0),
+                (String::from("call-1"), EmittedStream::ToolArguments, 0),
+            ]
+        );
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
@@ -2002,14 +2131,12 @@ mod tests {
             format!("{first}{second}"),
             "non-credential escapes reach the model byte for byte"
         );
-        // ...and none of it is smuggled onto another correlation or index.
-        assert!(
-            observed.iter().all(|observation| matches!(
-                (&observation.correlation, &observation.fact),
-                (correlation, ObservationFact::ToolArgumentsDelta { index: 0, .. })
-                    if correlation == "call-1"
-            )),
-            "the preserved bytes stay on their own correlation and index: {observed:?}"
+        // ...and none of it is smuggled onto another correlation or index:
+        // exactly one stream was emitted, and it is this call's own.
+        assert_eq!(
+            emitted_stream_keys(&observed),
+            vec![(String::from("call-1"), EmittedStream::ToolArguments, 0)],
+            "the preserved bytes stay on their own correlation and index"
         );
     }
 

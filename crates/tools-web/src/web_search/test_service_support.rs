@@ -1,11 +1,11 @@
 use signalbox_application::{
     FixtureToolExecutionTransaction, FixtureTransactionFailures, InProcessToolDispatchGate,
-    PreparedAttemptIdentities, PreparedAttemptProposal, ToolExecutionService,
-    ToolExecutionServiceOutcome, ToolExecutorEvidence, UuidV7ToolLoopIdGenerator,
-    prepared_single_attempt_batch,
+    PreparedAttemptApproval, PreparedAttemptIdentities, PreparedAttemptProposal,
+    ToolExecutionService, ToolExecutionServiceOutcome, ToolExecutorEvidence,
+    UuidV7ToolLoopIdGenerator, prepared_single_attempt_batch,
 };
 use signalbox_domain::{
-    ContextFrontierId, ModelCallId, NormalizedToolArguments, SessionId,
+    ContextFrontierId, DurableCommandId, ModelCallId, NormalizedToolArguments, SessionId,
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
     ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolName,
     ToolRequestId, TurnAttemptId, TurnId,
@@ -149,6 +149,8 @@ pub(super) const ATTEMPT_IDENTITY: u128 = 5;
 pub(super) const PRODUCING_CALL_IDENTITY: u128 = 6;
 
 pub(super) const FRONTIER_IDENTITY: u128 = 7;
+
+pub(super) const APPROVAL_IDENTITY: u128 = 8;
 
 pub(super) struct CountingCredentials {
     pub(super) resolutions: Arc<AtomicUsize>,
@@ -422,6 +424,12 @@ pub(super) fn prepared_web_search_batch() -> signalbox_domain::ToolBatch {
             name: ToolName::try_new(String::from(WEB_SEARCH_NAME)).expect("fixture name is valid"),
             arguments: arguments(&serde_json::json!({"query": FIXTURE_QUERY}).to_string()),
             effect_class: ToolEffectClass::ExternalEffect,
+            // `web_search` is declared `ToolPermissionDefault::Confirm`, so a
+            // policy approval would describe a batch the application never
+            // prepares for it.
+            approval: PreparedAttemptApproval::UserConfirmation {
+                command: DurableCommandId::from_uuid(uuid::Uuid::from_u128(APPROVAL_IDENTITY)),
+            },
         },
     )
 }

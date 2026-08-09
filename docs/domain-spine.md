@@ -7740,6 +7740,12 @@ pub struct PreparedAttemptProposal {
     pub name: ToolName,
     pub arguments: NormalizedToolArguments,
     pub effect_class: ToolEffectClass,
+    pub approval: PreparedAttemptApproval,
+}
+
+pub enum PreparedAttemptApproval {
+    PolicyAuto,
+    UserConfirmation { command: DurableCommandId },
 }
 
 pub fn prepared_single_attempt_batch(
@@ -9890,6 +9896,6 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: startup_scan                          | 7 (incl. 2 traits)    |
 | application: submit_input                          | 7 (incl. 2 traits)    |
 | application: tool_dispatch_gate                    | 2                     |
-| application: tool_execution_test_support           | 6 (+1 free fn)        |
+| application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **249**               |
+| **signalbox-application total**                    | **250**               |

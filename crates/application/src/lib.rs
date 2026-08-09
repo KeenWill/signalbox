@@ -134,8 +134,8 @@ pub use submit_input::{
 pub use tool_dispatch_gate::{InProcessToolDispatchGate, InProcessToolDispatchPermit};
 #[cfg(feature = "test-support")]
 pub use tool_execution_test_support::{
-    FixtureToolExecutionTransaction, FixtureTransactionFailures, PreparedAttemptIdentities,
-    PreparedAttemptProposal, RecordedEvidence, RecordingToolExecutor,
+    FixtureToolExecutionTransaction, FixtureTransactionFailures, PreparedAttemptApproval,
+    PreparedAttemptIdentities, PreparedAttemptProposal, RecordedEvidence, RecordingToolExecutor,
     prepared_single_attempt_batch,
 };
 pub use tool_loop::{
