@@ -238,8 +238,11 @@ extension SnapshotCanvas {
 /// verified byte-identical across different iPhone simulators. A canvas wider
 /// than the host phone's screen is the exception, and for one reason: the
 /// window's corner mask and the glass materials composite against the device,
-/// so every iPad-canvas golden here still resolves differently on a different
-/// phone. That is a property of changing the simulator and not of adding a
+/// so every golden recorded on one still resolves differently on a different
+/// phone. That is the two iPad canvases and the 540-point `sheet` canvas —
+/// a width rule rather than an iPad rule, and stating it as the latter is what
+/// left `*.sheet.png` unclassified in the fallback warning
+/// `scripts/lib/snapshots.sh` prints. That is a property of changing the simulator and not of adding a
 /// canvas — every canvas in one run renders on the one destination
 /// `scripts/lib/snapshots.sh` pins — so the cost of the matrix is paid once, in
 /// goldens that only CI's destination reproduces. CI pins that destination and

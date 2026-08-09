@@ -61,7 +61,7 @@ snapshot_xcode_destination() {
 	fi
 
 	echo "No $SIGNALBOX_NATIVE_SNAPSHOT_DEVICE_NAME simulator on iOS $SIGNALBOX_NATIVE_SNAPSHOT_IOS_VERSION, the runtime these goldens are recorded and checked against." >&2
-	echo "Falling back to the newest available iPhone. Every *.ipad-portrait.png and *.ipad-landscape.png reference resolves against the device, so all of them may differ on this destination; a phone-canvas reference does not." >&2
+	echo "Falling back to the newest available iPhone. Every reference recorded on a canvas wider than a phone screen resolves against the device — *.ipad-portrait.png, *.ipad-landscape.png, and *.sheet.png — so all of them may differ on this destination; a phone-canvas reference does not." >&2
 	resolved="$(simulator_resolve_iphone_ids "$SIMULATOR_DEFAULT_MIN_IOS_VERSION" | head -n 1)"
 	if [[ -z "$resolved" ]]; then
 		echo "No available iPhone simulator for iOS $SIMULATOR_DEFAULT_MIN_IOS_VERSION or newer. Set XCODE_DESTINATION." >&2
