@@ -1009,6 +1009,116 @@ async fn acquire_review_command_permit_while_buffered(
     Ok(Some((frame_buffer_permit, review_command_permit)))
 }
 
+/// One closed snapshot-reader admission class, decided for every request before
+/// dispatch.
+///
+/// The decision lives here rather than in each dispatch arm because a verb that
+/// forgets to reserve capacity does not fail: it quietly spends the connections
+/// [`RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS`] holds back for the outbox
+/// dispatcher and mutations. An exhaustive match makes a later verb state its
+/// class instead of inheriting one by omission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnapshotReaderAdmission {
+    /// The request holds no pooled connection across statements: it either
+    /// touches no database or completes in one statement on a pooled
+    /// connection it returns immediately.
+    NotRequired,
+    /// The request holds one pooled connection across its database phase — a
+    /// multi-statement read, a `REPEATABLE READ` transaction, or a spool.
+    OneConnection,
+    /// The coherent review-orchestration snapshot, which holds
+    /// [`REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS`] at once.
+    CoherentReviewSnapshot,
+}
+
+impl SnapshotReaderAdmission {
+    const fn for_request(request: &ClientRequest) -> Self {
+        match request {
+            ClientRequest::ListSessions {}
+            | ClientRequest::ReadGoal { .. }
+            | ClientRequest::ReadTranscript { .. }
+            | ClientRequest::FollowSession { .. }
+            | ClientRequest::ListSessionMetadata { .. }
+            | ClientRequest::ListConversations { .. }
+            | ClientRequest::ReadImportedConversation { .. }
+            // The metadata point read is not one statement: it opens a
+            // transaction, sets `REPEATABLE READ ONLY`, selects, and commits.
+            | ClientRequest::ReadSessionMetadata { .. }
+            // Each review read opens its own `REPEATABLE READ` transaction, and
+            // the findings listing opens two and then walks the finding graph.
+            | ClientRequest::ReadReviewTarget { .. }
+            | ClientRequest::ReadReviewRun { .. }
+            | ClientRequest::ReadReviewFinding { .. }
+            | ClientRequest::ListReviewFindings { .. } => Self::OneConnection,
+            ClientRequest::ReadReviewOrchestration { .. } => Self::CoherentReviewSnapshot,
+            ClientRequest::CreateSession { .. }
+            | ClientRequest::CreateSessionFromTemplate { .. }
+            | ClientRequest::ListTemplates {}
+            | ClientRequest::UpdateSessionPlacement { .. }
+            | ClientRequest::AttachGoal { .. }
+            | ClientRequest::ResumeGoal { .. }
+            | ClientRequest::StopGoal { .. }
+            | ClientRequest::SupersedeGoal { .. }
+            | ClientRequest::SubmitInput { .. }
+            | ClientRequest::CompactSession { .. }
+            | ClientRequest::SpawnSession { .. }
+            | ClientRequest::AwaitSession { .. }
+            | ClientRequest::SendSessionMessage { .. }
+            | ClientRequest::ListModelAliases {}
+            | ClientRequest::ListModelCapabilities {}
+            | ClientRequest::ReplaceSessionMetadata { .. }
+            | ClientRequest::ReplaceSessionDefaults { .. }
+            | ClientRequest::ReadSessionDefaults { .. }
+            | ClientRequest::ImportConversation { .. }
+            | ClientRequest::BeginConversationImport { .. }
+            | ClientRequest::AppendConversationImport { .. }
+            | ClientRequest::CommitConversationImport {}
+            | ClientRequest::AbortConversationImport {}
+            | ClientRequest::CreateSessionFromImportedFrontier { .. }
+            | ClientRequest::ReconcileTurn { .. }
+            | ClientRequest::CreateReviewTarget { .. }
+            | ClientRequest::StartReviewRun { .. }
+            | ClientRequest::ActivateReviewPass { .. }
+            | ClientRequest::CompleteReviewPass { .. }
+            | ClientRequest::RecordReviewFindings { .. }
+            | ClientRequest::RecordReviewFindingEvent { .. }
+            | ClientRequest::ReserveReviewExternalLink { .. }
+            | ClientRequest::AttachReviewExternalLink { .. }
+            | ClientRequest::StartReviewOrchestration { .. }
+            | ClientRequest::RecordReviewImportOutcome { .. }
+            | ClientRequest::RecordReviewConcernOutcome { .. }
+            | ClientRequest::RecordReviewJudgmentPlan { .. }
+            | ClientRequest::RecordReviewJudgmentEffect { .. }
+            | ClientRequest::RecordReviewRepairOutcomes { .. }
+            | ClientRequest::RecordReviewPublicationOutcomes { .. }
+            | ClientRequest::StopTurn { .. }
+            | ClientRequest::DecideToolRequest { .. } => Self::NotRequired,
+        }
+    }
+}
+
+/// The snapshot-reader capacity one request holds, or `None` when shutdown
+/// cancelled the wait and the request goes unanswered.
+async fn admit_snapshot_reader(
+    request: &ClientRequest,
+    budget: Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<Option<OwnedSemaphorePermit>>, ProcessConnectionError> {
+    match SnapshotReaderAdmission::for_request(request) {
+        SnapshotReaderAdmission::NotRequired => Ok(Some(None)),
+        SnapshotReaderAdmission::OneConnection => {
+            Ok(acquire_snapshot_reader_permit(budget, shutdown)
+                .await?
+                .map(Some))
+        }
+        SnapshotReaderAdmission::CoherentReviewSnapshot => Ok(
+            acquire_review_orchestration_snapshot_permit(budget, shutdown)
+                .await?
+                .map(Some),
+        ),
+    }
+}
+
 fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
     let available =
         max_pool_connections.checked_sub(RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS)?;
@@ -1153,6 +1263,15 @@ where
     } else {
         None
     };
+    let Some(snapshot_permit) = admit_snapshot_reader(
+        &request,
+        Arc::clone(&services.snapshot_reader_budget),
+        &mut shutdown,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
     match request {
         ClientRequest::CreateSession {
             command_id,
@@ -1236,12 +1355,7 @@ where
         ClientRequest::ReadImportedConversation {
             imported_conversation_id,
         } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_read_imported_conversation(
@@ -1255,12 +1369,7 @@ where
             .await
         }
         ClientRequest::ListSessions {} => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_list_sessions(writer, version, request_id, &services.pool, snapshot_permit).await
@@ -1311,12 +1420,7 @@ where
             .await
         }
         ClientRequest::ReadGoal { session_id } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_read_goal(
@@ -1457,12 +1561,7 @@ where
             .await
         }
         ClientRequest::ReadTranscript { session_id } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_read_transcript(
@@ -1477,12 +1576,7 @@ where
             .await
         }
         ClientRequest::FollowSession { session_id } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_follow_session(
@@ -1505,12 +1599,7 @@ where
             page_size,
             after_session_id,
         } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_list_session_metadata(
@@ -1536,12 +1625,7 @@ where
             page_size,
             after,
         } => {
-            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             handle_list_conversations(
@@ -1579,8 +1663,18 @@ where
             .await
         }
         ClientRequest::ReadSessionMetadata { session_id } => {
-            handle_read_session_metadata(writer, version, request_id, session_id, &services.pool)
-                .await
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            handle_read_session_metadata(
+                writer,
+                version,
+                request_id,
+                session_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
         }
         ClientRequest::ReplaceSessionMetadata {
             command_id,
@@ -1951,12 +2045,7 @@ where
             .await
         }
         request @ ClientRequest::ReadReviewOrchestration { .. } => {
-            let Some(snapshot_permit) = acquire_review_orchestration_snapshot_permit(
-                Arc::clone(&services.snapshot_reader_budget),
-                &mut shutdown,
-            )
-            .await?
-            else {
+            let Some(snapshot_permit) = snapshot_permit else {
                 return Ok(());
             };
             run_until_shutdown(
@@ -1975,17 +2064,60 @@ where
             .unwrap_or(Ok(()))
         }
         ClientRequest::ReadReviewTarget { target_id } => {
-            handle_read_review_target(writer, version, request_id, target_id, &services.pool).await
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            handle_read_review_target(
+                writer,
+                version,
+                request_id,
+                target_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
         }
         ClientRequest::ReadReviewRun { run_id } => {
-            handle_read_review_run(writer, version, request_id, run_id, &services.pool).await
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            handle_read_review_run(
+                writer,
+                version,
+                request_id,
+                run_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
         }
         ClientRequest::ReadReviewFinding { finding_id } => {
-            handle_read_review_finding(writer, version, request_id, finding_id, &services.pool)
-                .await
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            handle_read_review_finding(
+                writer,
+                version,
+                request_id,
+                finding_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
         }
         ClientRequest::ListReviewFindings { run_id } => {
-            handle_list_review_findings(writer, version, request_id, run_id, &services.pool).await
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            handle_list_review_findings(
+                writer,
+                version,
+                request_id,
+                run_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
         }
         ClientRequest::StopTurn {
             command_id,
@@ -4093,15 +4225,17 @@ async fn handle_read_review_target<Writer>(
     request_id: RequestId,
     target_id: CanonicalUuid,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let store = ReviewWorkflowStore::new(pool.clone());
-    match store
+    let loaded = store
         .load_target(ReviewTargetId::from_uuid(target_id.into_uuid()))
-        .await
-    {
+        .await;
+    drop(snapshot_permit);
+    match loaded {
         Ok(Some(target)) => {
             write_message(
                 writer,
@@ -4124,15 +4258,17 @@ async fn handle_read_review_run<Writer>(
     request_id: RequestId,
     run_id: CanonicalUuid,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let store = ReviewWorkflowStore::new(pool.clone());
-    let (run, pass) = match store
+    let loaded = store
         .load_run_with_pass(ReviewRunId::from_uuid(run_id.into_uuid()))
-        .await
-    {
+        .await;
+    drop(snapshot_permit);
+    let (run, pass) = match loaded {
         Ok(Some(aggregate)) => aggregate,
         Ok(None) => return write_review_not_found(writer, version, request_id).await,
         Err(error) => return write_review_store_error(writer, version, request_id, error).await,
@@ -4156,15 +4292,17 @@ async fn handle_read_review_finding<Writer>(
     request_id: RequestId,
     finding_id: CanonicalUuid,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let store = ReviewWorkflowStore::new(pool.clone());
-    match store
+    let loaded = store
         .load_finding(ReviewFindingId::from_uuid(finding_id.into_uuid()))
-        .await
-    {
+        .await;
+    drop(snapshot_permit);
+    match loaded {
         Ok(Some(finding)) => {
             write_message(
                 writer,
@@ -4181,25 +4319,39 @@ where
     }
 }
 
+/// Loads one run's complete finding page, or `None` when the run is absent.
+///
+/// The existence check and the graph walk are separate database phases, so they
+/// belong to the same reader admission: splitting them would let a listing hold
+/// pool capacity it never reserved.
+async fn load_review_findings_page(
+    store: &ReviewWorkflowStore,
+    run_id: ReviewRunId,
+) -> Result<Option<Vec<ReviewFinding>>, ReviewWorkflowStoreError> {
+    if store.load_run(run_id).await?.is_none() {
+        return Ok(None);
+    }
+    store.list_findings(run_id).await.map(Some)
+}
+
 async fn handle_list_review_findings<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
     run_id: CanonicalUuid,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let run_id = ReviewRunId::from_uuid(run_id.into_uuid());
     let store = ReviewWorkflowStore::new(pool.clone());
-    match store.load_run(run_id).await {
-        Ok(Some(_)) => {}
+    let loaded = load_review_findings_page(&store, run_id).await;
+    drop(snapshot_permit);
+    let findings = match loaded {
+        Ok(Some(findings)) => findings,
         Ok(None) => return write_review_not_found(writer, version, request_id).await,
-        Err(error) => return write_review_store_error(writer, version, request_id, error).await,
-    }
-    let findings = match store.list_findings(run_id).await {
-        Ok(findings) => findings,
         Err(error) => return write_review_store_error(writer, version, request_id, error).await,
     };
     write_message(
@@ -8491,15 +8643,17 @@ async fn handle_read_session_metadata<Writer>(
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let service = LoadSessionMetadataService::new(SessionMetadataRepository::new(pool.clone()));
-    match service
+    let loaded = service
         .execute(SessionId::from_uuid(session_id.into_uuid()))
-        .await
-    {
+        .await;
+    drop(snapshot_permit);
+    match loaded {
         Ok(Some(snapshot)) => {
             let (metadata, last_writer) =
                 wire_metadata_snapshot(&snapshot).ok_or(ProcessConnectionError::EncodeInvariant)?;
@@ -11762,10 +11916,7 @@ fn wire_system_prompt(
 fn wire_list_metadata(
     item: &SessionMetadataListItem,
 ) -> Option<(Option<String>, Vec<String>, Option<MetadataLastWriter>)> {
-    let last_writer = match item.last_writer() {
-        Some(writer) => Some(wire_metadata_last_writer(writer)?),
-        None => None,
-    };
+    let last_writer = item.last_writer().map(wire_metadata_last_writer);
     Some((
         item.title().map(str::to_owned),
         item.tags().map(str::to_owned).collect(),
@@ -11787,22 +11938,25 @@ fn wire_metadata_snapshot(
         content.archived(),
     )
     .ok()?;
-    let last_writer = match snapshot.last_writer() {
-        Some(writer) => Some(wire_metadata_last_writer(writer)?),
-        None => None,
-    };
+    let last_writer = snapshot.last_writer().map(wire_metadata_last_writer);
     Some((metadata, last_writer))
 }
 
-fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> Option<MetadataLastWriter> {
+fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> MetadataLastWriter {
     let actor = match writer.actor() {
         Actor::User => MetadataActor::User {},
-        Actor::Recovery | Actor::Model { .. } | Actor::Tool { .. } => return None,
+        Actor::Model { turn } => MetadataActor::Model {
+            turn_id: wire_uuid(turn.into_uuid()),
+        },
+        Actor::Recovery => MetadataActor::Recovery {},
+        Actor::Tool { request } => MetadataActor::Tool {
+            tool_request_id: wire_uuid(request.into_uuid()),
+        },
     };
-    Some(MetadataLastWriter::new(
+    MetadataLastWriter::new(
         CanonicalU64::new(writer.updated_at().as_unix_micros()),
         actor,
-    ))
+    )
 }
 
 const fn wire_imported_source_speaker(
@@ -13714,7 +13868,7 @@ mod tests {
     use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConversionFailure;
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
     use signalbox_domain::{
-        AcceptedInputId, ContextFrontierId, DelegationMessageId, DirectModelSelection,
+        AcceptedInputId, Actor, ContextFrontierId, DelegationMessageId, DirectModelSelection,
         DurableCommandId, FastModeOverlay, FastModeSupport, FrozenAliasDefinition,
         FrozenModelSelection, Goal, GoalStatement, GoalUserProvenance, ImportedConversation,
         ImportedConversationFormat, ImportedConversationId, ImportedTranscriptEntryId, ModelAlias,
@@ -13724,15 +13878,16 @@ mod tests {
         ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
         ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
         ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion,
-        SessionId, SessionInputPosition, SessionModelSettingsChanged, SettingOverlay,
-        SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, ToolRequestId,
-        TurnAttemptId, TurnId, TurnModelSettingsResolved, ValidatedModelSettings,
+        SessionId, SessionInputPosition, SessionMetadataLastWriter, SessionMetadataUpdatedAt,
+        SessionModelSettingsChanged, SettingOverlay, SubmitInputRejectedResult,
+        ToolApprovalDecision, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+        TurnModelSettingsResolved, ValidatedModelSettings,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
         DelegationToolRequestState as WireDelegationToolRequestState, ErrorCode, ErrorDetail,
         FrameEncodeError, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
-        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, ProtocolVersion,
+        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor, ProtocolVersion,
         RejectionDetail, ReviewFindingInput, ReviewSeverity, ServerFrame, ServerMessage,
         SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
         TurnState, decode_server_line, encode_server_line,
@@ -13755,15 +13910,16 @@ mod tests {
         ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
         RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
         REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS, RequestId, ReviewCommandAdmission,
-        SnapshotSpoolError, SubmitInputModelExecutionDiagnostic, acquire_import_permit,
-        acquire_import_waiter_permit, acquire_inbound_frame_permit,
+        SnapshotReaderAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
+        acquire_import_permit, acquire_import_waiter_permit, acquire_inbound_frame_permit,
         acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
         acquire_review_command_permit_while_buffered, acquire_review_orchestration_snapshot_permit,
-        acquire_snapshot_reader_permit, admitted_user_content, canonical_review_request_digest,
-        claude_conversion_failure_disposition, codex_conversion_failure_disposition,
-        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
-        foreground_peer_activity, handle_append_conversation_import,
-        handle_begin_conversation_import, handle_commit_conversation_import, import_evidence,
+        acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
+        canonical_review_request_digest, claude_conversion_failure_disposition,
+        codex_conversion_failure_disposition, consume_snapshot_queued_update,
+        context_compaction_failure_disposition, execute_import, foreground_peer_activity,
+        handle_append_conversation_import, handle_begin_conversation_import,
+        handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, nudge_after_process_await_rejection,
         nudge_after_process_message_rejection, nudge_delegation_issuer, nudge_delegation_wake,
@@ -13773,9 +13929,9 @@ mod tests {
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
         submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
-        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
-        write_context_compaction_repository_error, write_delegation_port_error,
-        write_snapshot_spool_error, write_transcript_entry,
+        wire_metadata_last_writer, wire_model_call_state, wire_tool_decision, wire_turn_state,
+        wire_uuid, write_content, write_context_compaction_repository_error,
+        write_delegation_port_error, write_snapshot_spool_error, write_transcript_entry,
     };
 
     macro_rules! assert_import_failure_ordinal {
@@ -14330,6 +14486,52 @@ mod tests {
         Ok(())
     }
 
+    /// The post-lock statement time every metadata projection fixture carries.
+    /// No projection depends on the value, only on its passing through.
+    const METADATA_WRITE_UNIX_MICROS: u64 = 17;
+
+    /// Projects one domain agency and pins both members against the fixture it
+    /// came from. A failure names the agency at the call site.
+    #[track_caller]
+    fn assert_metadata_last_writer_projects(actor: Actor, expected_actor: MetadataActor) {
+        let writer = SessionMetadataLastWriter::new(
+            SessionMetadataUpdatedAt::from_unix_micros(METADATA_WRITE_UNIX_MICROS),
+            actor,
+        );
+        let projected = wire_metadata_last_writer(writer);
+        assert_eq!(projected.actor(), expected_actor);
+        assert_eq!(
+            projected.updated_at_unix_micros().value(),
+            writer.updated_at().as_unix_micros()
+        );
+    }
+
+    /// INV-033: the metadata last-writer projection is total over the domain
+    /// agencies durable metadata records, and each carried reference lands in
+    /// its own member. A projection gap here is not a degraded field: both
+    /// callers propagate it as an encode invariant, which is fatal to the
+    /// daemon and re-fires on every read of the durable row.
+    #[test]
+    fn inv033_metadata_last_writer_projects_every_domain_agency() {
+        let turn = TurnId::from_uuid(Uuid::from_u128(2));
+        let request = ToolRequestId::from_uuid(Uuid::from_u128(3));
+
+        assert_metadata_last_writer_projects(Actor::User, MetadataActor::User {});
+        assert_metadata_last_writer_projects(
+            Actor::Model { turn },
+            MetadataActor::Model {
+                turn_id: wire_uuid(turn.into_uuid()),
+            },
+        );
+        assert_metadata_last_writer_projects(Actor::Recovery, MetadataActor::Recovery {});
+        assert_metadata_last_writer_projects(
+            Actor::Tool { request },
+            MetadataActor::Tool {
+                tool_request_id: wire_uuid(request.into_uuid()),
+            },
+        );
+    }
+
     fn compaction_session() -> SessionId {
         SessionId::from_uuid(Uuid::from_u128(1))
     }
@@ -14688,6 +14890,203 @@ mod tests {
                 .await?
                 .is_none()
         );
+        Ok(())
+    }
+
+    /// The wire vocabulary as text. The review read verbs are enumerated from
+    /// the protocol itself so a later one cannot be admitted by a list here
+    /// staying silent about it.
+    const WIRE_VOCABULARY: &str = include_str!("../../../crates/process-protocol/src/lib.rs");
+
+    fn client_request_variant_names(source: &str) -> BTreeSet<String> {
+        let declaration = "pub enum ClientRequest {";
+        let start = source
+            .find(declaration)
+            .expect("the wire vocabulary declares the client request enum");
+        let body = &source[start + declaration.len()..];
+        let end = body
+            .find("\n}\n")
+            .expect("the client request enum body is closed");
+        body[..end]
+            .lines()
+            .filter_map(|line| {
+                let variant = line.strip_prefix("    ")?;
+                if !variant.starts_with(|character: char| character.is_ascii_uppercase()) {
+                    return None;
+                }
+                Some(
+                    variant
+                        .split(|character: char| !character.is_ascii_alphanumeric())
+                        .next()?
+                        .to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// The review verbs that read the database, taken from the wire vocabulary.
+    fn review_read_verbs_in_vocabulary() -> BTreeSet<String> {
+        client_request_variant_names(WIRE_VOCABULARY)
+            .into_iter()
+            .filter(|name| {
+                name.contains("Review") && (name.starts_with("Read") || name.starts_with("List"))
+            })
+            .collect()
+    }
+
+    /// The scraper carries logic no assertion can inspect, so it is pinned on
+    /// its own: one name per declaration, single-line and braced forms alike,
+    /// with doc comments and field lines excluded.
+    #[test]
+    fn client_request_variant_names_reads_one_name_per_declaration() {
+        let source = concat!(
+            "pub enum ClientRequest {\n",
+            "    /// Read one target.\n",
+            "    ReadReviewTarget { target_id: CanonicalUuid },\n",
+            "    ListReviewFindings {\n",
+            "        run_id: CanonicalUuid,\n",
+            "    },\n",
+            "    ListTemplates {},\n",
+            "}\n",
+        );
+
+        assert_eq!(
+            client_request_variant_names(source),
+            BTreeSet::from([
+                String::from("ListReviewFindings"),
+                String::from("ListTemplates"),
+                String::from("ReadReviewTarget"),
+            ])
+        );
+    }
+
+    /// One fixture identity. No admission reads an identity's value; the verb
+    /// carrying one is the whole input.
+    fn fixture_identity(seed: u128) -> CanonicalUuid {
+        CanonicalUuid::from_uuid(Uuid::from_u128(seed))
+    }
+
+    fn read_review_target_request() -> ClientRequest {
+        ClientRequest::ReadReviewTarget {
+            target_id: fixture_identity(1),
+        }
+    }
+
+    fn read_review_run_request() -> ClientRequest {
+        ClientRequest::ReadReviewRun {
+            run_id: fixture_identity(2),
+        }
+    }
+
+    fn read_review_finding_request() -> ClientRequest {
+        ClientRequest::ReadReviewFinding {
+            finding_id: fixture_identity(3),
+        }
+    }
+
+    fn list_review_findings_request() -> ClientRequest {
+        ClientRequest::ListReviewFindings {
+            run_id: fixture_identity(4),
+        }
+    }
+
+    fn read_review_orchestration_request() -> ClientRequest {
+        ClientRequest::ReadReviewOrchestration {
+            attempt_id: fixture_identity(5),
+        }
+    }
+
+    /// Every review verb that reads the database reserves snapshot capacity.
+    /// The reservation exists so `RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS`
+    /// connections stay available to the outbox dispatcher and mutations; a
+    /// read verb dispatched without it spends that reserve silently.
+    #[test]
+    fn every_review_read_verb_reserves_snapshot_capacity() {
+        assert_eq!(
+            review_read_verbs_in_vocabulary(),
+            BTreeSet::from([
+                String::from("ListReviewFindings"),
+                String::from("ReadReviewFinding"),
+                String::from("ReadReviewOrchestration"),
+                String::from("ReadReviewRun"),
+                String::from("ReadReviewTarget"),
+            ]),
+            "a review read verb in the wire vocabulary has no admission of its own"
+        );
+
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&read_review_target_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&read_review_run_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&read_review_finding_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&list_review_findings_request()),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&read_review_orchestration_request()),
+            SnapshotReaderAdmission::CoherentReviewSnapshot
+        );
+    }
+
+    /// A metadata point read opens a transaction, sets `REPEATABLE READ ONLY`,
+    /// selects, and commits, so it holds a pooled connection across statements
+    /// and belongs to the same admission. A defaults read is one statement and
+    /// does not.
+    #[test]
+    fn point_reads_are_admitted_by_how_long_they_hold_a_connection() {
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&ClientRequest::ReadSessionMetadata {
+                session_id: fixture_identity(6),
+            }),
+            SnapshotReaderAdmission::OneConnection
+        );
+        assert_eq!(
+            SnapshotReaderAdmission::for_request(&ClientRequest::ReadSessionDefaults {
+                session_id: fixture_identity(7),
+                defaults_version: None,
+            }),
+            SnapshotReaderAdmission::NotRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn review_read_admission_draws_on_the_shared_reader_budget() -> Result<(), Box<dyn Error>>
+    {
+        let capacity = usize::try_from(REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS)? + 1;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+
+        let permit = admit_snapshot_reader(
+            &read_review_target_request(),
+            Arc::clone(&budget),
+            &mut shutdown_receiver,
+        )
+        .await?
+        .ok_or_else(|| io::Error::other("the running fixture must be admitted"))?
+        .ok_or_else(|| io::Error::other("a review read must hold a reader permit"))?;
+        assert_eq!(budget.available_permits(), capacity - 1);
+        drop(permit);
+
+        assert!(
+            admit_snapshot_reader(
+                &ClientRequest::ListModelAliases {},
+                Arc::clone(&budget),
+                &mut shutdown_receiver,
+            )
+            .await?
+            .ok_or_else(|| io::Error::other("the running fixture must be admitted"))?
+            .is_none(),
+            "a request that reads no snapshot holds no reader permit"
+        );
+        assert_eq!(budget.available_permits(), capacity);
         Ok(())
     }
 

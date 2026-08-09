@@ -6,6 +6,7 @@ import XCTest
 final class ProcessProtocolTests: XCTestCase {
   private let sessionID = "11111111-1111-4111-8111-111111111111"
   private let turnID = "22222222-2222-4222-8222-222222222222"
+  private let toolRequestID = "33333333-3333-4333-8333-333333333333"
 
   func testClientFrameUsesVersionOneAndCanonicalStringScalars() throws {
     let frame = SignalboxProcessClientFrame(
@@ -20,6 +21,91 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(
       String(decoding: encoded, as: UTF8.self),
       #"{"request":{"session_id":"\#(sessionID)","type":"read_transcript"},"request_id":"7","version":1}"#
+    )
+  }
+
+  /// INV-033: every metadata last-writer actor the daemon can send decodes into
+  /// its own typed variant carrying the reference that actor object states, so
+  /// a tool-written or model-written snapshot is readable rather than opaque.
+  func testMetadataLastWriterDecodesEveryActor() throws {
+    let userFrame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.metadataReadFrame(
+        sessionID: sessionID,
+        actorJSON: #"{"type":"user"}"#
+      )
+    )
+    XCTAssertEqual(try ProcessProtocolFixture.metadataActor(in: userFrame.message), .user)
+
+    let modelFrame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.metadataReadFrame(
+        sessionID: sessionID,
+        actorJSON: #"{"type":"model","turn_id":"\#(turnID)"}"#
+      )
+    )
+    XCTAssertEqual(
+      try ProcessProtocolFixture.metadataActor(in: modelFrame.message),
+      .model(turnID: try SignalboxCanonicalUUID(validating: turnID))
+    )
+
+    let recoveryFrame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.metadataReadFrame(
+        sessionID: sessionID,
+        actorJSON: #"{"type":"recovery"}"#
+      )
+    )
+    XCTAssertEqual(try ProcessProtocolFixture.metadataActor(in: recoveryFrame.message), .recovery)
+
+    let toolFrame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.metadataReadFrame(
+        sessionID: sessionID,
+        actorJSON: #"{"type":"tool","tool_request_id":"\#(toolRequestID)"}"#
+      )
+    )
+    XCTAssertEqual(
+      try ProcessProtocolFixture.metadataActor(in: toolFrame.message),
+      .tool(toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID))
+    )
+  }
+
+  /// INV-033: every metadata last-writer actor encodes to its exact wire bytes
+  /// and decodes back to the same value. The two arms are hand-written and
+  /// separate, so an encoder that dropped a carried reference, or spelled a
+  /// member differently from the decoder, would otherwise ship unseen.
+  func testMetadataLastWriterActorRoundTripsToExactBytes() throws {
+    try assertMetadataActorRoundTrips(.user, #"{"type":"user"}"#)
+    try assertMetadataActorRoundTrips(
+      .model(turnID: try SignalboxCanonicalUUID(validating: turnID)),
+      #"{"turn_id":"\#(turnID)","type":"model"}"#
+    )
+    try assertMetadataActorRoundTrips(.recovery, #"{"type":"recovery"}"#)
+    try assertMetadataActorRoundTrips(
+      .tool(toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID)),
+      #"{"tool_request_id":"\#(toolRequestID)","type":"tool"}"#
+    )
+  }
+
+  /// Pins one actor's exact encoded bytes, then decodes those same bytes back,
+  /// so neither arm can drift without the other. A failure reports the call
+  /// site's actor rather than this helper.
+  private func assertMetadataActorRoundTrips(
+    _ actor: SignalboxMetadataActor,
+    _ expectedJSON: String,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) throws {
+    let encoded = try SignalboxJSONCoding.encoder().encode(actor)
+
+    XCTAssertEqual(
+      String(decoding: encoded, as: UTF8.self),
+      expectedJSON,
+      file: file,
+      line: line
+    )
+    XCTAssertEqual(
+      try SignalboxJSONCoding.decoder().decode(SignalboxMetadataActor.self, from: encoded),
+      actor,
+      file: file,
+      line: line
     )
   }
 
@@ -2552,6 +2638,28 @@ private enum ProcessProtocolFixture {
     return entry
   }
 
+  /// One `session_metadata` frame whose last writer carries the supplied actor
+  /// object. The metadata is the initial shape: only the actor varies.
+  static func metadataReadFrame(sessionID: String, actorJSON: String) -> Data {
+    Data(
+      """
+      {"version":1,"request_id":"1","message":{"type":"session_metadata",\
+      "session_id":"\(sessionID)","metadata":{"title":null,"tags":[],\
+      "attributes":{},"archived":false},"last_writer":\
+      {"updated_at_unix_micros":"1","actor":\(actorJSON)}}}
+      """.utf8
+    )
+  }
+
+  static func metadataActor(
+    in message: SignalboxProcessServerMessage
+  ) throws -> SignalboxMetadataActor {
+    guard case .sessionMetadata(let read) = message, let writer = read.lastWriter else {
+      throw ProcessProtocolFixtureError.missingMetadataWriter
+    }
+    return writer.actor
+  }
+
   static func transcriptEntry(
     in message: SignalboxProcessServerMessage
   ) throws -> SignalboxTranscriptEntryMessage {
@@ -2785,6 +2893,7 @@ private enum ProcessProtocolFixtureError: Error {
   case missingImportedEntry
   case missingRejectionDetail
   case missingProcessError
+  case missingMetadataWriter
   case missingTranscriptEntry
   case missingModelCallUsage
   case missingModelCallsEnd
