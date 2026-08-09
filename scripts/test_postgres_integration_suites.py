@@ -79,6 +79,8 @@ def suite(**overrides: object) -> Suite:
         "features": (),
         "shards": 1,
         "skip": (),
+        "include_binaries": (),
+        "exclude_binaries": (),
     }
     fields.update(overrides)
     return Suite(**fields)  # type: ignore[arg-type]
@@ -92,6 +94,8 @@ class ManifestParsingTests(unittest.TestCase):
         self.assertEqual(suites[0].package, "signalbox-persistence")
         self.assertEqual(suites[0].features, ("postgres-integration",))
         self.assertEqual(suites[0].shards, 3)
+        self.assertEqual(suites[0].include_binaries, ())
+        self.assertEqual(suites[0].exclude_binaries, ())
         self.assertEqual(suites[1].skip, ("a_live_credential_smoke",))
 
     def test_absent_optional_fields_default_to_empty(self) -> None:
@@ -99,6 +103,8 @@ class ManifestParsingTests(unittest.TestCase):
 
         self.assertEqual(suites[0].features, ())
         self.assertEqual(suites[0].skip, ())
+        self.assertEqual(suites[0].include_binaries, ())
+        self.assertEqual(suites[0].exclude_binaries, ())
 
     def test_manifest_line_locates_a_suite_for_diagnostics(self) -> None:
         self.assertEqual(manifest_line(VALID, "terminal-client"), 10)
@@ -205,6 +211,24 @@ class ManifestParsingTests(unittest.TestCase):
 
         self.assertIn("substring", str(raised.exception))
 
+    def test_binary_term_carrying_filterset_syntax_is_rejected(self) -> None:
+        with self.assertRaises(ManifestError) as raised:
+            parse_suites(
+                '[[suite]]\nname = "a"\npackage = "b"\nshards = 1\n'
+                'include_binaries = ["x) or all(1"]\n'
+            )
+
+        self.assertIn("test-target", str(raised.exception))
+
+    def test_same_binary_cannot_be_included_and_excluded(self) -> None:
+        with self.assertRaises(ManifestError) as raised:
+            parse_suites(
+                '[[suite]]\nname = "a"\npackage = "b"\nshards = 1\n'
+                'include_binaries = ["x"]\nexclude_binaries = ["x"]\n'
+            )
+
+        self.assertIn("both includes and excludes", str(raised.exception))
+
 
 class FiltersetTests(unittest.TestCase):
     def test_no_skips_selects_everything(self) -> None:
@@ -217,6 +241,21 @@ class FiltersetTests(unittest.TestCase):
         self.assertEqual(
             suite(skip=("alpha", "beta")).filterset(),
             "not test(alpha) and not test(beta)",
+        )
+
+    def test_one_included_binary_selects_only_that_target(self) -> None:
+        self.assertEqual(
+            suite(include_binaries=("runner_protocol_postgres",)).filterset(),
+            "(binary(runner_protocol_postgres))",
+        )
+
+    def test_binary_partition_composes_with_test_skips(self) -> None:
+        self.assertEqual(
+            suite(
+                exclude_binaries=("runner_protocol_postgres",),
+                skip=("alpha",),
+            ).filterset(),
+            "not binary(runner_protocol_postgres) and not test(alpha)",
         )
 
 
