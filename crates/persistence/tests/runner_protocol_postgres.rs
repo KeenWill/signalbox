@@ -77,6 +77,7 @@ const RETRY_ATTEMPT: u128 = 0x9601;
 const FOREIGN_RUNNER: u128 = 0x9202;
 const RELATED_IDENTITY_OFFSET: u128 = 0x100;
 const LOCK_WAIT_PROBE: Duration = Duration::from_millis(100);
+const LOCK_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
 const LEGACY_PLACEMENT_REFUSAL: &str =
@@ -3772,19 +3773,27 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
     .fetch_one(&mut *blocker)
     .await?;
     let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
-    let mut replacement =
-        Box::pin(replacement_store.register(&expected_enrollment, narrowed_advertisement()));
+    let mut replacement = tokio::spawn(async move {
+        replacement_store
+            .register(&expected_enrollment, narrowed_advertisement())
+            .await
+    });
     tokio::time::timeout(LOCK_WAIT_PROBE, &mut replacement)
         .await
         .expect_err("registration replacement must wait for enrollment authority");
-    let mut lease_store = Box::pin(store.store_lease(&lease));
+    let mut lease_store = tokio::spawn(async move { store.store_lease(&lease).await });
     tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
         .await
         .expect_err("lease admission must wait behind registration replacement");
     blocker.commit().await?;
-    replacement.await?;
-    let rejected = lease_store
+    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, replacement)
         .await
+        .expect("registration replacement must finish after enrollment authority releases")
+        .expect("registration replacement task must remain joinable")?;
+    let rejected = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, lease_store)
+        .await
+        .expect("lease admission must finish after registration replacement")
+        .expect("lease admission task must remain joinable")
         .expect_err("withdrawn current availability cannot authorize the later lease");
 
     assert_store_check_violation(rejected);
