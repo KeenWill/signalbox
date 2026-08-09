@@ -44,16 +44,24 @@ jobs:
         run: python3 scripts/check_migration_versions.py
       - name: Check user vocabulary
         run: python3 scripts/check_user_vocabulary.py
+      # The pinned Markdown toolchain, built once and reused. It was previously
+      # created inline by the formatting step; it is a named prerequisite now
+      # because the projection checker parses Markdown with the same pinned
+      # parser rather than approximating it with regular expressions.
+      - name: Set up the pinned Markdown toolchain
+        run: |
+          python3 -m venv /tmp/mdformat-venv
+          /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
       # Two documentation gates that keep one restructuring from drifting back.
       # An ungated documentation convention in this repository has been observed
       # to drift within days, and both of these guard a shape that a reviewer
       # otherwise has to rediscover one page-pair per round. The tier check is
-      # enrolled per page rather than corpus-wide: eleven pages still carry
+      # enrolled per page rather than corpus-wide: ten pages still carry
       # bold-prose tier labels, and enrolling one means restructuring it first.
       - name: Check specification tiers
         run: python3 scripts/check_spec_tiers.py
       - name: Check credential-availability projections
-        run: python3 scripts/check_availability_projections.py
+        run: /tmp/mdformat-venv/bin/python scripts/check_availability_projections.py
       # Gates normally: the tree satisfies this today, so the step can only
       # fail on a regression. Clippy enforces the panic denies but cannot see
       # a member that opts out of inheriting them, which is the hole this
@@ -95,7 +103,7 @@ jobs:
       - name: Test specification-tier checker
         run: python3 scripts/test_check_spec_tiers.py
       - name: Test credential-availability projection checker
-        run: python3 scripts/test_check_availability_projections.py
+        run: /tmp/mdformat-venv/bin/python scripts/test_check_availability_projections.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
       - name: Test panic-gate checker
@@ -123,10 +131,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check Markdown formatting
-        run: |
-          python3 -m venv /tmp/mdformat-venv
-          /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
-          /tmp/mdformat-venv/bin/mdformat --check *.md docs/
+        run: /tmp/mdformat-venv/bin/mdformat --check *.md docs/
       # Conservative inventory for the recorded session-lock protocols. The
       # checksum makes changes to the small
       # reviewed inventory explicit; the scan rejects strongest-mode row-lock
