@@ -1,5 +1,8 @@
 # Process protocol
 
+The typed runner-state session event and daemon outbox projection were verified
+against this PR (`agent/runner-event-outbox-persistence`).
+
 The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
 

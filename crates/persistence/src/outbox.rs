@@ -1953,13 +1953,37 @@ async fn load_event(
         }
         RUNNER_STATE_TRANSITION => {
             let row = sqlx::query(
-                "SELECT runner_id, placement_revision, sandbox_profile,
-                        working_directory, state_kind
-                   FROM runner_state_transition_outbox_event
-                  WHERE event_sequence = $1
-                    AND event_kind = $2
-                    AND storage_version = $3
-                    AND session_id = $4",
+                "SELECT event.runner_id, event.placement_revision,
+                        event.sandbox_profile, event.working_directory,
+                        event.state_kind, event.connection_enrollment_id,
+                        placement.event_kind AS source_event_kind,
+                        placement.state_kind AS source_state_kind,
+                        placement.requested_sandbox_profile AS source_sandbox_profile,
+                        placement.requested_working_directory AS source_working_directory,
+                        placement.selector_runner_id AS source_selector_runner_id,
+                        placement.pinned_runner_id AS source_pinned_runner_id,
+                        placement.lost_runner_id AS source_lost_runner_id,
+                        placement.registration_enrollment_id AS source_registration_enrollment_id,
+                        connection.state_kind AS source_connection_state_kind,
+                        connection.cause_kind AS source_connection_cause_kind,
+                        prior.lost_runner_id AS prior_lost_runner_id,
+                        prior.requested_working_directory AS prior_working_directory
+                   FROM runner_state_transition_outbox_event AS event
+                   JOIN runner_session_placement_record AS placement
+                     ON placement.session_id = event.session_id
+                    AND placement.event_ordinal = event.placement_event_ordinal
+                    AND placement.placement_revision = event.placement_revision
+                   LEFT JOIN runner_connection_event AS connection
+                     ON connection.enrollment_id = event.connection_enrollment_id
+                    AND connection.connection_epoch = event.connection_epoch
+                    AND connection.event_ordinal = event.connection_event_ordinal
+                   LEFT JOIN runner_session_placement_record AS prior
+                     ON prior.session_id = placement.session_id
+                    AND prior.event_ordinal + 1 = placement.event_ordinal
+                  WHERE event.event_sequence = $1
+                    AND event.event_kind = $2
+                    AND event.storage_version = $3
+                    AND event.session_id = $4",
             )
             .bind(Decimal::from(expected_sequence))
             .bind(RUNNER_STATE_TRANSITION)
@@ -1993,8 +2017,84 @@ async fn load_event(
                 "abandoned" => DispatchedRunnerState::Abandoned,
                 _ => return Err(OutboxCorruption::InvalidRunnerEvent.into()),
             };
+            let runner_uuid = row.try_get::<Uuid, _>("runner_id")?;
+            let source_sandbox = row.try_get::<String, _>("source_sandbox_profile")?;
+            let source_working_directory =
+                row.try_get::<Option<String>, _>("source_working_directory")?;
+            if source_sandbox != row.try_get::<String, _>("sandbox_profile")?
+                || source_working_directory
+                    != row.try_get::<Option<String>, _>("working_directory")?
+            {
+                return Err(OutboxCorruption::InvalidRunnerEvent.into());
+            }
+            let source_event = row.try_get::<String, _>("source_event_kind")?;
+            let source_state = row.try_get::<String, _>("source_state_kind")?;
+            let source_selector = row.try_get::<Option<Uuid>, _>("source_selector_runner_id")?;
+            let source_pinned = row.try_get::<Option<Uuid>, _>("source_pinned_runner_id")?;
+            let source_lost = row.try_get::<Option<Uuid>, _>("source_lost_runner_id")?;
+            let source_matches = match state {
+                DispatchedRunnerState::Pinned => {
+                    source_event == "pinned"
+                        && source_state == "pinned"
+                        && source_pinned == Some(runner_uuid)
+                }
+                DispatchedRunnerState::Suspect | DispatchedRunnerState::Connected => {
+                    let expected_connection = match state {
+                        DispatchedRunnerState::Suspect => ("suspect", "heartbeat_missed"),
+                        DispatchedRunnerState::Connected => ("connected", "heartbeat_recovered"),
+                        _ => unreachable!("the outer pattern admits only connection states"),
+                    };
+                    source_state == "pinned"
+                        && source_pinned == Some(runner_uuid)
+                        && row.try_get::<Option<Uuid>, _>("source_registration_enrollment_id")?
+                            == row.try_get::<Option<Uuid>, _>("connection_enrollment_id")?
+                        && row
+                            .try_get::<Option<String>, _>("source_connection_state_kind")?
+                            .as_deref()
+                            == Some(expected_connection.0)
+                        && row
+                            .try_get::<Option<String>, _>("source_connection_cause_kind")?
+                            .as_deref()
+                            == Some(expected_connection.1)
+                }
+                DispatchedRunnerState::RunnerLostBeforePin => {
+                    source_event == "runner_lost_before_pin"
+                        && source_state == "runner_lost_before_pin"
+                        && source_lost == Some(runner_uuid)
+                }
+                DispatchedRunnerState::RunnerLost => {
+                    source_event == "runner_lost"
+                        && source_state == "runner_lost"
+                        && source_lost == Some(runner_uuid)
+                }
+                DispatchedRunnerState::Replaced => {
+                    (source_event == "pre_pin_replaced"
+                        && source_state == "unpinned"
+                        && source_selector == Some(runner_uuid))
+                        || (source_event == "runner_replaced"
+                            && source_state == "pinned"
+                            && source_pinned == Some(runner_uuid))
+                }
+                DispatchedRunnerState::WorkingDirectoryChanged => {
+                    source_event == "runner_replaced"
+                        && source_state == "pinned"
+                        && source_pinned == Some(runner_uuid)
+                        && row.try_get::<Option<Uuid>, _>("prior_lost_runner_id")?
+                            == Some(runner_uuid)
+                        && row.try_get::<Option<String>, _>("prior_working_directory")?
+                            != source_working_directory
+                }
+                DispatchedRunnerState::Abandoned => {
+                    source_event == "abandoned"
+                        && source_state == "runner_abandoned"
+                        && source_lost == Some(runner_uuid)
+                }
+            };
+            if !source_matches {
+                return Err(OutboxCorruption::InvalidRunnerEvent.into());
+            }
             DispatchedOutboxEventKind::RunnerStateTransition {
-                runner: RunnerId::from_uuid(row.try_get("runner_id")?),
+                runner: RunnerId::from_uuid(runner_uuid),
                 placement_revision,
                 sandbox,
                 working_directory,

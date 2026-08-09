@@ -13790,8 +13790,9 @@ mod tests {
         ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
         ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
         ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
-        ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion,
-        SessionId, SessionInputPosition, SessionModelSettingsChanged, SettingOverlay,
+        ReviewWorkflowKind, RunnerGeneration, RunnerId, RunnerWorkingDirectory,
+        SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion, SessionId,
+        SessionInputPosition, SessionModelSettingsChanged, SettingOverlay,
         SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, ToolRequestId,
         TurnAttemptId, TurnId, TurnModelSettingsResolved, ValidatedModelSettings,
     };
@@ -13800,7 +13801,9 @@ mod tests {
         DelegationToolRequestState as WireDelegationToolRequestState, ErrorCode, ErrorDetail,
         FrameEncodeError, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
         ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, ProtocolVersion,
-        RejectionDetail, ReviewFindingInput, ReviewSeverity, ServerFrame, ServerMessage,
+        RejectionDetail, ReviewFindingInput, ReviewSeverity,
+        RunnerSandboxProfile as WireRunnerSandboxProfile,
+        RunnerStateTransitionState as WireRunnerStateTransitionState, ServerFrame, ServerMessage,
         SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
         TurnState, decode_server_line, encode_server_line,
     };
@@ -13895,7 +13898,7 @@ mod tests {
         },
         outbox::{
             DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEventKind,
-            DispatchedReconciliationOperation, DispatchedToolBatchState,
+            DispatchedReconciliationOperation, DispatchedRunnerState, DispatchedToolBatchState,
         },
         process_read::{
             ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessReadError,
@@ -16885,6 +16888,37 @@ mod tests {
                 state: ToolBatchState::RecoveryRequired {
                     tool_attempt_id: CanonicalUuid::from_uuid(tool_attempt.into_uuid()),
                 },
+            }
+        );
+    }
+
+    /// INV-032 / INV-044: the daemon preserves every bounded runner-placement
+    /// fact while projecting one dispatched outbox transition to the wire.
+    #[test]
+    fn inv032_inv044_runner_state_transition_projects_to_the_closed_wire_shape() {
+        let runner = RunnerId::from_uuid(Uuid::from_u128(7));
+        let placement_revision =
+            RunnerGeneration::try_from_u64(9).expect("the fixture revision is positive");
+        let working_directory = RunnerWorkingDirectory::try_new("workspace/project".to_owned())
+            .expect("the fixture directory is bounded exact text");
+        let update =
+            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::RunnerStateTransition {
+                runner,
+                placement_revision,
+                sandbox: signalbox_domain::RunnerSandboxProfile::WorkspaceRestricted,
+                working_directory: Some(working_directory),
+                state: DispatchedRunnerState::WorkingDirectoryChanged,
+            })
+            .expect("a client-visible runner event projects to one update");
+
+        assert_eq!(
+            update.wire().expect("the fixture event is representable"),
+            SessionEvent::RunnerStateTransition {
+                runner_id: CanonicalUuid::from_uuid(runner.into_uuid()),
+                placement_revision: CanonicalU64::new(placement_revision.get()),
+                sandbox_profile: WireRunnerSandboxProfile::WorkspaceRestricted,
+                working_directory: Some("workspace/project".to_owned()),
+                state: WireRunnerStateTransitionState::WorkingDirectoryChanged,
             }
         );
     }

@@ -1,5 +1,9 @@
 # Persistence protocol
 
+The runner-state transition outbox representation, relational source checks,
+and dispatch projection were verified against this PR
+(`agent/runner-event-outbox-persistence`).
+
 The runner-recovery turn-phase representation and read boundary were verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
 

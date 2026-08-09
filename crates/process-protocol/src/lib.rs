@@ -7842,13 +7842,13 @@ mod tests {
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
         ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
-        ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject, ServerFrame,
-        RunnerSandboxProfile, RunnerStateTransitionState, ServerMessage, ServiceTier, SessionEvent,
-        SessionMetadata, SettingOverlay,
-        SystemPromptMember, SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision,
-        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
-        TurnModelSettingsSnapshot, TurnState, UsageProvenance, decode_client_line,
-        decode_server_line, encode_client_line, encode_server_line, validate_adjustments,
+        ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject,
+        RunnerSandboxProfile, RunnerStateTransitionState, ServerFrame, ServerMessage, ServiceTier,
+        SessionEvent, SessionMetadata, SettingOverlay, SystemPromptMember, SystemPromptText,
+        ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
+        TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnModelSettingsSnapshot,
+        TurnState, UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
+        encode_server_line, validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;

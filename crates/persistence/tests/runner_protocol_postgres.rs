@@ -43,8 +43,8 @@ use signalbox_persistence::{
     create_session::CreateSessionRepository,
     local_test_connection_options, migrate,
     outbox::{
-        DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState,
-        OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState, OutboxCorruption,
+        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
         RunnerStateTransitionOutboxTestSource, append_runner_state_transition_for_test,
     },
     runner_protocol::{
@@ -498,13 +498,20 @@ fn replacement_enrollment() -> RunnerEnrollment {
     )
 }
 
+fn exact_runner_directory() -> RunnerWorkingDirectory {
+    RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+        .expect("the exact fixture directory is valid")
+}
+
+fn replacement_runner_directory() -> RunnerWorkingDirectory {
+    RunnerWorkingDirectory::try_new("/workspace/replacement".to_owned())
+        .expect("the replacement fixture directory is valid")
+}
+
 fn exact_runner_request(runner: RunnerId) -> SessionRunnerPlacementRequest {
     SessionRunnerPlacementRequest {
         selector: RunnerSelector::Identity(runner),
-        working_directory: WorkingDirectorySelection::Exact(
-            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
-                .expect("the exact fixture directory is valid"),
-        ),
+        working_directory: WorkingDirectorySelection::Exact(exact_runner_directory()),
         credential_profile: None,
         workspace: WorkspaceRequirement::None,
         sandbox: RunnerSandboxProfile::WorkspaceRestricted,
@@ -757,6 +764,51 @@ async fn stored_pin_fixture(
     Ok((store, expected_enrollment, registration, pin))
 }
 
+async fn stored_credentialless_pin_fixture(
+    pool: &PgPool,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPin,
+    ),
+    Box<dyn Error>,
+> {
+    insert_session(pool).await?;
+    insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the credentialless registration pins the placement");
+    store.store_pin(&pin, &registration).await?;
+    Ok((store, expected_enrollment, registration, pin))
+}
+
 async fn stored_later_lease_fixture(
     pool: &PgPool,
 ) -> Result<
@@ -877,6 +929,50 @@ async fn dispatch_next_outbox_event(
         .await?;
     assert_eq!(outcome, OutboxDispatchOutcome::Delivered { sequence: 1 });
     Ok(dispatched.expect("the delivered outcome carries its decoded event"))
+}
+
+async fn placement_outbox_facts(
+    pool: &PgPool,
+    session: SessionId,
+    event_kind: &str,
+) -> Result<(u64, RunnerGeneration), Box<dyn Error>> {
+    let (event_ordinal, placement_revision): (Decimal, Decimal) = sqlx::query_as(
+        "SELECT event_ordinal, placement_revision
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(event_kind)
+    .fetch_one(pool)
+    .await?;
+    let event_ordinal = u64::try_from(event_ordinal.mantissa())?;
+    let placement_revision = u64::try_from(placement_revision.mantissa())?;
+    let placement_revision = RunnerGeneration::try_from_u64(placement_revision)
+        .expect("the persisted placement fixture has a positive revision");
+    Ok((event_ordinal, placement_revision))
+}
+
+async fn connection_outbox_source(
+    pool: &PgPool,
+    placement_event_ordinal: u64,
+    enrollment: RunnerEnrollmentId,
+    cause_kind: &str,
+) -> Result<RunnerStateTransitionOutboxTestSource, Box<dyn Error>> {
+    let (connection_epoch, event_ordinal): (Decimal, Decimal) = sqlx::query_as(
+        "SELECT connection_epoch, event_ordinal
+           FROM runner_connection_event
+          WHERE enrollment_id = $1 AND cause_kind = $2",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(cause_kind)
+    .fetch_one(pool)
+    .await?;
+    Ok(RunnerStateTransitionOutboxTestSource::connection(
+        placement_event_ordinal,
+        enrollment,
+        u64::try_from(connection_epoch.mantissa())?,
+        u64::try_from(event_ordinal.mantissa())?,
+    ))
 }
 
 async fn insert_physical_attempt(
@@ -2054,6 +2150,7 @@ async fn append_runner_registration_loss_projection(
 async fn append_same_runner_replacement_projection(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session: SessionId,
+    requested_directory: Option<&RunnerWorkingDirectory>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO runner_session_placement_record
@@ -2077,13 +2174,16 @@ async fn append_same_runner_replacement_projection(
              credential_grant_revision)
          SELECT session_id, event_ordinal + 1, placement_revision + 1,
                 'runner_replaced', selector_kind, selector_runner_id,
-                selector_capability_class, directory_selection_kind,
-                requested_working_directory,
+                selector_capability_class,
+                CASE WHEN $2::text IS NULL
+                     THEN directory_selection_kind ELSE 'exact' END,
+                COALESCE($2::text, requested_working_directory),
                 requested_credential_profile_name,
                 workspace_requirement_kind, requested_repository_key,
                 requested_sandbox_profile, permission_override_count,
                 'pinned', NULL, NULL, pinned_runner_id,
-                pinned_working_directory, pinned_credential_profile_name,
+                COALESCE($2::text, pinned_working_directory),
+                pinned_credential_profile_name,
                 registration_enrollment_id, registration_revision,
                 pinned_tool_count, workspace_repository_key,
                 workspace_working_directory, workspace_manifest_id,
@@ -2103,6 +2203,7 @@ async fn append_same_runner_replacement_projection(
             )",
     )
     .bind(session.into_uuid())
+    .bind(requested_directory.map(RunnerWorkingDirectory::as_str))
     .execute(&mut **transaction)
     .await?;
     sqlx::query(
@@ -4556,41 +4657,11 @@ async fn s32_inv044_checked_runner_replacement_requires_a_live_successor_connect
 async fn s32_inv044_registration_loss_admits_same_runner_replacement_shape()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    insert_session(&pool).await?;
-    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone(), catalog());
-    let expected_enrollment = enrollment();
-    store.insert_enrollment(&expected_enrollment).await?;
-    let registration = store
-        .register(&expected_enrollment, advertisement())
-        .await?;
-    let placement = SessionRunnerPlacement::new(
-        SessionId::from_uuid(uuid(SESSION)),
-        SessionRunnerPlacementRequest {
-            selector: RunnerSelector::CapabilityClass(class()),
-            working_directory: WorkingDirectorySelection::RunnerDefault,
-            credential_profile: None,
-            workspace: WorkspaceRequirement::None,
-            sandbox: RunnerSandboxProfile::Ambient,
-            permission_overrides: no_permission_overrides(),
-        },
-    );
-    store.store_placement(&placement, None, None).await?;
-    let pin = placement
-        .pin_and_offer_lease(
-            &expected_enrollment,
-            registration.registration(),
-            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
-                .expect("the fixture working directory is valid"),
-            None,
-            authorized(INITIAL_PHYSICAL_ATTEMPT),
-            offer_request(),
-        )
-        .expect("the credentialless registration pins the placement");
-    store.store_pin(&pin, &registration).await?;
+    let (store, _, registration, pin) = stored_credentialless_pin_fixture(&pool).await?;
     append_runner_registration_loss_projection(&pool, pin.placement.session()).await?;
     let mut replacement = pool.begin().await?;
-    append_same_runner_replacement_projection(&mut replacement, pin.placement.session()).await?;
+    append_same_runner_replacement_projection(&mut replacement, pin.placement.session(), None)
+        .await?;
     replacement.commit().await?;
     let loaded_replacement = store
         .load_placement(pin.placement.session())
@@ -4621,7 +4692,7 @@ async fn s32_inv044_connection_loss_rejects_same_runner_replacement_shape()
     append_runner_lost_projection(&pool, pin.placement.session()).await?;
     let mut malformed = pool.begin().await?;
     let rejected =
-        append_same_runner_replacement_projection(&mut malformed, pin.placement.session())
+        append_same_runner_replacement_projection(&mut malformed, pin.placement.session(), None)
             .await
             .expect_err("only registration loss may retain the runner identity");
 
@@ -9818,6 +9889,523 @@ async fn s30_inv001_reconstitution_rejects_cross_wired_enrollment() -> Result<()
         .expect_err("cross-wired enrollment identity fails independent audit evidence");
 
     assert!(matches!(error, RunnerProtocolStoreError::Domain(_)));
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: initial pin dispatches from its immutable placement
+/// record with the complete follower-visible runner facts.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_pinned_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "pinned").await?;
+    append_runner_state_transition_for_test(
+        &pool,
+        session,
+        pin.lease.runner(),
+        placement_revision,
+        pin.placement.request().sandbox,
+        None,
+        DispatchedRunnerState::Pinned,
+        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+    )
+    .await?;
+    let event = dispatch_next_outbox_event(&pool).await?;
+
+    assert_eq!(event.sequence(), 1);
+    assert_eq!(event.session(), session);
+    assert_eq!(
+        event.kind(),
+        &DispatchedOutboxEventKind::RunnerStateTransition {
+            runner: pin.lease.runner(),
+            placement_revision,
+            sandbox: pin.placement.request().sandbox,
+            working_directory: None,
+            state: DispatchedRunnerState::Pinned,
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: first-heartbeat suspicion dispatches only from its
+/// exact connection event and retained pinned placement.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_suspect_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "pinned").await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await?;
+    let source = connection_outbox_source(
+        &pool,
+        placement_event_ordinal,
+        expected_enrollment.enrollment(),
+        "heartbeat_missed",
+    )
+    .await?;
+    append_runner_state_transition_for_test(
+        &pool,
+        session,
+        pin.lease.runner(),
+        placement_revision,
+        pin.placement.request().sandbox,
+        None,
+        DispatchedRunnerState::Suspect,
+        source,
+    )
+    .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatRecovered,
+        )
+        .await?;
+    let event = dispatch_next_outbox_event(&pool).await?;
+
+    assert_eq!(event.sequence(), 1);
+    assert_eq!(event.session(), session);
+    assert_eq!(
+        event.kind(),
+        &DispatchedOutboxEventKind::RunnerStateTransition {
+            runner: pin.lease.runner(),
+            placement_revision,
+            sandbox: pin.placement.request().sandbox,
+            working_directory: None,
+            state: DispatchedRunnerState::Suspect,
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: heartbeat recovery dispatches from the exact recovered
+/// connection event rather than the mutable current connection head.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_connected_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "pinned").await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatRecovered,
+        )
+        .await?;
+    let source = connection_outbox_source(
+        &pool,
+        placement_event_ordinal,
+        expected_enrollment.enrollment(),
+        "heartbeat_recovered",
+    )
+    .await?;
+    append_runner_state_transition_for_test(
+        &pool,
+        session,
+        pin.lease.runner(),
+        placement_revision,
+        pin.placement.request().sandbox,
+        None,
+        DispatchedRunnerState::Connected,
+        source,
+    )
+    .await?;
+    let event = dispatch_next_outbox_event(&pool).await?;
+
+    assert_eq!(event.sequence(), 1);
+    assert_eq!(event.session(), session);
+    assert_eq!(
+        event.kind(),
+        &DispatchedOutboxEventKind::RunnerStateTransition {
+            runner: pin.lease.runner(),
+            placement_revision,
+            sandbox: pin.placement.request().sandbox,
+            working_directory: None,
+            state: DispatchedRunnerState::Connected,
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: exact-identity loss before pin dispatches the retained
+/// requested sandbox and user-selected directory.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_lost_before_pin_outbox_round_trips() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(runner),
+    );
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, placement.session(), "runner_lost_before_pin").await?;
+    append_runner_state_transition_for_test(
+        &pool,
+        placement.session(),
+        runner,
+        placement_revision,
+        placement.request().sandbox,
+        Some(exact_runner_directory()),
+        DispatchedRunnerState::RunnerLostBeforePin,
+        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+    )
+    .await?;
+    let event = dispatch_next_outbox_event(&pool).await?;
+
+    assert_eq!(event.sequence(), 1);
+    assert_eq!(event.session(), placement.session());
+    assert_eq!(
+        event.kind(),
+        &DispatchedOutboxEventKind::RunnerStateTransition {
+            runner,
+            placement_revision,
+            sandbox: placement.request().sandbox,
+            working_directory: Some(exact_runner_directory()),
+            state: DispatchedRunnerState::RunnerLostBeforePin,
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: pinned loss dispatches against the historical loss
+/// record even after the placement head can later advance.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_lost_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_lost_projection(&pool, session).await?;
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "runner_lost").await?;
+    append_runner_state_transition_for_test(
+        &pool,
+        session,
+        pin.lease.runner(),
+        placement_revision,
+        pin.placement.request().sandbox,
+        None,
+        DispatchedRunnerState::RunnerLost,
+        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+    )
+    .await?;
+    append_abandoned_projection(&pool, session, None).await?;
+    let event = dispatch_next_outbox_event(&pool).await?;
+
+    assert_eq!(event.sequence(), 1);
+    assert_eq!(event.session(), session);
+    assert_eq!(
+        event.kind(),
+        &DispatchedOutboxEventKind::RunnerStateTransition {
+            runner: pin.lease.runner(),
+            placement_revision,
+            sandbox: pin.placement.request().sandbox,
+            working_directory: None,
+            state: DispatchedRunnerState::RunnerLost,
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: pre-pin owner replacement dispatches the successor
+/// identity and successor placement revision without fabricating pinned facts.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_pre_pin_replaced_outbox_round_trips() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let successor = RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(runner),
+    );
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    append_pre_pin_replacement_projection(&pool, placement.session(), successor).await?;
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, placement.session(), "pre_pin_replaced").await?;
+    append_runner_state_transition_for_test(
+        &pool,
+        placement.session(),
+        successor,
+        placement_revision,
+        placement.request().sandbox,
+        Some(exact_runner_directory()),
+        DispatchedRunnerState::Replaced,
+        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+    )
+    .await?;
+    let event = dispatch_next_outbox_event(&pool).await?;
+
+    assert_eq!(event.sequence(), 1);
+    assert_eq!(event.session(), placement.session());
+    assert_eq!(
+        event.kind(),
+        &DispatchedOutboxEventKind::RunnerStateTransition {
+            runner: successor,
+            placement_revision,
+            sandbox: placement.request().sandbox,
+            working_directory: Some(exact_runner_directory()),
+            state: DispatchedRunnerState::Replaced,
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: checked pinned replacement dispatches from the exact
+/// successor placement record without requiring a directory relocation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_pinned_replaced_outbox_round_trips() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_registration_loss_projection(&pool, session).await?;
+    let mut replacement = pool.begin().await?;
+    append_same_runner_replacement_projection(&mut replacement, session, None).await?;
+    replacement.commit().await?;
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "runner_replaced").await?;
+    append_runner_state_transition_for_test(
+        &pool,
+        session,
+        pin.lease.runner(),
+        placement_revision,
+        pin.placement.request().sandbox,
+        None,
+        DispatchedRunnerState::Replaced,
+        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+    )
+    .await?;
+    let event = dispatch_next_outbox_event(&pool).await?;
+
+    assert_eq!(event.sequence(), 1);
+    assert_eq!(event.session(), session);
+    assert_eq!(
+        event.kind(),
+        &DispatchedOutboxEventKind::RunnerStateTransition {
+            runner: pin.lease.runner(),
+            placement_revision,
+            sandbox: pin.placement.request().sandbox,
+            working_directory: None,
+            state: DispatchedRunnerState::Replaced,
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: checked same-runner recovery with a new user-selected
+/// directory dispatches the relocation state and exact requested directory.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_working_directory_changed_outbox_round_trips()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_registration_loss_projection(&pool, session).await?;
+    let replacement_directory = replacement_runner_directory();
+    let mut replacement = pool.begin().await?;
+    append_same_runner_replacement_projection(
+        &mut replacement,
+        session,
+        Some(&replacement_directory),
+    )
+    .await?;
+    replacement.commit().await?;
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "runner_replaced").await?;
+    append_runner_state_transition_for_test(
+        &pool,
+        session,
+        pin.lease.runner(),
+        placement_revision,
+        pin.placement.request().sandbox,
+        Some(replacement_directory.clone()),
+        DispatchedRunnerState::WorkingDirectoryChanged,
+        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+    )
+    .await?;
+    let event = dispatch_next_outbox_event(&pool).await?;
+
+    assert_eq!(event.sequence(), 1);
+    assert_eq!(event.session(), session);
+    assert_eq!(
+        event.kind(),
+        &DispatchedOutboxEventKind::RunnerStateTransition {
+            runner: pin.lease.runner(),
+            placement_revision,
+            sandbox: pin.placement.request().sandbox,
+            working_directory: Some(replacement_directory),
+            state: DispatchedRunnerState::WorkingDirectoryChanged,
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: abandonment dispatches from its exact terminal
+/// placement record while retaining the lost runner identity.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_abandoned_outbox_round_trips() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_lost_projection(&pool, session).await?;
+    append_abandoned_projection(&pool, session, None).await?;
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "abandoned").await?;
+    append_runner_state_transition_for_test(
+        &pool,
+        session,
+        pin.lease.runner(),
+        placement_revision,
+        pin.placement.request().sandbox,
+        None,
+        DispatchedRunnerState::Abandoned,
+        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+    )
+    .await?;
+    let event = dispatch_next_outbox_event(&pool).await?;
+
+    assert_eq!(event.sequence(), 1);
+    assert_eq!(event.session(), session);
+    assert_eq!(
+        event.kind(),
+        &DispatchedOutboxEventKind::RunnerStateTransition {
+            runner: pin.lease.runner(),
+            placement_revision,
+            sandbox: pin.placement.request().sandbox,
+            working_directory: None,
+            state: DispatchedRunnerState::Abandoned,
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: dispatch revalidates the immutable placement source and
+/// rejects a runner event whose stored runner was corrupted after admission.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_outbox_dispatch_rejects_cross_wired_source()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "pinned").await?;
+    append_runner_state_transition_for_test(
+        &pool,
+        session,
+        pin.lease.runner(),
+        placement_revision,
+        pin.placement.request().sandbox,
+        None,
+        DispatchedRunnerState::Pinned,
+        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+    )
+    .await?;
+    sqlx::query("ALTER TABLE runner_state_transition_outbox_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_state_transition_outbox_event
+            SET runner_id = $1
+          WHERE event_sequence = 1",
+    )
+    .bind(uuid(FOREIGN_RUNNER))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_state_transition_outbox_event ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let rejected = OutboxDispatcher::new(pool.clone())
+        .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+        .await
+        .expect_err("a cross-wired runner event cannot be offered");
+
+    assert!(matches!(
+        rejected,
+        OutboxDispatchError::Corruption(OutboxCorruption::InvalidRunnerEvent)
+    ));
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: the relational outbox guard refuses a transition whose
+/// runner identity disagrees with its immutable placement source.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_outbox_insert_rejects_cross_wired_source()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "pinned").await?;
+    let rejected = append_runner_state_transition_for_test(
+        &pool,
+        session,
+        RunnerId::from_uuid(uuid(FOREIGN_RUNNER)),
+        placement_revision,
+        pin.placement.request().sandbox,
+        None,
+        DispatchedRunnerState::Pinned,
+        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+    )
+    .await
+    .expect_err("a cross-wired runner event cannot commit");
+
+    assert_check_violation(rejected);
     drop(pool);
     Ok(())
 }
