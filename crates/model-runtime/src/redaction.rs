@@ -811,6 +811,8 @@ fn lossy_truncated(body: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use crate::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
         CompletionFinish, CredentialValue, ExchangeFacts, FinishReason, LossCause,
@@ -1720,6 +1722,545 @@ mod tests {
 
         assert_eq!(emitted.len(), 4 * 1024 * 1024);
         assert_eq!(pending, "ke");
+    }
+
+    /// INV-035: a credential the provider echoes back with ordinary JSON
+    /// escapes is caught even when the arrival boundary falls inside the
+    /// escape itself, which is where `input_json_delta` is free to split.
+    #[test]
+    fn inv_035_simple_escaped_credential_split_mid_escape_is_redacted() {
+        let key = credential("fixture/secret");
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"{"path":"fixture\"#.to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"/secret"}"#.to_string(),
+            },
+        });
+        sink.flush();
+        drop(sink);
+
+        // Checked against every emitted fragment first: a leak forwarded on
+        // another correlation or tool index never reaches the projection below.
+        assert_no_stream_carries(&observed, "fixture/secret");
+        assert_no_stream_carries(&observed, "secret");
+        let arguments = joined_arguments(&observed, "call-1", 0);
+        assert_eq!(arguments, r#"{"path":"[redacted]"}"#);
+    }
+
+    /// The reconstructed arguments for one tool index, as a reader of the
+    /// stream would see them.
+    ///
+    /// INV-035 constrains the *content* a consumer reassembles — safe bytes
+    /// preserved, credential absent — not how the scrubber chops it into
+    /// deltas. Asserting exact fragment boundaries would fail a
+    /// behaviour-preserving change that buffered the safe prefix or coalesced
+    /// it with the replacement, while producing identical secure output.
+    /// Which of a correlation's parallel delta streams a fragment extends.
+    ///
+    /// Part of the reassembly key: two facts may share a correlation and an
+    /// index yet belong to streams no consumer ever concatenates together.
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    enum EmittedStream {
+        Text,
+        Thinking,
+        ToolArguments,
+    }
+
+    /// Asserts `secret` is unrecoverable from every stream the sink emitted.
+    ///
+    /// [`joined_arguments`] deliberately projects one correlation and one tool
+    /// index, so a credential forwarded on a *different* correlation or index
+    /// is invisible to it. Checking each observation on its own is not enough
+    /// either: a leak split across two deltas — `fixture/sec` then `ret` — is
+    /// recoverable by any consumer that concatenates the stream while no
+    /// single fragment contains the credential. So every emitted fragment is
+    /// grouped by the stream it extends and the absence check runs on each
+    /// reconstruction, which is what a consumer actually sees.
+    ///
+    /// Exhaustive over `ObservationFact` so a new text-bearing fact cannot be
+    /// added without deciding whether the credential could ride out on it.
+    /// Where one emitted fact's provider-controlled text belongs.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum EmittedText<'a> {
+        /// A fragment extending one identified delta stream.
+        Fragment {
+            stream: EmittedStream,
+            index: u32,
+            text: &'a str,
+        },
+        /// Complete values standing alone rather than extending a stream.
+        Complete(Vec<&'a str>),
+        /// Carries no provider-controlled text at all.
+        Absent,
+    }
+
+    /// Classifies every provider-controlled string one fact carries.
+    ///
+    /// Deliberately mirrors [`redact_observation_fact`]: production decides
+    /// which fields a credential can reach by redacting them, so a field it
+    /// scrubs and this classifier reports as `Absent` is a field no INV-035
+    /// case would ever inspect — deleting that production redaction would
+    /// leave the suite green while the credential is emitted. The two matches
+    /// are meant to name the same surface, and only `SendCommenced` and
+    /// `UsageReported` carry nothing.
+    ///
+    /// Exhaustive over `ObservationFact` and over `FinishReason` so a new
+    /// text-bearing shape cannot be added without deciding the question.
+    fn emitted_text(fact: &ObservationFact) -> EmittedText<'_> {
+        match fact {
+            ObservationFact::TextDelta { index, text } => EmittedText::Fragment {
+                stream: EmittedStream::Text,
+                index: *index,
+                text: text.as_str(),
+            },
+            ObservationFact::ThinkingDelta { index, text } => EmittedText::Fragment {
+                stream: EmittedStream::Thinking,
+                index: *index,
+                text: text.as_str(),
+            },
+            ObservationFact::ToolArgumentsDelta { index, fragment } => EmittedText::Fragment {
+                stream: EmittedStream::ToolArguments,
+                index: *index,
+                text: fragment.as_str(),
+            },
+            ObservationFact::ToolCallProposed(proposal) => EmittedText::Complete(vec![
+                proposal.id.as_str(),
+                proposal.name.as_str(),
+                proposal.arguments_json.as_str(),
+            ]),
+            ObservationFact::ProviderModelReported(model) => {
+                EmittedText::Complete(vec![model.as_str()])
+            }
+            ObservationFact::ExchangeEstablished(exchange) => EmittedText::Complete(
+                exchange
+                    .provider_request_id
+                    .iter()
+                    .map(ProviderRequestId::as_str)
+                    .collect(),
+            ),
+            ObservationFact::FinishReported(finish) => EmittedText::Complete(match finish {
+                FinishReason::StopSequence { sequence } => {
+                    sequence.as_deref().into_iter().collect()
+                }
+                FinishReason::Unrecognized { provider_token } => vec![provider_token.as_str()],
+                FinishReason::EndTurn
+                | FinishReason::MaxOutputTokens
+                | FinishReason::ContextWindowExceeded
+                | FinishReason::ToolUse
+                | FinishReason::Refusal => Vec::new(),
+            }),
+            ObservationFact::SendCommenced | ObservationFact::UsageReported(_) => {
+                EmittedText::Absent
+            }
+        }
+    }
+
+    /// Reassembles every emitted delta stream, keyed by the stream it extends.
+    fn reconstructed_streams(
+        observed: &[Observation<String>],
+    ) -> BTreeMap<(String, EmittedStream, u32), String> {
+        let mut streams: BTreeMap<(String, EmittedStream, u32), String> = BTreeMap::new();
+        for observation in observed {
+            if let EmittedText::Fragment {
+                stream,
+                index,
+                text,
+            } = emitted_text(&observation.fact)
+            {
+                streams
+                    .entry((observation.correlation.clone(), stream, index))
+                    .or_default()
+                    .push_str(text);
+            }
+        }
+        streams
+    }
+
+    /// Names every delta stream the sink emitted, in a stable order.
+    fn emitted_stream_keys(observed: &[Observation<String>]) -> Vec<(String, EmittedStream, u32)> {
+        reconstructed_streams(observed).into_keys().collect()
+    }
+
+    #[track_caller]
+    fn assert_no_stream_carries(observed: &[Observation<String>], secret: &str) {
+        for ((correlation, stream, index), reconstructed) in &reconstructed_streams(observed) {
+            assert!(
+                !reconstructed.contains(secret),
+                "the credential must not be recoverable from any emitted stream; \
+                 found it on correlation {correlation} {stream:?} index {index}: {reconstructed}"
+            );
+        }
+        for observation in observed {
+            if let EmittedText::Complete(values) = emitted_text(&observation.fact) {
+                for text in values {
+                    assert!(
+                        !text.contains(secret),
+                        "the credential must not be emitted; found it in a complete value on \
+                         correlation {}: {text}",
+                        observation.correlation
+                    );
+                }
+            }
+        }
+    }
+
+    /// The reassembly is the only reason the check is stronger than a
+    /// per-observation scan, and a helper carrying logic the INV-035 cases
+    /// depend on is verified rather than assumed: a credential split across
+    /// two deltas leaks recoverably even though neither fragment contains it,
+    /// and the projection those cases use never reconstructs that stream.
+    #[test]
+    #[should_panic(expected = "must not be recoverable from any emitted stream")]
+    fn split_credential_on_an_uninspected_stream_is_caught() {
+        let observed = vec![
+            Observation {
+                correlation: "call-9".to_string(),
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 7,
+                    fragment: "fixture/sec".to_string(),
+                },
+            },
+            Observation {
+                correlation: "call-9".to_string(),
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 7,
+                    fragment: "ret".to_string(),
+                },
+            },
+        ];
+
+        assert_no_stream_carries(&observed, "fixture/secret");
+    }
+
+    /// The classifier decides which text every later check inspects, so its
+    /// three text-bearing shapes are pinned directly.
+    #[test]
+    fn emitted_text_classifies_each_bearing_fact() {
+        assert_eq!(
+            emitted_text(&ObservationFact::TextDelta {
+                index: 3,
+                text: String::from("answer"),
+            }),
+            EmittedText::Fragment {
+                stream: EmittedStream::Text,
+                index: 3,
+                text: "answer",
+            }
+        );
+        assert_eq!(
+            emitted_text(&ObservationFact::ThinkingDelta {
+                index: 4,
+                text: String::from("reasoning"),
+            }),
+            EmittedText::Fragment {
+                stream: EmittedStream::Thinking,
+                index: 4,
+                text: "reasoning",
+            }
+        );
+        assert_eq!(
+            emitted_text(&ObservationFact::ToolArgumentsDelta {
+                index: 5,
+                fragment: String::from("{\"a\":1}"),
+            }),
+            EmittedText::Fragment {
+                stream: EmittedStream::ToolArguments,
+                index: 5,
+                text: "{\"a\":1}",
+            }
+        );
+        // Every field production redacts is reported as inspectable text. A
+        // field scrubbed there but `Absent` here is one no case would check.
+        assert_eq!(
+            emitted_text(&ObservationFact::ProviderModelReported(
+                ProviderReportedModel::new("fixture-model")
+            )),
+            EmittedText::Complete(vec!["fixture-model"])
+        );
+        assert_eq!(
+            emitted_text(&ObservationFact::ExchangeEstablished(ExchangeFacts {
+                provider_request_id: Some(ProviderRequestId::new("fixture-request")),
+                http_status: Some(200),
+            })),
+            EmittedText::Complete(vec!["fixture-request"])
+        );
+        assert_eq!(
+            emitted_text(&ObservationFact::FinishReported(
+                FinishReason::Unrecognized {
+                    provider_token: String::from("fixture-token"),
+                }
+            )),
+            EmittedText::Complete(vec!["fixture-token"])
+        );
+        assert_eq!(
+            emitted_text(&ObservationFact::FinishReported(FinishReason::EndTurn)),
+            EmittedText::Complete(Vec::new())
+        );
+        assert_eq!(
+            emitted_text(&ObservationFact::SendCommenced),
+            EmittedText::Absent
+        );
+    }
+
+    /// Facts sharing a correlation and index but not a kind stay distinct
+    /// streams, which is what keeps the reassembly from inventing a leak by
+    /// concatenating text a consumer never joins.
+    #[test]
+    fn same_index_on_different_kinds_reconstructs_separately() {
+        let observed = vec![
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: String::from("fixture/sec"),
+                },
+            },
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 0,
+                    fragment: String::from("ret"),
+                },
+            },
+        ];
+
+        assert_eq!(
+            emitted_stream_keys(&observed),
+            vec![
+                (String::from("call-1"), EmittedStream::Text, 0),
+                (String::from("call-1"), EmittedStream::ToolArguments, 0),
+            ]
+        );
+        assert_no_stream_carries(&observed, "fixture/secret");
+    }
+
+    /// Grouping is per stream, not one buffer: fragments that would spell the
+    /// credential only if separate streams were concatenated are not a leak,
+    /// because no consumer reassembles across them.
+    #[test]
+    fn fragments_spanning_separate_streams_are_not_a_leak() {
+        let observed = vec![
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 7,
+                    fragment: "fixture/sec".to_string(),
+                },
+            },
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::ToolArgumentsDelta {
+                    index: 8,
+                    fragment: "ret".to_string(),
+                },
+            },
+        ];
+
+        assert_no_stream_carries(&observed, "fixture/secret");
+    }
+
+    fn joined_arguments(observed: &[Observation<String>], correlation: &str, index: u32) -> String {
+        observed
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::ToolArgumentsDelta {
+                    index: observed_index,
+                    fragment,
+                } if observation.correlation == correlation && *observed_index == index => {
+                    Some(fragment.as_str())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// INV-035: the credential is scrubbed from the facts that carry a single
+    /// provider-controlled value, not only from the delta streams.
+    ///
+    /// Each of these is redacted by `redact_observation_fact`, so each is a
+    /// way a credential could reach a consumer; without a case that emits one
+    /// carrying the credential, deleting that production redaction would leave
+    /// this suite green.
+    #[test]
+    fn inv_035_single_value_facts_are_credential_scrubbed() {
+        let key = credential("fixture/secret");
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
+                "model-fixture/secret-v1",
+            )),
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ExchangeEstablished(ExchangeFacts {
+                provider_request_id: Some(ProviderRequestId::new("req-fixture/secret")),
+                http_status: Some(200),
+            }),
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::FinishReported(FinishReason::Unrecognized {
+                provider_token: String::from("stop-fixture/secret"),
+            }),
+        });
+        sink.flush();
+        drop(sink);
+
+        // Pinned exactly rather than by credential absence and a count. Those
+        // two hold just as well when redaction replaces the *whole* value, so
+        // a regression that scrubbed `model-` and `-v1` away with the
+        // credential would satisfy them while losing the safe bytes INV-035
+        // preserves. Comparing the forwarded facts states both halves at once:
+        // the credential is gone, the surrounding bytes and the non-credential
+        // `http_status` are untouched, and each variant is still itself.
+        assert_eq!(
+            observed,
+            vec![
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
+                        "model-[redacted]-v1"
+                    )),
+                },
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::ExchangeEstablished(ExchangeFacts {
+                        provider_request_id: Some(ProviderRequestId::new("req-[redacted]")),
+                        http_status: Some(200),
+                    }),
+                },
+                Observation {
+                    correlation: "call-1".to_string(),
+                    fact: ObservationFact::FinishReported(FinishReason::Unrecognized {
+                        provider_token: String::from("stop-[redacted]"),
+                    }),
+                },
+            ]
+        );
+    }
+
+    /// INV-035: a credential spelled as a surrogate pair survives a boundary
+    /// that falls between the pair's two halves.
+    #[test]
+    fn inv_035_surrogate_pair_credential_split_mid_escape_is_redacted() {
+        let key = credential("key\u{1f600}loop");
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"{"emoji":"key\ud83d\ud"#.to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"e00loop"}"#.to_string(),
+            },
+        });
+        sink.flush();
+        drop(sink);
+
+        assert_no_stream_carries(&observed, "key\u{1f600}loop");
+        assert_no_stream_carries(&observed, "loop");
+        let arguments = joined_arguments(&observed, "call-1", 0);
+        assert_eq!(arguments, r#"{"emoji":"[redacted]"}"#);
+    }
+
+    /// INV-035: a held credential prefix ending inside an escape is replaced
+    /// rather than forwarded when another tool call's arguments arrive, so no
+    /// later observation can reassemble it across the fact boundary.
+    #[test]
+    fn inv_035_held_partial_escape_is_flushed_closed_before_another_tool_index() {
+        let key = credential("fixture/secret");
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"{"path":"fixture\"#.to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 1,
+                fragment: r#"{"other":1}"#.to_string(),
+            },
+        });
+        sink.flush();
+        drop(sink);
+
+        // The held prefix must be replaced rather than forwarded — on this
+        // index, on the index that displaced it, or on any other stream.
+        assert_no_stream_carries(&observed, "fixture");
+        let held = joined_arguments(&observed, "call-1", 0);
+        assert_eq!(held, r#"{"path":"[redacted]"#);
+        // The other index is untouched, and — the point of this case — no
+        // later observation can reassemble the credential across the boundary.
+        assert_eq!(joined_arguments(&observed, "call-1", 1), r#"{"other":1}"#);
+    }
+
+    /// Escapes the scrubber decodes but never matches are re-emitted from the
+    /// raw fragment, so tool arguments carrying a multi-line string or a
+    /// quoted path reach the model byte for byte across a mid-escape split.
+    #[test]
+    fn streamed_tool_arguments_preserve_non_credential_escapes_byte_for_byte() {
+        let key = credential("fixture_secret");
+        // Split mid-escape: the scrubber must hold `\` and decide about it only
+        // once the next chunk arrives.
+        let first = r#"{"text":"first\"#;
+        let second = r#"nsecond \"quoted\" \\ \t last"}"#;
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: first.to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: second.to_string(),
+            },
+        });
+        sink.flush();
+        drop(sink);
+
+        // The claim is byte preservation of the reconstructed stream, not any
+        // particular delta segmentation: provider chunk boundaries are
+        // arbitrary, and an implementation that buffered or coalesced these
+        // safe fragments would still be correct.
+        assert_eq!(
+            joined_arguments(&observed, "call-1", 0),
+            format!("{first}{second}"),
+            "non-credential escapes reach the model byte for byte"
+        );
+        // ...and none of it is smuggled onto another correlation or index:
+        // exactly one stream was emitted, and it is this call's own.
+        assert_eq!(
+            emitted_stream_keys(&observed),
+            vec![(String::from("call-1"), EmittedStream::ToolArguments, 0)],
+            "the preserved bytes stay on their own correlation and index"
+        );
     }
 
     #[test]
