@@ -4,7 +4,11 @@
 //! the domain API defined by `docs/spec/review-workflows.md`.
 
 use signalbox_application::ReviewWorkflowReader;
-use std::{error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
@@ -658,6 +662,82 @@ impl ReviewWorkflowStore {
             .await?;
         transaction.commit().await?;
         Ok(finding)
+    }
+
+    /// Loads and validates several findings, reading each target graph once.
+    ///
+    /// [`Self::load_finding`] answers for one identity by reconstructing the
+    /// entire target graph that identity belongs to and then selecting a single
+    /// member from it. A caller holding a list of identities therefore pays for
+    /// that whole reconstruction once per member, which is quadratic in the
+    /// number of findings on a target. This performs the same reconstruction
+    /// once per distinct target and selects every requested member from it.
+    ///
+    /// Identities with no `review_finding` row are absent from the result, so a
+    /// caller distinguishes them exactly as it would from [`Self::load_finding`]
+    /// returning `None`.
+    pub async fn load_findings(
+        &self,
+        findings: &[ReviewFindingId],
+    ) -> Result<BTreeMap<ReviewFindingId, ReviewFinding>, ReviewWorkflowStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .load_findings_on_connection(&mut transaction, findings)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
+    }
+
+    async fn load_findings_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        findings: &[ReviewFindingId],
+    ) -> Result<BTreeMap<ReviewFindingId, ReviewFinding>, ReviewWorkflowStoreError> {
+        let requested: BTreeSet<ReviewFindingId> = findings.iter().copied().collect();
+        if requested.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let rows = sqlx::query(
+            "SELECT finding_id, target_id
+               FROM review_finding
+              WHERE finding_id = ANY($1)",
+        )
+        .bind(
+            requested
+                .iter()
+                .map(|finding| finding.into_uuid())
+                .collect::<Vec<_>>(),
+        )
+        .fetch_all(&mut *connection)
+        .await?;
+        let mut resolved = BTreeSet::new();
+        let mut targets = BTreeSet::new();
+        for row in rows {
+            resolved.insert(finding_id(row.try_get("finding_id")?));
+            targets.insert(row.try_get::<Uuid, _>("target_id")?);
+        }
+        let mut loaded = BTreeMap::new();
+        for target in targets {
+            for finding in self
+                .load_target_findings_on_connection(connection, target)
+                .await?
+            {
+                let identity = finding.proposal().reference().finding();
+                if requested.contains(&identity) {
+                    loaded.insert(identity, finding);
+                }
+            }
+        }
+        // A resolved identity names a row whose target graph was just loaded
+        // under one snapshot, so its absence is the same corruption the
+        // single-identity loader reports rather than a missing finding.
+        if resolved.iter().any(|finding| !loaded.contains_key(finding)) {
+            return Err(corruption(
+                "review_finding",
+                String::from("requested target graph finding disappeared"),
+            ));
+        }
+        Ok(loaded)
     }
 
     /// Lists and validates complete findings for one run in identity order.
