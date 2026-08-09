@@ -1836,6 +1836,21 @@ class CommentPayloadTests(JqBackedTestCase):
 
         self.assertEqual(self.payload_body(NATIVE_COMMENT_PAYLOAD, body), body)
 
+    def test_the_native_payload_round_trips_the_whole_produced_comment(self) -> None:
+        """The native counterpart of the whole-comment round trip, and the only
+        native test that carries provenance at all.
+
+        Neither other native payload test reaches this text: the renderer test
+        stops where the report ends, and the no-report body has no footer to
+        corrupt. A native payload filter that preserved the report and mangled
+        only the workflow-appended provenance would pass both of them, which is
+        the same gap the Rust side had. The two workflows carry separate copies
+        of this program and can drift apart, so covering one says nothing about
+        the other."""
+        body = native_full_comment_body()
+
+        self.assertEqual(self.payload_body(NATIVE_COMMENT_PAYLOAD, body), body)
+
 
 # --------------------------------------------------------------------------
 # The sticky-comment selector
