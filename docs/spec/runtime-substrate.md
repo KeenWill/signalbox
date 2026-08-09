@@ -965,23 +965,27 @@ terminal evidence. A success must satisfy the operation's any/named tool choice,
 with a structured-output contract represented as the required named MCP tool.
 Provider usage is retained only where the CLI reports it.
 
-The adapter accepts only its configured non-secret `CredentialReference`.
-Ambient delivery leaves subscription-login resolution inside Claude Code. File
-delivery resolves the reference during cancellable preparation, rejects an
-empty, non-UTF-8, or NUL-bearing value, and writes the exact value to a
-mode-0600 credential file in a private request-scoped settings store. That
-store's mode-0600 `settings.json` configures Claude's `apiKeyHelper` to invoke a
-mode-0600 request-scoped script through the fixed `/bin/sh` interpreter. The
-script preserves the exact file bytes using only shell builtins and resolves no
-executable through `PATH`. The credential, script, settings, and existing MCP
-support files share the temporary directory; the adapter replaces only the
-already allowlisted `CLAUDE_CONFIG_DIR` value with that directory and still
-never adds `ANTHROPIC_API_KEY` itself to the child process environment. Dropping
-the prepared capability removes the directory. The exact value remains in the
-one-shot capability so provider-controlled observations and terminal evidence
-receive exact-value redaction in addition to the CLI credential-shape and
-cross-fragment discipline. Proxy userinfo and unusable credential-home paths
-still fail before spawn.
+Ambient delivery leaves subscription-login resolution inside Claude Code, and an
+ambient adapter accepts only its one configured non-secret
+`CredentialReference`. File delivery is not so limited: the adapter holds the
+complete adapter-scoped catalog of declared `claude_cli` file profiles and
+resolves whichever reference the operation pins, so a historical session keeps
+the profile it was created with even when the configured default has moved on,
+and two Claude families may prefer different profiles. It resolves that
+reference during cancellable preparation, rejects an empty, non-UTF-8, or
+NUL-bearing value, and writes the exact value to a mode-0600 credential file in
+a private request-scoped settings store. That store's mode-0600 `settings.json`
+configures Claude's `apiKeyHelper` to invoke a mode-0600 request-scoped script
+through the fixed `/bin/sh` interpreter. The script preserves the exact file
+bytes using only shell builtins and resolves no executable through `PATH`. The
+credential, script, settings, and existing MCP support files share the temporary
+directory; the adapter replaces only the already allowlisted `CLAUDE_CONFIG_DIR`
+value with that directory and still never adds `ANTHROPIC_API_KEY` itself to the
+child process environment. Dropping the prepared capability removes the
+directory. The exact value remains in the one-shot capability so
+provider-controlled observations and terminal evidence receive exact-value
+redaction in addition to the CLI credential-shape and cross-fragment discipline.
+Proxy userinfo and unusable credential-home paths still fail before spawn.
 
 The output-token ceiling is enforced by the cleared child environment, while
 reasoning level and fast mode use the explicit preparation mappings owned by

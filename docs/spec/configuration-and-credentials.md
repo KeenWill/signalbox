@@ -85,20 +85,14 @@ verified against the references above.
 
 `signalboxd` reads six unconditionally required deployment values and the
 optional runner-socket override from the process environment at startup, and
-also consults `HOME`. The present composition additionally requires
-`ANTHROPIC_API_KEY_FILE` or `OPENAI_API_KEY_FILE` when a static mapping selects
-that direct HTTP adapter; those conditional channels are what this build
-actually reads.
-
-**Committed unimplemented functionality — catalog-supplied model credentials.**
-No present composition builds `FileCredentialAccess` from the profile catalog,
-so the conditional channels above remain required until the implementing child
-lands. That child removes them: model-provider paths then come only from each
-`file` profile's delivery configuration in the static catalog below, on the same
-pattern `[credentials.<name>]` already uses for the runner. Why that direction —
-one environment variable cannot name the paths of several accounts, and a
-deployment holding two keys for one provider must be able to say so. An operator
-configuring this build still supplies the conditional path.
+also consults `HOME`. Model-provider credential paths are not among them: this
+build composes `FileCredentialAccess` from the profile catalog, so those paths
+come only from each `file` profile's delivery configuration in the static
+catalog below, on the same pattern `[credentials.<name>]` already uses for the
+runner. `ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read and
+supplying them has no effect. Why this direction: one environment variable
+cannot name the paths of several accounts, and a deployment holding two keys for
+one provider must be able to say so.
 
 The two integration credentials, of which there is exactly one each, keep their
 process settings:
@@ -194,13 +188,10 @@ the socket boundary and single-daemon guard are
 [process-protocol](process-protocol.md) material.
 
 The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL` and
-`SIGNALBOX_CONFIG_FILE` in its `--anthropic` mode, and on this build also
-requires `ANTHROPIC_API_KEY_FILE`, from which it builds its credential access
-directly. Taking that path from the configured profile instead is committed
-unimplemented functionality that lands with the same child that replaces the
-daemon's conditional channels. It does not compose the daemon tool catalog and
-does not read `GITHUB_TOKEN_FILE`; it is a development driver, not the client
-protocol.
+`SIGNALBOX_CONFIG_FILE` in its `--anthropic` mode, taking the Anthropic key path
+from the configured profile exactly as the daemon does. It does not compose the
+daemon tool catalog and does not read `GITHUB_TOKEN_FILE`; it is a development
+driver, not the client protocol.
 
 ## Telemetry export
 
@@ -493,13 +484,14 @@ fail-closed:
   name is 1 through 256 UTF-8 bytes, unpadded, and NUL-free. Duplicate names,
   unknown adapters, unknown kinds, an unknown delivery, a delivery its adapter
   does not admit, and unknown fields are rejected. Parsing opens no credential
-  path and contacts no provider. After configuration-independent recovery and
-  before scheduling, startup establishes each `codex_home` identity as its
-  delivery contract requires; every other credential remains lazy, matching the
-  no-preflight rule below. Billing kind belongs to authentication, not to the
-  adapter a mapping selects. A profile name is otherwise opaque to code: no
-  build-provided constant is compared against it, so a deployment names its
-  accounts as it chooses.
+  path and contacts no provider. A `codex_home` profile is rejected as an
+  undelivered delivery, so nothing about it is retained and its identity walk is
+  never performed; establishing that identity before scheduling is a requirement
+  on the child that admits the delivery. Every credential this build does admit
+  remains lazy, matching the no-preflight rule below. Billing kind belongs to
+  authentication, not to the adapter a mapping selects. A profile name is
+  otherwise opaque to code: no build-provided constant is compared against it,
+  so a deployment names its accounts as it chooses.
 - At least one `[[credential_pools]]` entry is required.
   [Credential pools and selection](#credential-pools-and-selection) owns its
   complete grammar and admission rules.
@@ -1026,12 +1018,13 @@ is outside anything the daemon can coordinate.
 **Committed unimplemented functionality — capacity reservations.** No present
 composition reserves capacity for a bounded `codex_home` profile, records an
 invocation reservation, or withholds a call because one is at its bound.
-`max_concurrent_invocations` is validated and retained by the grammar above and
-governs nothing in this build. Its implementing child owns the shared
-per-profile capacity row, the reservation lifecycle and its process-group
-fencing across restart, and the contention behavior that decides between waiting
-for a bounded member and consulting `on_pool_exhausted`. Until that child lands,
-a document may declare the bound and every invocation proceeds unbounded.
+`max_concurrent_invocations` is parsed and range-checked by the grammar above,
+after which the profile is rejected as an undelivered delivery, so no bound is
+retained and no invocation of any kind proceeds against a `codex_home` profile.
+Its implementing child owns the shared per-profile capacity row, the reservation
+lifecycle and its process-group fencing across restart, and the contention
+behavior that decides between waiting for a bounded member and consulting
+`on_pool_exhausted`.
 
 **`oauth`** is spelled `delivery = "oauth"` with exactly four required fields:
 TOML strings `client_id`, `token_url`, and `device_authorization_url`, plus TOML
@@ -1294,13 +1287,17 @@ This is the same fail-closed admission rule that rejects
 stay in the grammar so that an adapter gaining a native token for a cause admits
 that pair with no configuration change.
 
-Selection happens at model-call preparation, never at session creation. In this
-build it is deliberately degenerate: for the resolved target's family,
-preparation resolves the mapped pool and takes its admissible preferred member —
-the lowest priority value, and the first declared among equals. No exclusion,
-rotation, or failover state exists to consult, so `tie_break` beyond
-`first_listed` and every trigger action are retained configuration rather than
-behavior.
+Selection is deliberately degenerate in this build, and it happens once per
+session rather than once per call. Configuration parsing takes each pool's
+admissible preferred member — the lowest priority value, first declared among
+equals — and session creation pins that reference in the session's credential
+snapshot. Preparation then resolves the pinned reference from the session's
+durable family-to-reference entry; it consults no pool and chooses no member. An
+existing session therefore stays on the profile it was created with even after a
+pool's priorities change, which is the same durability the pinned-policy design
+gives a later build for a different reason. No exclusion, rotation, or failover
+state exists to consult, so `tie_break` beyond `first_listed` and every trigger
+action are retained configuration rather than behavior.
 
 **Committed unimplemented functionality — pool selection state.** No present
 repository interns an immutable pool-policy revision, stores a session's
@@ -1316,12 +1313,13 @@ work, so INV-034 is unaffected.
 
 Two consequences of that degeneracy are worth stating for this build. A
 multi-member pool behaves as its preferred member alone, since every call on
-that family authenticates as that member. And because one CLI runtime per
-adapter carries one credential reference, two families of one CLI adapter
-resolving to different profiles is a typed startup failure rather than a silent
-pin of whichever parsed last. Direct HTTP adapters instead resolve the exact
-session-pinned reference from their complete adapter-scoped file credential
-catalog; a profile declared for another adapter is unmapped even if a later
+that family authenticates as that member. And two families of one adapter may
+prefer different profiles wherever that adapter resolves the session-pinned
+reference from a complete adapter-scoped catalog — both direct HTTP adapters and
+`claude_cli` do. Only `codex_cli` still carries a single reference into its
+runtime, so two `codex_cli` families resolving to different profiles is a typed
+startup failure rather than a silent pin of whichever parsed last. A profile
+declared for another adapter is unmapped in every case, even if a later
 configuration routes the same model family through this adapter.
 
 Admission is fail-closed. Startup rejects a pool with no members, a duplicate
