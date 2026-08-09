@@ -976,6 +976,59 @@ class InvariantScenarioCountCheckerTests(unittest.TestCase):
             f"scenario count: {STALE_SCENARIO_COUNT}. The next sentence."
         )
 
+    def test_a_reference_linked_count_continuing_as_a_decimal_is_not_read(self) -> None:
+        """A reference link's `][label]` run ends in ordinary letters, so the
+        trailing boundary walk stopped there and — finding a letter rather than
+        a separator — accepted the integer part of a decimal as a total."""
+        self.assert_no_count_read_from(
+            f"scenario count: [{STALE_SCENARIO_COUNT}][catalog].5"
+        )
+
+    def test_a_reference_linked_count_continuing_as_a_grouped_number_is_not_read(
+        self,
+    ) -> None:
+        self.assert_no_count_read_from(
+            f"scenario count: [{STALE_SCENARIO_COUNT}][catalog],500"
+        )
+
+    def test_a_punctuation_dash_before_a_count_still_states_a_total(self) -> None:
+        """An em dash opening a sentence is punctuation, not a range terminus.
+        Read as one it discarded the count and hid it when stale — the same loss
+        as the list bullet, from a different cause."""
+        self.assert_stale_scenario_count_caught(
+            f"Summary \u2014 {STALE_SCENARIO_COUNT} scenarios are catalogued"
+        )
+
+    def test_a_punctuation_hyphen_before_a_count_still_states_a_total(self) -> None:
+        self.assert_stale_scenario_count_caught(
+            f"Summary - {STALE_SCENARIO_COUNT} scenarios are catalogued"
+        )
+
+    def test_an_unspaced_dash_needs_no_lower_bound(self) -> None:
+        """The guard that keeps the citation reading refused: a dash joined to
+        what precedes it is an identifier's tail, not punctuation, so it stays a
+        terminus without any lower bound in front of it."""
+        self.assert_no_count_read_from(
+            f"The INV-0{STALE_INVARIANT_COUNT} invariants are enforced"
+        )
+
+    def test_a_long_run_of_link_openers_does_not_stall_the_scan(self) -> None:
+        """Link masking started a fresh balanced-bracket walk at every `[`, so a
+        run of unmatched openers cost time growing with its square. Skipping
+        ahead on failure is not available — a later opener can match where an
+        earlier one does not — so the walk is bounded instead.
+
+        This fixture ran in about 0.001s against the bounded masking and grew
+        past a second against the unbounded version, so the timeout tells a
+        stall from ordinary work without needing a tight margin.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fixture_root(tmp, {"docs/spec/example.md": "[" * 40000 + "\n"})
+
+            result = run_checker(root, timeout=10)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_an_unreadable_tracked_file_is_reported_not_raised(self) -> None:
         """A tracked path can vanish between `git ls-files` and the read.
 

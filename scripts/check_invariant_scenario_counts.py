@@ -185,6 +185,15 @@ NOT_PARTIAL_NUMBER = r"(?![0-9])(?![.,][0-9])"
 NUMBER_BOUNDARY = re.compile(r"[0-9A-Za-z.,/]")
 MARKUP_CHARACTERS = frozenset("*_~`[]")
 
+# CommonMark's maximum link-label length. Used to decide when a closing bracket
+# is too far away for any label to reach it, which is what keeps link masking
+# linear over a long run of unmatched openers.
+LABEL_LIMIT = 999
+
+# The dashes `RANGE_PREFIX` accepts as termini, as a set rather than a class,
+# for the position tests that decide what a particular dash is doing.
+DASH_CHARACTERS = frozenset("-") | {chr(point) for point in range(0x2010, 0x2016)}
+
 # The whitespace a range terminus may be separated from either of its bounds
 # by, including the hard wrap the required mdformat pass can leave between them
 # and the block-quote markers such a wrap carries. At most one newline, for the
@@ -443,8 +452,35 @@ def mask_link_metadata(text: str) -> str:
     """
     buffer = list(text)
     index = 0
+    # The nearest closing bracket, carried rather than re-derived. Every `[` used
+    # to start a fresh `find_closing_bracket` walk over the rest of the document,
+    # so a run of unmatched openers cost time growing with its square: ~0.01s at
+    # 800, ~0.05s at 1,600, ~0.18s at 3,200. That is a stall in a checker that
+    # reads every tracked Markdown file, and generated or malformed Markdown is
+    # where such a run appears.
+    #
+    # Skipping ahead on a failed parse is not available: `find_closing_bracket`
+    # matches *balanced* brackets, so a later opener can succeed where an earlier
+    # one failed — in "[[[]" the third `[` matches although the first two do not.
+    # Two cheaper facts do hold, and between them they bound the work:
+    next_bracket = text.find("]")
     while index < len(text):
         if text[index] != "[" or is_escaped(text, index):
+            index += 1
+            continue
+        if next_bracket != -1 and next_bracket < index:
+            next_bracket = text.find("]", index)
+        # No closing bracket left anywhere: no link can start here, or at any
+        # later opener, since they would all want the same absent bracket.
+        if next_bracket == -1:
+            break
+        # The nearest closing bracket is further away than a label may legally
+        # run, and a balanced one can only be further still. CommonMark caps a
+        # link label at 999 characters, so nothing here is a link and the walk
+        # would only rediscover that. The bound is the specification's, not an
+        # invented one; the cost is that a label longer than the spec permits is
+        # no longer masked, which is input no renderer would treat as a link.
+        if next_bracket - index - 1 > LABEL_LIMIT:
             index += 1
             continue
         parsed = parse_inline_link_at(text, index)
@@ -547,18 +583,72 @@ def closes_mid_number(text: str, number_end: int) -> bool:
 
     A separator only continues a number when a digit follows it directly, so
     "scenario count: 37. The next" and "37, and then" keep their totals.
+
+    Whole `MARKUP_CONSTRUCT` matches are stepped over, not just the
+    single-character delimiters, because a reference link's `][label]` run ends
+    in ordinary letters: the walk stopped there and, finding a letter rather
+    than a separator, accepted "[37][catalog].5" as a total of 37.
+
+    That is where this differs from `opens_mid_number`, and why the same
+    conservatism does not transfer. Stopping early on the *opening* side lands
+    on a letter, which `NUMBER_BOUNDARY` rejects — a statement skipped, the safe
+    direction. Stopping early here lands on a letter too, but a letter is not a
+    separator, so the match is *accepted*. The identical walk fails safe on one
+    side and unsafe on the other, which is exactly why this side needs to
+    understand the construct rather than merely tolerate its characters.
     """
     position = number_end
-    while position < len(text) and (
-        text[position] in MARKUP_CHARACTERS or text[position] in " \t"
-    ):
-        position += 1
+    while position < len(text):
+        construct = MARKUP_CONSTRUCT.match(text, position)
+        if construct is not None:
+            position = construct.end()
+            continue
+        if text[position] in " \t":
+            position += 1
+            continue
+        break
     if position >= len(text):
         return False
     following = text[position]
     if following.isdigit():
         return True
     return following in ".," and text[position + 1 : position + 2].isdigit()
+
+
+def spaced_dash_without_a_bound(text: str, index: int) -> bool:
+    """Whether the dash at `index` is sentence punctuation rather than a range.
+
+    "Summary \u2014 9 scenarios are catalogued" opens a count with a dash used as
+    punctuation. Read as a range terminus it discarded the count, hiding it when
+    stale — the same class of loss as the list bullet, from a different cause.
+
+    Three positions tell the uses apart, and all three existing behaviours have
+    to survive the distinction:
+
+    * A dash with no whitespace before it is joined to what precedes it: an
+      identifier's tail (`INV-002`) or a closed range (`5\u201337`). Still a
+      terminus, unconditionally.
+    * A dash with whitespace before but not after is a sign, not a separator:
+      `-9` states no total either. Still a terminus.
+    * A dash spaced on both sides is punctuation *unless* a number precedes it.
+      `5 \u2013 37` is a range; `Summary \u2014 9` is a sentence.
+
+    So only the third case asks for a lower bound, which is what keeps this from
+    reopening the citation and negative-number readings that the unconditional
+    dash rejection exists to prevent.
+    """
+    if text[index] not in DASH_CHARACTERS:
+        return False
+    before = text[index - 1] if index > 0 else ""
+    after = text[index + 1] if index + 1 < len(text) else ""
+    if before not in " \t" or after not in " \t":
+        return False
+    position = index - 1
+    while position >= 0 and (
+        text[position] in " \t" or text[position] in MARKUP_CHARACTERS
+    ):
+        position -= 1
+    return position < 0 or not text[position].isdigit()
 
 
 def bounds_a_range(text: str, match: re.Match[str]) -> bool:
@@ -574,7 +664,11 @@ def bounds_a_range(text: str, match: re.Match[str]) -> bool:
     place, so the two directions cannot disagree about what a dash means.
     """
     before = RANGE_PREFIX.search(text[: match.start("number")])
-    if before is not None and not opens_a_list_item(text, before.start()):
+    if (
+        before is not None
+        and not opens_a_list_item(text, before.start())
+        and not spaced_dash_without_a_bound(text, before.start())
+    ):
         return True
     after = RANGE_SUFFIX.match(text, match.end("number"))
     return after is not None and not opens_a_list_item(text, after.start("terminus"))
