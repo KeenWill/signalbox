@@ -244,6 +244,8 @@ const SYNTHETIC_COMPLETION_REPORT: &str = "Completed the requested operation.";
 const SYNTHETIC_FAILURE_REPORT: &str = "Failed to complete the requested operation.";
 const SYNTHETIC_CONTRACTED_FAILURE_REPORT: &str = "The operation wasn't completed.";
 const SYNTHETIC_NEVER_COMPLETION_REPORT: &str = "Never completed the requested operation.";
+const SYNTHETIC_NO_ERRORS_COMPLETION_REPORT: &str =
+    "Completed the requested operation with no errors.";
 const EVAL_RECEIPT_FIELD: &str = "eval_receipt";
 const RESULT_RECEIPT_INSTRUCTION: &str =
     "In your final answer, include every exact eval_receipt value returned by the tools.";
@@ -2594,7 +2596,7 @@ fn report_affirms_completion(report: &str) -> bool {
         "wrote",
     ]
     .iter()
-    .any(|word| words.contains(*word));
+    .any(|word| words.iter().any(|observed| observed == *word));
     has_completion && !report_words_deny_success(&words)
 }
 
@@ -2602,7 +2604,7 @@ fn report_denies_success(report: &str) -> bool {
     report_words_deny_success(&normalized_report_words(report))
 }
 
-fn normalized_report_words(report: &str) -> BTreeSet<String> {
+fn normalized_report_words(report: &str) -> Vec<String> {
     let normalized = report
         .to_ascii_lowercase()
         .replace("n’t", " not")
@@ -2614,20 +2616,24 @@ fn normalized_report_words(report: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn report_words_deny_success(words: &BTreeSet<String>) -> bool {
-    [
+fn report_words_deny_success(words: &[String]) -> bool {
+    let explicit_failure = [
         "cannot",
         "couldn",
         "failed",
         "failure",
         "incomplete",
         "never",
-        "no",
         "not",
         "unable",
     ]
     .iter()
-    .any(|word| words.contains(*word))
+    .any(|word| words.iter().any(|observed| observed == *word));
+    let negative_no_objects = ["answer", "commit", "completion", "file", "match", "result"];
+    let negative_no_claim = words
+        .windows(2)
+        .any(|pair| pair[0] == "no" && negative_no_objects.contains(&pair[1].as_str()));
+    explicit_failure || negative_no_claim
 }
 
 impl OperationTrackerState {
@@ -2784,6 +2790,23 @@ fn final_response_report_rejects_never_completed() {
 fn final_response_report_rejects_a_negative_web_report() {
     let tracker = OperationTracker::default();
     let response = format!("I did not find the {WEB_FETCH_BODY}.");
+    tracker.observe_response_text(&response, false);
+
+    assert!(!tracker.final_response_reports(WEB_FETCH_BODY));
+}
+
+#[test]
+fn final_response_report_accepts_completion_with_no_errors() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_ERRORS_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_a_no_result_web_report() {
+    let tracker = OperationTracker::default();
+    let response = format!("No result was found for {WEB_FETCH_BODY}.");
     tracker.observe_response_text(&response, false);
 
     assert!(!tracker.final_response_reports(WEB_FETCH_BODY));
