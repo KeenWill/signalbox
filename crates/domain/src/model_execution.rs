@@ -4631,6 +4631,27 @@ mod tests {
         ));
     }
 
+    /// A configured `Delegated` posture now also satisfies an `AlwaysConfirm`
+    /// declaration, so `Delegated` reaches this admission check under either
+    /// blanket posture and must be admitted by both. `Human` shares that
+    /// property and is pinned alongside it.
+    #[test]
+    fn delegated_and_human_approvals_are_admitted_under_either_blanket_posture() {
+        for posture in [
+            DangerousToolAutoApproval::Disabled,
+            DangerousToolAutoApproval::ApproveAll,
+        ] {
+            assert!(initial_tool_approval_matches_posture(
+                posture,
+                InitialToolApproval::Delegated,
+            ));
+            assert!(initial_tool_approval_matches_posture(
+                posture,
+                InitialToolApproval::Human,
+            ));
+        }
+    }
+
     #[test]
     fn session_blanket_approval_is_rejected_when_blanket_posture_is_disabled() {
         assert!(!initial_tool_approval_matches_posture(
