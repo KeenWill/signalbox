@@ -418,9 +418,21 @@ pool-capacity budget, leaving two connections reserved for non-snapshot work; a
 pool with fewer than four configured connections cannot start the process
 listener. The database-global snapshot admission loser rolls back its
 transaction before an exponential retry wait that begins at 10 ms and is capped
-at 100 ms. Admission is bounded to five seconds, after which the read reports
+at 100 ms. One admitted attempt waits at most one second for the shared table
+locks, and an expired wait rolls back and retries on the same schedule as a lost
+admission, so a queued snapshot never holds writers behind it for longer than
+that wait. Admission is bounded to five seconds, after which the read reports
 unavailable; daemon shutdown cancels the admission wait and releases its
 capacity.
+
+Holding those locks is bounded too, because the inventory includes the tables
+ordinary turn processing writes. The loaders run for at most fifteen seconds
+under the acquired locks — below the pool's own connection-acquisition bound, so
+a snapshot starved of a loader connection releases rather than waits — after
+which the read reports unavailable and the locks are released. The guard is idle
+in its transaction for that whole phase, and the database terminates a guard
+idle past twenty seconds; that backstop releases the locks even for a daemon
+that never reaches its own release.
 
 Target subjects, workflows, pass and finding state, finding content, events, and
 external-link vocabularies are the distinct wire representations of the

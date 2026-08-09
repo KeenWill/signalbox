@@ -33,6 +33,31 @@ const STORAGE_VERSION: i16 = 1;
 const SNAPSHOT_ADMISSION_INITIAL_BACKOFF: Duration = Duration::from_millis(10);
 const SNAPSHOT_ADMISSION_MAX_BACKOFF: Duration = Duration::from_millis(100);
 const SNAPSHOT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long one admission attempt waits in the table lock queue.
+///
+/// A `SHARE` request that is itself waiting queues conflicting writers behind
+/// it, so an unbounded wait stalls writes before the snapshot holds anything.
+/// Expiring the wait and retrying under the same admission bound lets the
+/// queued writers drain between attempts.
+const SNAPSHOT_LOCK_WAIT: Duration = Duration::from_secs(1);
+/// How long the shared table locks may be held while the loaders run.
+///
+/// The loaders run on separate pool connections, so a snapshot that cannot
+/// obtain one holds `SHARE` on every listed table while it waits — and the
+/// writers it blocks are holding the connections it waits for. This bound is
+/// below the pool acquire timeout so the cycle is cut at the snapshot rather
+/// than at each loader's connection wait.
+const SNAPSHOT_LOCK_PHASE_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long the database itself tolerates the idle lock-holding guard.
+///
+/// The guard is idle in its transaction for the whole locked phase, so this is
+/// the backstop for a daemon that never reaches its own rollback: PostgreSQL
+/// terminates the session and releases the shared locks without it. It must
+/// outlast [`SNAPSHOT_LOCK_PHASE_TIMEOUT`], which is the bound a healthy
+/// daemon enforces first.
+const SNAPSHOT_GUARD_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+/// PostgreSQL's `lock_not_available`, raised when `lock_timeout` expires.
+const LOCK_NOT_AVAILABLE: &str = "55P03";
 const REVIEW_SNAPSHOT_LOCKS: &str = "LOCK TABLE
     accepted_input,
     turn_lifecycle,
@@ -389,6 +414,13 @@ impl PostgresReviewOrchestrationStore {
     /// admission attempts before an exponentially backed-off retry; the wait
     /// begins at 10 ms and is capped at 100 ms, preserving one reader connection
     /// without polling PostgreSQL on every scheduler turn.
+    ///
+    /// Both phases are bounded, because the locked tables include the ones
+    /// ordinary turn processing writes: admission may wait at most
+    /// [`SNAPSHOT_ADMISSION_TIMEOUT`], and the loaders may hold the shared
+    /// locks at most [`SNAPSHOT_LOCK_PHASE_TIMEOUT`]. Either expiry releases
+    /// the guard and reports the phase that ran out of time, so no read leaves
+    /// writers blocked for longer than the sum of the two bounds.
     pub async fn load_snapshot(
         &self,
         attempt: ReviewOrchestrationAttemptId,
@@ -399,7 +431,7 @@ impl PostgresReviewOrchestrationStore {
             ));
         }
         let snapshot_keeper = self.begin_snapshot_guard().await?;
-        let result = self.load_snapshot_while_locked(attempt).await;
+        let result = bounded_snapshot_lock_phase(self.load_snapshot_while_locked(attempt)).await;
         let released = snapshot_keeper.rollback().await;
         let facts = result?;
         released?;
@@ -417,24 +449,47 @@ impl PostgresReviewOrchestrationStore {
     ) -> Result<Transaction<'_, Postgres>, ReviewOrchestrationStoreError> {
         let mut backoff = SNAPSHOT_ADMISSION_INITIAL_BACKOFF;
         loop {
-            let mut transaction = self.pool.begin().await?;
-            let admitted: bool = sqlx::query_scalar(
-                "SELECT pg_try_advisory_xact_lock(
-                    hashtext('signalbox:review-orchestration'),
-                    hashtext('coherent-snapshot'))",
-            )
-            .fetch_one(&mut *transaction)
-            .await?;
-            if admitted {
-                sqlx::query(REVIEW_SNAPSHOT_LOCKS)
-                    .execute(&mut *transaction)
-                    .await?;
-                return Ok(transaction);
+            if let Some(admitted) = self.try_admit_snapshot().await? {
+                return Ok(admitted);
             }
-            transaction.rollback().await?;
             tokio::time::sleep(backoff).await;
             backoff = std::cmp::min(backoff.saturating_mul(2), SNAPSHOT_ADMISSION_MAX_BACKOFF);
         }
+    }
+
+    /// Takes database-global admission and the shared table locks exactly once.
+    ///
+    /// `None` reports the two losses a later attempt can win — another snapshot
+    /// holds admission, or the bounded lock wait expired behind conflicting
+    /// writers. Both roll the attempt back before returning, so neither a
+    /// connection nor a queued lock request survives into the retry wait.
+    async fn try_admit_snapshot(
+        &self,
+    ) -> Result<Option<Transaction<'_, Postgres>>, ReviewOrchestrationStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        bound_snapshot_guard(&mut transaction).await?;
+        let admitted: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock(
+                hashtext('signalbox:review-orchestration'),
+                hashtext('coherent-snapshot'))",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        if admitted {
+            match sqlx::query(REVIEW_SNAPSHOT_LOCKS)
+                .execute(&mut *transaction)
+                .await
+            {
+                Ok(_) => return Ok(Some(transaction)),
+                Err(error) if !lock_wait_expired(&error) => {
+                    transaction.rollback().await?;
+                    return Err(error.into());
+                }
+                Err(_) => {}
+            }
+        }
+        transaction.rollback().await?;
+        Ok(None)
     }
 
     async fn load_snapshot_while_locked(
@@ -1934,6 +1989,41 @@ fn encode_disposition(
     }
 }
 
+/// Installs the guard transaction's own lock-wait and lock-hold bounds.
+///
+/// `lock_timeout` bounds the `LOCK TABLE` wait; `idle_in_transaction_session_timeout`
+/// bounds the phase the guard spends idle while the loaders run on other
+/// connections. The second is the database's own backstop: it releases the
+/// shared locks even when the daemon never reaches its rollback. Both are set
+/// through `set_config`'s local form so the bounds stay bind parameters
+/// derived from the constants rather than a rendered statement that could
+/// drift from them.
+async fn bound_snapshot_guard(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), ReviewOrchestrationStoreError> {
+    sqlx::query(
+        "SELECT set_config('lock_timeout', $1, true),
+                set_config('idle_in_transaction_session_timeout', $2, true)",
+    )
+    .bind(milliseconds(SNAPSHOT_LOCK_WAIT))
+    .bind(milliseconds(SNAPSHOT_GUARD_IDLE_TIMEOUT))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+/// Renders one bound in the millisecond form PostgreSQL's timeout settings take.
+fn milliseconds(bound: Duration) -> String {
+    format!("{}ms", bound.as_millis())
+}
+
+/// Reports the bounded lock wait expiring behind a conflicting writer.
+fn lock_wait_expired(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .is_some_and(|database| database.code().as_deref() == Some(LOCK_NOT_AVAILABLE))
+}
+
 async fn bounded_snapshot_admission<Output>(
     operation: impl Future<Output = Result<Output, ReviewOrchestrationStoreError>>,
 ) -> Result<Output, ReviewOrchestrationStoreError> {
@@ -1944,9 +2034,45 @@ async fn bounded_snapshot_admission_with_timeout<Output>(
     operation: impl Future<Output = Result<Output, ReviewOrchestrationStoreError>>,
     timeout: Duration,
 ) -> Result<Output, ReviewOrchestrationStoreError> {
+    bounded_snapshot_phase(
+        operation,
+        timeout,
+        ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut,
+    )
+    .await
+}
+
+async fn bounded_snapshot_lock_phase<Output>(
+    operation: impl Future<Output = Result<Output, ReviewOrchestrationStoreError>>,
+) -> Result<Output, ReviewOrchestrationStoreError> {
+    bounded_snapshot_lock_phase_with_timeout(operation, SNAPSHOT_LOCK_PHASE_TIMEOUT).await
+}
+
+async fn bounded_snapshot_lock_phase_with_timeout<Output>(
+    operation: impl Future<Output = Result<Output, ReviewOrchestrationStoreError>>,
+    timeout: Duration,
+) -> Result<Output, ReviewOrchestrationStoreError> {
+    bounded_snapshot_phase(
+        operation,
+        timeout,
+        ReviewOrchestrationStoreError::SnapshotLockPhaseTimedOut,
+    )
+    .await
+}
+
+/// Runs one snapshot phase under a deadline, naming the phase that expired.
+///
+/// Cancelling the phase future is what bounds it: the caller rolls the guard
+/// back on the expiry path, so the shared locks are released rather than held
+/// for however long the abandoned work would have taken.
+async fn bounded_snapshot_phase<Output>(
+    operation: impl Future<Output = Result<Output, ReviewOrchestrationStoreError>>,
+    timeout: Duration,
+    expiry: ReviewOrchestrationStoreError,
+) -> Result<Output, ReviewOrchestrationStoreError> {
     tokio::time::timeout(timeout, operation)
         .await
-        .map_err(|_| ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut)?
+        .map_err(|_| expiry)?
 }
 
 fn decode_finding_ref(
@@ -2449,6 +2575,7 @@ pub enum ReviewOrchestrationStoreError {
     Database(sqlx::Error),
     CommitAmbiguous(sqlx::Error),
     SnapshotAdmissionTimedOut,
+    SnapshotLockPhaseTimedOut,
     Workflow(ReviewWorkflowStoreError),
     Corruption(&'static str),
 }
@@ -2465,6 +2592,9 @@ impl fmt::Display for ReviewOrchestrationStoreError {
             ),
             Self::SnapshotAdmissionTimedOut => {
                 formatter.write_str("review orchestration snapshot admission timed out")
+            }
+            Self::SnapshotLockPhaseTimedOut => {
+                formatter.write_str("review orchestration snapshot held its shared locks too long")
             }
             Self::Workflow(error) => write!(
                 formatter,
@@ -2483,7 +2613,9 @@ impl Error for ReviewOrchestrationStoreError {
         match self {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::Workflow(error) => Some(error),
-            Self::SnapshotAdmissionTimedOut | Self::Corruption(_) => None,
+            Self::SnapshotAdmissionTimedOut
+            | Self::SnapshotLockPhaseTimedOut
+            | Self::Corruption(_) => None,
         }
     }
 }
@@ -2507,8 +2639,9 @@ const fn corruption(detail: &'static str) -> ReviewOrchestrationStoreError {
 #[cfg(test)]
 mod tests {
     use super::{
-        REVIEW_SNAPSHOT_LOCKS, ReviewOrchestrationStoreError,
-        bounded_snapshot_admission_with_timeout,
+        REVIEW_SNAPSHOT_LOCKS, ReviewOrchestrationStoreError, SNAPSHOT_ADMISSION_TIMEOUT,
+        SNAPSHOT_GUARD_IDLE_TIMEOUT, SNAPSHOT_LOCK_PHASE_TIMEOUT, SNAPSHOT_LOCK_WAIT,
+        bounded_snapshot_admission_with_timeout, bounded_snapshot_lock_phase_with_timeout,
     };
 
     fn lock_position(table: &str) -> usize {
@@ -2530,6 +2663,35 @@ mod tests {
             error,
             ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut
         ));
+    }
+
+    #[tokio::test]
+    async fn snapshot_lock_phase_timeout_is_typed() {
+        let pending = std::future::pending::<Result<(), ReviewOrchestrationStoreError>>();
+
+        let error =
+            bounded_snapshot_lock_phase_with_timeout(pending, std::time::Duration::from_millis(1))
+                .await
+                .expect_err("the locked snapshot phase must be time bounded");
+
+        assert!(matches!(
+            error,
+            ReviewOrchestrationStoreError::SnapshotLockPhaseTimedOut
+        ));
+    }
+
+    /// The two bounds are ordered so the daemon releases the shared locks and
+    /// the database backstop only fires for a daemon that never got there.
+    #[test]
+    fn the_guard_idle_bound_outlasts_the_locked_phase() {
+        assert!(SNAPSHOT_LOCK_PHASE_TIMEOUT < SNAPSHOT_GUARD_IDLE_TIMEOUT);
+    }
+
+    /// One expired lock wait must leave room for a retry inside admission,
+    /// otherwise the bounded wait converts a winnable attempt into a failure.
+    #[test]
+    fn the_bounded_lock_wait_fits_inside_admission() {
+        assert!(SNAPSHOT_LOCK_WAIT < SNAPSHOT_ADMISSION_TIMEOUT);
     }
 
     #[test]

@@ -1669,7 +1669,8 @@ fn configured_concern_template(concern: &str) -> Option<&'static str> {
 fn map_store_error(error: ReviewOrchestrationStoreError) -> ReviewOrchestrationRuntimeError {
     match error {
         ReviewOrchestrationStoreError::Database(_)
-        | ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut => {
+        | ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut
+        | ReviewOrchestrationStoreError::SnapshotLockPhaseTimedOut => {
             ReviewOrchestrationRuntimeError::Unavailable {
                 commit_ambiguous: false,
             }
@@ -1696,7 +1697,8 @@ fn map_post_effect_store_error(
                 commit_ambiguous: true,
             }
         }
-        ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut => {
+        ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut
+        | ReviewOrchestrationStoreError::SnapshotLockPhaseTimedOut => {
             ReviewOrchestrationRuntimeError::Unavailable {
                 commit_ambiguous: false,
             }
