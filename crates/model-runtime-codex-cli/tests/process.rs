@@ -381,13 +381,16 @@ fn emitted_streams_keep_separate_streams_apart() {
         text_delta_fixture("reassembly-fixture", 1, "secret"),
         text_delta_fixture("other-correlation", 0, "secret"),
     ];
-    let streams = emitted_streams(&observations);
 
-    assert_eq!(streams.len(), 3);
-    assert!(
-        !streams
-            .iter()
-            .any(|stream| stream.contains("synthetic-reassembly-secret"))
+    // Three reconstructions, none of them the joined value: the fragments stay
+    // in the streams that carried them, keyed correlation-first.
+    assert_eq!(
+        emitted_streams(&observations),
+        vec![
+            "secret".to_string(),
+            "synthetic-reassembly-".to_string(),
+            "secret".to_string(),
+        ]
     );
 }
 
@@ -1000,78 +1003,170 @@ async fn inv_035_message_id_prefixing_final_text_is_redacted() {
     assert_eq!(result.spawns, 1);
 }
 
-/// INV-035: an item identity the adapter only validates as nonempty and then
-/// drops is provider-controlled text like every other dropped field. An `id`
-/// or an unmatched item `type` ending in a credential-marker prefix (`api_`)
-/// seeds the dropped lookbehind, so the value opening the text that follows is
-/// suppressed instead of crossing the boundary in retained evidence.
+/// Runs one dropped-identity fixture and asserts the credential is
+/// unrecoverable from everything the adapter emitted for it.
 ///
-/// One case per arm that drops the identity: a bare lifecycle event (both
-/// fields), an unsupported item (whose `type` matched no literal of the
-/// adapter's), and the modeled reasoning and error items (whose `type` did,
-/// leaving only the unretained `id`).
-#[tokio::test]
-async fn inv_035_dropped_item_identity_marker_suppresses_the_continuation() {
-    for scenario in [
-        "lifecycle_item_id_marker",
-        "lifecycle_item_type_marker",
-        "unsupported_item_type_marker",
-        "reasoning_item_id_marker",
-        "error_item_id_marker",
-    ] {
-        for delivery in [DeliveryMode::Streamed, DeliveryMode::Buffered] {
-            let result = execute_scenario(
-                scenario,
-                delivery,
-                OperationShape::Text,
-                CancellationSignal::never(),
-            )
-            .await;
+/// Absorbs only the spawn plumbing every case repeats; the two
+/// behaviour-relevant values — which fixture, which delivery mode — stay at the
+/// call site. `#[track_caller]` cannot name a call site through an async fn, so
+/// the case identity travels in the failure label instead.
+async fn assert_identity_marker_suppresses_the_continuation(
+    scenario: &str,
+    delivery: DeliveryMode,
+) {
+    let result = execute_scenario(
+        scenario,
+        delivery,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
 
-            assert_no_emitted_stream_carries(
-                scenario,
-                &result,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION,
-            );
-            assert_eq!(result.spawns, 1);
-        }
-    }
+    assert_no_emitted_stream_carries(
+        &format!("{scenario} {delivery:?}"),
+        &result,
+        fixtures::SENSITIVE_SPLIT_AUTHORIZATION,
+    );
+    assert_eq!(result.spawns, 1);
 }
 
-/// The control on the case above: routine item identity is not a credential.
-/// An ordinary id and a real Codex item type (`todo_list`, whose trailing bytes
-/// the lookbehind does hold conservatively — they could still grow into a
-/// credential name) fold like every other dropped field, and the answer that
-/// follows still reaches the caller byte-verbatim. Folding the identity widens
-/// what can arm the scrubber; it does not make routine metadata suppress the
-/// response.
+/// INV-035: a bare lifecycle event is dropped whole after its identity is only
+/// validated as nonempty, so an `id` ending in a credential-marker prefix
+/// (`api_`) is dropped provider text that seeds the lookbehind — the value
+/// opening the text that follows (`key=<secret>`) is suppressed instead of
+/// crossing the boundary in retained evidence.
 #[tokio::test]
-async fn benign_item_identity_leaves_the_answer_verbatim() {
-    for delivery in [DeliveryMode::Streamed, DeliveryMode::Buffered] {
-        let result = execute_scenario(
-            "benign_item_identity_before_answer",
-            delivery,
-            OperationShape::Text,
-            CancellationSignal::never(),
-        )
-        .await;
-        let completed = completed(&result.evidence);
+async fn inv_035_lifecycle_item_id_marker_suppresses_the_continuation() {
+    assert_identity_marker_suppresses_the_continuation(
+        "lifecycle_item_id_marker",
+        DeliveryMode::Streamed,
+    )
+    .await;
+    assert_identity_marker_suppresses_the_continuation(
+        "lifecycle_item_id_marker",
+        DeliveryMode::Buffered,
+    )
+    .await;
+}
 
-        assert_eq!(
-            completed.content,
-            vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
-        );
-        assert!(!boundary_material(&result).contains("[redacted]"));
-        if delivery == DeliveryMode::Streamed {
-            // Read as the caller reads it: the held-then-released trailing
-            // bytes may arrive as more than one fragment of the text stream.
-            assert!(
-                emitted_streams(&result.observations)
-                    .contains(&fixtures::BUFFERED_ANSWER.to_string())
-            );
-        }
-        assert_eq!(result.spawns, 1);
-    }
+/// INV-035: the same boundary one field over. A lifecycle event's item `type`
+/// is matched against nothing the adapter chose, so a `type` ending in the
+/// marker prefix seeds the lookbehind exactly as the id does.
+#[tokio::test]
+async fn inv_035_lifecycle_item_type_marker_suppresses_the_continuation() {
+    assert_identity_marker_suppresses_the_continuation(
+        "lifecycle_item_type_marker",
+        DeliveryMode::Streamed,
+    )
+    .await;
+    assert_identity_marker_suppresses_the_continuation(
+        "lifecycle_item_type_marker",
+        DeliveryMode::Buffered,
+    )
+    .await;
+}
+
+/// INV-035: an unsupported item's `type` selected the catch-all arm rather than
+/// one of the adapter's literals, so it is provider-chosen text the adapter
+/// drops, and a marker prefix ending it governs the text that follows.
+#[tokio::test]
+async fn inv_035_unsupported_item_type_marker_suppresses_the_continuation() {
+    assert_identity_marker_suppresses_the_continuation(
+        "unsupported_item_type_marker",
+        DeliveryMode::Streamed,
+    )
+    .await;
+    assert_identity_marker_suppresses_the_continuation(
+        "unsupported_item_type_marker",
+        DeliveryMode::Buffered,
+    )
+    .await;
+}
+
+/// INV-035: a modeled reasoning item interprets its `type` (the adapter's own
+/// literal) and its text, but never retains the id. The dropped id carries the
+/// marker prefix that the item's own `key=` and the final-text value complete.
+#[tokio::test]
+async fn inv_035_reasoning_item_id_marker_suppresses_the_continuation() {
+    assert_identity_marker_suppresses_the_continuation(
+        "reasoning_item_id_marker",
+        DeliveryMode::Streamed,
+    )
+    .await;
+    assert_identity_marker_suppresses_the_continuation(
+        "reasoning_item_id_marker",
+        DeliveryMode::Buffered,
+    )
+    .await;
+}
+
+/// INV-035: the same shape on the dropped error item, whose message is
+/// interpreted while its id is not.
+#[tokio::test]
+async fn inv_035_error_item_id_marker_suppresses_the_continuation() {
+    assert_identity_marker_suppresses_the_continuation(
+        "error_item_id_marker",
+        DeliveryMode::Streamed,
+    )
+    .await;
+    assert_identity_marker_suppresses_the_continuation(
+        "error_item_id_marker",
+        DeliveryMode::Buffered,
+    )
+    .await;
+}
+
+/// The control on the cases above, in buffered delivery: routine item identity
+/// is not a credential. An ordinary id and a real Codex item type (`todo_list`,
+/// whose trailing bytes the lookbehind does hold conservatively — they could
+/// still grow into a credential name) fold like every other dropped field, and
+/// the answer still reaches the caller byte-verbatim. Folding the identity
+/// widens what can arm the scrubber; it does not make routine metadata suppress
+/// the response.
+#[tokio::test]
+async fn buffered_benign_item_identity_leaves_the_answer_verbatim() {
+    let result = execute_scenario(
+        "benign_item_identity_before_answer",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let completed = completed(&result.evidence);
+
+    assert_eq!(
+        completed.content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert!(!boundary_material(&result).contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
+/// The same control in streamed delivery, which carries the further claim
+/// buffered delivery has no stream to make: the answer is verbatim in the
+/// delta stream too, read as the caller reads it — reassembled, since a
+/// conservatively held trailing byte may arrive as its own fragment.
+#[tokio::test]
+async fn streamed_benign_item_identity_leaves_the_answer_verbatim() {
+    let result = execute_scenario(
+        "benign_item_identity_before_answer",
+        DeliveryMode::Streamed,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let completed = completed(&result.evidence);
+
+    assert_eq!(
+        completed.content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert!(!boundary_material(&result).contains("[redacted]"));
+    assert_eq!(
+        emitted_streams(&result.observations),
+        vec![fixtures::BUFFERED_ANSWER.to_string()]
+    );
+    assert_eq!(result.spawns, 1);
 }
 
 /// INV-035: an unsupported (unmodeled) streamed item whose text ends in a
