@@ -72,10 +72,10 @@ use signalbox_tools_exec::{
     BwrapAvailability, CARGO_DIAGNOSTICS_NAME, CaptureCompleteness, CargoDiagnosticRecords,
     CargoDiagnosticsCommand, CargoDiagnosticsExecution, CargoDiagnosticsExecutor,
     CargoDiagnosticsResult, CargoDiagnosticsStream, CargoDiagnosticsTool, CargoEvidenceProvenance,
-    CargoTestRecords, ExecExecutor, ExecResult, ExecutionConfinement, OutputCapture,
-    OutputEncoding, ProcessOutcome, ProcessSpawnFailure, ProcessSupervisionFailure,
-    SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner,
-    UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
+    CargoTestOutcome, CargoTestRecords, CargoTestResult, ExecExecutor, ExecResult,
+    ExecutionConfinement, OutputCapture, OutputEncoding, ProcessOutcome, ProcessSpawnFailure,
+    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool,
+    TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
 use signalbox_tools_git::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
@@ -176,6 +176,8 @@ const EXEC_RESULT: &str = "model loop observed\n";
 const EXEC_FORCED_SANDBOXED_ARGUMENTS: &str = r#"{"program":"printf","arguments":["forced sandboxed eval\n"],"working_directory":".","timeout_seconds":30}"#;
 const EXEC_FORCED_SANDBOXED_OUTPUT: &str = "forced sandboxed eval\n";
 const EXEC_FORCED_READ_ONLY_OUTPUT: &str = "forced unsandboxed eval\n";
+const SYNTHETIC_CARGO_TEST_EXECUTABLE: &str = "synthetic-test-executable";
+const SYNTHETIC_CARGO_TEST_NAME: &str = "synthetic_test_name";
 const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
@@ -3038,7 +3040,7 @@ struct CargoDiagnosticsEvalStream {
 #[derive(serde::Deserialize)]
 struct CargoDiagnosticsEvalRecords {
     #[serde(rename = "values")]
-    _values: Vec<serde_json::Value>,
+    values: Vec<serde_json::Value>,
     limit_reached: bool,
     provenance: String,
     known_truncated: bool,
@@ -3062,6 +3064,7 @@ fn cargo_diagnostics_result_passed(result: &serde_json::Value) -> bool {
         && !result.diagnostics.limit_reached
         && !result.diagnostics.known_truncated
         && result.tests.provenance == "workspace_influenced"
+        && result.tests.values.is_empty()
         && !result.tests.limit_reached
         && !result.tests.known_truncated
 }
@@ -5221,6 +5224,22 @@ fn forced_cargo_diagnostics_rejects_capped_records() {
 fn forced_cargo_diagnostics_rejects_known_truncated_test_records() {
     let mut result = successful_cargo_diagnostics_result();
     result["tests"]["known_truncated"] = serde_json::json!(true);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_unexpected_test_records() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["tests"]["values"] = serde_json::to_value(vec![CargoTestResult {
+        executable: String::from(SYNTHETIC_CARGO_TEST_EXECUTABLE),
+        executable_completeness: CaptureCompleteness::Complete,
+        name: String::from(SYNTHETIC_CARGO_TEST_NAME),
+        name_completeness: CaptureCompleteness::Complete,
+        outcome: CargoTestOutcome::Passed,
+    }])
+    .expect("producer Cargo test records serialize");
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
