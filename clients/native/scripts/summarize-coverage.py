@@ -71,18 +71,26 @@ def is_test_bundle(target: dict) -> bool:
     return str(target.get("name", "")).endswith(TEST_BUNDLE_SUFFIX)
 
 
-def percent_value(covered: int, executable: int) -> float:
-    """Covered share, with an empty target reported as fully covered."""
+def percent_value(*, covered: int, executable: int) -> float:
+    """Covered share, with an empty target reported as fully covered.
+
+    Keyword-only, along with `percent` and `delta` below. The two counters
+    are adjacent integers, so a transposed call is valid Python that renders
+    the reciprocal share and a delta to match — a wrong number presented
+    with the same confidence as a right one. The Rust summarizer is spared
+    this by carrying a `Counter`; here the labels do the same work at the
+    call site (docs/style.md principle 2).
+    """
     if executable == 0:
         return 100.0
     return 100.0 * covered / executable
 
 
-def percent(covered: int, executable: int) -> str:
-    return f"{percent_value(covered, executable):.2f}%"
+def percent(*, covered: int, executable: int) -> str:
+    return f"{percent_value(covered=covered, executable=executable):.2f}%"
 
 
-def delta(covered: int, executable: int, baseline: Baseline) -> str:
+def delta(*, covered: int, executable: int, baseline: Baseline) -> str:
     """Render the signed difference between this run and its baseline.
 
     The unit is percentage points, not percent: the difference between two
@@ -91,8 +99,8 @@ def delta(covered: int, executable: int, baseline: Baseline) -> str:
     The sign is always shown, including on an exact zero, so a reader can tell
     "measured, unchanged" from "not measured".
     """
-    difference = percent_value(covered, executable) - percent_value(
-        baseline.covered, baseline.executable
+    difference = percent_value(covered=covered, executable=executable) - percent_value(
+        covered=baseline.covered, executable=baseline.executable
     )
     return f"{difference:+.2f} pp"
 
@@ -172,7 +180,7 @@ def load_baseline(path: Path, *, label: str, sha: str, date: str) -> tuple["Base
         # workflow's `jq` predicate rejects both before they reach here; this is
         # the loader keeping its own promise for direct CLI use, which the
         # documented contract permits.
-        if not isfinite(percent_value(covered, executable)):
+        if not isfinite(percent_value(covered=covered, executable=executable)):
             return None, "the baseline report has a counter that cannot be rendered"
         # More covered than executable, or a negative count, is a corrupt
         # measurement rather than a low one: it renders a complete current run
@@ -291,7 +299,10 @@ def target_rows(targets: list[dict]) -> list[str]:
     return [
         "| `{name}` | {share} | {covered}/{executable} |".format(
             name=target["name"],
-            share=percent(target["coveredLines"], target["executableLines"]),
+            share=percent(
+                covered=target["coveredLines"],
+                executable=target["executableLines"],
+            ),
             covered=target["coveredLines"],
             executable=target["executableLines"],
         )
@@ -319,7 +330,10 @@ def file_rows(targets: list[dict], repository_root: Path, limit: int) -> list[st
         "| `{path}` | {uncovered} | {share} |".format(
             path=relative_path(source["path"], repository_root),
             uncovered=source["executableLines"] - source["coveredLines"],
-            share=percent(source["coveredLines"], source["executableLines"]),
+            share=percent(
+                covered=source["coveredLines"],
+                executable=source["executableLines"],
+            ),
         )
         for source in ordered[:limit]
     ]
@@ -356,9 +370,11 @@ def render(
     bundles = [target for target in document.get("targets", []) if is_test_bundle(target)]
     covered, executable = product_totals(document)
 
-    headline = f"**{percent(covered, executable)}** of product lines covered ({covered}/{executable})"
+    share = percent(covered=covered, executable=executable)
+    headline = f"**{share}** of product lines covered ({covered}/{executable})"
     if baseline is not None:
-        headline += f", **{delta(covered, executable, baseline)}** against the baseline below"
+        signed = delta(covered=covered, executable=executable, baseline=baseline)
+        headline += f", **{signed}** against the baseline below"
     lines = [
         f"## {title}",
         "",
