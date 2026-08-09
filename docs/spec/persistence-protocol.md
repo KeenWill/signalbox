@@ -1463,10 +1463,13 @@ superseded stored token again. Provisioning replaces the quarantined generation
 with a fresh authorization in one transaction. Each generation stores the exact
 provisioning tuple it was minted under — `client_id`, `token_url`,
 `device_authorization_url`, and ordered `scopes` — and every refresh and
-dispatch compares it byte for byte with the current registration under the same
-profile lock; a difference quarantines instead of exchanging, so an edited
-endpoint cannot receive a token minted for another. This paragraph constrains
-the future schema; no present storage surface provides it.
+dispatch compares it with the current registration under the same profile lock,
+by the canonical components
+[configuration and credentials](configuration-and-credentials.md#distinct-members-are-distinct-authorizations)
+defines rather than by the configured bytes; a difference quarantines instead of
+exchanging, so an edited endpoint cannot receive a token minted for another.
+This paragraph constrains the future schema; no present storage surface provides
+it.
 
 **Committed unimplemented functionality — credential-pool state.** No present
 migration stores a pool-policy revision, pool action, or pre-call exhaustion

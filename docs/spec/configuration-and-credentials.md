@@ -1361,14 +1361,19 @@ provisioning tuple treat them as different values. Declared order is request
 order, exact duplicate strings are rejected, and no trimming, case folding,
 sorting, or other normalization occurs. Both endpoint values must be absolute
 `https` URLs carrying no fragment and no user information — an empty username
-and an empty password component. Both are rejected rather than stripped, and for
-the same reason: neither reaches the request target the daemon compares against,
-so two endpoints differing only after `#`, or only in a `user:secret@` prefix,
-are one wire endpoint, yet the provisioning tuple compares the configured string
-byte for byte. Accepting either would let an edit that changes nothing on the
-wire quarantine a working authorization, and would give one wire endpoint
-several stored identities. User information carries a second objection of its
-own: a URL is logged, persisted in the provisioning tuple, and echoed in
+and an empty password component. The tuple comparison is over parsed canonical
+components — scheme, lowercased host, effective port, path, and query — and
+never over the configured bytes, as
+[the identity property](#distinct-members-are-distinct-authorizations) requires
+of this delivery. Two spellings a URL parser sends to the same request target
+are therefore one stored identity, so respelling an endpoint as
+`https://issuer.example:443/token` where it was `https://ISSUER.example/token`
+does not quarantine a working authorization. Fragment and user information are
+rejected at admission rather than normalized away, and for a reason the
+canonical comparison does not supply: neither is a component of that comparison
+at all, so silently discarding them would accept a document whose text states
+something the daemon does not do. User information carries a second objection of
+its own: a URL is logged, persisted in the provisioning tuple, and echoed in
 diagnostics, so a password embedded there is a credential smuggled outside the
 daemon-owned boundary this delivery exists to establish — and on an HTTP stack
 that does honor it, it becomes an undeclared authentication credential the
@@ -1423,15 +1428,16 @@ A stored authorization is bound to the tuple it was minted under. Provisioning
 persists, in the same transaction as the token generation, the exact
 `client_id`, `token_url`, `device_authorization_url`, and ordered `scopes` the
 authorization used. Every later refresh and every dispatch first compares that
-stored tuple byte for byte with the profile's current registration, under the
-profile row lock and before any request is formed. A mismatch never sends the
-stored token: the generation quarantines and re-provisioning is the only
-recovery, exactly as for a rejected refresh. Why this is a storage rule rather
-than a review rule: a refresh token is bearer material for one authorization
-server, so a mistaken or hostile edit of `token_url` in a document that ordinary
-restart deliberately honors would otherwise disclose it to a host the operator's
-authorization never named, and a changed `client_id` or scope set would corrupt
-the family the operator believes they hold.
+stored tuple with the profile's current registration by the same canonical
+components stated above, under the profile row lock and before any request is
+formed. A mismatch never sends the stored token: the generation quarantines and
+re-provisioning is the only recovery, exactly as for a rejected refresh. Why
+this is a storage rule rather than a review rule: a refresh token is bearer
+material for one authorization server, so a mistaken or hostile edit of
+`token_url` in a document that ordinary restart deliberately honors would
+otherwise disclose it to a host the operator's authorization never named, and a
+changed `client_id` or scope set would corrupt the family the operator believes
+they hold.
 
 The daemon is the sole refresher of a stored authorization. Before contacting
 the provider, it locks the profile row, reads the stored token, and
