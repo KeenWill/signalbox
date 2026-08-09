@@ -1267,6 +1267,63 @@ async fn append_runner_registration_loss_projection(
     transaction.commit().await
 }
 
+async fn insert_same_runner_replacement_record(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, selector_capability_class,
+             directory_selection_kind, requested_working_directory,
+             requested_credential_profile_name, workspace_requirement_kind,
+             requested_repository_key, requested_sandbox_profile,
+             permission_override_count, state_kind, lost_runner_id,
+             loss_source_kind, pinned_runner_id,
+             pinned_working_directory, pinned_credential_profile_name,
+             registration_enrollment_id, registration_revision,
+             pinned_tool_count, workspace_repository_key,
+             workspace_working_directory, workspace_manifest_id,
+             workspace_placement_revision,
+             workspace_clone_url_digest, workspace_credential_profile_name,
+             workspace_sandbox_profile, workspace_relative_path,
+             workspace_recovery_kind, workspace_branch_name, workspace_revision,
+             credential_grant_runner_id,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision)
+         SELECT session_id, event_ordinal + 1, placement_revision + 1,
+                'runner_replaced', selector_kind, selector_runner_id,
+                selector_capability_class, directory_selection_kind,
+                requested_working_directory,
+                requested_credential_profile_name,
+                workspace_requirement_kind, requested_repository_key,
+                requested_sandbox_profile, permission_override_count,
+                'pinned', NULL, NULL, pinned_runner_id,
+                pinned_working_directory, pinned_credential_profile_name,
+                registration_enrollment_id, registration_revision,
+                pinned_tool_count, workspace_repository_key,
+                workspace_working_directory, workspace_manifest_id,
+                workspace_placement_revision,
+                workspace_clone_url_digest, workspace_credential_profile_name,
+                workspace_sandbox_profile, workspace_relative_path,
+                workspace_recovery_kind, workspace_branch_name,
+                workspace_revision, credential_grant_runner_id,
+                credential_grant_lineage_origin_ordinal,
+                credential_grant_revision + 1
+           FROM runner_session_placement_record
+          WHERE session_id = $1
+            AND event_ordinal = (
+                SELECT event_ordinal
+                  FROM runner_current_session_placement
+                 WHERE session_id = $1
+            )",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn append_runner_lost_before_pin_projection(
     pool: &PgPool,
     session: SessionId,
@@ -3659,6 +3716,43 @@ async fn s32_inv044_checked_runner_replacement_requires_a_live_successor_connect
         .expect_err("a disconnected successor cannot install replacement authority");
 
     assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: the relational replacement shape preserves the checked future
+/// same-runner recovery reserved exclusively for registration-triggered loss.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_registration_loss_admits_same_runner_replacement_shape()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    append_runner_registration_loss_projection(&pool, pin.placement.session()).await?;
+    let mut prospective = pool.begin().await?;
+
+    insert_same_runner_replacement_record(&mut prospective, pin.placement.session()).await?;
+
+    prospective.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: connection loss retains the different-runner replacement rule.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_connection_loss_rejects_same_runner_replacement_shape()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    append_runner_lost_projection(&pool, pin.placement.session()).await?;
+    let mut malformed = pool.begin().await?;
+    let rejected = insert_same_runner_replacement_record(&mut malformed, pin.placement.session())
+        .await
+        .expect_err("only registration loss may retain the runner identity");
+
+    assert_check_violation(rejected);
+    drop(malformed);
     drop(pool);
     Ok(())
 }

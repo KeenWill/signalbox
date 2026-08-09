@@ -444,7 +444,10 @@ BEGIN
         IF prior.state_kind <> 'runner_lost'
            OR NEW.state_kind <> 'pinned'
            OR NEW.placement_revision <> prior.placement_revision + 1
-           OR NEW.pinned_runner_id = prior.lost_runner_id
+           OR (
+                NEW.pinned_runner_id = prior.lost_runner_id
+                AND prior.loss_source_kind <> 'registration'
+           )
            OR (
                 prior.credential_grant_revision IS NULL
                 AND NEW.credential_grant_revision IS NOT NULL
