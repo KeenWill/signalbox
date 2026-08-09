@@ -36,7 +36,6 @@ document is synthetic and built in this file.
 
 from __future__ import annotations
 
-import ast
 import importlib.util
 import json
 import os
@@ -1668,6 +1667,51 @@ def non_integer_selector_output(identifier: str) -> list[str]:
     return [line for line in selector_output_lines(identifier) if not line.lstrip("-").isdigit()]
 
 
+def payload_round_trip_failures() -> list[str]:
+    """Producer bodies the payload programs do not return unchanged.
+
+    Runs outside test bodies, and iterates whatever the workflows define rather
+    than a list kept by hand here. The named round trips below each document
+    one body, but a body variant added to a workflow would not appear in any of
+    them until somebody wrote one; this one covers every variant a workflow
+    composes, so coverage follows the workflow instead of trailing it.
+    """
+    failures: list[str] = []
+    for workflow, identifier, report in (
+        (
+            COVERAGE_WORKFLOW,
+            RUST_COMMENT_PAYLOAD,
+            render(healthy_export(), FIXTURE_REPO_ROOT, RUST_TOP_UNCOVERED, RUST_REPORT_TITLE),
+        ),
+        (
+            SWIFT_WORKFLOW,
+            NATIVE_COMMENT_PAYLOAD,
+            NATIVE_SUMMARIZER.render(
+                native_report(native_target(PRODUCT_TARGET, covered=40, executable=100)),
+                FIXTURE_REPO_ROOT,
+                NATIVE_TOP_UNCOVERED,
+                NATIVE_REPORT_TITLE,
+            ),
+        ),
+    ):
+        for variant, body in sorted(producer_bodies(workflow, report).items()):
+            with tempfile.TemporaryDirectory() as workspace:
+                body_path = Path(workspace) / COMMENT_FILE
+                body_path.write_text(body, encoding="utf-8")
+                result = run_jq(
+                    one_program_for(identifier), "", "-n", "--rawfile", "body", str(body_path)
+                )
+            if result.status != 0:
+                failures.append(f"{workflow.name}/{variant}: jq failed: {result.stderr.strip()}")
+                continue
+            returned = json.loads(result.stdout)
+            if list(returned) != ["body"] or returned["body"] != body:
+                failures.append(
+                    f"{workflow.name}/{variant}: the payload did not return the body unchanged"
+                )
+    return failures
+
+
 def predicate_disagreements(
     identifier: str, documents: tuple[RecordedDocument, ...]
 ) -> list[str]:
@@ -2120,6 +2164,20 @@ class CommentPayloadTests(JqBackedTestCase):
 
         self.assertEqual(self.payload_body(NATIVE_COMMENT_PAYLOAD, body), body)
 
+    def test_every_producer_body_survives_its_payload_program(self) -> None:
+        """Every body the workflows compose, not only the ones named below.
+
+        The round trips beside this each document one body, which is what makes
+        them readable, but each also has to be written by hand, so a body that
+        changed shape would keep passing a test built for the old one. This is
+        driven by what the workflows compose instead.
+
+        Completeness rests on the producer count being pinned separately: this
+        covers the report and no-report bodies a workflow classifies into, and
+        a workflow growing a third producer fails that count rather than
+        slipping past here."""
+        self.assertEqual(payload_round_trip_failures(), [])
+
     def test_the_native_payload_round_trips_the_whole_produced_comment(self) -> None:
         """The native counterpart of the whole-comment round trip, and the only
         native test that carries provenance at all.
@@ -2241,6 +2299,20 @@ class StickySelectorTests(JqBackedTestCase):
         page = comments_page({"id": FOREIGN_COMMENT_ID, "body": quoting})
 
         result = run_extracted(RUST_STICKY_SELECTOR, page)
+
+        self.assert_selection(result, "")
+
+    def test_a_comment_merely_quoting_the_native_marker_is_not_selected(self) -> None:
+        """The native selector is a separate program and can broaden on its
+        own. Were it to gain a looser branch while keeping the registered
+        `startswith` clause, the registry and every other native test would
+        still pass, and the Swift workflow would then PATCH an ordinary human
+        comment that happens to quote the marker — overwriting what somebody
+        wrote."""
+        quoting = f"Should the {NATIVE_MARKER} marker move?"
+        page = comments_page({"id": FOREIGN_COMMENT_ID, "body": quoting})
+
+        result = run_extracted(NATIVE_STICKY_SELECTOR, page)
 
         self.assert_selection(result, "")
 
@@ -2514,37 +2586,6 @@ class JqNumericContractTests(JqBackedTestCase):
 
         self.assertTrue(result.errored)
         self.assertIn("endswith", result.stderr)
-
-
-def unused_module_helpers() -> list[str]:
-    """Helpers this module defines and never calls, outside test bodies.
-
-    A fixture builder that is defined and never invoked is what a coverage gap
-    looks like from the inside: the helper reads as though something exercises
-    it while nothing does. Exactly that reached review here — a builder for the
-    whole native comment body was written, and the test meant to consume it was
-    not, so the native payload program went unexercised against everything the
-    workflow appends to a report.
-    """
-    source = Path(__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    defined = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
-    called = {
-        node.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-    }
-    return [name for name in defined if name not in called]
-
-
-class HarnessIntegrityTests(unittest.TestCase):
-    """Checks on this module rather than on the pipeline it tests."""
-
-    def test_every_helper_this_module_defines_is_used(self) -> None:
-        """A fixture builder nothing calls is a gap wearing the clothes of
-        coverage, and one already reached review in this file. Cheaper to
-        assert than to notice."""
-        self.assertEqual(unused_module_helpers(), [])
 
 
 if __name__ == "__main__":
