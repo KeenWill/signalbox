@@ -1967,15 +1967,75 @@ mod tests {
             }
             match completed_string_token(raw, at) {
                 Some(after) => {
-                    // `serde_json` owns every escape decision; a token it
-                    // rejects is not a string any consumer recovers, and the
-                    // raw comparison still covers those bytes.
-                    if let Ok(text) = serde_json::from_str::<String>(&raw[at..after]) {
-                        decoded.push(text);
+                    let token = &raw[at..after];
+                    match serde_json::from_str::<String>(token) {
+                        Ok(text) => decoded.push(text),
+                        // A token `serde_json` rejects is not discarded. One
+                        // invalid escape before an encoded credential would
+                        // otherwise hide the whole token, and production
+                        // decodes malformed fragments rather than trusting
+                        // them.
+                        Err(_) => decoded.push(decoded_escapes(&token[1..token.len() - 1])),
                     }
                     at = after;
                 }
-                None => break,
+                // A token the text never closes still carries content the
+                // stream would recover once it continues, so its interior is
+                // inspected rather than assumed safe.
+                None => {
+                    decoded.push(decoded_escapes(&raw[at + 1..]));
+                    break;
+                }
+            }
+        }
+        decoded
+    }
+
+    /// The decoded contents of a span `serde_json` will not accept whole.
+    ///
+    /// Reached for the two shapes a strict token decode drops: a string the
+    /// stream never closed, and one carrying an invalid escape before an
+    /// encoded credential. Production redacts both — `redact_json_stream_fragment`
+    /// decodes a partial or malformed fragment rather than trusting it, which
+    /// I verified against the real sink — so treating either as safe here
+    /// would leave a regression on those paths invisible.
+    ///
+    /// Every escape decision is still `serde_json`'s. This walks the span and
+    /// offers each candidate escape to `serde_json` longest first, taking the
+    /// first spelling it accepts; a spelling it rejects contributes its
+    /// backslash literally and the scan continues past it, so one bad escape
+    /// cannot mask what follows. Nothing here decides what an escape *means*,
+    /// which is what keeps it from becoming a second copy of the semantics
+    /// under test.
+    fn decoded_escapes(content: &str) -> String {
+        // Longest first: a surrogate pair spans twelve characters, a lone
+        // `\uXXXX` six, and the single-character escapes two.
+        const CANDIDATE_LENGTHS: [usize; 3] = [12, 6, 2];
+
+        let units = content.chars().collect::<Vec<_>>();
+        let mut decoded = String::with_capacity(content.len());
+        let mut at = 0;
+        while at < units.len() {
+            if units[at] != '\\' {
+                decoded.push(units[at]);
+                at += 1;
+                continue;
+            }
+            let accepted = CANDIDATE_LENGTHS.into_iter().find_map(|length| {
+                let span = units.get(at..at + length)?.iter().collect::<String>();
+                serde_json::from_str::<String>(&format!("\"{span}\""))
+                    .ok()
+                    .map(|text| (length, text))
+            });
+            match accepted {
+                Some((length, text)) => {
+                    decoded.push_str(&text);
+                    at += length;
+                }
+                None => {
+                    decoded.push('\\');
+                    at += 1;
+                }
             }
         }
         decoded
@@ -2411,15 +2471,64 @@ mod tests {
         );
     }
 
-    /// A token the text never finishes is not recovered: nothing closed it,
-    /// so no consumer reads it as a string.
+    /// The best-effort decoder is what the two salvage paths rely on, so its
+    /// own behaviour is pinned rather than inferred from its callers.
+    ///
+    /// Longest-first candidate selection is the load-bearing part: a
+    /// surrogate pair must be offered whole, because each half alone is not a
+    /// character `serde_json` will accept.
     #[test]
-    fn an_unfinished_token_is_not_decoded() {
+    fn decoded_escapes_delegates_each_spelling() {
+        assert_eq!(decoded_escapes(r"\u0066ixture"), "fixture");
+        assert_eq!(decoded_escapes(r"\ud83d\ude00"), "\u{1f600}");
+        assert_eq!(decoded_escapes(r"a\/b"), "a/b");
+        assert_eq!(decoded_escapes("plain"), "plain");
+    }
+
+    /// A spelling `serde_json` rejects contributes its backslash and nothing
+    /// more, so one bad escape cannot mask what follows it.
+    #[test]
+    fn a_rejected_spelling_does_not_consume_what_follows() {
+        assert_eq!(decoded_escapes(r"\q\u0066"), "\\qf");
+        assert_eq!(decoded_escapes(r"\ud83d"), "\\ud83d");
+    }
+
+    /// A token the stream never closed is still inspected: its contents are
+    /// what a consumer recovers once the stream continues, and production
+    /// redacts such a fragment rather than trusting it.
+    #[test]
+    fn an_unfinished_token_is_still_inspected() {
+        let [.., partial] = &REPRESENTATIVE_DISGUISES;
+
+        assert_eq!(
+            decoded_json_strings(&format!(r#"{{"k":"{}"#, partial.spelling)),
+            vec![String::from("k"), String::from("fixture/secret")]
+        );
         assert_eq!(
             decoded_json_strings(r#"{"k":"fixture"#),
-            vec![String::from("k")]
+            vec![String::from("k"), String::from("fixture")]
         );
+    }
+
+    /// Text carrying no string token yields nothing, so plain prose is never
+    /// rewritten into a decoded value.
+    #[test]
+    fn text_without_a_token_yields_nothing() {
         assert_eq!(decoded_json_strings("plain text"), Vec::<String>::new());
+    }
+
+    /// One invalid escape does not hide the rest of its token.
+    ///
+    /// `serde_json` rejects `\q`, so a strict decode would drop the whole
+    /// token and with it the encoded credential behind it.
+    #[test]
+    fn a_malformed_escape_does_not_hide_the_rest_of_a_token() {
+        let [.., partial] = &REPRESENTATIVE_DISGUISES;
+
+        assert_eq!(
+            decoded_json_strings(&format!(r#"{{"k":"\q{}"}}"#, partial.spelling)),
+            vec![String::from("k"), String::from("\\qfixture/secret")]
+        );
     }
 
     /// Every member is inspected, including one a map would drop.
@@ -2537,18 +2646,73 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
-    /// The same disguise inside a decoded proposal's arguments is caught too.
+    /// INV-035: a disguised credential in proposed arguments is scrubbed by
+    /// the sink itself, pinned to the exact forwarded proposal.
+    ///
+    /// Driven through `CredentialRedactingSink` rather than starting from an
+    /// already-leaked fact: a test that only feeds the absence helper proves
+    /// the helper works and nothing about the production path, so a regression
+    /// in `redact_tool_proposal` would not reach it.
     #[test]
-    #[should_panic(expected = "must not be recoverable")]
-    fn disguised_credential_in_proposed_arguments_is_caught() {
+    fn inv_035_disguised_credential_in_proposed_arguments_is_scrubbed() {
+        let key = credential("fixture/secret");
         let [fully, ..] = &REPRESENTATIVE_DISGUISES;
-        let observed = vec![Observation {
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
             correlation: "call-1".to_string(),
             fact: ObservationFact::ToolCallProposed(ToolCallProposal {
                 id: ToolCallId::new("id-1"),
                 name: ToolName::new("t"),
                 arguments_json: disguised_document(fully),
             }),
+        });
+        sink.flush();
+        drop(sink);
+
+        assert_eq!(
+            observed,
+            vec![Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::ToolCallProposed(ToolCallProposal {
+                    id: ToolCallId::new("id-1"),
+                    name: ToolName::new("t"),
+                    arguments_json: r#"{"k":"[redacted]"}"#.to_string(),
+                }),
+            }]
+        );
+        assert_no_stream_carries(&observed, "fixture/secret");
+    }
+
+    /// INV-035: a disguised credential in a token the stream never closed is
+    /// caught, the shape a truncated argument delta actually takes.
+    #[test]
+    #[should_panic(expected = "must not be recoverable")]
+    fn disguised_credential_in_an_unclosed_token_is_caught() {
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
+        let observed = vec![Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: format!(r#"{{"k":"{}"#, fully.spelling),
+            },
+        }];
+
+        assert_no_stream_carries(&observed, "fixture/secret");
+    }
+
+    /// INV-035: an invalid escape ahead of a disguised credential does not
+    /// hide it.
+    #[test]
+    #[should_panic(expected = "must not be recoverable")]
+    fn disguised_credential_behind_a_malformed_escape_is_caught() {
+        let [fully, ..] = &REPRESENTATIVE_DISGUISES;
+        let observed = vec![Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: format!(r#"{{"k":"\q{}"}}"#, fully.spelling),
+            },
         }];
 
         assert_no_stream_carries(&observed, "fixture/secret");
