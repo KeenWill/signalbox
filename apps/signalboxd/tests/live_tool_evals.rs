@@ -69,13 +69,14 @@ use signalbox_persistence::{
     tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_tools_exec::{
-    BwrapAvailability, CARGO_DIAGNOSTICS_NAME, CaptureCompleteness, CargoDiagnosticRecords,
-    CargoDiagnosticsCommand, CargoDiagnosticsExecution, CargoDiagnosticsExecutor,
-    CargoDiagnosticsResult, CargoDiagnosticsStream, CargoDiagnosticsTool, CargoEvidenceProvenance,
-    CargoTestOutcome, CargoTestRecords, CargoTestResult, ExecExecutor, ExecResult,
-    ExecutionConfinement, OutputCapture, OutputEncoding, ProcessOutcome, ProcessSpawnFailure,
-    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool,
-    TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
+    BwrapAvailability, CARGO_DIAGNOSTICS_NAME, CaptureCompleteness, CargoDiagnostic,
+    CargoDiagnosticRecords, CargoDiagnosticsCommand, CargoDiagnosticsExecution,
+    CargoDiagnosticsExecutor, CargoDiagnosticsResult, CargoDiagnosticsStream, CargoDiagnosticsTool,
+    CargoEvidenceProvenance, CargoTestOutcome, CargoTestRecords, CargoTestResult, ExecExecutor,
+    ExecResult, ExecutionConfinement, OutputCapture, OutputEncoding, ProcessOutcome,
+    ProcessSpawnFailure, ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner,
+    SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner,
+    UnsandboxedExecTool,
 };
 use signalbox_tools_git::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
@@ -188,6 +189,9 @@ const EXEC_FORCED_SANDBOXED_OUTPUT: &str = "forced sandboxed eval\n";
 const EXEC_FORCED_READ_ONLY_OUTPUT: &str = "forced unsandboxed eval\n";
 const SYNTHETIC_CARGO_TEST_EXECUTABLE: &str = "synthetic-test-executable";
 const SYNTHETIC_CARGO_TEST_NAME: &str = "synthetic_test_name";
+const SYNTHETIC_CARGO_DIAGNOSTIC_MESSAGE: &str = "synthetic compiler diagnostic";
+const CARGO_ERROR_DIAGNOSTIC_LEVEL: &str = "error";
+const CARGO_WARNING_DIAGNOSTIC_LEVEL: &str = "warning";
 const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
@@ -3173,6 +3177,25 @@ struct CargoDiagnosticsEvalRecords {
     known_truncated: bool,
 }
 
+#[derive(serde::Deserialize)]
+struct CargoDiagnosticsEvalDiagnostic {
+    file: serde_json::Value,
+    file_completeness: String,
+    span: serde_json::Value,
+    level: String,
+    level_completeness: String,
+    message: String,
+    message_completeness: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoDiagnosticsEvalSpan {
+    line_start: u64,
+    column_start: u64,
+    line_end: u64,
+    column_end: u64,
+}
+
 /// Whether Cargo diagnostics returned the requested successful pass together
 /// with every execution and record envelope the tool promises.
 fn cargo_diagnostics_result_passed(result: &serde_json::Value) -> bool {
@@ -3190,10 +3213,51 @@ fn cargo_diagnostics_result_passed(result: &serde_json::Value) -> bool {
         && result.diagnostics.provenance == "workspace_influenced"
         && !result.diagnostics.limit_reached
         && !result.diagnostics.known_truncated
+        && result
+            .diagnostics
+            .values
+            .iter()
+            .all(cargo_diagnostic_record_is_success_evidence)
         && result.tests.provenance == "workspace_influenced"
         && result.tests.values.is_empty()
         && !result.tests.limit_reached
         && !result.tests.known_truncated
+}
+
+fn cargo_diagnostic_record_is_success_evidence(record: &serde_json::Value) -> bool {
+    let Ok(diagnostic) = serde_json::from_value::<CargoDiagnosticsEvalDiagnostic>(record.clone())
+    else {
+        return false;
+    };
+    cargo_diagnostic_file_is_valid(&diagnostic.file)
+        && cargo_diagnostic_completeness_is_valid(&diagnostic.file_completeness)
+        && cargo_diagnostic_span_is_valid(&diagnostic.span)
+        && diagnostic.level_completeness == "complete"
+        && !diagnostic.level.is_empty()
+        && diagnostic.level != CARGO_ERROR_DIAGNOSTIC_LEVEL
+        && !diagnostic.message.is_empty()
+        && cargo_diagnostic_completeness_is_valid(&diagnostic.message_completeness)
+}
+
+fn cargo_diagnostic_file_is_valid(file: &serde_json::Value) -> bool {
+    file.is_null() || file.is_string()
+}
+
+fn cargo_diagnostic_completeness_is_valid(completeness: &str) -> bool {
+    matches!(completeness, "complete" | "truncated")
+}
+
+fn cargo_diagnostic_span_is_valid(span: &serde_json::Value) -> bool {
+    if span.is_null() {
+        return true;
+    }
+    let Ok(span) = serde_json::from_value::<CargoDiagnosticsEvalSpan>(span.clone()) else {
+        return false;
+    };
+    span.line_start > 0
+        && span.column_start > 0
+        && span.line_end >= span.line_start
+        && span.column_end > 0
 }
 
 fn cargo_diagnostics_stream_is_valid(stream: &CargoDiagnosticsEvalStream) -> bool {
@@ -5431,6 +5495,18 @@ fn cargo_diagnostics_result(execution: CargoDiagnosticsExecution) -> serde_json:
     .expect("producer Cargo diagnostics result serializes")
 }
 
+fn synthetic_cargo_diagnostic(level: &str) -> CargoDiagnostic {
+    CargoDiagnostic {
+        file: None,
+        file_completeness: CaptureCompleteness::Complete,
+        span: None,
+        level: String::from(level),
+        level_completeness: CaptureCompleteness::Complete,
+        message: String::from(SYNTHETIC_CARGO_DIAGNOSTIC_MESSAGE),
+        message_completeness: CaptureCompleteness::Complete,
+    }
+}
+
 #[test]
 fn forced_exec_tier_passes_the_exact_captured_output() {
     let outcome = forced_exec_outcome(
@@ -5492,12 +5568,35 @@ fn forced_cargo_diagnostics_rejects_an_unconfined_zero_exit() {
 
 #[test]
 fn forced_cargo_diagnostics_accepts_a_complete_successful_check() {
-    let outcome = forced_exec_outcome(
-        CARGO_DIAGNOSTICS_NAME,
-        successful_cargo_diagnostics_result(),
-    );
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["values"] = serde_json::to_value(vec![synthetic_cargo_diagnostic(
+        CARGO_WARNING_DIAGNOSTIC_LEVEL,
+    )])
+    .expect("producer Cargo diagnostics serialize");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Pass);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_error_diagnostics_from_a_successful_check() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["values"] = serde_json::to_value(vec![synthetic_cargo_diagnostic(
+        CARGO_ERROR_DIAGNOSTIC_LEVEL,
+    )])
+    .expect("producer Cargo diagnostics serialize");
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_malformed_diagnostics() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["values"] = serde_json::json!([{}]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
 }
 
 #[test]
