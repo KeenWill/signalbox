@@ -879,13 +879,14 @@ where
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::RefCell,
         collections::VecDeque,
         fmt,
         future::{Future, pending, ready},
         io::{self, Write},
         num::NonZeroUsize,
         sync::{
-            Arc, Mutex,
+            Arc, Mutex, OnceLock,
             atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
@@ -913,27 +914,18 @@ mod tests {
         StartEligibleTurnService, StartEligibleTurnTransaction,
     };
 
-    #[derive(Clone, Default)]
-    struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
-
-    impl CapturedTelemetry {
-        fn text(&self) -> String {
-            String::from_utf8(
-                self.0
-                    .lock()
-                    .expect("captured telemetry lock is available")
-                    .clone(),
-            )
-            .expect("captured telemetry is UTF-8")
-        }
+    thread_local! {
+        /// Telemetry captured on this thread alone.
+        static CAPTURED_TELEMETRY: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     }
+
+    /// Appends every formatted event to the emitting thread's own buffer.
+    #[derive(Clone, Copy, Default)]
+    struct CapturedTelemetry;
 
     impl Write for CapturedTelemetry {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("captured telemetry lock is available")
-                .extend_from_slice(buffer);
+            CAPTURED_TELEMETRY.with(|captured| captured.borrow_mut().extend_from_slice(buffer));
             Ok(buffer.len())
         }
 
@@ -946,8 +938,44 @@ mod tests {
         type Writer = Self;
 
         fn make_writer(&'writer self) -> Self::Writer {
-            self.clone()
+            *self
         }
+    }
+
+    /// Installs the capturing subscriber once for the whole test process.
+    ///
+    /// It must be global rather than thread-scoped. `tracing` caches each
+    /// callsite's interest process-wide, but `set_default` binds a subscriber
+    /// to one thread, so a sibling test that reaches a callsite first on
+    /// another thread registers it against no subscriber at all — recording it
+    /// as uninteresting for every thread, including the one that installed a
+    /// capture. The event then is not merely written late; it is never emitted,
+    /// and the assertion reads an empty buffer. A global subscriber is live for
+    /// whichever thread registers the callsite, so no registration can resolve
+    /// to uninterested and the capture cannot be lost.
+    ///
+    /// Writes are routed per thread so concurrent tests never read each other's
+    /// events, which keeps both the positive and the negative assertions honest.
+    fn capture_telemetry_for_this_thread() {
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+
+        INSTALLED.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(CapturedTelemetry)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other global telemetry subscriber is installed");
+        });
+        CAPTURED_TELEMETRY.with(|captured| captured.borrow_mut().clear());
+    }
+
+    /// Returns the telemetry captured on this thread.
+    fn captured_telemetry() -> String {
+        CAPTURED_TELEMETRY
+            .with(|captured| String::from_utf8(captured.borrow().clone()))
+            .expect("captured telemetry is UTF-8")
     }
 
     fn session(value: u128) -> SessionId {
@@ -1546,13 +1574,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_pass_event_does_not_promise_scheduler_retry() {
-        let output = CapturedTelemetry::default();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(output.clone())
-            .finish();
-        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        capture_telemetry_for_this_thread();
         let failing_session = session(7);
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let pass = FakePass::failing_once(failing_session, 1, shutdown_sender);
@@ -1570,7 +1592,7 @@ mod tests {
                     .expect("fake pass requests shutdown after its failure");
             })
             .await;
-        let encoded = output.text();
+        let encoded = captured_telemetry();
 
         assert_eq!(exit, SchedulerLoopExit::Shutdown);
         assert!(encoded.contains("authoritative eligibility pass failed"));
