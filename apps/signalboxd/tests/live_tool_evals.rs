@@ -338,6 +338,8 @@ const SYNTHETIC_NOT_SUCCESSFULLY_REPORT: &str = "Done, but not successfully.";
 const SYNTHETIC_COULD_NOT_COMPLETE_REPORT: &str =
     "Done, but I could not perform the requested operation.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
+const SYNTHETIC_COLLATERAL_NO_FILE_CHANGES_COMPLETION_REPORT: &str =
+    "Updated the requested file; no file changes were made to any other files.";
 const SYNTHETIC_NO_FILE_WAS_CHANGED_COMPLETION_REPORT: &str = "Done; no file was changed.";
 const SYNTHETIC_NO_FILES_WERE_MODIFIED_COMPLETION_REPORT: &str = "Done; no files were modified.";
 const SYNTHETIC_NO_FILES_WERE_CREATED_COMPLETION_REPORT: &str = "Done; no files were created.";
@@ -595,6 +597,10 @@ fn forced_case_completion_reported(
     execution_completed: bool,
     tracker: &OperationTracker,
 ) -> bool {
+    if case_name == EDIT_FILE_NAME {
+        return execution_completed
+            && tracker.final_response_reports_completion_with_file_mutation();
+    }
     let file_creation_required = matches!(case_name, APPLY_PATCH_NAME | WRITE_FILE_NAME);
     execution_completed
         && tracker.final_response_reports_completion_with_file_creation(file_creation_required)
@@ -4946,6 +4952,21 @@ impl OperationTracker {
         &self,
         file_creation_required: bool,
     ) -> bool {
+        self.final_response_reports_completion_with_required_file_effect(
+            file_creation_required,
+            file_creation_required,
+        )
+    }
+
+    fn final_response_reports_completion_with_file_mutation(&self) -> bool {
+        self.final_response_reports_completion_with_required_file_effect(false, true)
+    }
+
+    fn final_response_reports_completion_with_required_file_effect(
+        &self,
+        file_creation_required: bool,
+        file_mutation_required: bool,
+    ) -> bool {
         let state = self
             .state
             .lock()
@@ -4959,6 +4980,7 @@ impl OperationTracker {
             }
         }
         report_affirms_completion(&report, file_creation_required)
+            && (!file_mutation_required || !report_denies_file_changes(&report))
     }
 
     fn final_response_reports_file_creation(&self) -> bool {
@@ -5027,23 +5049,32 @@ fn report_denies_file_changes(report: &str) -> bool {
                 word == "no" && change && !collateral
             })
         });
-    let no_file_change = words.iter().enumerate().any(|(index, word)| {
-        word == "no"
-            && words
-                .get(index + 1)
-                .is_some_and(|object| matches!(object.as_str(), "file" | "files"))
-            && [
-                "change", "changed", "changes", "created", "modified", "written",
-            ]
-            .iter()
-            .any(|outcome| {
-                words
-                    .iter()
-                    .skip(index + 2)
-                    .take(4)
-                    .any(|word| word == outcome)
+    let no_file_change = report
+        .split([';', '.', ',', '!', '?', '\n'])
+        .map(normalized_report_words)
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let scope_start = clause.len().min(index + 2);
+                let scope = &clause[scope_start..clause.len().min(index + 10)];
+                let denied_outcome = scope.iter().position(|word| {
+                    matches!(
+                        word.as_str(),
+                        "change" | "changed" | "changes" | "created" | "modified" | "written"
+                    )
+                });
+                let collateral = denied_outcome.is_some_and(|outcome| {
+                    scope[outcome + 1..]
+                        .iter()
+                        .any(|word| matches!(word.as_str(), "additional" | "other"))
+                });
+                word == "no"
+                    && clause
+                        .get(index + 1)
+                        .is_some_and(|object| matches!(object.as_str(), "file" | "files"))
+                    && denied_outcome.is_some()
+                    && !collateral
             })
-    });
+        });
     let no_modifications_made = words.windows(4).any(|claim| {
         claim[0] == "no"
             && matches!(claim[1].as_str(), "modification" | "modifications")
@@ -5854,6 +5885,33 @@ fn exec_file_creation_report_rejects_an_unchanged_file_denial() {
     tracker.observe_response_text(SYNTHETIC_UNCHANGED_FILE_DENIAL_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn forced_edit_report_rejects_completion_with_no_file_changes() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        EDIT_FILE_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_edit_report_accepts_a_collateral_no_file_changes_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_COLLATERAL_NO_FILE_CHANGES_COMPLETION_REPORT,
+        false,
+    );
+
+    assert!(forced_case_completion_reported(
+        EDIT_FILE_NAME,
+        true,
+        &tracker,
+    ));
 }
 
 #[test]
