@@ -300,6 +300,7 @@ const SYNTHETIC_VERB_FIRST_CREATION_DENIAL_REPORT: &str = "Done, but I did not c
 const SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT: &str =
     "Done, but I did not modify any files.";
 const SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT: &str = "Done, but no changes were made.";
+const SYNTHETIC_BARE_NO_MODIFICATIONS_DENIAL_REPORT: &str = "Done, but no modifications were made.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
@@ -3522,7 +3523,7 @@ fn report_denies_success(report: &str) -> bool {
 
 fn report_denies_file_changes(report: &str) -> bool {
     let words = normalized_report_words(report);
-    words.iter().enumerate().any(|(index, word)| {
+    let no_file_change = words.iter().enumerate().any(|(index, word)| {
         word == "no"
             && words
                 .get(index + 1)
@@ -3536,7 +3537,14 @@ fn report_denies_file_changes(report: &str) -> bool {
                         .take(4)
                         .any(|word| word == outcome)
                 })
-    })
+    });
+    let no_modifications_made = words.windows(4).any(|claim| {
+        claim[0] == "no"
+            && matches!(claim[1].as_str(), "modification" | "modifications")
+            && matches!(claim[2].as_str(), "was" | "were")
+            && claim[3] == "made"
+    });
+    no_file_change || no_modifications_made
 }
 
 fn normalized_report_words(report: &str) -> Vec<String> {
@@ -3880,6 +3888,14 @@ fn exec_file_creation_report_rejects_a_verb_first_modification_denial() {
 fn exec_file_creation_report_rejects_a_bare_no_changes_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_bare_no_modifications_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BARE_NO_MODIFICATIONS_DENIAL_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
 }
