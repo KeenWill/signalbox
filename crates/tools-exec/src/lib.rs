@@ -22,9 +22,15 @@
 //! `known_truncated` flag reports positive truncation evidence; false never
 //! claims that the workspace-influenced collection is complete or authentic.
 //!
-//! This day-one profile does not fence the network or impose resource limits.
-//! It is therefore not an admissible boundary for executing untrusted code.
-//! Shell sessions and PTYs are likewise outside this crate's contract.
+//! The profile unshares the network namespace, so a sandboxed command reaches
+//! no host or remote service and holds only a loopback interface. It still
+//! imposes no resource limits, drops no uid or gid, and applies no seccomp or
+//! landlock policy, so it remains an inadmissible boundary for executing
+//! untrusted code — the network fence narrows that gap rather than closing it.
+//! Because the sandbox binds no host Cargo home, a Cargo pass through
+//! [`CargoDiagnosticsTool`] now resolves only against an already-populated
+//! workspace-local registry cache. Shell sessions and PTYs are likewise outside
+//! this crate's contract.
 //!
 //! The real-bubblewrap containment check is mandatory in CI. Unsupported local
 //! hosts skip it unless `SIGNALBOX_RUN_BWRAP_INTEGRATION=1` requests the same

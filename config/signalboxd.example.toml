@@ -208,6 +208,13 @@ author_email = "signalbox@example.invalid"
 
 # Exact-name overrides are optional. Any composed tool omitted here retains its
 # existing permission default and session-blanket behavior.
+#
+# The execution tools are omitted deliberately and keep their compiled defaults:
+# unsandboxed_exec is AlwaysConfirm, sandboxed_exec is Confirm, and
+# cargo_diagnostics is Auto because its arguments carry no program. A deployment
+# that enables dangerous_tool_auto_approval on a session template turns that
+# sandboxed_exec confirmation into a session blanket; add
+# sandboxed_exec = "human" below to keep it parked for a person regardless.
 [tool_approval_postures]
 web_fetch = "human"
 web_search = "human"

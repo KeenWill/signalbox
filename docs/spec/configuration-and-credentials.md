@@ -10,6 +10,10 @@ verified against the implementing stack through this PR
 The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
 
+The execution family's permission defaults and the confinement its bubblewrap
+profile does and does not provide are verified against this PR
+(`agent/exec-sandbox-net-fence`).
+
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
 
@@ -587,12 +591,33 @@ publication, and every workspace mutation default to `Confirm`. Reading the
 invoking session's transcript defaults to `Auto`, while listing conversations
 and reading another native or imported conversation default to `Confirm`.
 `web_search` and `web_fetch` also default to `Confirm`; the checked-in example
-maps both exact names to `human`. The runtime meaning and precedence of those
-declaration defaults, the explicit posture, the session blanket, and the durable
-approval wait are owned by
+maps both exact names to `human`. The three execution tools complete the
+enumeration. `unsandboxed_exec` is compiled `AlwaysConfirm`, which no posture,
+approval judge, or session blanket can lower. `sandboxed_exec` defaults to
+`Confirm`, because it accepts an arbitrary program and argument vector and no
+unconfirmed turn may hold that authority. `cargo_diagnostics` defaults to
+`Auto`: its arguments carry no program, and the fixed Cargo commands it builds
+itself are the whole of what it can run. The runtime meaning and precedence of
+those declaration defaults, the explicit posture, the session blanket, and the
+durable approval wait are owned by
 [Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
 Only the explicit `[tool_approval_postures]` table changes a declaration's
 resolved posture; family composition itself does not.
+
+`sandboxed_exec` and `cargo_diagnostics` share one daemon-local bubblewrap
+profile whose confinement is stated here because its name overstates it. The
+profile unshares the user, mount, PID, IPC, UTS, and network namespaces, mounts
+a fresh `/proc`, `/dev`, and `/tmp`, binds a read-only operating-system runtime,
+clears the ambient environment, and binds the configured workspace root
+read-write at `/workspace`. A sandboxed command therefore reaches no host or
+remote service, and no credential file, because none is bound; it may write
+anything under the configured workspace root, including that repository's
+`.git`. The profile imposes no resource limits, drops no uid or gid, and applies
+no seccomp or landlock policy, so it does not contain a deliberately hostile
+program. It is not the runner's `WorkspaceRestricted` profile described by
+[sandbox profiles and approval](runner-protocol.md#sandbox-profiles-and-approval),
+which additionally drops capabilities and brokers egress through a hostname
+allowlist, and which no present runner surface provides.
 
 The conversation adapter uses the existing application listing service and the
 established persistence projections for native semantic transcripts and

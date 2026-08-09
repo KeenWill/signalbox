@@ -57,6 +57,29 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
 
     assert_real_bwrap_result(nested_result, ci)?;
 
+    // The other probes hold whether or not the network namespace is unshared,
+    // so none of them would notice `--unshare-net` disappearing from the
+    // profile. A network namespace of its own is the one containment property
+    // that separates this sandbox from a process that can post the workspace to
+    // an arbitrary host, and its direct observable is the interface table: a
+    // freshly unshared namespace carries the loopback device and nothing else,
+    // whereas sharing the host's namespace exposes every host interface.
+    let network_arguments = ExecArguments {
+        program: String::from("sh"),
+        arguments: vec![
+            String::from("-c"),
+            String::from(
+                "grep -q '^ *lo:' /proc/net/dev && test \"$(grep -c : /proc/net/dev)\" -eq 1",
+            ),
+        ],
+        working_directory: String::from("."),
+        timeout_seconds: 5,
+    };
+
+    let network_result = runner.try_run(network_arguments).await?;
+
+    assert_real_bwrap_result(network_result, ci)?;
+
     let missing_arguments = ExecArguments {
         program: String::from("signalbox-exec-definitely-missing-target"),
         arguments: Vec::new(),
