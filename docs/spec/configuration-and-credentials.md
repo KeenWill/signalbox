@@ -1614,8 +1614,21 @@ deployment-side rules that code cannot enforce are stated in
   safe in configuration, errors, logs, and durable records; values are safe only
   at the adapter boundary. Why: value rotation preserves the stable name so no
   record or log ever needs the secret (INV-035). The two integration constants
-  are `brave-search-primary` and `github-primary`; every model-provider
-  reference is a configured profile name this build never spells.
+  are `brave-search-primary` and `github-primary`. Model-provider references are
+  configured profile names, but this build does spell four of them: an
+  `anthropic` mapping must name `anthropic-primary` and an `openai` mapping must
+  name `openai-primary` — any other name is a typed startup failure — while
+  `codex-subscription-primary` and `claude-subscription-primary` are the
+  defaults a CLI runtime falls back to when its mapping names nothing else, and
+  are not enforced.
+
+- **Committed unimplemented functionality — operator-chosen provider names.**
+  Removing those four spellings is the pool grammar's doing, not this build's:
+  once a mapping names a pool rather than a profile, every model-provider name
+  is the operator's and no build-provided constant is compared against it. Until
+  that child lands, an operator writing a differently named `anthropic` or
+  `openai` profile gets a rejected configuration, so this page states the
+  spellings rather than the intent.
 
 - **File-based supply, reread per preparation.** Each `FileCredentialAccess`
   instance binds one consumer-scoped map of references to deployment paths. In
@@ -1683,6 +1696,18 @@ deployment-side rules that code cannot enforce are stated in
   command replay returns the recorded session without consulting the current
   table, so a configuration edit never silently re-resolves an existing
   session's credentials.
+
+- **Legacy migration fallback, still live.** Sessions that predate this history
+  carry a `migration_backfill` creation event holding the single previously
+  composed `anthropic` / `anthropic-primary` pair, seeded by the migration that
+  introduced the feature. While that event remains a session's current one, an
+  Anthropic route may resolve through that durable legacy entry even when the
+  configured family is named differently; a Codex route never may. The daemon
+  performs this today — preparation falls back to the migrated entry when the
+  resolved family has no entry of its own — so it is described here rather than
+  left to be rediscovered from the code. A later explicit credential event ends
+  the aliasing for that session, because resolution then uses only the complete
+  latest snapshot.
 
 - **Committed unimplemented functionality — pool-policy credential history.** No
   present repository stores a family-to-pool-policy snapshot or migrates an
