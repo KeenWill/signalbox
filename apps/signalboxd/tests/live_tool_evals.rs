@@ -705,6 +705,7 @@ struct GitFixtureSnapshot {
     index_extensions: Vec<GitIndexExtensionSnapshot>,
     static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reflog_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    reflog_modified_times: BTreeMap<PathBuf, SystemTime>,
     reference_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reference_modified_times: BTreeMap<PathBuf, SystemTime>,
     objects: GitObjectInventory,
@@ -2606,6 +2607,7 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         index_extensions: git_index_extensions(&repository)?,
         static_metadata_entries: git_static_metadata_entries(root)?,
         reflog_entries: git_reflog_entries(root)?,
+        reflog_modified_times: git_reflog_modified_times(root)?,
         reference_entries: git_reference_entries(root)?,
         reference_modified_times: git_reference_modified_times(root)?,
         objects: git_object_inventory(&repository)?,
@@ -3081,6 +3083,11 @@ fn git_reflog_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntr
     filesystem_entries(&repository.path().join(GIT_LOGS_DIRECTORY), None)
 }
 
+fn git_reflog_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
+    let repository = Repository::open(root)?;
+    filesystem_file_modified_times(&repository.path().join(GIT_LOGS_DIRECTORY))
+}
+
 fn git_forced_reflogs_match(
     root: &Path,
     case_name: &str,
@@ -3098,7 +3105,7 @@ fn git_forced_reflogs_match(
                 head,
                 GIT_COMMIT_REFLOG_MESSAGE,
                 &["HEAD", branch_reference.as_str()],
-                &seed_fixture.reflog_entries,
+                seed_fixture,
                 None,
             )
         }
@@ -3115,11 +3122,12 @@ fn git_forced_reflogs_match(
                 target,
                 GIT_SWITCH_REFLOG_MESSAGE,
                 &["HEAD"],
-                &seed_fixture.reflog_entries,
+                seed_fixture,
                 execution_window,
             )
         }
-        _ => Ok(git_reflog_entries(root)? == seed_fixture.reflog_entries),
+        _ => Ok(git_reflog_entries(root)? == seed_fixture.reflog_entries
+            && git_reflog_modified_times(root)? == seed_fixture.reflog_modified_times),
     }
 }
 
@@ -3129,12 +3137,14 @@ fn git_reflog_updates_match(
     new: Oid,
     message: &str,
     references: &[&str],
-    seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    seed_fixture: &GitFixtureSnapshot,
     execution_window: Option<GitExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let actual_entries = git_reflog_entries(root)?;
-    let mut expected_entries = seed_entries.clone();
+    let mut expected_entries = seed_fixture.reflog_entries.clone();
+    let actual_modified_times = git_reflog_modified_times(root)?;
+    let mut expected_modified_times = seed_fixture.reflog_modified_times.clone();
     let expectation = GitReflogUpdateExpectation {
         old,
         new,
@@ -3151,8 +3161,13 @@ fn git_reflog_updates_match(
         )? {
             return Ok(false);
         }
+        let path = Path::new(reference);
+        let Some(modified) = actual_modified_times.get(path) else {
+            return Ok(false);
+        };
+        expected_modified_times.insert(path.to_path_buf(), *modified);
     }
-    Ok(actual_entries == expected_entries)
+    Ok(actual_entries == expected_entries && actual_modified_times == expected_modified_times)
 }
 
 #[derive(Clone, Copy)]
@@ -3822,7 +3837,7 @@ fn git_natural_state_passed_in_window(
         head.id(),
         GIT_COMMIT_REFLOG_MESSAGE,
         &["HEAD", format!("refs/heads/{GIT_BASE_BRANCH}").as_str()],
-        &seed_fixture.reflog_entries,
+        seed_fixture,
         None,
     )?;
     let complete_worktree_inventory_matches =
@@ -8297,6 +8312,40 @@ fn forced_git_log_verifier_rejects_nested_reference_mtime_drift() -> EvalResult 
             .join("log-target"),
     )?
     .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_reflog_file_mtime_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    fs::File::open(repository.path().join(GIT_LOGS_DIRECTORY).join("HEAD"))?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
     let result = serde_json::json!({
         "commits": [{
             "commit": target.id().to_string(),
