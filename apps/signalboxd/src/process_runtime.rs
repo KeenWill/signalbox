@@ -220,7 +220,6 @@ const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
-const REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS: u32 = 2;
 
 #[derive(Debug)]
 struct UnavailableContextCompactionModel;
@@ -842,18 +841,6 @@ async fn acquire_snapshot_reader_permit(
     }
 }
 
-async fn acquire_review_orchestration_snapshot_permit(
-    budget: Arc<Semaphore>,
-    shutdown: &mut watch::Receiver<bool>,
-) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError> {
-    tokio::select! {
-        () = wait_for_shutdown(shutdown) => Ok(None),
-        permit = budget.acquire_many_owned(REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS) => permit
-            .map(Some)
-            .map_err(|_| ProcessConnectionError::SnapshotReaderBudgetClosed),
-    }
-}
-
 fn conversation_import_request_requires_permit(
     request: &ClientRequest,
     import_state: ConversationImportState,
@@ -1026,9 +1013,6 @@ enum SnapshotReaderAdmission {
     /// The request holds one pooled connection across its database phase — a
     /// multi-statement read, a `REPEATABLE READ` transaction, or a spool.
     OneConnection,
-    /// The coherent review-orchestration snapshot, which holds
-    /// [`REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS`] at once.
-    CoherentReviewSnapshot,
 }
 
 impl SnapshotReaderAdmission {
@@ -1049,8 +1033,10 @@ impl SnapshotReaderAdmission {
             | ClientRequest::ReadReviewTarget { .. }
             | ClientRequest::ReadReviewRun { .. }
             | ClientRequest::ReadReviewFinding { .. }
-            | ClientRequest::ListReviewFindings { .. } => Self::OneConnection,
-            ClientRequest::ReadReviewOrchestration { .. } => Self::CoherentReviewSnapshot,
+            | ClientRequest::ListReviewFindings { .. }
+            // The coherent orchestration snapshot reads every adapter fact
+            // inside one `REPEATABLE READ` transaction on a single connection.
+            | ClientRequest::ReadReviewOrchestration { .. } => Self::OneConnection,
             ClientRequest::CreateSession { .. }
             | ClientRequest::CreateSessionFromTemplate { .. }
             | ClientRequest::ListTemplates {}
@@ -1111,18 +1097,13 @@ async fn admit_snapshot_reader(
                 .await?
                 .map(Some))
         }
-        SnapshotReaderAdmission::CoherentReviewSnapshot => Ok(
-            acquire_review_orchestration_snapshot_permit(budget, shutdown)
-                .await?
-                .map(Some),
-        ),
     }
 }
 
 fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
     let available =
         max_pool_connections.checked_sub(RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS)?;
-    if available < REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS {
+    if available == 0 {
         return None;
     }
     usize::try_from(available).ok()
@@ -13912,11 +13893,10 @@ mod tests {
         MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, PendingConversationImport,
         ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
         RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
-        REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS, RequestId, ReviewCommandAdmission,
-        SnapshotReaderAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
-        acquire_import_permit, acquire_import_waiter_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
-        acquire_review_command_permit_while_buffered, acquire_review_orchestration_snapshot_permit,
+        RequestId, ReviewCommandAdmission, SnapshotReaderAdmission, SnapshotSpoolError,
+        SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
+        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
+        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
         acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
         canonical_review_request_digest, claude_conversion_failure_disposition,
         codex_conversion_failure_disposition, consume_snapshot_queued_update,
@@ -14846,25 +14826,31 @@ mod tests {
         Ok(())
     }
 
+    /// The orchestration snapshot holds one pooled connection, like every
+    /// other review read: its whole reconstruction runs inside a single
+    /// `REPEATABLE READ` transaction. A three-connection pool therefore starts,
+    /// where the two-connection form of this read needed four.
     #[tokio::test]
-    async fn review_orchestration_snapshot_reserves_its_two_pool_connections()
-    -> Result<(), Box<dyn Error>> {
-        let reserved = usize::try_from(REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS)?;
-        let capacity = reserved + 1;
+    async fn review_orchestration_snapshot_holds_one_pool_connection() -> Result<(), Box<dyn Error>>
+    {
+        let capacity = 2;
         let budget = Arc::new(Semaphore::new(capacity));
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
 
-        let permit = acquire_review_orchestration_snapshot_permit(
+        let permit = admit_snapshot_reader(
+            &read_review_orchestration_request(),
             Arc::clone(&budget),
             &mut shutdown_receiver,
         )
         .await?
-        .ok_or_else(|| io::Error::other("the running fixture must acquire a permit"))?;
+        .ok_or_else(|| io::Error::other("the running fixture must be admitted"))?
+        .ok_or_else(|| io::Error::other("the snapshot read must hold a reader permit"))?;
 
-        assert_eq!(budget.available_permits(), capacity - reserved);
+        assert_eq!(budget.available_permits(), capacity - 1);
         drop(permit);
         assert_eq!(budget.available_permits(), capacity);
-        assert!(snapshot_reader_capacity(3).is_none());
+        assert_eq!(snapshot_reader_capacity(3), Some(1));
+        assert!(snapshot_reader_capacity(2).is_none());
         Ok(())
     }
 
@@ -15047,7 +15033,7 @@ mod tests {
         );
         assert_eq!(
             SnapshotReaderAdmission::for_request(&read_review_orchestration_request()),
-            SnapshotReaderAdmission::CoherentReviewSnapshot
+            SnapshotReaderAdmission::OneConnection
         );
     }
 
@@ -15075,7 +15061,7 @@ mod tests {
     #[tokio::test]
     async fn review_read_admission_draws_on_the_shared_reader_budget() -> Result<(), Box<dyn Error>>
     {
-        let capacity = usize::try_from(REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS)? + 1;
+        let capacity = 3;
         let budget = Arc::new(Semaphore::new(capacity));
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
 
