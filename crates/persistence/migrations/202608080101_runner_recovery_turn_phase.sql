@@ -859,6 +859,47 @@ BEGIN
                         'reconciliation_required'
                     AND cancelled.terminal_tool_attempt_id =
                         effect.interrupted_tool_attempt_id
+                    AND EXISTS (
+                        SELECT 1
+                          FROM tool_attempt AS stopped_tool
+                          JOIN runner_physical_attempt_lease_binding AS binding
+                            ON binding.attempt_id = stopped_tool.attempt_id
+                          JOIN runner_lease_generation AS lease
+                            ON lease.lease_id = binding.lease_id
+                           AND lease.attempt_id = stopped_tool.attempt_id
+                           AND lease.session_id = stopped_tool.session_id
+                          JOIN runner_current_lease_event AS lease_head
+                            ON lease_head.lease_id = lease.lease_id
+                           AND lease_head.generation = lease.generation
+                          JOIN runner_lease_event AS lease_event
+                            ON lease_event.lease_id = lease_head.lease_id
+                           AND lease_event.generation = lease_head.generation
+                           AND lease_event.event_ordinal =
+                                lease_head.event_ordinal
+                          JOIN runner_session_placement_record AS leased_placement
+                            ON leased_placement.session_id = lease.session_id
+                           AND leased_placement.event_ordinal =
+                                lease.placement_event_ordinal
+                         WHERE stopped_tool.attempt_id =
+                                effect.interrupted_tool_attempt_id
+                           AND stopped_tool.session_id = effect.session_id
+                           AND stopped_tool.turn_id = effect.turn_id
+                           AND stopped_tool.state_kind = 'terminal'
+                           AND stopped_tool.terminal_disposition_kind =
+                                'ambiguous'
+                           AND lease.runner_id = effect.runner_id
+                           AND lease_event.state_kind IN (
+                                'lost_execution_possible', 'lost_claimed'
+                           )
+                           AND lease.effect_class IN (
+                                'idempotent', 'side_effecting'
+                           )
+                           AND leased_placement.placement_revision =
+                                effect.placement_revision
+                           AND leased_placement.state_kind = 'pinned'
+                           AND leased_placement.pinned_runner_id =
+                                effect.runner_id
+                    )
                 )
                 OR (
                     effect.interrupted_tool_attempt_id IS NOT NULL

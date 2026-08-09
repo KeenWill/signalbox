@@ -6835,6 +6835,7 @@ async fn prepare_unclaimed_retryable_runner_recovery(
         ToolAttemptId,
         ContextFrontierId,
         ToolRequestId,
+        RunnerLeaseCorrelation,
     ),
     Box<dyn Error>,
 > {
@@ -6873,6 +6874,7 @@ async fn prepare_unclaimed_retryable_runner_recovery(
         )
         .expect("the external-effect fixture pins the placement");
     store.store_pin(&pin, &registration).await?;
+    let lease = pin.lease.correlation();
     record_no_execution_lease_loss(pool, &pin.lease).await?;
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
     let producing_call = ModelCallId::from_uuid(uuid(
@@ -6936,7 +6938,7 @@ async fn prepare_unclaimed_retryable_runner_recovery(
     .execute(&mut *recovery)
     .await?;
     recovery.commit().await?;
-    Ok((session, turn, interrupted_attempt, boundary, request))
+    Ok((session, turn, interrupted_attempt, boundary, request, lease))
 }
 
 /// INV-029 / INV-044: stopping a retryable no-execution runner wait retires
@@ -6945,7 +6947,7 @@ async fn prepare_unclaimed_retryable_runner_recovery(
 #[ignore = "requires Docker"]
 async fn s32_inv029_inv044_stop_retires_retryable_runner_attempt() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (session, turn, interrupted_attempt, boundary, request) =
+    let (session, turn, interrupted_attempt, boundary, request, lease) =
         prepare_unclaimed_retryable_runner_recovery(&pool).await?;
     let command = DurableCommandId::from_uuid(uuid(0xa171));
     let result_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xa172));
@@ -7026,6 +7028,19 @@ async fn s32_inv029_inv044_stop_retires_retryable_runner_attempt() -> Result<(),
             .bind(interrupted_attempt.into_uuid())
             .fetch_one(&pool)
             .await?;
+    let consumed_loss = RunnerProtocolStore::new(pool.clone(), side_effecting_catalog())
+        .load_lease_loss(lease.lease, lease.generation)
+        .await?
+        .expect("the stopped source lease remains loadable");
+    let retry = consumed_loss
+        .retry()
+        .expect("the stopped no-execution loss retains checked lineage");
+    let consumed_retry = retry
+        .prepare_unclaimed_attempt(claimed_batch_with_effect(
+            INITIAL_PHYSICAL_ATTEMPT,
+            ToolEffectClass::ExternalEffect,
+        ))
+        .expect_err("the stop durably consumes retry preparation authority");
 
     assert_eq!(lifecycle.0, "cancelled");
     assert_eq!(stopped_attempt.0, "terminal");
@@ -7035,9 +7050,65 @@ async fn s32_inv029_inv044_stop_retires_retryable_runner_attempt() -> Result<(),
     assert_eq!(result.1, interrupted_attempt.into_uuid());
     assert_eq!(result.2, boundary.into_uuid());
     assert_eq!(closure_request, request.into_uuid());
+    assert_eq!(consumed_retry, RunnerDomainError::InvalidState);
     assert!(
         reload.is_some(),
         "the cancelled retryable runner wait must reload before its queued successor starts"
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-029 / INV-044: a corrupted stop cannot turn a no-execution source into
+/// reconciliation-required ambiguity merely by terminalizing its attempt.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv029_inv044_stop_rejects_unclaimed_side_effecting_ambiguity()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, interrupted_attempt, _, _, _) =
+        prepare_unclaimed_retryable_runner_recovery(&pool).await?;
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    let interrupt = SubmitInput::new(
+        DurableCommandId::from_uuid(uuid(0xa17c)),
+        session,
+        UserContent::try_text(String::from("invalid ambiguous stop"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    let rejected = SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            interrupt,
+            AcceptedInputId::from_uuid(uuid(0xa17d)),
+            Some(TurnId::from_uuid(uuid(0xa17e))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa17f)),
+                ContextFrontierId::from_uuid(uuid(0xa180)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xa181)),
+            |_| {
+                (
+                    vec![SemanticTranscriptEntryId::from_uuid(uuid(0xa182))],
+                    ContextFrontierId::from_uuid(uuid(0xa183)),
+                )
+            },
+        )
+        .await
+        .expect_err("no-execution loss cannot become reconciliation-required");
+
+    assert!(
+        rejected
+            .to_string()
+            .contains("incomplete or cross-wired effect"),
+        "the deferred effect correlation must reject the wrong lease ambiguity: {rejected}"
     );
     drop(pool);
     Ok(())

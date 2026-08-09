@@ -587,8 +587,8 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Eleven explicit lock statements live
-in the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Thirteen explicit lock statements
+live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
@@ -616,7 +616,10 @@ in the schema instead:
   `turn_lifecycle` row before it admits a prepared judge call; and
 - the deferred approval-decision authority trigger in that migration takes
   `FOR UPDATE` on the `tool_request` row before it checks for a nonterminal
-  judge call and validates the decision's frozen-posture authority.
+  judge call and validates the decision's frozen-posture authority; and
+- the runner-recovery completeness checker and placement-side recheck in
+  migration `202608080101` each take `FOR UPDATE` on the session scheduler row
+  before re-reading the active recovery lifecycle and placement relationship.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
