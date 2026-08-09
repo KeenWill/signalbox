@@ -2944,8 +2944,9 @@ mod test_support;
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::RefCell,
         io::{self, Write},
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, OnceLock},
     };
 
     use signalbox_application::{
@@ -3085,27 +3086,18 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
-    struct CapturedTelemetry(Arc<Mutex<Vec<u8>>>);
-
-    impl CapturedTelemetry {
-        fn text(&self) -> String {
-            String::from_utf8(
-                self.0
-                    .lock()
-                    .expect("captured telemetry lock is available")
-                    .clone(),
-            )
-            .expect("captured telemetry is UTF-8")
-        }
+    thread_local! {
+        /// Telemetry captured on this thread alone.
+        static CAPTURED_TELEMETRY: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     }
+
+    /// Appends every formatted event to the emitting thread's own buffer.
+    #[derive(Clone, Copy, Default)]
+    struct CapturedTelemetry;
 
     impl Write for CapturedTelemetry {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("captured telemetry lock is available")
-                .extend_from_slice(buffer);
+            CAPTURED_TELEMETRY.with(|captured| captured.borrow_mut().extend_from_slice(buffer));
             Ok(buffer.len())
         }
 
@@ -3118,8 +3110,43 @@ mod tests {
         type Writer = Self;
 
         fn make_writer(&'writer self) -> Self::Writer {
-            self.clone()
+            *self
         }
+    }
+
+    /// Installs the capturing subscriber once for the whole test process, and
+    /// clears whatever this thread captured earlier.
+    ///
+    /// It must be global rather than thread-scoped. `tracing` caches each
+    /// callsite's interest process-wide, but `set_default` binds a subscriber
+    /// to one thread, so a sibling test that reaches a callsite first on
+    /// another thread registers it against no subscriber at all -- recording it
+    /// as uninteresting for every thread, including the one that installed a
+    /// capture. The event then is not merely written late; it is never emitted,
+    /// and the assertion reads an empty buffer.
+    ///
+    /// Writes are routed per thread so concurrent tests never read each other's
+    /// events, which keeps assertions on both presence and absence honest.
+    fn capture_telemetry_for_this_thread() {
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+
+        INSTALLED.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(CapturedTelemetry)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other global telemetry subscriber is installed");
+        });
+        CAPTURED_TELEMETRY.with(|captured| captured.borrow_mut().clear());
+    }
+
+    /// Returns the telemetry captured on this thread.
+    fn captured_telemetry() -> String {
+        CAPTURED_TELEMETRY
+            .with(|captured| String::from_utf8(captured.borrow().clone()))
+            .expect("captured telemetry is UTF-8")
     }
 
     fn dispatch_correlation() -> ToolAttemptDispatchCorrelation {
@@ -3141,45 +3168,24 @@ mod tests {
         error: &CredentialAccessError,
         correlation: &ToolAttemptDispatchCorrelation,
     ) -> String {
-        let output = CapturedTelemetry::default();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(output.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            report_credential_access_failure(error, correlation);
-        });
-        output.text()
+        capture_telemetry_for_this_thread();
+        report_credential_access_failure(error, correlation);
+        captured_telemetry()
     }
 
     fn capture_credential_value_failure(correlation: &ToolAttemptDispatchCorrelation) -> String {
-        let output = CapturedTelemetry::default();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(output.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            report_credential_value_failure(correlation);
-        });
-        output.text()
+        capture_telemetry_for_this_thread();
+        report_credential_value_failure(correlation);
+        captured_telemetry()
     }
 
     fn capture_transport_failure(
         failure: &GitHubTransportFailure,
         correlation: &ToolAttemptDispatchCorrelation,
     ) -> String {
-        let output = CapturedTelemetry::default();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(output.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            report_transport_failure(failure, correlation);
-        });
-        output.text()
+        capture_telemetry_for_this_thread();
+        report_transport_failure(failure, correlation);
+        captured_telemetry()
     }
 
     fn catalog() -> CompiledToolCatalog {

@@ -4,7 +4,11 @@
 //! the domain API defined by `docs/spec/review-workflows.md`.
 
 use signalbox_application::ReviewWorkflowReader;
-use std::{error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
@@ -143,6 +147,18 @@ impl ReviewWorkflowStore {
         run: ReviewRunId,
     ) -> Result<Option<(ReviewRun, Option<ReviewPass>)>, ReviewWorkflowStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .load_run_with_pass_on_connection(&mut transaction, run)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
+    }
+
+    pub(crate) async fn load_run_with_pass_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        run: ReviewRunId,
+    ) -> Result<Option<(ReviewRun, Option<ReviewPass>)>, ReviewWorkflowStoreError> {
         let row = sqlx::query(
             "SELECT workflow_run.run_id, workflow_run.target_id,
                     workflow_run.workflow_kind, workflow_run.policy_version,
@@ -197,10 +213,9 @@ impl ReviewWorkflowStore {
               WHERE workflow_run.run_id = $1",
         )
         .bind(run.into_uuid())
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut *connection)
         .await?;
         let Some(row) = row else {
-            transaction.commit().await?;
             return Ok(None);
         };
         require_joined_reference(
@@ -214,7 +229,7 @@ impl ReviewWorkflowStore {
             .map(pass_id);
         let loaded_pass = match evidence_pass {
             Some(pass) => Some(
-                load_pass_on_connection(&mut transaction, pass)
+                load_pass_on_connection(&mut *connection, pass)
                     .await?
                     .ok_or_else(|| {
                         corruption("review_run", String::from("referenced pass row is missing"))
@@ -224,7 +239,6 @@ impl ReviewWorkflowStore {
         };
         let run = decode_run(&row, loaded_pass.as_ref())?;
         let pass = loaded_pass.map(|loaded| loaded.pass);
-        transaction.commit().await?;
         Ok(Some((run, pass)))
     }
 
@@ -658,6 +672,82 @@ impl ReviewWorkflowStore {
             .await?;
         transaction.commit().await?;
         Ok(finding)
+    }
+
+    /// Loads and validates several findings, reading each target graph once.
+    ///
+    /// [`Self::load_finding`] answers for one identity by reconstructing the
+    /// entire target graph that identity belongs to and then selecting a single
+    /// member from it. A caller holding a list of identities therefore pays for
+    /// that whole reconstruction once per member, which is quadratic in the
+    /// number of findings on a target. This performs the same reconstruction
+    /// once per distinct target and selects every requested member from it.
+    ///
+    /// Identities with no `review_finding` row are absent from the result, so a
+    /// caller distinguishes them exactly as it would from [`Self::load_finding`]
+    /// returning `None`.
+    pub async fn load_findings(
+        &self,
+        findings: &[ReviewFindingId],
+    ) -> Result<BTreeMap<ReviewFindingId, ReviewFinding>, ReviewWorkflowStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let loaded = self
+            .load_findings_on_connection(&mut transaction, findings)
+            .await?;
+        transaction.commit().await?;
+        Ok(loaded)
+    }
+
+    pub(crate) async fn load_findings_on_connection(
+        &self,
+        connection: &mut PgConnection,
+        findings: &[ReviewFindingId],
+    ) -> Result<BTreeMap<ReviewFindingId, ReviewFinding>, ReviewWorkflowStoreError> {
+        let requested: BTreeSet<ReviewFindingId> = findings.iter().copied().collect();
+        if requested.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let rows = sqlx::query(
+            "SELECT finding_id, target_id
+               FROM review_finding
+              WHERE finding_id = ANY($1)",
+        )
+        .bind(
+            requested
+                .iter()
+                .map(|finding| finding.into_uuid())
+                .collect::<Vec<_>>(),
+        )
+        .fetch_all(&mut *connection)
+        .await?;
+        let mut resolved = BTreeSet::new();
+        let mut targets = BTreeSet::new();
+        for row in rows {
+            resolved.insert(finding_id(row.try_get("finding_id")?));
+            targets.insert(row.try_get::<Uuid, _>("target_id")?);
+        }
+        let mut loaded = BTreeMap::new();
+        for target in targets {
+            for finding in self
+                .load_target_findings_on_connection(connection, target)
+                .await?
+            {
+                let identity = finding.proposal().reference().finding();
+                if requested.contains(&identity) {
+                    loaded.insert(identity, finding);
+                }
+            }
+        }
+        // A resolved identity names a row whose target graph was just loaded
+        // under one snapshot, so its absence is the same corruption the
+        // single-identity loader reports rather than a missing finding.
+        if resolved.iter().any(|finding| !loaded.contains_key(finding)) {
+            return Err(corruption(
+                "review_finding",
+                String::from("requested target graph finding disappeared"),
+            ));
+        }
+        Ok(loaded)
     }
 
     /// Lists and validates complete findings for one run in identity order.
@@ -1536,7 +1626,7 @@ impl ReviewWorkflowStore {
         Ok(link)
     }
 
-    async fn load_external_link_on_connection(
+    pub(crate) async fn load_external_link_on_connection(
         connection: &mut PgConnection,
         link: ReviewExternalLinkId,
     ) -> Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError> {
@@ -1958,7 +2048,12 @@ fn require_joined_reference(
     Ok(())
 }
 
-async fn begin_repeatable_read(
+/// Opens one read-only `REPEATABLE READ` transaction.
+///
+/// Every statement issued on the returned transaction observes the same
+/// database snapshot, which is how a multi-statement read stays coherent
+/// without excluding writers.
+pub(crate) async fn begin_repeatable_read(
     pool: &PgPool,
 ) -> Result<Transaction<'_, Postgres>, ReviewWorkflowStoreError> {
     let mut transaction = pool.begin().await?;
@@ -2022,8 +2117,8 @@ async fn load_target_on_connection(
 }
 
 #[derive(Clone, Debug)]
-struct LoadedReviewPass {
-    pass: ReviewPass,
+pub(crate) struct LoadedReviewPass {
+    pub(crate) pass: ReviewPass,
     policy: ReviewPolicy,
     turn_evidence: Option<ReviewPassTurnEvidence>,
     run: ReviewRunEvidence,
@@ -2039,7 +2134,7 @@ impl LoadedReviewPass {
     }
 }
 
-async fn load_pass_on_connection(
+pub(crate) async fn load_pass_on_connection(
     connection: &mut PgConnection,
     pass: ReviewPassId,
 ) -> Result<Option<LoadedReviewPass>, ReviewWorkflowStoreError> {

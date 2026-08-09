@@ -4852,6 +4852,44 @@ mod tests {
         ));
     }
 
+    /// A configured `Delegated` posture now also satisfies an `AlwaysConfirm`
+    /// declaration, so `Delegated` reaches this admission check with the blanket
+    /// disabled and must be admitted there.
+    #[test]
+    fn delegated_approval_is_admitted_when_blanket_posture_is_disabled() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::Delegated,
+        ));
+    }
+
+    /// The same configured `Delegated` posture reaches this check under the
+    /// dangerous blanket, which the `AlwaysConfirm` declaration refuses to honor
+    /// on its own.
+    #[test]
+    fn delegated_approval_is_admitted_under_dangerous_blanket_posture() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::Delegated,
+        ));
+    }
+
+    #[test]
+    fn human_approval_is_admitted_when_blanket_posture_is_disabled() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::Human,
+        ));
+    }
+
+    #[test]
+    fn human_approval_is_admitted_under_dangerous_blanket_posture() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::Human,
+        ));
+    }
+
     #[test]
     fn session_blanket_approval_is_rejected_when_blanket_posture_is_disabled() {
         assert!(!initial_tool_approval_matches_posture(
