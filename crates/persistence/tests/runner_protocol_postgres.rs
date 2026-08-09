@@ -10794,6 +10794,79 @@ async fn s32_inv032_inv044_runner_suspect_outbox_round_trips() -> Result<(), Box
     Ok(())
 }
 
+/// INV-032 / INV-044: dispatch rejects a non-connection state that retains
+/// connection provenance after post-admission corruption.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_outbox_dispatch_rejects_pinned_connection_provenance()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "pinned").await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await?;
+    let source = connection_outbox_source(
+        &pool,
+        placement_event_ordinal,
+        expected_enrollment.enrollment(),
+        "heartbeat_missed",
+    )
+    .await?;
+    append_runner_state_transition_for_test(
+        &pool,
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Suspect,
+            source,
+        ),
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_state_transition_outbox_event
+            DROP CONSTRAINT runner_state_transition_outbox_source_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_state_transition_outbox_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_state_transition_outbox_event
+            SET state_kind = 'pinned'
+          WHERE event_sequence = 1",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_state_transition_outbox_event ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let rejected = OutboxDispatcher::new(pool.clone())
+        .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+        .await
+        .expect_err("a pinned event cannot retain connection provenance");
+
+    assert!(matches!(
+        rejected,
+        OutboxDispatchError::Corruption(OutboxCorruption::InvalidRunnerEvent)
+    ));
+    drop(pool);
+    Ok(())
+}
+
 /// INV-032 / INV-044: heartbeat recovery dispatches from the exact recovered
 /// connection event rather than the mutable current connection head.
 #[tokio::test]
