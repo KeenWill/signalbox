@@ -1510,6 +1510,16 @@ pub(crate) async fn load_runner_recovery_batch_without_attempt(
     turn: TurnId,
     yielded_attempt: signalbox_domain::TurnAttemptId,
 ) -> Result<Option<ToolBatch>, ToolLoopRepositoryError> {
+    load_runner_recovery_cancellation_batch(connection, session, turn, yielded_attempt, None).await
+}
+
+pub(crate) async fn load_runner_recovery_cancellation_batch(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    yielded_attempt: signalbox_domain::TurnAttemptId,
+    interrupted_attempt: Option<ToolAttemptId>,
+) -> Result<Option<ToolBatch>, ToolLoopRepositoryError> {
     let producing_call = sqlx::query_scalar::<_, Uuid>(
         "SELECT active_tool_round_call_id
            FROM turn_lifecycle
@@ -1517,11 +1527,12 @@ pub(crate) async fn load_runner_recovery_batch_without_attempt(
             AND turn_id = $2
             AND state_kind = 'active'
             AND active_phase_kind = 'awaiting_runner_recovery'
-            AND runner_recovery_tool_attempt_id IS NULL
+            AND runner_recovery_tool_attempt_id IS NOT DISTINCT FROM $3
             AND active_tool_round_call_id IS NOT NULL",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
+    .bind(interrupted_attempt.map(tool_attempt_id_to_uuid))
     .fetch_optional(&mut *connection)
     .await?
     .map(signalbox_domain::ModelCallId::from_uuid);

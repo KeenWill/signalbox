@@ -266,6 +266,8 @@ python3 scripts/check_docs_consistency.py
 python3 scripts/test_check_docs_consistency.py
 python3 scripts/check_migration_versions.py
 python3 scripts/test_check_migration_versions.py
+python3 scripts/check_panic_gate.py
+python3 scripts/test_check_panic_gate.py
 python3 scripts/test_postgres_integration_suites.py
 mdformat --check *.md docs/
 git diff --check

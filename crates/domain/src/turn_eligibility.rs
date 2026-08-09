@@ -2498,6 +2498,33 @@ impl AcceptedInputSchedulingProjection {
         )
     }
 
+    /// Cancels a runner-loss wait after its retryable physical attempt has
+    /// been retired as a known crash loss.
+    pub fn apply_interrupt_to_retryable_runner_tool_recovery(
+        self,
+        batch: crate::ToolBatch,
+        result_projection: crate::PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::CancelledModelCallTurnIdentities,
+    ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        let starting_snapshot = self
+            .snapshots
+            .get(&active_turn.start().frontier().snapshot())
+            .cloned()
+            .ok_or(crate::ModelCallClosureError::FrontierDerivationFailed)?;
+        crate::model_execution::apply_interrupt_to_retryable_runner_tool_recovery_wait(
+            active_turn.into(),
+            starting_snapshot,
+            batch,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
     /// Closes one executing tool batch under a newly applied interrupt.
     ///
     /// The checked scheduling projection supplies the current active phase;
@@ -3116,6 +3143,26 @@ impl ActivatedTurn {
             wait,
             tool_attempt,
             yielded_attempt,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
+    /// Cancels a delegated runner-loss wait after its retryable physical
+    /// attempt has been retired as a known crash loss.
+    pub fn apply_interrupt_to_retryable_runner_tool_recovery(
+        self,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        batch: crate::ToolBatch,
+        result_projection: crate::PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::CancelledModelCallTurnIdentities,
+    ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_interrupt_to_retryable_runner_tool_recovery_wait(
+            self,
+            starting_snapshot,
+            batch,
             result_projection,
             interrupt,
             identities,
