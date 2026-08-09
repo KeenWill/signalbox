@@ -2395,7 +2395,11 @@ fn workspace_forced_case_passed(
             let Some(path) = arguments["path"].as_str() else {
                 return Ok(false);
             };
-            workspace_modified_times_match_except(root, seed_modified_times, &[Path::new(path)])
+            let path = Path::new(path);
+            let Some(parent) = path.parent() else {
+                return Ok(false);
+            };
+            workspace_modified_times_match_except(root, seed_modified_times, &[path, parent])
         }
         WRITE_FILE_NAME => {
             let Some(path) = arguments["path"].as_str() else {
@@ -10608,6 +10612,31 @@ fn forced_workspace_edit_fixture_exercises_replace_all() -> EvalResult {
     .to_string();
 
     assert_eq!(arguments["replace_all"], true);
+    assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_edit_verifier_accepts_atomic_parent_mtime_change() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == EDIT_FILE_NAME)
+        .expect("the workspace edit fixture exists");
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_SEED_PATH),
+        WORKSPACE_EDITED_SEED,
+    )?;
+    fs::File::open(suite.workspace.path())?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "replacements": EXPECTED_WORKSPACE_EDIT_REPLACEMENTS,
+        "bytes_written": EXPECTED_WORKSPACE_EDIT_BYTES,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
     assert!(suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
