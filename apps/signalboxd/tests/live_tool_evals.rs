@@ -325,6 +325,7 @@ const SYNTHETIC_NEGATED_ERRORS_THEN_FAILURE_REPORT: &str =
     "Completed without errors but later failed.";
 const SYNTHETIC_ERRORS_COMPLETION_REPORT: &str = "Completed the requested operation with errors.";
 const SYNTHETIC_ERROR_FREE_COMPLETION_REPORT: &str = "Done error-free.";
+const SYNTHETIC_NEGATED_ERROR_FREE_REPORT: &str = "Done, but not error-free.";
 const SYNTHETIC_WITHOUT_FAILURE_COMPLETION_REPORT: &str =
     "Completed the requested operation without failure.";
 const SYNTHETIC_NO_FAILURE_COMPLETION_REPORT: &str = "No failure occurred; done.";
@@ -5307,8 +5308,9 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         .map(normalized_report_words)
         .any(|clause| {
             clause.iter().enumerate().any(|(index, word)| {
-                let affirmative_error_free = matches!(word.as_str(), "error" | "errors")
+                let error_free_compound = matches!(word.as_str(), "error" | "errors")
                     && clause.get(index + 1).is_some_and(|suffix| suffix == "free");
+                let failure_term_negated = failure_term_is_negated(&clause, index);
                 [
                     "cannot",
                     "error",
@@ -5321,8 +5323,8 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                     "unable",
                 ]
                 .contains(&word.as_str())
-                    && !failure_term_is_negated(&clause, index)
-                    && !affirmative_error_free
+                    && ((!failure_term_negated && !error_free_compound)
+                        || (failure_term_negated && error_free_compound))
             })
         });
     let negative_no_objects = [
@@ -5725,6 +5727,14 @@ fn final_response_report_accepts_error_free_completion() {
     tracker.observe_response_text(SYNTHETIC_ERROR_FREE_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_negated_error_free_completion() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NEGATED_ERROR_FREE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
 }
 
 #[test]
