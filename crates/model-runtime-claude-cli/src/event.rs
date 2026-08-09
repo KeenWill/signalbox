@@ -292,9 +292,10 @@ impl<C: Clone> EventDecoder<C> {
             .as_ref()
             .is_none_or(|observed| observed == &event.message.model);
         if !model_matches_init {
-            return Err(DecodeFailure::stream_protocol(
-                "Claude assistant model does not resolve the system init model",
-            ));
+            return Err(DecodeFailure::stream_protocol(format!(
+                "Claude assistant model `{}` does not resolve the system init model",
+                redact_text(&event.message.model)
+            )));
         }
         if !model_matches_prior_assistant {
             return Err(DecodeFailure::stream_protocol(
