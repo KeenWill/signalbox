@@ -2903,6 +2903,19 @@ pub enum HubModelConfigurationError {
     },
     /// A credential profile declared no supported billing kind.
     InvalidBillingKind,
+    /// A profile's `billing_kind` contradicts the authentication its delivery
+    /// establishes.
+    ///
+    /// Both spellings are carried because a refusal naming only the profile
+    /// leaves an operator to rediscover which of its two fields to edit.
+    DisagreeingCredentialBillingKind {
+        /// Exact profile name whose two fields disagree.
+        credential_profile: Arc<str>,
+        /// Exact delivery spelling that fixes the authentication kind.
+        delivery: Arc<str>,
+        /// Exact billing kind the profile declared alongside it.
+        billing_kind: Arc<str>,
+    },
     /// A credential profile named no delivery, or its delivery's own fields
     /// were absent or malformed.
     InvalidCredentialDelivery,
@@ -3126,6 +3139,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidBillingKind => {
                 "model configuration contains an invalid credential billing kind"
+            }
+            Self::DisagreeingCredentialBillingKind { .. } => {
+                "model configuration declares a billing kind its credential delivery cannot authenticate"
             }
             Self::InvalidCredentialDelivery => {
                 "model configuration contains an invalid credential delivery"
@@ -5798,10 +5814,17 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
 
     #[test]
     fn configuration_validates_an_undelivered_codex_file_before_refusing_it() {
-        let credential_file = CONFIGURATION.replace(
-            "delivery = \"ambient\"",
-            "delivery = \"file\"\nfile = \"/run/secrets/codex-primary\"\nenv_key = \"HOME\"",
-        );
+        // `file` admits only `api_metered`, so the profile takes that kind to
+        // reach the env-key validation this test is about.
+        let credential_file = CONFIGURATION
+            .replace(
+                "billing_kind = \"subscription\"",
+                "billing_kind = \"api_metered\"",
+            )
+            .replace(
+                "delivery = \"ambient\"",
+                "delivery = \"file\"\nfile = \"/run/secrets/codex-primary\"\nenv_key = \"HOME\"",
+            );
 
         assert_eq!(
             HubModelConfiguration::parse(&credential_file).err(),
@@ -5811,10 +5834,17 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
 
     #[test]
     fn configuration_parses_a_valid_codex_file_before_refusing_it() {
-        let credential_file = CONFIGURATION.replace(
-            "delivery = \"ambient\"",
-            "delivery = \"file\"\nfile = \"/run/secrets/codex-primary\"\nenv_key = \"OPENAI_API_KEY\"",
-        );
+        // `file` admits only `api_metered`, so the profile takes that kind and
+        // the refusal this test asserts is the undelivered one.
+        let credential_file = CONFIGURATION
+            .replace(
+                "billing_kind = \"subscription\"",
+                "billing_kind = \"api_metered\"",
+            )
+            .replace(
+                "delivery = \"ambient\"",
+                "delivery = \"file\"\nfile = \"/run/secrets/codex-primary\"\nenv_key = \"OPENAI_API_KEY\"",
+            );
 
         assert_eq!(
             HubModelConfiguration::parse(&credential_file).err(),
@@ -5927,6 +5957,112 @@ scopes = ["model:invoke"]"#
             HubModelConfiguration::parse(&oauth).err(),
             Some(HubModelConfigurationError::InvalidCredentialDelivery)
         );
+    }
+
+    #[test]
+    fn configuration_rejects_a_subscription_billing_kind_on_a_file_delivery() {
+        // `file` presents a provider API key, so its billing kind is fixed.
+        // The refusal names the profile and both disagreeing spellings, because
+        // naming only the profile leaves the operator to find which field to
+        // edit.
+        let disagreeing = CONFIGURATION.replace(
+            r#"name = "anthropic-primary"
+adapter = "anthropic"
+billing_kind = "api_metered""#,
+            r#"name = "anthropic-primary"
+adapter = "anthropic"
+billing_kind = "subscription""#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&disagreeing).err(),
+            Some(
+                HubModelConfigurationError::DisagreeingCredentialBillingKind {
+                    credential_profile: Arc::from("anthropic-primary"),
+                    delivery: Arc::from("file"),
+                    billing_kind: Arc::from("subscription"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_api_metered_billing_kind_on_an_oauth_delivery() {
+        // `oauth` constructs a subscription login. The disagreement is refused
+        // on its own terms even though the delivery is undelivered, so the
+        // contradiction is not masked by the refusal that would follow it.
+        let disagreeing = CONFIGURATION
+            .replace(
+                r#"name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription""#,
+                r#"name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "api_metered""#,
+            )
+            .replace(
+                "delivery = \"ambient\"",
+                r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "https://example.test/token"
+device_authorization_url = "https://example.test/device"
+scopes = ["model:invoke"]"#,
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&disagreeing).err(),
+            Some(
+                HubModelConfigurationError::DisagreeingCredentialBillingKind {
+                    credential_profile: Arc::from("codex-subscription-primary"),
+                    delivery: Arc::from("oauth"),
+                    billing_kind: Arc::from("api_metered"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn configuration_admits_a_subscription_oauth_profile_before_refusing_it() {
+        // The legal `oauth` pairing passes the agreement rule and reaches the
+        // undelivered refusal, which is what proves the rule admitted it.
+        let oauth = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "https://example.test/token"
+device_authorization_url = "https://example.test/device"
+scopes = ["model:invoke"]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&oauth).err(),
+            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
+                delivery: Arc::from("oauth"),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_admits_an_api_metered_ambient_profile() {
+        // `ambient` names a login the operator established outside the daemon,
+        // which may be billed either way, so both kinds are admitted.
+        let ambient = CONFIGURATION.replace(
+            r#"name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription""#,
+            r#"name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "api_metered""#,
+        );
+
+        assert!(HubModelConfiguration::parse(&ambient).is_ok());
+    }
+
+    #[test]
+    fn configuration_admits_a_subscription_ambient_profile() {
+        // The checked-in fixture already pairs `ambient` with `subscription`;
+        // asserting it here states the other half of that delivery's rule.
+        assert!(HubModelConfiguration::parse(CONFIGURATION).is_ok());
     }
 
     #[test]

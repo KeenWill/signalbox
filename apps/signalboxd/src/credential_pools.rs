@@ -100,7 +100,12 @@ impl CredentialDelivery {
         }
     }
 
-    fn parse(profile: &Table, adapter: ModelAdapter) -> Result<Self, HubModelConfigurationError> {
+    fn parse(
+        profile: &Table,
+        adapter: ModelAdapter,
+        name: &Arc<str>,
+        billing_kind: BillingKind,
+    ) -> Result<Self, HubModelConfigurationError> {
         let key = required_string(profile, "delivery")?;
         if !DELIVERY_KEYS.contains(&key) {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
@@ -111,6 +116,7 @@ impl CredentialDelivery {
                 delivery: Arc::from(key),
             });
         }
+        reject_disagreeing_billing_kind(key, name, billing_kind)?;
         match key {
             "ambient" => {
                 reject_unknown_fields(profile, &PROFILE_COMMON_FIELDS)?;
@@ -149,6 +155,49 @@ impl CredentialDelivery {
             _ => Err(HubModelConfigurationError::InvalidCredentialDelivery),
         }
     }
+}
+
+/// Rejects a `billing_kind` the profile's delivery cannot authenticate.
+///
+/// Where a delivery fixes the authentication kind, the two fields cannot
+/// disagree: `file` presents a provider API key, so it is `api_metered`, and
+/// `oauth` constructs a subscription login, so it is `subscription`. `ambient`
+/// and `codex_home` name a login the operator established outside the daemon,
+/// which may be either, and the daemon cannot tell which — so they admit both.
+///
+/// Why reject rather than infer: `billing_kind` is what terminal cost
+/// derivation trusts to choose between a real charge and a metered equivalent,
+/// so an accepted contradiction silently misreports spend, and inferring the
+/// value would overwrite an operator's statement about the two deliveries where
+/// the answer genuinely varies.
+///
+/// This runs before the undelivered decision, so a reserved delivery's
+/// contradiction is refused on its own terms rather than being masked by the
+/// refusal that follows it.
+fn reject_disagreeing_billing_kind(
+    delivery: &str,
+    name: &Arc<str>,
+    billing_kind: BillingKind,
+) -> Result<(), HubModelConfigurationError> {
+    let admitted = match delivery {
+        "file" => billing_kind == BillingKind::ApiMetered,
+        "oauth" => billing_kind == BillingKind::Subscription,
+        // `ambient` and `codex_home` admit either, so nothing is checked.
+        _ => true,
+    };
+    if admitted {
+        return Ok(());
+    }
+    Err(
+        HubModelConfigurationError::DisagreeingCredentialBillingKind {
+            credential_profile: Arc::clone(name),
+            delivery: Arc::from(delivery),
+            billing_kind: Arc::from(match billing_kind {
+                BillingKind::ApiMetered => "api_metered",
+                BillingKind::Subscription => "subscription",
+            }),
+        },
+    )
 }
 
 fn undelivered(delivery: &str) -> HubModelConfigurationError {
@@ -572,7 +621,7 @@ pub(crate) fn parse_credential_profiles(
         let name = validated_credential_catalog_name(required_string(profile, "name")?)?;
         let adapter = ModelAdapter::parse(required_string(profile, "adapter")?)?;
         let billing_kind = BillingKind::parse(required_string(profile, "billing_kind")?)?;
-        let delivery = CredentialDelivery::parse(profile, adapter)?;
+        let delivery = CredentialDelivery::parse(profile, adapter, &name, billing_kind)?;
         if delivery == CredentialDelivery::Ambient && !ambient_adapters.insert(adapter) {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }

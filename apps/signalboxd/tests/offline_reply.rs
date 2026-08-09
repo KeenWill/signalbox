@@ -67,7 +67,7 @@ version = 1
 [[credential_profiles]]
 name = "anthropic-primary"
 adapter = "anthropic"
-billing_kind = "subscription"
+billing_kind = "api_metered"
 delivery = "file"
 file = "/run/secrets/anthropic-primary"
 

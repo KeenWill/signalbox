@@ -493,14 +493,24 @@ fail-closed:
   whose own fields [credential deliveries](#credential-deliveries) owns. The
   name is 1 through 256 UTF-8 bytes, unpadded, and NUL-free. Duplicate names,
   unknown adapters, unknown kinds, an unknown delivery, a delivery its adapter
-  does not admit, and unknown fields are rejected. `billing_kind` and `delivery`
-  are parsed independently of one another; the agreement rule between them is
-  stated with the deliveries it constrains. Parsing opens no credential path and
-  contacts no provider, so every admitted credential stays lazy, matching the
-  no-preflight rule below. Billing kind belongs to authentication, not to the
-  adapter a mapping selects. A profile name is otherwise opaque to code: no
-  build-provided constant is compared against it, so a deployment names its
-  accounts as it chooses.
+  does not admit, and unknown fields are rejected. Where a delivery determines
+  the authentication kind, a disagreeing `billing_kind` is rejected too: `file`
+  authenticates with a provider API key, so it admits only `api_metered`, and
+  `oauth` constructs a subscription login, so it admits only `subscription`.
+  `ambient` and `codex_home` name a login the operator established and admit
+  either, because the daemon cannot tell which one it is. The refusal names the
+  profile and both disagreeing spellings, and it is taken before the undelivered
+  decision, so a reserved delivery's contradiction is refused on its own terms
+  rather than masked by the refusal that follows it. Why reject rather than
+  infer: the field is what terminal cost derivation trusts to choose between a
+  real charge and a metered equivalent, so an accepted contradiction silently
+  misreports spend, and inferring it would overwrite an operator's statement
+  about the two deliveries where the answer genuinely varies. Parsing opens no
+  credential path and contacts no provider, so every admitted credential stays
+  lazy, matching the no-preflight rule below. Billing kind belongs to
+  authentication, not to the adapter a mapping selects. A profile name is
+  otherwise opaque to code: no build-provided constant is compared against it,
+  so a deployment names its accounts as it chooses.
 - At least one `[[credential_pools]]` entry is required.
   [Credential pools and selection](#credential-pools-and-selection) owns its
   complete grammar and admission rules.
@@ -1024,24 +1034,14 @@ then rejects the profile, so no store is opened, no identity is recorded, and no
 capacity is reserved; the remainder of this section is the contract its
 implementing children satisfy.
 
-Two further rules sit here because no present composition applies them. First,
-the agreement between a delivery and its `billing_kind`: where a delivery
-determines the authentication kind, a disagreeing `billing_kind` is to be
-rejected — `file` authenticates with a provider API key, so it admits only
-`api_metered`, and `oauth` constructs a subscription login, so it admits only
-`subscription`, while `ambient` and `codex_home` name a login the operator
-established and admit either, because the daemon cannot tell which one it is.
-Why reject rather than infer: the field is what terminal cost derivation trusts
-to choose between a real charge and a metered equivalent, so an accepted
-contradiction silently misreports spend, and inferring it would overwrite an
-operator's statement about the two deliveries where the answer genuinely varies.
-This build parses `billing_kind` and `delivery` independently and checks neither
-against the other, so a `file` profile declaring `subscription` is presently
-accepted; the child that adds the check owns it for every delivery, not only the
-undelivered ones. Second, after configuration-independent recovery and before
-scheduling, startup establishes each `codex_home` identity as its delivery
-contract requires; every other credential remains lazy, matching the
-no-preflight rule below.
+One further rule sits here because no present composition applies it: after
+configuration-independent recovery and before scheduling, startup establishes
+each `codex_home` identity as its delivery contract requires; every other
+credential remains lazy, matching the no-preflight rule below. The agreement
+between a delivery and its `billing_kind` is *not* one of these — this build
+enforces it for every delivery, reserved spellings included, and
+[the credential catalog](#the-static-model-alias-and-web-fetch-catalog) states
+it.
 
 #### The `codex_home` delivery
 
