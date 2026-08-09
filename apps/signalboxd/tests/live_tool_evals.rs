@@ -379,13 +379,13 @@ async fn run_case(
     };
     let mut approval_state = ExecApprovalState::new(approval_mode);
     let mut approval_continuations = 0;
-    let mut approval_cap_reached = false;
+    let mut approval_cap = ExecApprovalCap::NotReached;
     while database
         .decide_pending_unsandboxed_requests(session, turn, &mut approval_state)
         .await?
     {
         if approval_continuations == MAX_NATURAL_APPROVAL_CONTINUATIONS {
-            approval_cap_reached = true;
+            approval_cap = ExecApprovalCap::Reached;
             break;
         }
         timeout(TURN_TIMEOUT, execution.resume_active(session))
@@ -393,7 +393,7 @@ async fn run_case(
             .map_err(|_| io::Error::other("the daemon tool eval resume exceeded its timeout"))??;
         approval_continuations += 1;
     }
-    let snapshot = CaseSnapshot::read(&database.pool, session, turn, approval_cap_reached).await?;
+    let snapshot = CaseSnapshot::read(&database.pool, session, turn, approval_cap).await?;
     let expected_arguments = forced_case
         .map(|case| normalized_arguments_text(case.expected_arguments))
         .transpose()?;
@@ -2659,6 +2659,12 @@ enum ExecApprovalMode {
     ApproveOneExactForced,
 }
 
+#[derive(Clone, Copy)]
+enum ExecApprovalCap {
+    NotReached,
+    Reached,
+}
+
 struct ExecApprovalState {
     mode: ExecApprovalMode,
     exact_forced_approved: bool,
@@ -2731,7 +2737,7 @@ impl CaseSnapshot {
         pool: &PgPool,
         session: SessionId,
         turn: TurnId,
-        approval_cap_reached: bool,
+        approval_cap: ExecApprovalCap,
     ) -> EvalResult<Self> {
         let transcript = ProcessReadRepository::new(pool.clone())
             .read_transcript(session)
@@ -2743,12 +2749,15 @@ impl CaseSnapshot {
             .find(|candidate| candidate.turn() == turn)
             .ok_or_else(|| io::Error::other("the eval transcript turn is missing"))?
             .state();
-        let turn_disposition = if approval_cap_reached
-            && matches!(turn_state, ProcessTurnState::ActiveRunning { .. })
-        {
-            SnapshotTurnDisposition::ApprovalCapReached
-        } else {
-            SnapshotTurnDisposition::from_process_state(turn_state)
+        let turn_disposition = match approval_cap {
+            ExecApprovalCap::Reached
+                if matches!(turn_state, ProcessTurnState::ActiveRunning { .. }) =>
+            {
+                SnapshotTurnDisposition::ApprovalCapReached
+            }
+            ExecApprovalCap::NotReached | ExecApprovalCap::Reached => {
+                SnapshotTurnDisposition::from_process_state(turn_state)
+            }
         };
         let completed_results = completed_tool_result_entry_indices(transcript.entries());
         let successful_requests = completed_results.keys().copied().collect::<BTreeSet<_>>();
