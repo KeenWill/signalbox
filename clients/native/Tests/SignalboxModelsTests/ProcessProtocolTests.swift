@@ -67,6 +67,48 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  /// INV-033: every metadata last-writer actor encodes to its exact wire bytes
+  /// and decodes back to the same value. The two arms are hand-written and
+  /// separate, so an encoder that dropped a carried reference, or spelled a
+  /// member differently from the decoder, would otherwise ship unseen.
+  func testMetadataLastWriterActorRoundTripsToExactBytes() throws {
+    try assertMetadataActorRoundTrips(.user, #"{"type":"user"}"#)
+    try assertMetadataActorRoundTrips(
+      .model(turnID: try SignalboxCanonicalUUID(validating: turnID)),
+      #"{"turn_id":"\#(turnID)","type":"model"}"#
+    )
+    try assertMetadataActorRoundTrips(.recovery, #"{"type":"recovery"}"#)
+    try assertMetadataActorRoundTrips(
+      .tool(toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID)),
+      #"{"tool_request_id":"\#(toolRequestID)","type":"tool"}"#
+    )
+  }
+
+  /// Pins one actor's exact encoded bytes, then decodes those same bytes back,
+  /// so neither arm can drift without the other. A failure reports the call
+  /// site's actor rather than this helper.
+  private func assertMetadataActorRoundTrips(
+    _ actor: SignalboxMetadataActor,
+    _ expectedJSON: String,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) throws {
+    let encoded = try SignalboxJSONCoding.encoder().encode(actor)
+
+    XCTAssertEqual(
+      String(decoding: encoded, as: UTF8.self),
+      expectedJSON,
+      file: file,
+      line: line
+    )
+    XCTAssertEqual(
+      try SignalboxJSONCoding.decoder().decode(SignalboxMetadataActor.self, from: encoded),
+      actor,
+      file: file,
+      line: line
+    )
+  }
+
   /// INV-033: turn stops encode the required descendant scope in version one.
   func testTurnStopRequestEncodesItsDescendantScope() throws {
     let frame = SignalboxProcessClientFrame(
