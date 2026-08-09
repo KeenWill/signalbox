@@ -85,12 +85,22 @@ verified against the references above.
 
 `signalboxd` reads six unconditionally required deployment values and the
 optional runner-socket override from the process environment at startup, and
-also consults `HOME`. Model-provider credential paths are deliberately not among
-them: model credential profiles carry their delivery configuration in the static
-catalog below, on the same pattern `[credentials.<name>]` already uses for the
-runner. Why: one environment variable cannot name the paths of several accounts,
-and a deployment holding two keys for one provider must be able to say so. The
-two integration credentials, of which there is exactly one each, keep their
+also consults `HOME`. The present composition additionally requires
+`ANTHROPIC_API_KEY_FILE` or `OPENAI_API_KEY_FILE` when a static mapping selects
+that direct HTTP adapter; those conditional channels are what this build
+actually reads.
+
+**Committed unimplemented functionality — catalog-supplied model credentials.**
+No present composition builds `FileCredentialAccess` from the profile catalog,
+so the conditional channels above remain required until the implementing child
+lands. That child removes them: model-provider paths then come only from each
+`file` profile's delivery configuration in the static catalog below, on the same
+pattern `[credentials.<name>]` already uses for the runner. Why that direction —
+one environment variable cannot name the paths of several accounts, and a
+deployment holding two keys for one provider must be able to say so. An operator
+configuring this build still supplies the conditional path.
+
+The two integration credentials, of which there is exactly one each, keep their
 process settings:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
@@ -446,6 +456,17 @@ The file named by `SIGNALBOX_CONFIG_FILE` is a versioned TOML document
 fail-closed:
 
 - The root must carry `version = 1`; any other or absent version is rejected.
+  This grammar deliberately keeps that discriminator while changing what
+  `version = 1` admits, so a document written for the previous mapping shape —
+  one naming `credential_profile`, or declaring profiles without `adapter` and
+  `delivery` — is rejected at startup rather than migrated. Why not a version 2:
+  a version discriminator earns its keep when two shapes must be accepted at
+  once, and nothing here needs that. The catalog is a deployment-owned file with
+  no in-place upgrade path, no installed base this build is compatible with, and
+  a single operator who edits it; carrying a second decoder would preserve a
+  shape no deployment is entitled to keep working. The rejection is typed and
+  names the missing field, so the edit an operator must make is the error
+  message, and `config/signalboxd.example.toml` is the worked example.
 - At least one `[[models]]` entry is required: an absent, mistyped, or empty
   models array is rejected (`MissingModels`), so a document containing only
   `version = 1` fails startup.
@@ -848,27 +869,49 @@ which mutable store the path denotes. A descriptor-relative walk from the
 filesystem root rejects a symlink in any component and requires the final
 component to be a directory, then records its device and inode as the profile's
 credential-home identity; failure blocks scheduling but cannot block recovery of
-acknowledged work. Two `codex_home` profiles may not resolve to the same
-identity even when their lexically normalized paths differ. The daemon repeats
-that no-symlink walk before every invocation and requires the same identity;
-replacement or aliasing is a typed pre-send credential-configuration failure and
-starts no child. That walk runs in off-transaction capability preparation, after
-the reservation and the call's `Prepared` record have committed — not before
-them. Why that order: the member and its reservation are chosen atomically under
-the capacity locks, so doing the walk first would decide against exclusion and
-capacity facts that the selecting transaction may then contradict, while doing
-it inside that transaction would hold a database transaction across filesystem
-I/O, which [staged execution](model-call-execution.md#staged-execution) forbids.
-A mismatch therefore fails the call in preparation and releases its reservation
-through the ordinary guarded pre-send closure, exactly as a spawn failure does.
-It exists so a deployment can point the daemon at a login an operator already
-established interactively, provisioning nothing. Concurrent invocations against
-one such profile are admitted by default, matching how the CLI is ordinarily
-used. The store has no cross-process file locking, but the CLI re-reads it
-immediately before refreshing and adopts a token another process wrote rather
-than refreshing again, so the residual race is two processes crossing the
-refresh threshold within one token-exchange round trip — narrow, because a
-process refreshes about once per access-token lifetime. When it does fire the
+acknowledged work.
+
+Identity alone is not enough, because a directory another local principal can
+write is an authentication-material substitution surface that never changes the
+device and inode the recheck compares. Under the same descriptor-relative walk,
+startup therefore also requires — from `fstat` on the descriptors it already
+holds, never from a second lookup by path — that the final home be owned by the
+daemon's effective user and carry no group-write or other-write permission bit,
+and that every regular file directly within it be owned by that same user and
+likewise not group- or other-writable. A home failing either test is rejected
+exactly as a symlinked component is: scheduling is blocked and no invocation
+starts against it. Why this is stated as effective-user and mode rather than
+"unwritable": those are the two facts the daemon can verify at open time from
+the descriptor it holds, without racing a path lookup, and together they are
+what excludes every principal but the daemon's own user. A more permissive home
+would let another principal replace the CLI's login files between two successful
+identity rechecks, so the child would read attacker-supplied credentials and
+write refreshed ones back where that principal could read them.
+
+Every per-invocation recheck repeats the ownership and mode tests together with
+the identity comparison, so a home that becomes writable after startup fails the
+next preparation rather than the next restart. Two `codex_home` profiles may not
+resolve to the same identity even when their lexically normalized paths differ.
+The daemon repeats that no-symlink walk before every invocation and requires the
+same identity; replacement or aliasing is a typed pre-send
+credential-configuration failure and starts no child. That walk runs in
+off-transaction capability preparation, after the reservation and the call's
+`Prepared` record have committed — not before them. Why that order: the member
+and its reservation are chosen atomically under the capacity locks, so doing the
+walk first would decide against exclusion and capacity facts that the selecting
+transaction may then contradict, while doing it inside that transaction would
+hold a database transaction across filesystem I/O, which
+[staged execution](model-call-execution.md#staged-execution) forbids. A mismatch
+therefore fails the call in preparation and releases its reservation through the
+ordinary guarded pre-send closure, exactly as a spawn failure does. It exists so
+a deployment can point the daemon at a login an operator already established
+interactively, provisioning nothing. Concurrent invocations against one such
+profile are admitted by default, matching how the CLI is ordinarily used. The
+store has no cross-process file locking, but the CLI re-reads it immediately
+before refreshing and adopts a token another process wrote rather than
+refreshing again, so the residual race is two processes crossing the refresh
+threshold within one token-exchange round trip — narrow, because a process
+refreshes about once per access-token lifetime. When it does fire the
 authorization is invalidated and the profile quarantines; recovery is the
 ordinary re-provisioning an operator already performs, and the pool fails over
 meanwhile. A deployment preferring not to carry that risk sets the optional
@@ -903,11 +946,19 @@ values are configuration, never build-provided constants: which OAuth client a
 deployment presents is the operator's decision and is recorded in the operator's
 own document, not asserted by this build. `client_id` is 1 through 1,024 UTF-8
 bytes with no NUL; its bytes are preserved exactly, including whitespace.
-`scopes` contains 1 through 64 strings, each 1 through 256 UTF-8 bytes and
-NUL-free. Declared order is request order, exact duplicate strings are rejected,
-and no trimming, case folding, sorting, or other normalization occurs. Both
-endpoint values must be absolute `https` URLs; startup rejects every other
-scheme and provides no plaintext or local-host exception.
+`scopes` contains 1 through 64 strings, each 1 through 256 bytes. Every byte of
+every element must be an RFC 6749 `scope-token` character — `%x21`, `%x23-5B`,
+or `%x5D-7E` — which admits ordinary ASCII graphics while excluding the space,
+the double quote, the backslash, every control byte including NUL, and every
+non-ASCII byte. Why the whole set rather than only NUL: OAuth transmits `scope`
+as a space-delimited sequence, so an accepted element containing a space would
+become two scopes on the wire and make `["read write"]` and `["read", "write"]`
+request the same authorization while the exact-duplicate rule and the persisted
+provisioning tuple treat them as different values. Declared order is request
+order, exact duplicate strings are rejected, and no trimming, case folding,
+sorting, or other normalization occurs. Both endpoint values must be absolute
+`https` URLs; startup rejects every other scheme and provides no plaintext or
+local-host exception.
 
 **Committed unimplemented functionality — OAuth delivery and administration.**
 No present configuration composition, runtime path, API, process message, CLI
@@ -1396,6 +1447,7 @@ deployment-side rules that code cannot enforce are stated in
   record or log ever needs the secret (INV-035). The two integration constants
   are `brave-search-primary` and `github-primary`; every model-provider
   reference is a configured profile name this build never spells.
+
 - **File-based supply, reread per preparation.** Each `FileCredentialAccess`
   instance binds one consumer-scoped map of references to deployment paths: a
   model adapter receives the complete catalog of that adapter's `file` profiles,
@@ -1411,6 +1463,7 @@ deployment-side rules that code cannot enforce are stated in
   `Unmapped`; a missing file is `Unavailable`; an unreadable file is
   `Unreadable` — all reference-only errors, so a failure names an account
   without disclosing which path served it.
+
 - **External and daemon-owned CLI logins.** An `ambient` profile leaves login
   resolution to the CLI under the adapter's existing child-environment contract.
   A `codex_home` profile instead names a login store the daemon never opens and
@@ -1421,6 +1474,7 @@ deployment-side rules that code cannot enforce are stated in
   one pool hold several. The adapter invents no credential-value shape of its
   own. The profile's configured billing kind labels derived cost; adapter kind
   and delivery do not.
+
 - **The value is the file's bytes less trailing line termination.** The read
   drops trailing `\n` and `\r` bytes and retains every other byte exactly,
   including leading and interior whitespace. Why: the tools that write a
@@ -1432,40 +1486,37 @@ deployment-side rules that code cannot enforce are stated in
   file holding nothing but termination narrows to an empty value, which the
   adapter boundary then refuses exactly as it already refuses an empty file;
   narrowing never invents a credential.
+
 - **No startup preflight.** signalboxd never reads a credential file at boot, so
   a missing or unsynced credential cannot block startup or the recovery scan.
   Why: recovery of acknowledged work must not depend on any provider or
   integration credential (INV-034).
-- **Committed unimplemented functionality — session pool-policy history.** No
-  present persistence surface appends a family-to-pool-policy event or migrates
-  the existing family-to-reference shape. The implementing slice must append the
-  complete nonempty immutable policy at session creation with the existing
-  creation-command provenance, append-only record and entry rows, guarded head,
-  and equal-replay behavior. Preparation must read the latest family entry
-  before selecting from its stored policy
-  ([credential pools and selection](#credential-pools-and-selection)). For each
-  existing family-to-reference entry, its post-schema backfill must consult only
-  the validated profile registration named by that reference, never the
-  document's current family mapping or pool table. It must run where the
-  `codex_home` identity check runs — after the configuration-independent
-  recovery scan completes and before scheduling is enabled — so a missing
-  registration rewrites no entry and blocks scheduling without blocking recovery
-  of acknowledged work (INV-034). It must intern one canonical singleton policy
-  whose pool name is
-  `legacy/<session-uuid>/<event-ordinal>/sha256:<model-family-digest>`, using
-  the canonical lowercase hyphenated session UUID, positive decimal ordinal, and
-  the 64 lowercase hexadecimal characters of SHA-256 over the exact UTF-8 model
-  family spelling. The resulting name is at most 136 bytes, within the pool-name
-  bound regardless of the legacy family length. The one member is the exact
-  legacy reference with priority 1, no headroom reserve, and the registered
-  adapter and delivery kind; `tie_break` is `first_listed`, `on_pool_exhausted`
-  is `fail`, and every trigger action is `stay`. Those values preserve the
-  former one-account, no-automatic-failover behavior instead of inventing
-  parking or substitution. The transaction locks the legacy entry, interns that
-  complete value, and rewrites the entry to its policy identity atomically;
-  replay observes the already stored policy. The migrated policy is independent
-  of the document's current mapping, so even a mapping that now names a
-  multi-member pool cannot broaden the session's credentials.
+
+- **Session credential history.** First handling of every native or imported
+  session-creation command appends event ordinal 1 to that session's credential
+  history in the same transaction as the session. In this build that event
+  carries the complete, nonempty family-to-*reference* snapshot it has always
+  carried, copied from the validated mapping table. Record and entry rows are
+  append-only; a guarded head names the current event, and model-call
+  preparation reads the latest entry for the resolved target's family. Equal
+  command replay returns the recorded session without consulting the current
+  table, so a configuration edit never silently re-resolves an existing
+  session's credentials.
+
+- **Committed unimplemented functionality — pool-policy credential history.** No
+  present repository stores a family-to-pool-policy snapshot or migrates an
+  existing family-to-reference entry; the reference behavior above is what this
+  build does. Its implementing child replaces that snapshot with the complete
+  immutable policy and owns the one-time backfill of existing entries. Because a
+  stored policy names members by profile reference, that child must also freeze
+  each member's adapter and delivery kind in the snapshot and compare them
+  against the current profile registration before credential resolution: without
+  it, editing a profile's `adapter` or `delivery` would silently re-point a
+  historical session's stored member at a different contract, which is exactly
+  what the replay rule above promises cannot happen. A disagreeing or absent
+  registration must block scheduling the same way a missing historical
+  registration does.
+
 - **Resolution timing.** Each direct HTTP adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
   before send authorization — and scopes the resulting value to that request
@@ -1479,6 +1530,7 @@ deployment-side rules that code cannot enforce are stated in
   call; no model argument, client, or runner can select or receive the
   credential. The pull-request suite follows the same timing with its fixed
   GitHub API egress policy.
+
 - **Committed unimplemented functionality — Codex file resolution.** No present
   composition or runtime delivers a Codex `file` profile; the parser rejects it
   at startup. Its implementing child must resolve the pinned reference during
@@ -1487,6 +1539,7 @@ deployment-side rules that code cannot enforce are stated in
   non-UTF-8, NUL-containing, or oversized content must fail preparation as typed
   `CredentialUnusable`; no child may be spawned. Leading and interior whitespace
   remain credential bytes.
+
 - **Failure behavior.** A failed resolution, or a value that cannot form an HTTP
   header (empty, non-UTF-8, non-header-safe bytes), is a typed known preparation
   failure: the call ends `KnownFailed`, the attempt ends with a known failure,
@@ -1499,6 +1552,7 @@ deployment-side rules that code cannot enforce are stated in
   daemon; definitive code-host rejection is likewise fixed under its own detail,
   while an uncertain mutation acknowledgement follows the tool loop's
   external-effect ambiguity contract.
+
 - **Durable references, and one narrow class of value.** Postgres stores a
   credential value only where that credential rotates and the daemon alone
   refreshes it — exactly the `oauth` delivery in
@@ -1749,7 +1803,8 @@ are outside this cluster-delivery policy:
   action are rejected at startup rather than silently inert. The observation
   itself is routed through
   [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
-- A quarantine clears only through the operator command; no adapter in this
-  build offers a zero-cost liveness probe the daemon can use to clear one
-  automatically, so the second clearing path the section above admits has no
-  present implementation.
+- **Committed unimplemented functionality — quarantine clearing.** This build
+  stores no quarantine, so neither clearing path exists yet. The implementing
+  child adds the operator command; the automatic path additionally needs an
+  adapter offering a zero-cost liveness probe, and no adapter in this build
+  offers one.
