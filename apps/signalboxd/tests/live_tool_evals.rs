@@ -3521,6 +3521,11 @@ fn add_eval_receipt(
     let fields = result
         .as_object_mut()
         .ok_or_else(|| io::Error::other("the eval tool returned non-object success content"))?;
+    if fields.contains_key(EVAL_RECEIPT_FIELD) {
+        return Err(io::Error::other(
+            "the eval tool returned the reserved eval receipt field",
+        ));
+    }
     fields.insert(
         String::from(EVAL_RECEIPT_FIELD),
         serde_json::Value::String(receipt.to_owned()),
@@ -4133,6 +4138,15 @@ fn eval_receipt(content: &str) -> Option<String> {
         .get(EVAL_RECEIPT_FIELD)?
         .as_str()
         .map(str::to_owned)
+}
+
+#[test]
+fn eval_receipt_injection_rejects_a_preexisting_receipt() {
+    let evidence = ToolExecutorEvidence::CompletedText(
+        serde_json::json!({EVAL_RECEIPT_FIELD: "preexisting synthetic receipt"}).to_string(),
+    );
+
+    assert!(add_eval_receipt(evidence, SYNTHETIC_EVAL_RECEIPT).is_err());
 }
 
 fn synthetic_result_with_receipt() -> String {
