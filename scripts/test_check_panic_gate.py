@@ -113,22 +113,39 @@ def lint_table_with_panic_warned() -> str:
     return deny_all_lints().replace('panic = "deny"', 'panic = "warn"')
 
 
-def lint_table_with_restriction(
-    deny_priority: int, group_level: str, group_priority: str
+def lint_table_with_group(
+    *,
+    group: str,
+    lint_level: str,
+    lint_priority: int,
+    group_level: str,
+    group_priority: str,
 ) -> str:
-    """Return the required denies plus one `restriction` group entry.
+    """Return the required panic lints plus one group entry.
 
-    `group_priority` is spelled as raw TOML so a case can hand the checker an
-    unreadable value without the helper having to model what is readable.
+    Every knob is keyword-only because all five vary across the group-override
+    cases and each one decides whether a case passes. `group_priority` is
+    spelled as raw TOML so a case can hand the checker an unreadable value
+    without the helper having to model what is readable.
     """
-    denies = "\n".join(
-        f'{lint} = {{ level = "deny", priority = {deny_priority} }}'
+    lints = "\n".join(
+        f'{lint} = {{ level = "{lint_level}", priority = {lint_priority} }}'
         for lint in REQUIRED_PANIC_LINTS
     )
-    group = (
-        f'restriction = {{ level = "{group_level}", priority = {group_priority} }}'
+    entry = f'{group} = {{ level = "{group_level}", priority = {group_priority} }}'
+    return f"{lints}\n{entry}"
+
+
+def lint_table_spelled_with_hyphens() -> str:
+    """Return the required denies using Cargo's hyphenated lint spelling."""
+    return "\n".join(
+        f'{lint.replace("_", "-")} = "deny"' for lint in REQUIRED_PANIC_LINTS
     )
-    return f"{denies}\n{group}"
+
+
+def lint_table_spelling_one_lint_twice(lint: str) -> str:
+    """Return the required denies plus `lint` repeated in hyphen spelling."""
+    return f'{deny_all_lints()}\n{lint.replace("_", "-")} = "deny"'
 
 
 def lint_table_with_unreadable_lint_priority() -> str:
@@ -269,45 +286,74 @@ class PanicGateMembershipTests(unittest.TestCase):
             result = run_checker(root)
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("cargo metadata", result.stdout)
+        # Cargo's own wording rather than the checker's prefix, so dropping
+        # the captured diagnostic in favour of a generic message breaks this.
+        self.assertIn("failed to load manifest", result.stdout)
 
 
 class PanicGateLintTableTests(unittest.TestCase):
     def test_missing_expect_used_deny_fails(self) -> None:
-        result = check_workspace(clippy_table=lint_table_without("expect_used"))
+        omitted = "expect_used"
+
+        result = check_workspace(clippy_table=lint_table_without(omitted))
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("clippy::expect_used", result.stdout)
+        self.assertIn(f"clippy::{omitted}", result.stdout)
 
     def test_missing_panic_deny_fails(self) -> None:
-        result = check_workspace(clippy_table=lint_table_without("panic"))
+        omitted = "panic"
+
+        result = check_workspace(clippy_table=lint_table_without(omitted))
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("clippy::panic", result.stdout)
+        self.assertIn(f"clippy::{omitted}", result.stdout)
 
     def test_missing_todo_deny_fails(self) -> None:
-        result = check_workspace(clippy_table=lint_table_without("todo"))
+        omitted = "todo"
+
+        result = check_workspace(clippy_table=lint_table_without(omitted))
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("clippy::todo", result.stdout)
+        self.assertIn(f"clippy::{omitted}", result.stdout)
 
     def test_missing_unimplemented_deny_fails(self) -> None:
-        result = check_workspace(clippy_table=lint_table_without("unimplemented"))
+        omitted = "unimplemented"
+
+        result = check_workspace(clippy_table=lint_table_without(omitted))
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("clippy::unimplemented", result.stdout)
+        self.assertIn(f"clippy::{omitted}", result.stdout)
 
     def test_missing_unreachable_deny_fails(self) -> None:
-        result = check_workspace(clippy_table=lint_table_without("unreachable"))
+        omitted = "unreachable"
+
+        result = check_workspace(clippy_table=lint_table_without(omitted))
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("clippy::unreachable", result.stdout)
+        self.assertIn(f"clippy::{omitted}", result.stdout)
 
     def test_missing_unwrap_used_deny_fails(self) -> None:
-        result = check_workspace(clippy_table=lint_table_without("unwrap_used"))
+        omitted = "unwrap_used"
+
+        result = check_workspace(clippy_table=lint_table_without(omitted))
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("clippy::unwrap_used", result.stdout)
+        self.assertIn(f"clippy::{omitted}", result.stdout)
+
+    def test_hyphenated_lint_spelling_is_accepted(self) -> None:
+        result = check_workspace(clippy_table=lint_table_spelled_with_hyphens())
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_one_lint_spelled_both_ways_fails_as_ambiguous(self) -> None:
+        repeated = "unwrap_used"
+
+        result = check_workspace(
+            clippy_table=lint_table_spelling_one_lint_twice(repeated)
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(repeated, result.stdout)
 
     def test_panic_lint_demoted_to_warn_fails(self) -> None:
         result = check_workspace(clippy_table=lint_table_with_panic_warned())
@@ -354,50 +400,105 @@ class PanicGateGroupOverrideTests(unittest.TestCase):
     Every required form is a clippy `restriction` lint, so one `restriction`
     entry ranked above the denies turns all six off while each deny still
     reads correctly. The passing cases here are the ones that keep this from
-    being a blunt ban on ever naming the group.
+    being a blunt ban on ever naming the group — including the forbidden
+    table, which is stricter than what the gate demands and must not be
+    mistaken for an overridden one.
     """
 
     def test_restriction_allow_outranking_denies_fails(self) -> None:
+        group = "restriction"
+
         result = check_workspace(
-            clippy_table=lint_table_with_restriction(-1, "allow", "0")
+            clippy_table=lint_table_with_group(
+                group=group,
+                lint_level="deny",
+                lint_priority=-1,
+                group_level="allow",
+                group_priority="0",
+            )
         )
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("clippy::restriction", result.stdout)
+        self.assertIn(f"clippy::{group}", result.stdout)
         self.assertIn("clippy::panic", result.stdout)
 
     def test_restriction_warn_outranking_denies_fails(self) -> None:
+        group = "restriction"
+
         result = check_workspace(
-            clippy_table=lint_table_with_restriction(0, "warn", "1")
+            clippy_table=lint_table_with_group(
+                group=group,
+                lint_level="deny",
+                lint_priority=0,
+                group_level="warn",
+                group_priority="1",
+            )
         )
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("clippy::restriction", result.stdout)
+        self.assertIn(f"clippy::{group}", result.stdout)
 
     def test_restriction_allow_below_denies_passes(self) -> None:
         result = check_workspace(
-            clippy_table=lint_table_with_restriction(0, "allow", "-1")
+            clippy_table=lint_table_with_group(
+                group="restriction",
+                lint_level="deny",
+                lint_priority=0,
+                group_level="allow",
+                group_priority="-1",
+            )
         )
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_restriction_allow_at_equal_priority_passes(self) -> None:
         result = check_workspace(
-            clippy_table=lint_table_with_restriction(0, "allow", "0")
+            clippy_table=lint_table_with_group(
+                group="restriction",
+                lint_level="deny",
+                lint_priority=0,
+                group_level="allow",
+                group_priority="0",
+            )
         )
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_restriction_denied_above_the_lints_passes(self) -> None:
         result = check_workspace(
-            clippy_table=lint_table_with_restriction(0, "deny", "1")
+            clippy_table=lint_table_with_group(
+                group="restriction",
+                lint_level="deny",
+                lint_priority=0,
+                group_level="deny",
+                group_priority="1",
+            )
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_forbidden_lints_survive_an_outranking_allow(self) -> None:
+        result = check_workspace(
+            clippy_table=lint_table_with_group(
+                group="restriction",
+                lint_level="forbid",
+                lint_priority=-1,
+                group_level="allow",
+                group_priority="0",
+            )
         )
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_unreadable_group_priority_fails(self) -> None:
         result = check_workspace(
-            clippy_table=lint_table_with_restriction(0, "allow", "true")
+            clippy_table=lint_table_with_group(
+                group="restriction",
+                lint_level="deny",
+                lint_priority=0,
+                group_level="allow",
+                group_priority="true",
+            )
         )
 
         self.assertEqual(result.returncode, 1, result.stdout)

@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """Check that the workspace panic gate reaches every member crate.
 
-The workspace denies the panic-producing macros and the panicking `Option`
-and `Result` accessors in `[workspace.lints.clippy]`, and `cargo clippy -D
-warnings` fails any production site that uses one. That gate is what lets the
-repository treat a panic in production code as a compile-time impossibility
-rather than a review obligation.
+The workspace denies six panicking convenience paths in
+`[workspace.lints.clippy]` — `expect`, `panic`, `unwrap`, `todo`,
+`unimplemented`, and `unreachable` — and `cargo clippy -D warnings` fails any
+production site that reaches for one. That gate is what keeps those six out of
+production code without a reviewer having to spot them.
+
+It is not a proof that production code cannot panic, and reading it that way
+would be worse than not having it. Indexing, arithmetic overflow, division by
+zero, and an explicit `assert!` are all outside these six lints and compile
+clean under them — confirmed against clippy with `--all-targets -D warnings`
+on a member holding all four. `docs/style.md` scopes the contract to the named
+convenience paths for exactly that reason, and this checker guards that
+contract, not a broader one.
 
 Clippy cannot check the gate's own reach. A workspace lint table applies to a
 member only where that member's manifest opts in with `[lints] workspace =
@@ -59,7 +67,11 @@ does not apply to it. Asking Cargo costs one `--no-deps` invocation, reads no
 dependency graph, and cannot drift from what `cargo clippy --workspace`
 actually lints.
 
-`forbid` satisfies rule 2 wherever `deny` does, being strictly stronger.
+`forbid` satisfies rule 2 wherever `deny` does, being strictly stronger, and
+is exempt from rule 3 for the same reason: it denies the lint and every
+attempt to override it, so no group entry can lower it whatever its priority.
+Lint names are read with hyphens and underscores treated alike, because Cargo
+accepts either spelling for the same lint and clippy honours both.
 
 Run from the repository root; exits nonzero with a per-failure report naming
 every manifest involved. A workspace whose membership cannot be resolved is a
@@ -114,6 +126,32 @@ def lint_level(configured: object) -> str | None:
         if isinstance(level, str):
             return level
     return None
+
+
+def normalized_lints(clippy: dict, failures: list[str]) -> dict[str, object]:
+    """Return the clippy table keyed by underscore lint names.
+
+    Cargo accepts `unwrap-used` and `unwrap_used` as the same lint, and clippy
+    honours either, so a table using the hyphen spelling is a correctly gated
+    workspace and must not read as an ungated one. Two keys that differ only
+    in spelling are a genuinely ambiguous table and fail rather than letting
+    one silently win.
+    """
+    normalized: dict[str, object] = {}
+    spellings: dict[str, str] = {}
+    for key, configured in clippy.items():
+        if not isinstance(key, str):
+            continue
+        name = key.replace("-", "_")
+        if name in normalized:
+            failures.append(
+                f"[workspace.lints.clippy] configures {name} twice, as "
+                f"{spellings[name]!r} and {key!r}; which one applies is ambiguous"
+            )
+            continue
+        normalized[name] = configured
+        spellings[name] = key
+    return normalized
 
 
 def lint_priority(configured: object) -> int | None:
@@ -223,22 +261,27 @@ def check_panic_lints(root_manifest: dict, failures: list[str]) -> None:
             "Cargo.toml has no [workspace.lints.clippy] table, so no panic form is gated"
         )
         return
+    configured = normalized_lints(clippy, failures)
     denied_at: dict[str, int] = {}
     for lint in REQUIRED_PANIC_LINTS:
-        if lint not in clippy:
+        if lint not in configured:
             failures.append(
                 f"[workspace.lints.clippy] no longer denies clippy::{lint}, "
                 f"leaving that panic form ungated"
             )
             continue
-        level = lint_level(clippy[lint])
+        level = lint_level(configured[lint])
         if level not in GATING_LEVELS:
             failures.append(
                 f"[workspace.lints.clippy] sets clippy::{lint} to "
                 f"{level!r}, which does not fail a build (need deny or forbid)"
             )
             continue
-        priority = lint_priority(clippy[lint])
+        if level == "forbid":
+            # `-F` denies the lint and every attempt to override it, so no
+            # later group entry can lower it and its priority cannot matter.
+            continue
+        priority = lint_priority(configured[lint])
         if priority is None:
             failures.append(
                 f"[workspace.lints.clippy] gives clippy::{lint} an unreadable "
@@ -247,7 +290,7 @@ def check_panic_lints(root_manifest: dict, failures: list[str]) -> None:
             continue
         denied_at[lint] = priority
 
-    check_group_overrides(clippy, denied_at, failures)
+    check_group_overrides(configured, denied_at, failures)
 
 
 def check_group_overrides(
@@ -259,6 +302,11 @@ def check_group_overrides(
     so a group holding these lints at a non-gating level beats every deny it
     outranks. Equal priority is safe — the specific lint wins over the group —
     and a group ranked below the denies never reaches them.
+
+    Only `deny` reaches this comparison. `forbid` denies the lint and every
+    attempt to override it, so a forbidden form survives an outranking group
+    and never belongs in `denied_at`; treating it like a deny would fail a
+    table strictly stronger than the one this checker demands.
     """
     for group in OVERRIDING_GROUPS:
         if group not in clippy:
