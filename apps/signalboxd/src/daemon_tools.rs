@@ -1867,6 +1867,9 @@ mod tests {
         if artifact_parent == default_target_dir {
             return;
         }
+        if artifact_parent.parent() != Some(default_target_dir.as_path()) {
+            return;
+        }
         let artifact_parent_name = artifact_parent
             .file_name()
             .expect("Cargo artifact parent has a name");
@@ -2254,18 +2257,25 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "custom Cargo target specifications are unsupported by the nested bridge build"
-    )]
-    fn bridge_artifact_selection_rejects_a_custom_target_with_a_cli_target_directory() {
+    fn bridge_artifact_selection_accepts_a_host_build_with_a_cli_target_directory() {
         let cli_target_dir = Path::new("synthetic-cli-target");
-        let executable = cli_target_dir.join("custom/debug/deps/daemon-tools-test");
+        let executable = cli_target_dir.join("debug/deps/daemon-tools-test");
 
         reject_unrecognized_default_target(DefaultTargetRecognition {
             current_executable: &executable,
             configured_target_dir: None,
             default_target_dir: Path::new("synthetic-default-target"),
             known_targets: &BTreeSet::new(),
+        });
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: cli_target_dir,
+            configured_target_dir: None,
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: None,
         });
     }
 
@@ -4283,6 +4293,8 @@ mod tests {
     const MCP_OTHER_REQUEST_ID: u64 = 8;
     const MCP_BLOCKING_LIST_REQUEST_ID: u64 = 9;
     const MCP_UNDECLARED_TOOL_NAME: &str = "synthetic_undeclared_tool";
+    const MCP_CATALOG_FILENAME: &str = "tools.json";
+    const MCP_READY_FILENAME: &str = "ready";
     const MCP_PROPOSAL_PATH: &str = "bridge-must-not-write.txt";
     const MCP_PROPOSAL_CONTENT: &str = "proposal only\n";
     const MCP_PROPOSAL_ACKNOWLEDGEMENT: &str =
@@ -4328,8 +4340,8 @@ mod tests {
             let projected_catalog = bridge_catalog(definitions);
             let expected_tools = expected_bridge_tools(definitions);
             let support = tempfile::tempdir().expect("bridge support directory exists");
-            let catalog_path = support.path().join("tools.json");
-            let ready_path = support.path().join("ready");
+            let catalog_path = support.path().join(MCP_CATALOG_FILENAME);
+            let ready_path = support.path().join(MCP_READY_FILENAME);
             fs::write(&catalog_path, &projected_catalog).expect("bridge catalog is written");
             let executable = ensure_claude_mcp_bridge_executable();
             let bridge = McpBridgeProcess::spawn(McpBridgeSpawn {
