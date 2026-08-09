@@ -222,6 +222,12 @@ author_email = "signalbox@example.invalid"
 # A session template that enables dangerous_tool_auto_approval turns the
 # sandboxed_exec confirmation into a session blanket; add
 # sandboxed_exec = "human" below to keep it parked for a person regardless.
+#
+# unsandboxed_exec accepts all three posture values, but only
+# unsandboxed_exec = "delegated" changes where its requests go: to the approval
+# judge, which can still deny them or escalate to a person. Mapping it "auto" or
+# "human" leaves it parked for a person, as does omitting it, and no session
+# blanket ever lowers it.
 [tool_approval_postures]
 web_fetch = "human"
 web_search = "human"
