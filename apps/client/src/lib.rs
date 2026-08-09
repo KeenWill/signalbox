@@ -40,9 +40,10 @@ use signalbox_process_protocol::{
     ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
     ReviewOrchestrationState, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
     ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
-    ReviewRepairTerminalOutcome, ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent,
-    SessionPlacement, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
-    TurnState, decode_server_line, encode_client_line, encode_server_line,
+    ReviewRepairTerminalOutcome, ReviewRunSnapshot, RunnerStateTransitionState, ServerFrame,
+    ServerMessage, SessionEvent, SessionPlacement, SystemPromptMember, SystemPromptText,
+    ToolBatchState, ToolDecision, TurnState, decode_server_line, encode_client_line,
+    encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -3760,15 +3761,13 @@ async fn await_turn_terminal(
                     if let Some(terminal) = terminal_event_state(&event, turn_id) {
                         return Ok(terminal);
                     }
-                    if model_call_recovery_transition(&event, turn_id)
-                        || tool_recovery_transition(&event, turn_id)
-                    {
+                    if selected_turn_recovery_transition(&event, turn_id) {
                         let mut refreshed = transcript(client, session_id).await?;
                         let refreshed_state = refreshed.turn_state(turn_id)?;
                         let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())?
                         else {
                             return Err(ClientError::Protocol(
-                                "an ambiguous model call did not produce recovery or terminal state",
+                                "a recovery event did not produce recovery or terminal state",
                             ));
                         };
                         return Ok(terminal);
@@ -3915,6 +3914,23 @@ fn model_call_recovery_transition(event: &SessionEvent, selected_turn: Canonical
             ..
         } if *turn_id == selected_turn
     )
+}
+
+fn runner_recovery_transition(event: &SessionEvent) -> bool {
+    matches!(
+        event,
+        SessionEvent::RunnerStateTransition {
+            state: RunnerStateTransitionState::RunnerLostBeforePin
+                | RunnerStateTransitionState::RunnerLost,
+            ..
+        }
+    )
+}
+
+fn selected_turn_recovery_transition(event: &SessionEvent, selected_turn: CanonicalUuid) -> bool {
+    model_call_recovery_transition(event, selected_turn)
+        || tool_recovery_transition(event, selected_turn)
+        || runner_recovery_transition(event)
 }
 
 fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTerminal>, ClientError> {
@@ -5293,9 +5309,10 @@ mod tests {
         ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
         ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
         ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
-        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
-        SessionEvent, SessionPlacement, SettingOverlay, SystemPromptMember, ToolBatchState,
-        ToolDecision, TurnState, decode_client_line, encode_server_line,
+        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, RunnerPlacementRevision,
+        RunnerSandboxProfile, RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent,
+        SessionPlacement, SettingOverlay, SystemPromptMember, ToolBatchState, ToolDecision,
+        TurnState, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -5364,9 +5381,10 @@ mod tests {
         review_concern_state_is_coherent, review_finding_event_status,
         review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
         review_pass_completion_is_coherent, review_publication_state_is_coherent,
-        review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
-        source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
-        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
+        review_repair_state_is_coherent, run, search, selected_turn_recovery_transition,
+        session_recovery_transition, socket_path, source_fits_single_shot_import, stop_turn,
+        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
+        tool_recovery_transition,
     };
     use crate::{child_lifecycle_terminalization, error::ClientError, presentation::Output};
 
@@ -6638,6 +6656,23 @@ mod tests {
         assert!(!tool_recovery_transition(
             &event,
             CanonicalUuid::from_uuid(Uuid::from_u128(4))
+        ));
+    }
+
+    #[test]
+    fn runner_loss_requests_authoritative_turn_reread() {
+        let event = SessionEvent::RunnerStateTransition {
+            runner_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            placement_revision: RunnerPlacementRevision::try_new(2)
+                .expect("the fixture placement revision is positive"),
+            sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: None,
+            state: RunnerStateTransitionState::RunnerLost,
+        };
+
+        assert!(selected_turn_recovery_transition(
+            &event,
+            CanonicalUuid::from_uuid(Uuid::from_u128(3))
         ));
     }
 
