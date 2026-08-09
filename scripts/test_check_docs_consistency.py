@@ -275,6 +275,53 @@ class DocsConsistencyTests(unittest.TestCase):
     def test_valid_fixture_passes(self) -> None:
         self.assertEqual(run_checks(self.root), [])
 
+    def _write_machine_owner(self, projecting_body: str) -> None:
+        """Create the machine owner and one page that projects a column."""
+        (self.root / "docs/spec/credential-availability.md").write_text(
+            "# Credential availability\n\n"
+            "Verified against the implementing stack through PR #12 "
+            "(`agent/example`).\n\n"
+            "## The credential-availability machine\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs/spec/runtime-substrate.md").write_text(
+            "# Model-runtime substrate\n\n"
+            "Verified against the implementing stack through PR #12 "
+            "(`agent/example`).\n\n" + projecting_body,
+            encoding="utf-8",
+        )
+
+    def test_projection_owner_without_a_link_fails(self) -> None:
+        """A derived view that stops citing its owner is the carve seam.
+
+        This is the failure that started the restructuring: a paragraph moved
+        to another branch, the anchor citing it still resolved, and only the
+        meaning left — so no link checker saw anything.
+        """
+        self._write_machine_owner(
+            "This page owns the evidence algebra of the "
+            "credential-availability machine.\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertIn("machine-owner-link", failure_categories(failures))
+
+    def test_projection_owner_with_a_resolving_link_passes(self) -> None:
+        self._write_machine_owner(
+            "This page owns the evidence algebra of "
+            "[the machine](credential-availability.md#the-credential-availability-machine).\n"
+        )
+
+        self.assertEqual(
+            [
+                failure
+                for failure in run_checks(self.root)
+                if failure.category == "machine-owner-link"
+            ],
+            [],
+        )
+
     def test_untracked_sibling_markdown_and_rust_sources_are_ignored(self) -> None:
         sibling = self.root / ".claude/worktrees/agent-phantom"
         (sibling / "docs/spec").mkdir(parents=True)

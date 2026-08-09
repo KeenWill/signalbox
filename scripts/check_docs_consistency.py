@@ -3852,6 +3852,65 @@ def check_suite_manifest(root: Path) -> list[Violation]:
     return failures
 
 
+def check_machine_owner_links(root: Path) -> list[Violation]:
+    """Each projection owner links the machine it projects.
+
+    The credential-availability machine is stated once and every other page
+    holds a derived view of one of its columns. The failure this guards is the
+    one that started that restructuring: a carve moved a paragraph to another
+    branch, the anchor citing it still resolved, and only the meaning left — so
+    no link checker saw anything.
+
+    Deliberately coarse. It asks whether a page links the owner at all, not
+    whether each paragraph does. A per-block rule has to read prose, and the
+    checker that read prose generated more review findings than the pages it
+    guarded; this costs one resolution per page and adds no Markdown surface
+    beyond the link extraction this module already performs.
+    """
+    owner = (root / "docs/spec/credential-availability.md").resolve()
+    if not owner.exists():
+        return []
+    projecting_pages = (
+        "docs/spec/turn-lifecycle-and-scheduling.md",
+        "docs/spec/persistence-protocol.md",
+        "docs/spec/sessions-and-transcript.md",
+        "docs/spec/process-protocol.md",
+        "docs/spec/runtime-substrate.md",
+        "docs/spec/model-call-execution.md",
+        "docs/spec/configuration-and-credentials.md",
+    )
+    violations: list[Violation] = []
+    for name in projecting_pages:
+        source = root / name
+        if not source.exists():
+            continue
+        parsed = mask_inline_code(
+            mask_block_content(source.read_text(encoding="utf-8"))
+        )
+        linked = any(
+            (resolved := resolve_relative_target(root, source, link.destination))
+            is not None
+            and resolved[0] == owner
+            for link in extract_markdown_links(parsed)
+        )
+        if not linked:
+            violations.append(
+                Violation(
+                    path=name,
+                    line=1,
+                    category="machine-owner-link",
+                    message=(
+                        "page projects a column of the credential-availability "
+                        "machine but carries no resolving link to "
+                        "docs/spec/credential-availability.md; a derived view "
+                        "that stops citing its owner is the carve seam no link "
+                        "checker can see"
+                    ),
+                )
+            )
+    return violations
+
+
 def run_checks(root: Path = ROOT) -> list[Violation]:
     root = root.resolve()
     heading_anchors.cache_clear()
@@ -3861,6 +3920,7 @@ def run_checks(root: Path = ROOT) -> list[Violation]:
     )
     failures = invariant_failures
     failures.extend(check_relative_links(root, enforcement_links))
+    failures.extend(check_machine_owner_links(root))
     failures.extend(check_spec_verification_references(root))
     failures.extend(check_rust_test_generation(sources))
     failures.extend(check_suite_manifest(root))
