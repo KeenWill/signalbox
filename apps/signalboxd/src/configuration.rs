@@ -3040,8 +3040,6 @@ pub enum HubModelConfigurationError {
     MissingCodexCliConfiguration,
     /// Codex paths were malformed, relative, or named no existing directory.
     InvalidCodexCliConfiguration,
-    /// Claude model families selected more than one credential profile.
-    ConflictingClaudeCredentialProfiles,
     /// A Claude mapping exists without its required process configuration.
     MissingClaudeCliConfiguration,
     /// Claude paths were malformed, relative, or named no existing directory.
@@ -3214,9 +3212,6 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidCodexCliConfiguration => {
                 "model configuration contains invalid Codex CLI settings"
-            }
-            Self::ConflictingClaudeCredentialProfiles => {
-                "model configuration routes Claude CLI through conflicting credential profiles"
             }
             Self::MissingClaudeCliConfiguration => {
                 "model configuration maps Claude CLI without Claude CLI settings"

@@ -854,10 +854,14 @@ owns, and rejects every other key as unknown
 (`apps/signalboxd/src/credential_pools.rs:43`). Which adapter a profile
 authenticates is the profile's own `adapter`, and the secret reaches the
 provider through the delivery this section describes rather than through a
-process environment variable. Startup still rejects a document that gives two
-`claude_cli` mappings different profiles, as
-`ConflictingClaudeCredentialProfiles` — a single CLI adapter process environment
-exposes one login, so two names for it would be two labels on one credential.
+process environment variable. Startup rejects a document whose two `codex_cli`
+mappings prefer different profiles, as `ConflictingAdapterCredentialProfiles`
+(`apps/signalboxd/src/configuration.rs:750`): the Codex runtime still carries
+one credential reference, so two families preferring different profiles cannot
+both be served. That limitation is Codex-only. Claude receives the complete
+adapter-scoped catalog and resolves each operation's pinned reference, and the
+direct HTTP adapters resolve theirs from the same catalog, so differing
+preferences are admitted for all three.
 
 A profile's closed `delivery` states how its secret reaches the provider. The
 grammar admits four, and an adapter admits a subset of them. Each

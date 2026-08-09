@@ -533,14 +533,16 @@ impl CredentialPool {
         }
     }
 
-    /// Returns the member preparation selects while no member is excluded: the
+    /// Returns the member this pool prefers while no member is excluded: the
     /// lowest priority value, earliest in declaration order among equals.
     ///
-    /// This build observes no trigger and records no rotation state, so every
-    /// tie-break resolves here to the first-listed member of the preferred
-    /// rank. Selection proper — exclusion, stickiness, and rotation — is not
-    /// implemented, so a multi-member pool presently behaves as this member
-    /// alone.
+    /// Configuration parsing calls this once per mapping to derive the family's
+    /// pinned reference; preparation resolves that pin and never consults the
+    /// pool. This build observes no trigger and records no rotation state, so
+    /// every tie-break resolves here to the first-listed member of the
+    /// preferred rank. Selection proper — exclusion, stickiness, and rotation —
+    /// is not implemented, so a multi-member pool presently behaves as this
+    /// member alone.
     pub fn preferred_member(&self) -> Option<&CredentialPoolMember> {
         self.members.iter().min_by_key(|member| member.priority)
     }
