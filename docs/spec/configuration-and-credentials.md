@@ -1010,19 +1010,24 @@ then rejects the profile, so no store is opened, no identity is recorded, and no
 capacity is reserved; the remainder of this section is the contract its
 implementing children satisfy.
 
-Two rules stated here apply to those deliveries alone. First, where a delivery
-determines the authentication kind, a disagreeing `billing_kind` is rejected
-too: `file` authenticates with a provider API key, so it admits only
+Two further rules sit here because no present composition applies them. First,
+the agreement between a delivery and its `billing_kind`: where a delivery
+determines the authentication kind, a disagreeing `billing_kind` is to be
+rejected — `file` authenticates with a provider API key, so it admits only
 `api_metered`, and `oauth` constructs a subscription login, so it admits only
-`subscription`. `ambient` and `codex_home` name a login the operator established
-and admit either, because the daemon cannot tell which one it is. Why reject
-rather than infer: the field is what terminal cost derivation trusts to choose
-between a real charge and a metered equivalent, so an accepted contradiction
-silently misreports spend, and inferring it would overwrite an operator's
-statement about the two deliveries where the answer genuinely varies. Second,
-after configuration-independent recovery and before scheduling, startup
-establishes each `codex_home` identity as its delivery contract requires; every
-other credential remains lazy, matching the no-preflight rule below.
+`subscription`, while `ambient` and `codex_home` name a login the operator
+established and admit either, because the daemon cannot tell which one it is.
+Why reject rather than infer: the field is what terminal cost derivation trusts
+to choose between a real charge and a metered equivalent, so an accepted
+contradiction silently misreports spend, and inferring it would overwrite an
+operator's statement about the two deliveries where the answer genuinely varies.
+This build parses `billing_kind` and `delivery` independently and checks neither
+against the other, so a `file` profile declaring `subscription` is presently
+accepted; the child that adds the check owns it for every delivery, not only the
+undelivered ones. Second, after configuration-independent recovery and before
+scheduling, startup establishes each `codex_home` identity as its delivery
+contract requires; every other credential remains lazy, matching the
+no-preflight rule below.
 
 #### The `codex_home` delivery
 
