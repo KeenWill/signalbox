@@ -182,6 +182,7 @@ const GIT_MERGE_MESSAGE_PATH: &str = "MERGE_MSG";
 const GIT_MERGE_MODE_PATH: &str = "MERGE_MODE";
 const GIT_CHERRY_PICK_HEAD_PATH: &str = "CHERRY_PICK_HEAD";
 const GIT_CONFIG_PATH: &str = "config";
+const GIT_OBJECTS_DIRECTORY: &str = "objects";
 const GIT_MERGE_MESSAGE: &str = "synthetic forced merge\n";
 const GIT_MERGE_MODE: &str = "";
 const GIT_REGULAR_FILE_MODE: i32 = 0o100644;
@@ -703,7 +704,7 @@ struct GitFixtureSnapshot {
     config: Vec<u8>,
     worktree_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     metadata_root_mode: Option<u32>,
-    metadata_top_level: BTreeMap<PathBuf, GitMetadataEntryKind>,
+    metadata_top_level: BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
     static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reflog_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
 }
@@ -714,6 +715,12 @@ enum GitMetadataEntryKind {
     File,
     Symlink,
     Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GitMetadataEntrySnapshot {
+    kind: GitMetadataEntryKind,
+    mode: Option<u32>,
 }
 
 type GitReferenceInventory = BTreeMap<Vec<u8>, GitReferenceTarget>;
@@ -2188,7 +2195,7 @@ fn replace_expected_reflog_update(
     Ok(true)
 }
 
-fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetadataEntryKind>> {
+fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetadataEntrySnapshot>> {
     let repository = Repository::open(root)?;
     let mut entries = BTreeMap::new();
     for entry in fs::read_dir(repository.path())? {
@@ -2203,7 +2210,15 @@ fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetada
         } else {
             GitMetadataEntryKind::Other
         };
-        entries.insert(PathBuf::from(entry.file_name()), kind);
+        let mode = if kind == GitMetadataEntryKind::Symlink {
+            None
+        } else {
+            worktree_mode(&entry.path())?
+        };
+        entries.insert(
+            PathBuf::from(entry.file_name()),
+            GitMetadataEntrySnapshot { kind, mode },
+        );
     }
     Ok(entries)
 }
@@ -5840,6 +5855,29 @@ fn git_natural_state_rejects_metadata_root_mode_drift() -> EvalResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn git_natural_state_rejects_top_level_metadata_directory_mode_drift() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (seed, seed_refs, seed_fixture) = seed_git_repository_with_refs(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    let objects = Repository::open(workspace.path())?
+        .path()
+        .join(GIT_OBJECTS_DIRECTORY);
+    let mut permissions = fs::metadata(&objects)?.permissions();
+    permissions.set_mode(permissions.mode() ^ GROUP_WRITE_MODE_BIT);
+    fs::set_permissions(&objects, permissions)?;
+
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+        &seed_fixture,
+    )?);
+    Ok(())
+}
+
 #[test]
 fn git_natural_state_rejects_a_collateral_untracked_file() -> EvalResult {
     let workspace = tempfile::tempdir()?;
@@ -7200,6 +7238,38 @@ fn forced_git_status_verifier_rejects_metadata_root_mode_drift() -> EvalResult {
     let mut permissions = fs::metadata(&metadata_root)?.permissions();
     permissions.set_mode(permissions.mode() ^ GROUP_WRITE_MODE_BIT);
     fs::set_permissions(&metadata_root, permissions)?;
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_status_verifier_rejects_top_level_metadata_file_mode_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let config = Repository::open(suite.workspace.path())?
+        .path()
+        .join(GIT_CONFIG_PATH);
+    let mut permissions = fs::metadata(&config)?.permissions();
+    permissions.set_mode(permissions.mode() ^ GROUP_WRITE_MODE_BIT);
+    fs::set_permissions(&config, permissions)?;
     let result = serde_json::json!({
         "branch": GIT_BASE_BRANCH,
         "branch_truncated": false,
