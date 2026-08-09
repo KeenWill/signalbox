@@ -1141,7 +1141,7 @@ where
 mod tests {
     #[cfg(target_os = "linux")]
     use std::os::unix::ffi::OsStrExt;
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
@@ -1495,6 +1495,7 @@ mod tests {
     /// the expectation straight from the registry. The listing assertion
     /// therefore classifies the daemon-to-Claude-to-bridge path rather than
     /// comparing one helper with itself.
+    #[cfg(target_os = "linux")]
     #[track_caller]
     fn bridge_catalog(definitions: &[ToolDefinition]) -> Vec<u8> {
         let projected = signalbox_model_provider_runtime::runtime_tool_definitions(definitions)
@@ -1506,16 +1507,14 @@ mod tests {
         runtime.block_on(capture_prepared_claude_catalog(projected))
     }
 
+    #[cfg(target_os = "linux")]
     async fn capture_prepared_claude_catalog(
         tools: Vec<signalbox_model_runtime::ToolDefinition>,
     ) -> Vec<u8> {
         let workspace = tempfile::tempdir().expect("catalog capture workspace exists");
         let executable = workspace.path().join(CLAUDE_CATALOG_CAPTURE_EXECUTABLE);
-        let script = CLAUDE_CATALOG_CAPTURE_SCRIPT.replace(
-            CLAUDE_CAPTURE_OUTPUT_MARKER,
-            CLAUDE_CAPTURED_CATALOG_FILENAME,
-        );
-        fs::write(&executable, script).expect("catalog capture executable is written");
+        fs::write(&executable, CLAUDE_CATALOG_CAPTURE_SCRIPT)
+            .expect("catalog capture executable is written");
         let mut permissions = fs::metadata(&executable)
             .expect("catalog capture executable metadata is available")
             .permissions();
@@ -1556,14 +1555,36 @@ mod tests {
         let _report = runtime
             .execute(prepared, &mut observations, CancellationSignal::never())
             .await;
-        fs::read(workspace.path().join(CLAUDE_CAPTURED_CATALOG_FILENAME))
+        let captured_config = fs::read(workspace.path().join(CLAUDE_CAPTURED_CONFIG_FILENAME))
+            .expect("the fake CLI captured the prepared MCP config");
+        let catalog = claude_catalog_path_from_config(&captured_config)
+            .expect("the captured MCP config names the bridge catalog");
+        let catalog_name = catalog
+            .file_name()
+            .expect("the prepared Claude catalog path has a filename");
+        fs::read(workspace.path().join(catalog_name))
             .expect("the fake CLI captured the prepared Claude catalog")
     }
 
+    #[cfg(target_os = "linux")]
     struct DiscardClaudeCatalogObservations;
 
+    #[cfg(target_os = "linux")]
     impl ObservationSink<()> for DiscardClaudeCatalogObservations {
         fn observe(&mut self, _observation: Observation<()>) {}
+    }
+
+    #[cfg(target_os = "linux")]
+    fn claude_catalog_path_from_config(config: &[u8]) -> Option<PathBuf> {
+        let config: serde_json::Value = serde_json::from_slice(config).ok()?;
+        let servers = config.get("mcpServers")?.as_object()?;
+        let server = (servers.len() == 1)
+            .then(|| servers.values().next())
+            .flatten()?;
+        let arguments = server.get("args")?.as_array()?;
+        (arguments.len() == 3 && arguments.first()?.as_str()? == "--serve")
+            .then(|| arguments.get(1)?.as_str().map(PathBuf::from))
+            .flatten()
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1654,6 +1675,7 @@ mod tests {
     const SYNTHETIC_BRIDGE_TOOL_SCHEMA: &str =
         r#"{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}"#;
 
+    #[cfg(target_os = "linux")]
     #[track_caller]
     fn synthetic_bridge_tool_definition() -> ToolDefinition {
         ToolDefinition::new(
@@ -1667,6 +1689,7 @@ mod tests {
         )
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn bridge_catalog_projects_definition_fields_into_mcp_shape() {
         let definition = synthetic_bridge_tool_definition();
@@ -1675,6 +1698,24 @@ mod tests {
 
         expect![[r#"{"tools":[{"name":"synthetic_bridge_tool","description":"Projects a synthetic bridge tool.","inputSchema":{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}}]}"#]]
             .assert_eq(&observed);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captured_catalog_path_uses_semantic_mcp_configuration() {
+        let config = serde_json::to_string_pretty(&serde_json::json!({
+            "mcpServers": {
+                "synthetic": {
+                    "args": ["--serve", SYNTHETIC_CAPTURED_CATALOG_PATH, "ready path"]
+                }
+            }
+        }))
+        .expect("synthetic MCP config serializes");
+
+        assert_eq!(
+            claude_catalog_path_from_config(config.as_bytes()),
+            Some(PathBuf::from(SYNTHETIC_CAPTURED_CATALOG_PATH))
+        );
     }
 
     struct BridgeArtifactSelection {
@@ -1740,6 +1781,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     const PROC_COMMAND_LINE_FILENAME: &str = "cmdline";
     #[cfg(target_os = "linux")]
+    const PROC_PROCESS_STAT_FILENAME: &str = "stat";
+    #[cfg(target_os = "linux")]
     const MAX_CARGO_COMMAND_LINE_BYTES: u64 = 64 * 1024;
     const SYNTHETIC_GOAL_DATABASE_URL: &str =
         "postgresql://signalbox:synthetic@127.0.0.1/signalbox";
@@ -1754,9 +1797,13 @@ mod tests {
     const SYNTHETIC_CLAUDE_MODEL: &str = "synthetic-claude-model";
     const SYNTHETIC_CLAUDE_PROMPT: &str = "Capture the prepared MCP catalog";
     const SYNTHETIC_CLAUDE_MAX_OUTPUT_TOKENS: u32 = 256;
+    #[cfg(target_os = "linux")]
     const CLAUDE_CATALOG_CAPTURE_EXECUTABLE: &str = "capture-claude-catalog";
-    const CLAUDE_CAPTURED_CATALOG_FILENAME: &str = "captured-tools.json";
-    const CLAUDE_CAPTURE_OUTPUT_MARKER: &str = "__CAPTURE_OUTPUT__";
+    #[cfg(target_os = "linux")]
+    const CLAUDE_CAPTURED_CONFIG_FILENAME: &str = "mcp.json";
+    #[cfg(target_os = "linux")]
+    const SYNTHETIC_CAPTURED_CATALOG_PATH: &str = "catalog with a \"quote\".json";
+    #[cfg(target_os = "linux")]
     const CLAUDE_CATALOG_CAPTURE_SCRIPT: &str = r#"#!/bin/sh
 set -eu
 mcp_config=
@@ -1768,16 +1815,16 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 test -n "$mcp_config"
-config=
-IFS= read -r config < "$mcp_config" || test -n "$config"
-catalog=${config#*\"args\":[\"--serve\",\"}
-catalog=${catalog%%\"*}
-test -n "$catalog"
-while IFS= read -r line || test -n "$line"; do
-  printf '%s' "$line"
-done < "$catalog" > __CAPTURE_OUTPUT__
+capture_dir=${0%/*}
+support_dir=${mcp_config%/*}
+for candidate in "$support_dir"/*; do
+  test -f "$candidate" || continue
+  filename=${candidate##*/}
+  cp "$candidate" "$capture_dir/$filename"
+done
 "#;
 
+    #[cfg(target_os = "linux")]
     #[track_caller]
     fn claude_mcp_bridge_artifact_selection() -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
@@ -1831,11 +1878,6 @@ done < "$catalog" > __CAPTURE_OUTPUT__
             .collect::<Vec<_>>();
         cargo_test_profile_from_arguments(&arguments)
             .expect("the daemon-tools suite retains its parent Cargo test invocation")
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn current_cargo_test_profile() -> OsString {
-        OsString::from(CARGO_TEST_PROFILE)
     }
 
     fn cargo_test_profile_from_arguments(arguments: &[&OsStr]) -> Option<OsString> {
@@ -3479,6 +3521,7 @@ done < "$catalog" > __CAPTURE_OUTPUT__
         reader.join().expect("descendant stderr reader exits");
     }
 
+    #[cfg(target_os = "linux")]
     #[track_caller]
     fn ensure_claude_mcp_bridge_executable() -> PathBuf {
         let _build_guard = BRIDGE_BUILD_LOCK
@@ -3964,16 +4007,19 @@ done < "$catalog" > __CAPTURE_OUTPUT__
         }
     }
 
+    #[cfg(target_os = "linux")]
     struct McpBridgeReadyWaiter {
         child: Child,
     }
 
+    #[cfg(target_os = "linux")]
     struct McpBridgeReadyWaiterSpawn<'a> {
         executable: &'a Path,
         ready: &'a Path,
         workspace: &'a Path,
     }
 
+    #[cfg(target_os = "linux")]
     impl McpBridgeReadyWaiter {
         #[track_caller]
         fn start(config: McpBridgeReadyWaiterSpawn<'_>) -> Self {
@@ -3987,6 +4033,36 @@ done < "$catalog" > __CAPTURE_OUTPUT__
                 .spawn()
                 .expect("bridge readiness waiter starts");
             Self { child }
+        }
+
+        #[track_caller]
+        fn synchronize_wait_path(&mut self) {
+            let status_path = Path::new(PROC_FILESYSTEM_ROOT)
+                .join(self.child.id().to_string())
+                .join(PROC_PROCESS_STAT_FILENAME);
+            let deadline = Instant::now() + BRIDGE_RESPONSE_TIMEOUT;
+            loop {
+                let state = fs::read_to_string(&status_path).ok().and_then(|status| {
+                    status
+                        .rsplit_once(") ")
+                        .and_then(|(_, fields)| fields.chars().next())
+                });
+                if state == Some('S') {
+                    return;
+                }
+                if let Some(status) = self
+                    .child
+                    .try_wait()
+                    .expect("bridge readiness waiter remains observable")
+                {
+                    panic!("bridge readiness waiter exited before blocking: {status}");
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "bridge readiness waiter enters its blocking sleep"
+                );
+                thread::sleep(CHILD_POLL_INTERVAL);
+            }
         }
 
         #[track_caller]
@@ -4014,6 +4090,7 @@ done < "$catalog" > __CAPTURE_OUTPUT__
         }
     }
 
+    #[cfg(target_os = "linux")]
     impl Drop for McpBridgeReadyWaiter {
         fn drop(&mut self) {
             if self.child.try_wait().ok().flatten().is_none() {
@@ -4632,9 +4709,7 @@ done < "$catalog" > __CAPTURE_OUTPUT__
     const MCP_READY_FILENAME: &str = "ready";
     const MCP_PROPOSAL_PATH: &str = "bridge-must-not-write.txt";
     const MCP_PROPOSAL_CONTENT: &str = "proposal only\n";
-    const MCP_PROPOSAL_ACKNOWLEDGEMENT: &str =
-        "Signalbox recorded this tool proposal for external execution.";
-
+    #[cfg(target_os = "linux")]
     struct McpBridgeFixture {
         workspace: tempfile::TempDir,
         _support: tempfile::TempDir,
@@ -4644,6 +4719,7 @@ done < "$catalog" > __CAPTURE_OUTPUT__
         bridge: Option<McpBridgeProcess>,
     }
 
+    #[cfg(target_os = "linux")]
     impl McpBridgeFixture {
         #[track_caller]
         fn start() -> Self {
@@ -4803,6 +4879,7 @@ done < "$catalog" > __CAPTURE_OUTPUT__
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn claude_mcp_bridge_negotiates_the_supported_protocol() {
         let mut fixture = McpBridgeFixture::start();
@@ -4832,6 +4909,7 @@ done < "$catalog" > __CAPTURE_OUTPUT__
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn claude_mcp_bridge_rejects_an_unsupported_protocol_version() {
         let mut fixture = McpBridgeFixture::start();
@@ -4842,6 +4920,7 @@ done < "$catalog" > __CAPTURE_OUTPUT__
             .assert_eq(&rejected["error"].to_string());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn claude_mcp_bridge_lists_the_exact_daemon_catalog() {
         let mut fixture = McpBridgeFixture::start();
@@ -4866,6 +4945,7 @@ done < "$catalog" > __CAPTURE_OUTPUT__
             ready: &fixture.ready_path,
             workspace: fixture.workspace.path(),
         });
+        waiter.synchronize_wait_path();
         assert!(!fixture.ready_path.exists());
         waiter.assert_blocks_before_listing();
         fixture.list_tools();
@@ -4894,6 +4974,7 @@ done < "$catalog" > __CAPTURE_OUTPUT__
         assert_eq!(listed["result"]["tools"], expected_tools);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn claude_mcp_bridge_acknowledges_a_workspace_proposal() {
         let mut fixture = McpBridgeFixture::start();
@@ -4902,16 +4983,11 @@ done < "$catalog" > __CAPTURE_OUTPUT__
         let called = fixture.call_write_file();
         fixture.finish();
 
-        assert_eq!(called["result"]["isError"], false);
-        assert_eq!(
-            called["result"]["content"],
-            serde_json::json!([{
-                "type": "text",
-                "text": MCP_PROPOSAL_ACKNOWLEDGEMENT,
-            }])
-        );
+        expect![[r#"{"content":[{"text":"Signalbox recorded this tool proposal for external execution.","type":"text"}],"isError":false}"#]]
+            .assert_eq(&called["result"].to_string());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn claude_mcp_bridge_does_not_execute_a_workspace_proposal() {
         let mut fixture = McpBridgeFixture::start();
@@ -4924,6 +5000,7 @@ done < "$catalog" > __CAPTURE_OUTPUT__
         assert!(!target.exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn claude_mcp_bridge_rejects_an_undeclared_tool_call() {
         let mut fixture = McpBridgeFixture::start();
@@ -4936,6 +5013,7 @@ done < "$catalog" > __CAPTURE_OUTPUT__
             .assert_eq(&called["error"].to_string());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn claude_mcp_bridge_rejects_non_object_arguments_for_a_declared_tool() {
         let mut fixture = McpBridgeFixture::start();
