@@ -2688,6 +2688,7 @@ mod tests {
     ///
     /// Panics unless the sink forwards exactly one tool-argument delta, which
     /// is what these fixtures emit.
+    #[track_caller]
     fn forwarded_arguments(fragment: &str) -> String {
         let key = credential("fixture/secret");
         let mut observed = Vec::new();
