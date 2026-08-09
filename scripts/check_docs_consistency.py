@@ -3887,11 +3887,21 @@ def check_machine_owner_links(root: Path) -> list[Violation]:
         parsed = mask_inline_code(
             mask_block_content(source.read_text(encoding="utf-8"))
         )
+        # A citation is a link a reader can follow, so this counts inline
+        # links and reference links resolved through a definition — never a
+        # bare definition. `extract_markdown_links` returns definitions too,
+        # because its own caller is checking that every destination resolves;
+        # here an unused definition is precisely the missing citation being
+        # looked for, and counting it would admit the state this rejects.
+        citations = extract_inline_links(parsed)
+        citations.extend(
+            extract_reference_links(parsed, reference_definitions(parsed))
+        )
         linked = any(
             (resolved := resolve_relative_target(root, source, link.destination))
             is not None
             and resolved[0] == owner
-            for link in extract_markdown_links(parsed)
+            for link in citations
         )
         if not linked:
             violations.append(

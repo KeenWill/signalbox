@@ -313,14 +313,36 @@ class DocsConsistencyTests(unittest.TestCase):
             "[the machine](credential-availability.md#the-credential-availability-machine).\n"
         )
 
-        self.assertEqual(
-            [
-                failure
-                for failure in run_checks(self.root)
-                if failure.category == "machine-owner-link"
-            ],
-            [],
+        failures = run_checks(self.root)
+
+        self.assertNotIn("machine-owner-link", failure_categories(failures))
+
+    def test_projection_owner_with_a_reference_link_passes(self) -> None:
+        self._write_machine_owner(
+            "This page owns the evidence algebra of [the machine][owner].\n\n"
+            "[owner]: credential-availability.md\n"
         )
+
+        failures = run_checks(self.root)
+
+        self.assertNotIn("machine-owner-link", failure_categories(failures))
+
+    def test_unused_reference_definition_is_not_a_citation(self) -> None:
+        """A definition nobody uses renders no link a reader can follow.
+
+        The extractor returns definitions alongside links because its other
+        caller is checking that every destination resolves. Counted here, an
+        unused definition would satisfy this guard with exactly the missing
+        citation the guard exists to reject.
+        """
+        self._write_machine_owner(
+            "This page owns the evidence algebra of the machine.\n\n"
+            "[owner]: credential-availability.md\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertIn("machine-owner-link", failure_categories(failures))
 
     def test_untracked_sibling_markdown_and_rust_sources_are_ignored(self) -> None:
         sibling = self.root / ".claude/worktrees/agent-phantom"

@@ -1522,9 +1522,11 @@ locks that head `FOR UPDATE` before reading it, so concurrent observations in
 different sessions cannot mint two active generations for one profile and a
 uniqueness conflict cannot prevent a terminal observation from committing with
 its required action record. Call preparation locks the head of every member it
-may select `FOR SHARE` before reading exclusion state and holds it through the
-`Prepared` insert, so selection and exclusion mutation are serialized against
-each other rather than only against their own kind.
+may select before reading exclusion state and holds it through the `Prepared`
+insert, in the modes the lock protocol above fixes — `FOR SHARE` for a member it
+only reads, and `FOR UPDATE` for one whose pending displacement it consumes — so
+selection and exclusion mutation are serialized against each other rather than
+only against their own kind.
 
 Profile-quarantine, membership-exclusion, and session-displacement rows each
 carry a positive generation, active/cleared state, and their exact scope. A
