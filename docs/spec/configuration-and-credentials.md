@@ -914,12 +914,22 @@ cannot; this contract says which for every delivery, and there is no third case.
   own device and inode while carrying the same refresh token, and the daemon
   cannot detect the sharing: the store's contents are exactly what it never
   reads.
-- `oauth` — *established*, by comparing the provisioning tuple as parsed
-  canonical components — scheme, lowercased host, effective port, path, and
-  query — and never as configured bytes. Two spellings that a URL parser sends
-  to the same request target are therefore one identity rather than two, and
-  fragments and user information are rejected at admission because neither
-  reaches the request target at all.
+- `oauth` — *established*, by the provider account identity that provisioning
+  harvests and stores alongside the refresh token. That identity is what the
+  provider meters, throttles, and rejects against, so two members are
+  independent exactly when their stored account identities differ, and a pool
+  rejects two members resolving to one account however they were provisioned.
+  The provisioning tuple is deliberately **not** this relation, and it fails in
+  both directions: two independently metered accounts reached through one OAuth
+  client, endpoints, and scopes have identical tuples and are nonetheless
+  independent, while two grants for one account obtained under different clients
+  or scopes have different tuples and are nonetheless one authorization. The
+  tuple keeps its own separate job — binding a stored token to the configuration
+  it was minted under, so an edited endpoint cannot receive a token issued for
+  another — and for that job it is compared as parsed canonical components:
+  scheme, lowercased host, effective port, path, and query, never configured
+  bytes, with fragments and user information rejected at admission because
+  neither reaches the request target at all.
 
 Two exceptions, and only these two. `quarantine` excludes a member from every
 pool rather than from the one that observed it, so an authorization that turns

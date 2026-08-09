@@ -3887,13 +3887,25 @@ def check_machine_owner_links(root: Path) -> list[Violation]:
         parsed = mask_inline_code(
             mask_block_content(source.read_text(encoding="utf-8"))
         )
-        # A citation is a link a reader can follow, so this counts inline
-        # links and reference links resolved through a definition — never a
-        # bare definition. `extract_markdown_links` returns definitions too,
-        # because its own caller is checking that every destination resolves;
-        # here an unused definition is precisely the missing citation being
-        # looked for, and counting it would admit the state this rejects.
-        citations = extract_inline_links(parsed)
+        # A citation is a link a reader can follow. Two shapes this module
+        # returns are not that, and each is exactly the missing-citation state
+        # this guard exists to reject, so both are excluded rather than
+        # tolerated. A bare reference definition renders nothing at all:
+        # `extract_markdown_links` returns definitions because its own caller
+        # checks that every destination resolves. An image renders a fetch
+        # rather than a navigation: `extract_inline_links` returns image
+        # destinations for that same reason, and the test used here to drop
+        # them is the one that function already applies to keep images out of
+        # its own link pass.
+        citations = [
+            link
+            for link in extract_inline_links(parsed)
+            if not (
+                link.offset
+                and parsed[link.offset - 1] == "!"
+                and not is_escaped(parsed, link.offset - 1)
+            )
+        ]
         citations.extend(
             extract_reference_links(parsed, reference_definitions(parsed))
         )
