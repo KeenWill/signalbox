@@ -3862,6 +3862,10 @@ impl StoppedToolRoundModelCallIdentities {
     ) -> Self;
 }
 pub struct FailedModelCallTurnIdentities { /* private */ }
+impl FailedModelCallTurnIdentities {
+    pub const fn failure_entry(&self) -> SemanticTranscriptEntryId;
+    pub const fn terminal_frontier(&self) -> ContextFrontierId;
+}
 // constructor plus with_pending_steering_reclassifications(...)
 pub struct CancelledModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...) and into_ambiguous()
@@ -7721,6 +7725,64 @@ impl InProcessToolDispatchGate {
 pub struct InProcessToolDispatchPermit { /* private */ }
 ```
 
+## application: tool_execution_test_support
+
+```rust
+// Compiled only under the `test-support` feature.
+pub struct PreparedAttemptIdentities {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub producing_call: ModelCallId,
+    pub request: ToolRequestId,
+    pub attempt: ToolAttemptId,
+    pub issuing_turn_attempt: TurnAttemptId,
+    pub frontier: ContextFrontierId,
+}
+
+pub struct PreparedAttemptProposal {
+    pub name: ToolName,
+    pub arguments: NormalizedToolArguments,
+    pub effect_class: ToolEffectClass,
+    pub approval: PreparedAttemptApproval,
+}
+
+pub enum PreparedAttemptApproval {
+    PolicyAuto,
+    UserConfirmation { command: DurableCommandId },
+}
+
+pub fn prepared_single_attempt_batch(
+    identities: PreparedAttemptIdentities,
+    proposal: PreparedAttemptProposal,
+) -> ToolBatch;
+
+pub struct FixtureTransactionFailures<Error> {
+    pub domain_rejection: Error,
+    pub declined_crash_classification: Error,
+}
+
+pub struct FixtureToolExecutionTransaction<Error> { /* private */ }
+impl<Error> FixtureToolExecutionTransaction<Error> {
+    pub const fn new(
+        batch: ToolBatch,
+        failures: FixtureTransactionFailures<Error>,
+    ) -> Self;
+    pub const fn batch(&self) -> &ToolBatch;
+}
+// impl ToolExecutionTransaction where Error: ClassifyOperatorFailure + Clone + Send
+
+pub struct RecordingToolExecutor<Executor> { /* private */ }
+impl<Executor> RecordingToolExecutor<Executor> {
+    pub fn new(inner: Executor) -> (Self, RecordedEvidence);
+}
+// impl ToolExecutor where Executor: ToolExecutor + Send
+
+pub struct RecordedEvidence { /* private */ }
+impl RecordedEvidence {
+    pub fn take(&self) -> Option<ToolExecutorEvidence>;
+}
+```
+
 ## application: tool_loop_ports
 
 ```rust
@@ -8705,6 +8767,10 @@ pub enum RepoWatchEventKindNameV1 {
     Unlabeled,
     BaseAdvanced,
     ReactionChanged,
+}
+
+impl RepoWatchEventKindNameV1 {
+    pub fn all() -> Vec<Self>;
 }
 
 pub enum ChecksOutcome {
@@ -9833,5 +9899,6 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: startup_scan                          | 7 (incl. 2 traits)    |
 | application: submit_input                          | 7 (incl. 2 traits)    |
 | application: tool_dispatch_gate                    | 2                     |
+| application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **242**               |
+| **signalbox-application total**                    | **250**               |
