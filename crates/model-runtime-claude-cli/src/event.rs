@@ -191,7 +191,30 @@ impl<C: Clone> EventDecoder<C> {
                 // must not accumulate as dropped content.
                 members.remove("type");
                 members.remove("subtype");
-                members.remove("session_id");
+                // That last exemption is a claim about the value, so it is
+                // checked rather than assumed. `session_id` is dropped only
+                // where it is provably the identity `system/init` retained; a
+                // differing value contradicts that correlation exactly as it
+                // does on a `result` event, and a value arriving before any
+                // init is not a repeated identity at all. Anything this
+                // predicate cannot vouch for stays provider-controlled content
+                // and seeds the dropped lookbehind (INV-035), because a
+                // credential prefix discarded here would let its continuation
+                // escape the shape redactor in a later field.
+                match (
+                    members.get("session_id").and_then(Value::as_str),
+                    self.native_session_id.as_deref(),
+                ) {
+                    (Some(session), Some(native)) if session == native => {
+                        members.remove("session_id");
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(DecodeFailure::stream_protocol(
+                            "Claude lifecycle session contradicts system init",
+                        ));
+                    }
+                    _ => {}
+                }
                 members.retain(|_, value| !value.is_null());
                 if members.is_empty() {
                     return Ok(());

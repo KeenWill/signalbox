@@ -1000,17 +1000,25 @@ The pinned stream establishes correlation and reported-model evidence through
 `system/hook_progress`, `system/hook_response`, `system/api_retry`, and
 `system/thinking_tokens` lifecycle events are discarded, so they neither
 masquerade as initialization nor mask the later typed terminal or process-exit
-classification. Assistant `text`, `thinking`, `redacted_thinking`, and
-`tool_use` blocks become typed observations and assistant parts. A tool proposal
-must name the private MCP namespace, match a declared schema name, carry a
-unique nonempty id and object arguments, and receive exactly one matching user
-`tool_result` whose sole text block is the fixed acknowledgement. Only a
-terminal `result` event can establish success or refusal. The selected alias in
-`system/init` remains the provider-reported model; the first assistant event may
-name the provider-resolved model, but every later assistant event must repeat
-that same value. An error `result` and a nonzero process exit produce typed
-provider-error evidence. Exit zero without it is
-`BoundaryLoss(StreamEndedWithoutTerminalMarker)`; malformed or contradictory
+classification. Their remaining members become dropped redaction context, and
+the two envelope fields that are not provider content — `type` and `subtype` —
+are removed before that. A lifecycle `session_id` is removed on the same ground
+only where it equals the identity `system/init` retained: a differing value is
+stream-protocol boundary loss exactly as it is on a `result` event, and a value
+carried before any `init` has correlated a session is not a repeated identity at
+all, so it stays provider content and seeds the lookbehind. Dropping it on an
+unchecked claim would let a credential prefix spelled there escape the shape
+redactor through a later field (INV-035). Assistant `text`, `thinking`,
+`redacted_thinking`, and `tool_use` blocks become typed observations and
+assistant parts. A tool proposal must name the private MCP namespace, match a
+declared schema name, carry a unique nonempty id and object arguments, and
+receive exactly one matching user `tool_result` whose sole text block is the
+fixed acknowledgement. Only a terminal `result` event can establish success or
+refusal. The selected alias in `system/init` remains the provider-reported
+model; the first assistant event may name the provider-resolved model, but every
+later assistant event must repeat that same value. An error `result` and a
+nonzero process exit produce typed provider-error evidence. Exit zero without it
+is `BoundaryLoss(StreamEndedWithoutTerminalMarker)`; malformed or contradictory
 JSONL is `BoundaryLoss(StreamProtocolViolation)`; and prose alone never becomes
 terminal evidence. A success must satisfy the operation's any/named tool choice,
 with a structured-output contract represented as the required named MCP tool.

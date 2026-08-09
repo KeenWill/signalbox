@@ -107,6 +107,33 @@ async fn inv_035_dropped_system_lifecycle_event_seeds_output_redaction() {
     assert_eq!(result.spawns, 1);
 }
 
+/// A lifecycle `session_id` is dropped as a repeated identity only where it is
+/// one. A differing value contradicts the correlation `system/init`
+/// established, exactly as it does on a `result` event.
+#[tokio::test]
+async fn lifecycle_session_contradicting_init_is_a_protocol_violation() {
+    let result = execute_scenario("lifecycle_session_contradicts_init", OperationShape::Text).await;
+
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: an uncorrelated lifecycle `session_id` is provider content, not a
+/// repeated identity, so it seeds the redaction lookbehind rather than being
+/// discarded unexamined.
+#[tokio::test]
+async fn inv_035_uncorrelated_lifecycle_session_seeds_output_redaction() {
+    let result = execute_scenario("lifecycle_session_precedes_init", OperationShape::Text).await;
+    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
+
+    assert!(!diagnostic.contains(fixtures::FRAGMENTED_SECRET_CONTINUATION));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn assistant_resolved_model_may_differ_from_the_selected_init_alias() {
     let result = execute_scenario("resolved_assistant_model", OperationShape::Text).await;

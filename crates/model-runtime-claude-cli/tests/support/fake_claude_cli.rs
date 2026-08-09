@@ -107,6 +107,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         success("end_turn", Some(fixtures::FRAGMENTED_SECRET_CONTINUATION))?;
         return Ok(());
     }
+    if scenario == "lifecycle_session_contradicts_init" {
+        // The contradicting identity carries the credential prefix, so a
+        // decoder that discarded it as a repeated identity would drop the
+        // lookbehind the continuation below needs.
+        system_init(&arguments)?;
+        system_status_with_session(
+            Some("running"),
+            &format!(
+                "{}{}",
+                fixtures::OTHER_SESSION_ID,
+                fixtures::FRAGMENTED_SECRET_PREFIX
+            ),
+        )?;
+        assistant_text(fixtures::FRAGMENTED_SECRET_CONTINUATION)?;
+        success("end_turn", Some(fixtures::FRAGMENTED_SECRET_CONTINUATION))?;
+        return Ok(());
+    }
+    if scenario == "lifecycle_session_precedes_init" {
+        // No init has correlated a session yet, so this identity is not a
+        // repeated one and stays provider content that seeds the lookbehind.
+        system_event_with_session("status", fixtures::FRAGMENTED_SECRET_PREFIX)?;
+        system_init(&arguments)?;
+        assistant_text(fixtures::FRAGMENTED_SECRET_CONTINUATION)?;
+        success("end_turn", Some(fixtures::FRAGMENTED_SECRET_CONTINUATION))?;
+        return Ok(());
+    }
     system_init(&arguments)?;
     match scenario.as_str() {
         "normal_completion" => {
@@ -255,6 +281,21 @@ fn system_status(status: Option<&str>) -> std::io::Result<()> {
     emit_json(&serde_json::json!({
         "type": "system", "subtype": "status", "status": status,
         "session_id": fixtures::SESSION_ID
+    }))
+}
+
+fn system_status_with_session(status: Option<&str>, session_id: &str) -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "system", "subtype": "status", "status": status,
+        "session_id": session_id
+    }))
+}
+
+/// Emits a lifecycle event whose only retained member is its `session_id`, so
+/// that identity is the trailing dropped context a later field must complete.
+fn system_event_with_session(subtype: &str, session_id: &str) -> std::io::Result<()> {
+    emit_json(&serde_json::json!({
+        "type": "system", "subtype": subtype, "session_id": session_id
     }))
 }
 

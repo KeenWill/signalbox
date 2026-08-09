@@ -5,6 +5,7 @@
 )]
 
 pub const SESSION_ID: &str = "session-synthetic-1";
+pub const OTHER_SESSION_ID: &str = "session-synthetic-2";
 pub const MESSAGE_ID: &str = "message-synthetic-1";
 pub const OTHER_MESSAGE_ID: &str = "message-synthetic-2";
 pub const MODEL: &str = "claude-synthetic-model";
