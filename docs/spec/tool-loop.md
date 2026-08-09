@@ -11,6 +11,10 @@ version cross-link was re-verified through this PR
 The session-delegation scheduling executor and daemon catalog composition are
 verified against PR #462 (`agent/delegation-runtime-daemon-v2`).
 
+The object root every advertised argument schema declares, and the fold that
+renders an internally tagged argument type into it, are verified through this PR
+(`agent/object-rooted-tool-schemas`).
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -281,8 +285,20 @@ classes, bounds, and execution results; this cross-crate contract owns only
 their composition into one daemon catalog and name-directed executor. Mapped
 families are absent when their complete deployment configuration is absent.
 Local Git and execution tools bind the same configured workspace root used by
-the workspace families. The exact required inputs and fail-closed startup
-validation are owned by
+the workspace families.
+
+Every advertised argument schema declares an object at its root and carries no
+root keyword outside that object declaration (INV-055). One request carries the
+whole catalog, so a provider that refuses a single schema refuses every exchange
+offering it: a root-level union is a family-wide outage, not a per-tool cost. An
+internally tagged argument type is therefore advertised as one object whose tag
+property holds the variant vocabulary and names what each variant requires,
+while its Rust type still decodes the tagged form unchanged; the advertised
+schema alone widens, and each family's own argument validation still refuses
+what the declaration excludes. The composed catalog is swept for this property
+offline.
+
+The exact required inputs and fail-closed startup validation are owned by
 [configuration and credentials](configuration-and-credentials.md#daemon-tool-mapping-registry).
 The mapping-free base composition remains available without local Git or
 execution tools.
