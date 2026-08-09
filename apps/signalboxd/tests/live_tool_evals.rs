@@ -678,6 +678,10 @@ impl FamilySuite {
     }
 
     fn prepare_for(&self, tool: &str) -> EvalResult {
+        self.prepare_git_case(tool)
+    }
+
+    fn prepare_git_case(&self, tool: &str) -> EvalResult {
         if self.family == EvalFamily::Git {
             match tool {
                 GIT_CREATE_COMMIT_NAME => {
@@ -3430,7 +3434,7 @@ fn forced_git_commit_verifier_accepts_the_exact_fixture_tree() -> EvalResult {
     let message = arguments["message"]
         .as_str()
         .expect("the Git commit fixture has a message");
-    suite.prepare_for(GIT_CREATE_COMMIT_NAME)?;
+    suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
     commit_staged_paths(suite.workspace.path(), message)?;
     let head = Repository::open(suite.workspace.path())?
         .head()?
@@ -3459,7 +3463,7 @@ fn forced_git_commit_verifier_rejects_the_wrong_fixture_tree() -> EvalResult {
     let message = arguments["message"]
         .as_str()
         .expect("the Git commit fixture has a message");
-    suite.prepare_for(GIT_CREATE_COMMIT_NAME)?;
+    suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
     let repository = Repository::open(suite.workspace.path())?;
     let mut index = repository.index()?;
     index.remove_path(Path::new(GIT_COMMIT_PATH))?;
@@ -3493,7 +3497,7 @@ fn forced_git_commit_verifier_rejects_the_wrong_identity() -> EvalResult {
     let message = arguments["message"]
         .as_str()
         .expect("the Git commit fixture has a message");
-    suite.prepare_for(GIT_CREATE_COMMIT_NAME)?;
+    suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
     commit_staged_paths_with_identity(
         suite.workspace.path(),
         message,
@@ -3527,7 +3531,7 @@ fn forced_git_commit_verifier_rejects_retained_merge_state() -> EvalResult {
     let message = arguments["message"]
         .as_str()
         .expect("the Git commit fixture has a message");
-    suite.prepare_for(GIT_CREATE_COMMIT_NAME)?;
+    suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
     commit_staged_paths(suite.workspace.path(), message)?;
     install_git_merge_state(
         suite.workspace.path(),
@@ -3629,7 +3633,7 @@ fn forced_git_diff_verifier_accepts_the_seeded_worktree_patch() -> EvalResult {
         .iter()
         .find(|case| case.name == GIT_DIFF_NAME)
         .expect("the Git diff fixture exists");
-    suite.prepare_for(GIT_DIFF_NAME)?;
+    suite.prepare_git_case(GIT_DIFF_NAME)?;
     let repository = Repository::open(suite.workspace.path())?;
     let result = serde_json::json!({
         "patch": expected_bounded_git_worktree_patch(suite.workspace.path())?,
@@ -3653,7 +3657,7 @@ fn forced_git_diff_verifier_rejects_an_empty_patch() -> EvalResult {
         .iter()
         .find(|case| case.name == GIT_DIFF_NAME)
         .expect("the Git diff fixture exists");
-    suite.prepare_for(GIT_DIFF_NAME)?;
+    suite.prepare_git_case(GIT_DIFF_NAME)?;
     let result = serde_json::json!({
         "patch": "",
         "truncated": true,
@@ -3672,7 +3676,7 @@ fn forced_git_diff_verifier_rejects_an_unstaged_fixture() -> EvalResult {
         .iter()
         .find(|case| case.name == GIT_DIFF_NAME)
         .expect("the Git diff fixture exists");
-    suite.prepare_for(GIT_DIFF_NAME)?;
+    suite.prepare_git_case(GIT_DIFF_NAME)?;
     let result = serde_json::json!({
         "patch": expected_bounded_git_worktree_patch(suite.workspace.path())?,
         "truncated": true,
@@ -3694,7 +3698,7 @@ fn forced_git_diff_verifier_rejects_an_unbounded_patch() -> EvalResult {
         .iter()
         .find(|case| case.name == GIT_DIFF_NAME)
         .expect("the Git diff fixture exists");
-    suite.prepare_for(GIT_DIFF_NAME)?;
+    suite.prepare_git_case(GIT_DIFF_NAME)?;
     let result = serde_json::json!({
         "patch": expected_git_worktree_patch(suite.workspace.path())?,
         "truncated": false,
