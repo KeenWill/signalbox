@@ -1,14 +1,27 @@
 //! Process-lifetime compiled daemon tool catalog and executor dispatch.
+//!
+//! The catalog is one process-lifetime immutable compiled value; the executors
+//! a workspace root binds are per session, resolved through
+//! [`SessionWorkspaceRoots`]. See `docs/spec/tool-loop.md` and
+//! `docs/spec/git-authority-threat-model.md`.
 
-use std::{collections::BTreeMap, error::Error, fmt, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedDurableChildWait,
     CorrelatedToolExecutorEvidence, OperatorFailureClass, ToolCatalog,
     ToolCatalogValidationFailure, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
-    ToolExecutorDisposition,
+    ToolExecutorDisposition, ToolExecutorEvidence,
 };
-use signalbox_domain::{NormalizedToolArguments, ToolApprovalPosture, ToolName};
+use signalbox_domain::{
+    NormalizedToolArguments, SessionId, ToolApprovalPosture, ToolExecutionErrorDetail, ToolName,
+};
 use signalbox_model_runtime::CredentialAccess;
 use signalbox_persistence::plan::SessionPlanRepository;
 use signalbox_tools_basic::{
@@ -28,7 +41,9 @@ use signalbox_tools_exec::{
     ProcessRunner, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool,
     TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
-use signalbox_tools_git::{GitIdentity, LOCAL_GIT_TOOL_NAMES, LocalGitExecutor, LocalGitTools};
+use signalbox_tools_git::{
+    GitIdentity, GitObjectFormat, LOCAL_GIT_TOOL_NAMES, LocalGitExecutor, LocalGitTools,
+};
 use signalbox_tools_github::{
     GITHUB_TOOL_NAMES, GitHubApiTransport, GitHubEgressPolicy, GitHubExecutor, GitHubTools,
     GitHubTransport,
@@ -63,6 +78,11 @@ use crate::{
 
 /// Daemon-local filesystem adapter that shares one pinned root across both
 /// workspace suites.
+///
+/// One adapter binds exactly one root: [`WorkspaceFileSystem::open_root`] and
+/// [`WorkspaceMutationFileSystem::open_root`] both ignore the path they are
+/// handed and return the root this adapter pinned at construction. A second
+/// root therefore requires a second adapter, never a second call.
 #[derive(Clone, Debug)]
 pub struct PinnedWorkspaceFileSystem {
     root: WorkspaceRoot,
@@ -70,11 +90,36 @@ pub struct PinnedWorkspaceFileSystem {
 }
 
 impl PinnedWorkspaceFileSystem {
-    /// Opens the configured root exactly once for process-lifetime sharing.
+    /// Opens one root exactly once for the lifetime of this adapter.
     pub fn try_new(root: &Path) -> Result<Self, WorkspaceRootError> {
         let local = LocalWorkspaceFileSystem;
         let root = WorkspaceRoot::try_new(&local, root)?;
         Ok(Self { root, local })
+    }
+}
+
+/// Opens a further workspace root through one more adapter of the same kind.
+///
+/// Composing a second workspace-bound family needs a second adapter rather than
+/// a second call, because [`PinnedWorkspaceFileSystem`] structurally cannot open
+/// a root other than the one it pinned. This trait is that construction step,
+/// stated once so the composition below is generic over it.
+pub trait PinFurtherWorkspaceRoot: Sized {
+    /// Opens one root and returns the adapter bound to it.
+    fn pin_further_root(root: &Path) -> Result<Self, WorkspaceRootError>;
+}
+
+impl PinFurtherWorkspaceRoot for PinnedWorkspaceFileSystem {
+    fn pin_further_root(root: &Path) -> Result<Self, WorkspaceRootError> {
+        Self::try_new(root)
+    }
+}
+
+impl PinFurtherWorkspaceRoot for LocalWorkspaceFileSystem {
+    /// The local adapter holds no root, so every root is reachable through one
+    /// value; the suites it is injected into hold the pinned root instead.
+    fn pin_further_root(_root: &Path) -> Result<Self, WorkspaceRootError> {
+        Ok(Self)
     }
 }
 
@@ -139,6 +184,190 @@ impl WorkspaceMutationFileSystem for PinnedWorkspaceFileSystem {
     }
 }
 
+/// Directory name suffix appended to the configured workspace root's own name
+/// to form the parent of every derived per-session root.
+///
+/// A sibling rather than a child: a per-session root nested under the
+/// configured root would be readable, writable, and executable by every session
+/// still bound to that configured root, which is the isolation the derivation
+/// exists to establish.
+const SESSION_WORKSPACE_DIRECTORY_SUFFIX: &str = ".sessions";
+
+/// Largest number of derived per-session roots whose executors are retained.
+///
+/// Each retained entry holds open directory descriptors and one pinned
+/// repository, so the bound is what keeps descriptor use finite; the least
+/// recently used entry is dropped when a further session arrives.
+const MAX_RETAINED_SESSION_WORKSPACES: usize = 8;
+
+const SESSION_WORKSPACE_UNAVAILABLE_DETAIL: &str = "session workspace is unavailable";
+
+/// Derives each session's workspace root from the configured root by a fixed
+/// formula.
+///
+/// A session names no path: the derivation takes only the configured root and
+/// the session's own identity, so the set of roots the daemon can ever open is
+/// determined by deployment configuration alone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionWorkspaceRoots {
+    configured: PathBuf,
+    derived_parent: Option<PathBuf>,
+}
+
+impl SessionWorkspaceRoots {
+    /// Fixes the derivation against one configured workspace root.
+    pub fn new(configured: &Path) -> Self {
+        let derived_parent =
+            configured
+                .parent()
+                .zip(configured.file_name())
+                .map(|(parent, name)| {
+                    let mut directory = name.to_owned();
+                    directory.push(SESSION_WORKSPACE_DIRECTORY_SUFFIX);
+                    parent.join(directory)
+                });
+        Self {
+            configured: configured.to_owned(),
+            derived_parent,
+        }
+    }
+
+    /// Returns the path the formula assigns one session, before asking whether
+    /// a directory exists there.
+    ///
+    /// Absent only when the configured root has no parent or no final
+    /// component, which no absolute configured root outside the filesystem
+    /// root itself has.
+    #[must_use]
+    pub fn derived_path(&self, session: SessionId) -> Option<PathBuf> {
+        self.derived_parent
+            .as_ref()
+            .map(|parent| parent.join(session.into_uuid().to_string()))
+    }
+
+    /// Returns the root one session's workspace-bound tools bind.
+    #[must_use]
+    pub fn resolve(&self, session: SessionId) -> SessionWorkspaceRoot {
+        match self.derived_path(session) {
+            Some(path) if path.is_dir() => SessionWorkspaceRoot::Derived { path },
+            Some(_) | None => SessionWorkspaceRoot::ConfiguredRoot,
+        }
+    }
+}
+
+/// Which root one session's workspace-bound tools bind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionWorkspaceRoot {
+    /// A directory exists at the session's derived path and binds it alone.
+    Derived {
+        /// The derived absolute path.
+        path: PathBuf,
+    },
+    /// No directory exists at the session's derived path, so the session binds
+    /// the configured root that every session bound before this derivation.
+    ConfiguredRoot,
+}
+
+/// The six executors one workspace root binds.
+struct WorkspaceBoundExecutors<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> {
+    workspace_read: WorkspaceReadExecutor<FileSystem>,
+    workspace_mutation: SharedToolExecutor<WorkspaceMutationExecutor<FileSystem>>,
+    local_git: SharedToolExecutor<LocalGitExecutor<FileSystem>>,
+    sandboxed_exec: ExecExecutor<SandboxedCommandRunner<ExecRunner>>,
+    unsandboxed_exec: ExecExecutor<UnsandboxedCommandRunner<ExecRunner>>,
+    cargo_diagnostics: CargoDiagnosticsExecutor<ExecRunner>,
+    git_object_format: GitObjectFormat,
+}
+
+impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
+    for WorkspaceBoundExecutors<FileSystem, ExecRunner>
+{
+    fn clone(&self) -> Self {
+        Self {
+            workspace_read: self.workspace_read.clone(),
+            workspace_mutation: self.workspace_mutation.clone(),
+            local_git: self.local_git.clone(),
+            sandboxed_exec: self.sandboxed_exec.clone(),
+            unsandboxed_exec: self.unsandboxed_exec.clone(),
+            cargo_diagnostics: self.cargo_diagnostics.clone(),
+            git_object_format: self.git_object_format,
+        }
+    }
+}
+
+impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> fmt::Debug
+    for WorkspaceBoundExecutors<FileSystem, ExecRunner>
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkspaceBoundExecutors")
+            .finish_non_exhaustive()
+    }
+}
+
+/// One root's compiled declarations beside the executors bound to it.
+struct WorkspaceBoundFamilies<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> {
+    catalogs: [CompiledToolCatalog; 6],
+    executors: WorkspaceBoundExecutors<FileSystem, ExecRunner>,
+}
+
+impl<FileSystem, ExecRunner> WorkspaceBoundFamilies<FileSystem, ExecRunner>
+where
+    FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem,
+    ExecRunner: ProcessRunner,
+{
+    /// Composes every workspace-root-bound family around one root.
+    ///
+    /// The root stays construction input for each family exactly as before:
+    /// the filesystem adapter is already bound to it, the execution suites
+    /// capture its identity, and the Git suite validates its repository layout.
+    fn try_new(
+        filesystem: FileSystem,
+        root: &Path,
+        git_identity: GitIdentity,
+        exec_runner: ExecRunner,
+    ) -> Result<Self, DaemonToolsConstructionError> {
+        let workspace_read = WorkspaceReadTools::try_new(filesystem.clone(), root)
+            .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
+        let workspace_mutation = WorkspaceMutationTools::try_new(filesystem.clone(), root)
+            .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
+        let local_git = LocalGitTools::try_new(filesystem, root, git_identity)
+            .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
+        let git_object_format = local_git.object_format();
+        let sandboxed_exec = SandboxedExecTool::try_new(exec_runner.clone(), root)
+            .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let unsandboxed_exec = UnsandboxedExecTool::try_new(exec_runner.clone(), root)
+            .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let cargo_diagnostics = CargoDiagnosticsTool::try_new(exec_runner, root)
+            .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let (workspace_read_catalog, workspace_read) = workspace_read.into_parts();
+        let (workspace_mutation_catalog, workspace_mutation) = workspace_mutation.into_parts();
+        let (local_git_catalog, local_git) = local_git.into_parts();
+        let (sandboxed_exec_catalog, sandboxed_exec) = sandboxed_exec.into_parts();
+        let (unsandboxed_exec_catalog, unsandboxed_exec) = unsandboxed_exec.into_parts();
+        let (cargo_diagnostics_catalog, cargo_diagnostics) = cargo_diagnostics.into_parts();
+        Ok(Self {
+            catalogs: [
+                workspace_read_catalog,
+                workspace_mutation_catalog,
+                local_git_catalog,
+                sandboxed_exec_catalog,
+                unsandboxed_exec_catalog,
+                cargo_diagnostics_catalog,
+            ],
+            executors: WorkspaceBoundExecutors {
+                workspace_read,
+                workspace_mutation: SharedToolExecutor::new(workspace_mutation),
+                local_git: SharedToolExecutor::new(local_git),
+                sandboxed_exec,
+                unsandboxed_exec,
+                cargo_diagnostics,
+                git_object_format,
+            },
+        })
+    }
+}
+
 struct ComposedToolFamilies<
     Transport,
     SearchTransport,
@@ -156,16 +385,22 @@ struct ComposedToolFamilies<
     status: SessionStatusTool<Writer>,
     code_host: CodeHostTools<Credentials, HostTransport>,
     github: Option<GitHubTools<Credentials, GitHubTransportType>>,
-    workspace_read: Option<WorkspaceReadTools<FileSystem>>,
-    workspace_mutation: Option<WorkspaceMutationTools<FileSystem>>,
-    local_git: Option<LocalGitTools<FileSystem>>,
-    sandboxed_exec: Option<SandboxedExecTool<ExecRunner>>,
-    unsandboxed_exec: Option<UnsandboxedExecTool<ExecRunner>>,
-    cargo_diagnostics: Option<CargoDiagnosticsTool<ExecRunner>>,
+    workspace_bound: Option<ConfiguredWorkspaceComposition<FileSystem, ExecRunner>>,
     conversations: Option<ConversationTools<ConversationPort>>,
     plan: PlanTools<PlanPort>,
     delegation: SessionDelegationTools<DaemonSessionDelegationPort>,
     goal: Option<GoalDeclarationTool>,
+}
+
+/// The configured root's own families beside the derivation later sessions use.
+struct ConfiguredWorkspaceComposition<
+    FileSystem: WorkspaceMutationFileSystem,
+    ExecRunner: ProcessRunner,
+> {
+    families: WorkspaceBoundFamilies<FileSystem, ExecRunner>,
+    roots: SessionWorkspaceRoots,
+    git_identity: GitIdentity,
+    exec_runner: ExecRunner,
 }
 
 /// Credential channels required by the daemon's base tool composition.
@@ -263,20 +498,19 @@ impl<Clock>
             .map_err(|_| DaemonToolsConstructionError::GitHub)?;
         let workspace = PinnedWorkspaceFileSystem::try_new(workspace_root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
-        let workspace_read = WorkspaceReadTools::try_new(workspace.clone(), workspace_root)
-            .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
-        let workspace_mutation = WorkspaceMutationTools::try_new(workspace.clone(), workspace_root)
-            .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
-        let local_git = LocalGitTools::try_new(workspace, workspace_root, git_identity)
-            .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
         let exec_runner = TokioProcessRunner::try_new(exec_supervisor_executable)
             .map_err(|_| DaemonToolsConstructionError::Exec)?;
-        let sandboxed_exec = SandboxedExecTool::try_new(exec_runner.clone(), workspace_root)
-            .map_err(|_| DaemonToolsConstructionError::Exec)?;
-        let unsandboxed_exec = UnsandboxedExecTool::try_new(exec_runner.clone(), workspace_root)
-            .map_err(|_| DaemonToolsConstructionError::Exec)?;
-        let cargo_diagnostics = CargoDiagnosticsTool::try_new(exec_runner, workspace_root)
-            .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let workspace_bound = ConfiguredWorkspaceComposition {
+            families: WorkspaceBoundFamilies::try_new(
+                workspace,
+                workspace_root,
+                git_identity.clone(),
+                exec_runner.clone(),
+            )?,
+            roots: SessionWorkspaceRoots::new(workspace_root),
+            git_identity,
+            exec_runner,
+        };
         let conversations =
             ConversationTools::try_new(PostgresConversationIntrospection::new(pool.clone()))
                 .map_err(|_| DaemonToolsConstructionError::Conversations)?;
@@ -295,12 +529,7 @@ impl<Clock>
                 status,
                 code_host,
                 github: Some(github),
-                workspace_read: Some(workspace_read),
-                workspace_mutation: Some(workspace_mutation),
-                local_git: Some(local_git),
-                sandboxed_exec: Some(sandboxed_exec),
-                unsandboxed_exec: Some(unsandboxed_exec),
-                cargo_diagnostics: Some(cargo_diagnostics),
+                workspace_bound: Some(workspace_bound),
                 conversations: Some(conversations),
                 plan,
                 delegation,
@@ -348,12 +577,7 @@ impl<Clock>
                 status,
                 code_host,
                 github: None,
-                workspace_read: None,
-                workspace_mutation: None,
-                local_git: None,
-                sandboxed_exec: None,
-                unsandboxed_exec: None,
-                cargo_diagnostics: None,
+                workspace_bound: None,
                 conversations: None,
                 plan,
                 delegation,
@@ -390,7 +614,7 @@ impl<
         ExecRunner,
     >
 where
-    FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem,
+    FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem + PinFurtherWorkspaceRoot,
     ExecRunner: ProcessRunner,
 {
     /// Composes every family around injected test or production boundaries.
@@ -431,19 +655,17 @@ where
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
         let github = GitHubTools::try_new(github, github_transport, github_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::GitHub)?;
-        let workspace_read = WorkspaceReadTools::try_new(filesystem.clone(), workspace_root)
-            .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
-        let workspace_mutation =
-            WorkspaceMutationTools::try_new(filesystem.clone(), workspace_root)
-                .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
-        let local_git = LocalGitTools::try_new(filesystem, workspace_root, git_identity)
-            .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
-        let sandboxed_exec = SandboxedExecTool::try_new(exec_runner.clone(), workspace_root)
-            .map_err(|_| DaemonToolsConstructionError::Exec)?;
-        let unsandboxed_exec = UnsandboxedExecTool::try_new(exec_runner.clone(), workspace_root)
-            .map_err(|_| DaemonToolsConstructionError::Exec)?;
-        let cargo_diagnostics = CargoDiagnosticsTool::try_new(exec_runner, workspace_root)
-            .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let workspace_bound = ConfiguredWorkspaceComposition {
+            families: WorkspaceBoundFamilies::try_new(
+                filesystem,
+                workspace_root,
+                git_identity.clone(),
+                exec_runner.clone(),
+            )?,
+            roots: SessionWorkspaceRoots::new(workspace_root),
+            git_identity,
+            exec_runner,
+        };
         let conversations = ConversationTools::try_new(conversation_port)
             .map_err(|_| DaemonToolsConstructionError::Conversations)?;
         let plan = PlanTools::try_new(plan_port).map_err(|_| DaemonToolsConstructionError::Plan)?;
@@ -458,12 +680,7 @@ where
                 status,
                 code_host,
                 github: Some(github),
-                workspace_read: Some(workspace_read),
-                workspace_mutation: Some(workspace_mutation),
-                local_git: Some(local_git),
-                sandboxed_exec: Some(sandboxed_exec),
-                unsandboxed_exec: Some(unsandboxed_exec),
-                cargo_diagnostics: Some(cargo_diagnostics),
+                workspace_bound: Some(workspace_bound),
                 conversations: Some(conversations),
                 plan,
                 delegation,
@@ -493,12 +710,7 @@ where
             status,
             code_host,
             github,
-            workspace_read,
-            workspace_mutation,
-            local_git,
-            sandboxed_exec,
-            unsandboxed_exec,
-            cargo_diagnostics,
+            workspace_bound,
             conversations,
             plan,
             delegation,
@@ -515,12 +727,6 @@ where
         let (status_catalog, session_status) = status.into_parts();
         let (code_host_catalog, code_host) = code_host.into_parts();
         let github = github.map(GitHubTools::into_parts);
-        let workspace_read = workspace_read.map(WorkspaceReadTools::into_parts);
-        let workspace_mutation = workspace_mutation.map(WorkspaceMutationTools::into_parts);
-        let local_git = local_git.map(LocalGitTools::into_parts);
-        let sandboxed_exec = sandboxed_exec.map(SandboxedExecTool::into_parts);
-        let unsandboxed_exec = unsandboxed_exec.map(UnsandboxedExecTool::into_parts);
-        let cargo_diagnostics = cargo_diagnostics.map(CargoDiagnosticsTool::into_parts);
         let conversations = conversations.map(ConversationTools::into_parts);
         let (plan_catalog, plan) = plan.into_parts();
         let (delegation_catalog, delegation) = delegation.into_parts();
@@ -536,28 +742,18 @@ where
             delegation_catalog,
         ];
         catalogs.extend(github.as_ref().map(|(catalog, _)| catalog.clone()));
-        catalogs.extend(workspace_read.as_ref().map(|(catalog, _)| catalog.clone()));
         catalogs.extend(
-            workspace_mutation
-                .as_ref()
-                .map(|(catalog, _)| catalog.clone()),
-        );
-        catalogs.extend(local_git.as_ref().map(|(catalog, _)| catalog.clone()));
-        catalogs.extend(sandboxed_exec.as_ref().map(|(catalog, _)| catalog.clone()));
-        catalogs.extend(
-            unsandboxed_exec
-                .as_ref()
-                .map(|(catalog, _)| catalog.clone()),
-        );
-        catalogs.extend(
-            cargo_diagnostics
-                .as_ref()
-                .map(|(catalog, _)| catalog.clone()),
+            workspace_bound
+                .iter()
+                .flat_map(|composition| composition.families.catalogs.iter().cloned()),
         );
         catalogs.extend(conversations.as_ref().map(|(catalog, _)| catalog.clone()));
         catalogs.extend(goal.as_ref().map(|(catalog, _)| catalog.clone()));
         let catalog = DaemonToolCatalog::try_new(catalogs)
             .map_err(|_| DaemonToolsConstructionError::Duplicate)?;
+        let workspace_bound = workspace_bound
+            .map(SessionWorkspaceExecutors::try_new)
+            .transpose()?;
         Ok(Self {
             catalog,
             executor: DaemonToolExecutor {
@@ -568,13 +764,7 @@ where
                 session_status,
                 code_host,
                 github: github.map(|(_, executor)| executor),
-                workspace_read: workspace_read.map(|(_, executor)| executor),
-                workspace_mutation: workspace_mutation
-                    .map(|(_, executor)| SharedToolExecutor::new(executor)),
-                local_git: local_git.map(|(_, executor)| SharedToolExecutor::new(executor)),
-                sandboxed_exec: sandboxed_exec.map(|(_, executor)| executor),
-                unsandboxed_exec: unsandboxed_exec.map(|(_, executor)| executor),
-                cargo_diagnostics: cargo_diagnostics.map(|(_, executor)| executor),
+                workspace_bound,
                 conversations: conversations.map(|(_, executor)| executor),
                 plan,
                 delegation,
@@ -634,6 +824,9 @@ pub enum DaemonToolsConstructionError {
     /// The execution catalogs, workspace root, or supervisor program were
     /// invalid.
     Exec,
+    /// The sanitized detail reported when a session's derived workspace cannot
+    /// be composed was itself invalid.
+    SessionWorkspaceDetail,
     /// The conversation declarations or introspection port were invalid.
     Conversations,
     /// The plan declarations or session plan port were invalid.
@@ -660,6 +853,7 @@ impl fmt::Display for DaemonToolsConstructionError {
             Self::WorkspaceMutation => "workspace mutation tool suite construction failed",
             Self::LocalGit => "local Git tool suite construction failed",
             Self::Exec => "exec tool suite construction failed",
+            Self::SessionWorkspaceDetail => "session workspace failure detail was invalid",
             Self::Conversations => "conversation tool suite construction failed",
             Self::Plan => "plan tool suite construction failed",
             Self::SessionDelegation => "session-delegation tool suite construction failed",
@@ -870,6 +1064,259 @@ where
     }
 }
 
+/// Why one session's workspace-bound tools could not be composed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionWorkspaceFailure {
+    /// The derived root, its repository layout, or its supervisor binding was
+    /// rejected by the family that binds it.
+    Composition(DaemonToolsConstructionError),
+    /// The derived repository selects another object identifier format than the
+    /// one the process-lifetime catalog compiled its Git validators against.
+    ObjectFormatDisagreement,
+}
+
+impl SessionWorkspaceFailure {
+    /// Names the failure for startup-free runtime telemetry.
+    const fn discriminant(self) -> &'static str {
+        match self {
+            Self::Composition(_) => "composition_rejected",
+            Self::ObjectFormatDisagreement => "object_format_disagreement",
+        }
+    }
+}
+
+/// One retained per-session value and the counter that orders eviction.
+struct RetainedSessionWorkspace<Executors> {
+    executors: Executors,
+    last_used: u64,
+}
+
+/// Bounded set of derived per-session executor sets, keyed by session.
+///
+/// Generic in what it retains so the bound and the eviction order can be
+/// exercised without composing real descriptor-holding executors.
+struct RetainedSessionWorkspaces<Executors> {
+    retained: BTreeMap<SessionId, RetainedSessionWorkspace<Executors>>,
+    next_use: u64,
+}
+
+impl<Executors: Clone> RetainedSessionWorkspaces<Executors> {
+    const fn new() -> Self {
+        Self {
+            retained: BTreeMap::new(),
+            next_use: 0,
+        }
+    }
+
+    fn take_use(&mut self) -> u64 {
+        let use_order = self.next_use;
+        self.next_use = self.next_use.saturating_add(1);
+        use_order
+    }
+
+    fn get(&mut self, session: SessionId) -> Option<Executors> {
+        let use_order = self.take_use();
+        let retained = self.retained.get_mut(&session)?;
+        retained.last_used = use_order;
+        Some(retained.executors.clone())
+    }
+
+    /// Retains one composed set, dropping the least recently used entry when
+    /// the bound is already reached, and returns the set now retained.
+    ///
+    /// A concurrent resolution for the same session may have retained its own
+    /// set first; that one wins, so every caller converges on one pinned
+    /// instance and the loser's descriptors are released immediately.
+    fn retain(&mut self, session: SessionId, executors: Executors) -> Executors {
+        if let Some(already_retained) = self.get(session) {
+            return already_retained;
+        }
+        if self.retained.len() >= MAX_RETAINED_SESSION_WORKSPACES {
+            let evicted = self
+                .retained
+                .iter()
+                .min_by_key(|(_, retained)| retained.last_used)
+                .map(|(session, _)| *session);
+            if let Some(evicted) = evicted {
+                self.retained.remove(&evicted);
+            }
+        }
+        let last_used = self.take_use();
+        self.retained.insert(
+            session,
+            RetainedSessionWorkspace {
+                executors: executors.clone(),
+                last_used,
+            },
+        );
+        executors
+    }
+}
+
+/// Resolves the workspace-bound executors one session's tool calls dispatch to.
+///
+/// The configured root's own set is composed at startup and shared by every
+/// session whose derived root is absent, so an unprovisioned deployment keeps
+/// exactly the composition, descriptors, and failure timing it had before.
+struct SessionWorkspaceExecutors<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner>
+{
+    roots: SessionWorkspaceRoots,
+    git_identity: GitIdentity,
+    exec_runner: ExecRunner,
+    configured: WorkspaceBoundExecutors<FileSystem, ExecRunner>,
+    unavailable_detail: ToolExecutionErrorDetail,
+    retained:
+        Arc<Mutex<RetainedSessionWorkspaces<WorkspaceBoundExecutors<FileSystem, ExecRunner>>>>,
+}
+
+impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
+    for SessionWorkspaceExecutors<FileSystem, ExecRunner>
+{
+    fn clone(&self) -> Self {
+        Self {
+            roots: self.roots.clone(),
+            git_identity: self.git_identity.clone(),
+            exec_runner: self.exec_runner.clone(),
+            configured: self.configured.clone(),
+            unavailable_detail: self.unavailable_detail.clone(),
+            retained: Arc::clone(&self.retained),
+        }
+    }
+}
+
+impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> fmt::Debug
+    for SessionWorkspaceExecutors<FileSystem, ExecRunner>
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionWorkspaceExecutors")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<FileSystem, ExecRunner> SessionWorkspaceExecutors<FileSystem, ExecRunner>
+where
+    FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem + PinFurtherWorkspaceRoot,
+    ExecRunner: ProcessRunner,
+{
+    fn try_new(
+        composition: ConfiguredWorkspaceComposition<FileSystem, ExecRunner>,
+    ) -> Result<Self, DaemonToolsConstructionError> {
+        let ConfiguredWorkspaceComposition {
+            families,
+            roots,
+            git_identity,
+            exec_runner,
+        } = composition;
+        let unavailable_detail =
+            ToolExecutionErrorDetail::try_new(SESSION_WORKSPACE_UNAVAILABLE_DETAIL.to_owned())
+                .map_err(|_| DaemonToolsConstructionError::SessionWorkspaceDetail)?;
+        Ok(Self {
+            roots,
+            git_identity,
+            exec_runner,
+            configured: families.executors,
+            unavailable_detail,
+            retained: Arc::new(Mutex::new(RetainedSessionWorkspaces::new())),
+        })
+    }
+
+    async fn resolve(
+        &mut self,
+        session: SessionId,
+    ) -> Result<WorkspaceBoundExecutors<FileSystem, ExecRunner>, SessionWorkspaceFailure> {
+        // The retained set is consulted before the derivation so a session that
+        // already bound a derived root keeps binding it: a directory removed
+        // under a live session then yields that root's own typed failures
+        // rather than silently returning the session to the configured root.
+        if let Some(retained) = self.retained.lock().await.get(session) {
+            return Ok(retained);
+        }
+        let path = match self.roots.resolve(session) {
+            SessionWorkspaceRoot::ConfiguredRoot => return Ok(self.configured.clone()),
+            SessionWorkspaceRoot::Derived { path } => path,
+        };
+        let filesystem = FileSystem::pin_further_root(&path).map_err(|_| {
+            SessionWorkspaceFailure::Composition(DaemonToolsConstructionError::WorkspaceRead)
+        })?;
+        let families = WorkspaceBoundFamilies::try_new(
+            filesystem,
+            &path,
+            self.git_identity.clone(),
+            self.exec_runner.clone(),
+        )
+        .map_err(SessionWorkspaceFailure::Composition)?;
+        if families.executors.git_object_format != self.configured.git_object_format {
+            return Err(SessionWorkspaceFailure::ObjectFormatDisagreement);
+        }
+        Ok(self
+            .retained
+            .lock()
+            .await
+            .retain(session, families.executors))
+    }
+
+    /// Dispatches one workspace-root-bound request to the requesting session's
+    /// own executors.
+    ///
+    /// An unresolvable session workspace closes the attempt as a known tool
+    /// failure carrying sanitized detail — the model, the transcript, and both
+    /// clients see it — beside one telemetry event naming the session and a
+    /// closed reason. It is never silently redirected to another session's root.
+    async fn execute(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<CorrelatedToolExecutorEvidence, DaemonToolExecutorError> {
+        let session = invocation.correlation().session();
+        let mut executors = match self.resolve(session).await {
+            Ok(executors) => executors,
+            Err(failure) => {
+                tracing::warn!(
+                    session_id = %session.into_uuid(),
+                    reason = failure.discriminant(),
+                    "session workspace tools are unavailable"
+                );
+                return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
+                    detail: Some(self.unavailable_detail.clone()),
+                }));
+            }
+        };
+        match invocation.request().name().as_str() {
+            name if WORKSPACE_READ_TOOL_NAMES.contains(&name) => executors
+                .workspace_read
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            name if WORKSPACE_MUTATION_TOOL_NAMES.contains(&name) => executors
+                .workspace_mutation
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            name if LOCAL_GIT_TOOL_NAMES.contains(&name) => executors
+                .local_git
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            SANDBOXED_EXEC_NAME => executors
+                .sandboxed_exec
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            UNSANDBOXED_EXEC_NAME => executors
+                .unsandboxed_exec
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            CARGO_DIAGNOSTICS_NAME => executors
+                .cargo_diagnostics
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            _ => Err(DaemonToolExecutorError::unknown_tool()),
+        }
+    }
+}
+
 /// Name-directed daemon executor matching [`DaemonToolCatalog`].
 #[derive(Clone, Debug)]
 pub struct DaemonToolExecutor<
@@ -892,12 +1339,7 @@ pub struct DaemonToolExecutor<
     session_status: SessionStatusExecutor<Writer>,
     code_host: CodeHostExecutor<Credentials, HostTransport>,
     github: Option<GitHubExecutor<Credentials, GitHubTransportType>>,
-    workspace_read: Option<WorkspaceReadExecutor<FileSystem>>,
-    workspace_mutation: Option<SharedToolExecutor<WorkspaceMutationExecutor<FileSystem>>>,
-    local_git: Option<SharedToolExecutor<LocalGitExecutor<FileSystem>>>,
-    sandboxed_exec: Option<ExecExecutor<SandboxedCommandRunner<ExecRunner>>>,
-    unsandboxed_exec: Option<ExecExecutor<UnsandboxedCommandRunner<ExecRunner>>>,
-    cargo_diagnostics: Option<CargoDiagnosticsExecutor<ExecRunner>>,
+    workspace_bound: Option<SessionWorkspaceExecutors<FileSystem, ExecRunner>>,
     conversations: Option<ConversationExecutor<ConversationPort>>,
     plan: PlanExecutor<PlanPort>,
     delegation: SessionDelegationExecutor<DaemonSessionDelegationPort>,
@@ -972,7 +1414,7 @@ where
     Credentials: CredentialAccess,
     HostTransport: CodeHostTransport,
     GitHubTransportType: GitHubTransport,
-    FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem,
+    FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem + PinFurtherWorkspaceRoot,
     ConversationPort: ConversationIntrospectionPort,
     PlanPort: SessionPlanPort,
     ExecRunner: ProcessRunner,
@@ -1021,48 +1463,20 @@ where
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
-            name if WORKSPACE_READ_TOOL_NAMES.contains(&name) => self
-                .workspace_read
-                .as_mut()
-                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
-                .execute(invocation)
-                .await
-                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
-            name if WORKSPACE_MUTATION_TOOL_NAMES.contains(&name) => self
-                .workspace_mutation
-                .as_mut()
-                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
-                .execute(invocation)
-                .await
-                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
-            name if LOCAL_GIT_TOOL_NAMES.contains(&name) => self
-                .local_git
-                .as_mut()
-                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
-                .execute(invocation)
-                .await
-                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
-            SANDBOXED_EXEC_NAME => self
-                .sandboxed_exec
-                .as_mut()
-                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
-                .execute(invocation)
-                .await
-                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
-            UNSANDBOXED_EXEC_NAME => self
-                .unsandboxed_exec
-                .as_mut()
-                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
-                .execute(invocation)
-                .await
-                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
-            CARGO_DIAGNOSTICS_NAME => self
-                .cargo_diagnostics
-                .as_mut()
-                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
-                .execute(invocation)
-                .await
-                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            name if WORKSPACE_READ_TOOL_NAMES.contains(&name)
+                || WORKSPACE_MUTATION_TOOL_NAMES.contains(&name)
+                || LOCAL_GIT_TOOL_NAMES.contains(&name)
+                || matches!(
+                    name,
+                    SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
+                ) =>
+            {
+                self.workspace_bound
+                    .as_mut()
+                    .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                    .execute(invocation)
+                    .await
+            }
             name if CONVERSATION_TOOL_NAMES.contains(&name) => self
                 .conversations
                 .as_mut()
@@ -1141,7 +1555,16 @@ where
 mod tests {
     use std::{fmt, fs, time::SystemTime};
 
-    use signalbox_application::ToolCatalog;
+    use signalbox_application::{
+        FixtureToolExecutionTransaction, FixtureTransactionFailures, InProcessToolDispatchGate,
+        PreparedAttemptApproval, PreparedAttemptIdentities, PreparedAttemptProposal,
+        RecordingToolExecutor, ToolCatalog, ToolExecutionService, UuidV7ToolLoopIdGenerator,
+        prepared_single_attempt_batch,
+    };
+    use signalbox_domain::{
+        ContextFrontierId, DurableCommandId, ModelCallId, ToolAttemptId, ToolEffectClass,
+        ToolRequestId, TurnAttemptId, TurnId,
+    };
     use signalbox_model_runtime::{
         CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
     };
@@ -1557,12 +1980,9 @@ mod tests {
                 status,
                 code_host,
                 github: None::<GitHubTools<OfflineCredentials, OfflineGitHubTransport>>,
-                workspace_read: None::<WorkspaceReadTools<LocalWorkspaceFileSystem>>,
-                workspace_mutation: None::<WorkspaceMutationTools<LocalWorkspaceFileSystem>>,
-                local_git: None::<LocalGitTools<LocalWorkspaceFileSystem>>,
-                sandboxed_exec: None::<SandboxedExecTool<TokioProcessRunner>>,
-                unsandboxed_exec: None::<UnsandboxedExecTool<TokioProcessRunner>>,
-                cargo_diagnostics: None::<CargoDiagnosticsTool<TokioProcessRunner>>,
+                workspace_bound: None::<
+                    ConfiguredWorkspaceComposition<LocalWorkspaceFileSystem, TokioProcessRunner>,
+                >,
                 conversations: None::<ConversationTools<OfflineConversationPort>>,
                 plan: PlanTools::try_new(OfflineConversationPort)
                     .expect("offline plan tools compile"),
@@ -1614,6 +2034,17 @@ mod tests {
 
     /// Composes every injected family against offline boundaries.
     fn fully_composed_catalog(workspace: &Path) -> DaemonToolCatalog {
+        offline_daemon_composition(workspace).0
+    }
+
+    /// Composes every injected family against offline boundaries and returns
+    /// both composition roles.
+    fn offline_daemon_composition(
+        workspace: &Path,
+    ) -> (
+        DaemonToolCatalog,
+        impl ToolExecutor<Error = DaemonToolExecutorError> + Clone + Send,
+    ) {
         DaemonTools::try_new(
             || SystemTime::UNIX_EPOCH,
             OfflineTransport,
@@ -1640,7 +2071,6 @@ mod tests {
         )
         .expect("static daemon tools compile")
         .into_parts()
-        .0
     }
 
     /// The merged process-lifetime catalog exposes every daemon declaration in
@@ -1983,5 +2413,364 @@ mod tests {
             permission_default(UNSANDBOXED_EXEC_NAME),
             signalbox_domain::ToolPermissionDefault::AlwaysConfirm
         );
+    }
+
+    /// The two sessions the per-session workspace tests give separate roots.
+    /// Each value only needs to be distinct from the other.
+    const FIRST_SESSION_IDENTITY: u128 = 0x5001;
+    const SECOND_SESSION_IDENTITY: u128 = 0x5002;
+    /// Identities every driven fixture batch reuses. The session is the only
+    /// axis these tests vary, so the rest are arbitrary but distinct.
+    const FIXTURE_TURN_IDENTITY: u128 = 0x7001;
+    const FIXTURE_PRODUCING_CALL_IDENTITY: u128 = 0x7002;
+    const FIXTURE_REQUEST_IDENTITY: u128 = 0x7003;
+    const FIXTURE_ATTEMPT_IDENTITY: u128 = 0x7004;
+    const FIXTURE_ISSUING_TURN_ATTEMPT_IDENTITY: u128 = 0x7005;
+    const FIXTURE_FRONTIER_IDENTITY: u128 = 0x7006;
+    const FIXTURE_APPROVAL_COMMAND_IDENTITY: u128 = 0x7007;
+
+    /// The one relative path every session's fixture workspace carries, so the
+    /// content a read returns is evidence of which root answered it.
+    const SESSION_MARKER_PATH: &str = "marker.txt";
+    const CONFIGURED_ROOT_MARKER: &str = "configured root content";
+    const FIRST_SESSION_MARKER: &str = "first session content";
+    const SECOND_SESSION_MARKER: &str = "second session content";
+    const FIRST_SESSION_REPLACEMENT: &str = "first session replacement";
+
+    fn session(identity: u128) -> SessionId {
+        SessionId::from_uuid(uuid::Uuid::from_u128(identity))
+    }
+
+    /// Creates the configured root as a direct main worktree.
+    fn configured_workspace(parent: &Path) -> PathBuf {
+        let configured = parent.join("workspace");
+        fs::create_dir(&configured).expect("configured workspace exists");
+        git2::Repository::init(&configured).expect("configured repository initializes");
+        fs::write(configured.join(SESSION_MARKER_PATH), CONFIGURED_ROOT_MARKER)
+            .expect("configured marker is written");
+        configured
+    }
+
+    /// Creates a direct main worktree exactly where the derivation places one
+    /// session's root, so the test never restates the formula.
+    fn provisioned_session_workspace(configured: &Path, session: SessionId, marker: &str) {
+        let derived = SessionWorkspaceRoots::new(configured)
+            .derived_path(session)
+            .expect("the fixture configured root has a parent and a final component");
+        fs::create_dir_all(&derived).expect("derived session workspace exists");
+        git2::Repository::init(&derived).expect("derived session repository initializes");
+        fs::write(derived.join(SESSION_MARKER_PATH), marker)
+            .expect("derived session marker is written");
+    }
+
+    fn read_marker_proposal() -> PreparedAttemptProposal {
+        PreparedAttemptProposal {
+            name: ToolName::try_new(String::from(READ_FILE_NAME))
+                .expect("read_file is a valid tool name"),
+            arguments: arguments(&serde_json::json!({"path": SESSION_MARKER_PATH}).to_string()),
+            effect_class: ToolEffectClass::EffectFree,
+            approval: PreparedAttemptApproval::PolicyAuto,
+        }
+    }
+
+    fn write_marker_proposal(content: &str) -> PreparedAttemptProposal {
+        PreparedAttemptProposal {
+            name: ToolName::try_new(String::from(WRITE_FILE_NAME))
+                .expect("write_file is a valid tool name"),
+            arguments: arguments(
+                &serde_json::json!({"path": SESSION_MARKER_PATH, "content": content}).to_string(),
+            ),
+            effect_class: ToolEffectClass::ExternalEffect,
+            // `write_file` is declared `Confirm`, so a policy approval would
+            // describe a batch the application never prepares for it.
+            approval: PreparedAttemptApproval::UserConfirmation {
+                command: DurableCommandId::from_uuid(uuid::Uuid::from_u128(
+                    FIXTURE_APPROVAL_COMMAND_IDENTITY,
+                )),
+            },
+        }
+    }
+
+    fn arguments(value: &str) -> NormalizedToolArguments {
+        NormalizedToolArguments::try_from_provider_text(value.to_owned())
+            .expect("fixture arguments are admitted")
+    }
+
+    /// Drives one prepared single-attempt batch through the real tool-execution
+    /// service and returns the evidence the daemon executor bound.
+    ///
+    /// `ToolExecutionInvocation` has no public constructor, so the session on
+    /// the invocation the executor reads can only be established by running a
+    /// real batch for that session.
+    async fn daemon_evidence<Executor>(
+        catalog: DaemonToolCatalog,
+        executor: Executor,
+        session: SessionId,
+        proposal: PreparedAttemptProposal,
+    ) -> ToolExecutorEvidence
+    where
+        Executor: ToolExecutor<Error = DaemonToolExecutorError> + Send,
+    {
+        let (executor, recorded) = RecordingToolExecutor::new(executor);
+        let batch = prepared_single_attempt_batch(
+            PreparedAttemptIdentities {
+                session,
+                turn: TurnId::from_uuid(uuid::Uuid::from_u128(FIXTURE_TURN_IDENTITY)),
+                producing_call: ModelCallId::from_uuid(uuid::Uuid::from_u128(
+                    FIXTURE_PRODUCING_CALL_IDENTITY,
+                )),
+                request: ToolRequestId::from_uuid(uuid::Uuid::from_u128(FIXTURE_REQUEST_IDENTITY)),
+                attempt: ToolAttemptId::from_uuid(uuid::Uuid::from_u128(FIXTURE_ATTEMPT_IDENTITY)),
+                issuing_turn_attempt: TurnAttemptId::from_uuid(uuid::Uuid::from_u128(
+                    FIXTURE_ISSUING_TURN_ATTEMPT_IDENTITY,
+                )),
+                frontier: ContextFrontierId::from_uuid(uuid::Uuid::from_u128(
+                    FIXTURE_FRONTIER_IDENTITY,
+                )),
+            },
+            proposal,
+        );
+        let mut service = ToolExecutionService::new(
+            UuidV7ToolLoopIdGenerator,
+            FixtureToolExecutionTransaction::new(
+                batch.clone(),
+                // Neither failure is reachable from a coherent prepared batch;
+                // the daemon executor's only sanitized value stands in for both
+                // so an unexpected route reports as a caller-or-hub bug.
+                FixtureTransactionFailures {
+                    domain_rejection: DaemonToolExecutorError::unknown_tool(),
+                    declined_crash_classification: DaemonToolExecutorError::unknown_tool(),
+                },
+            ),
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("the prepared attempt commits definitive evidence");
+
+        recorded
+            .take()
+            .expect("the daemon executor bound evidence for the prepared attempt")
+    }
+
+    #[track_caller]
+    fn completed_text(evidence: ToolExecutorEvidence) -> String {
+        match evidence {
+            ToolExecutorEvidence::CompletedText(text) => text,
+            ToolExecutorEvidence::KnownFailed { detail } => {
+                panic!("the workspace tool failed: {detail:?}")
+            }
+            ToolExecutorEvidence::Ambiguous => panic!("the workspace tool was ambiguous"),
+        }
+    }
+
+    #[track_caller]
+    fn read_content(evidence: ToolExecutorEvidence) -> String {
+        let decoded: serde_json::Value =
+            serde_json::from_str(&completed_text(evidence)).expect("read_file evidence is JSON");
+        decoded["content"]
+            .as_str()
+            .expect("read_file evidence carries string content")
+            .to_owned()
+    }
+
+    /// The derivation places every session's root beside the configured root
+    /// rather than inside it, so a session still bound to the configured root
+    /// cannot read, write, or execute another session's tree.
+    #[test]
+    fn a_session_workspace_is_derived_beside_the_configured_root() {
+        let configured = Path::new("/srv/signalbox/workspace");
+        let first = session(FIRST_SESSION_IDENTITY);
+
+        let derived = SessionWorkspaceRoots::new(configured)
+            .derived_path(first)
+            .expect("an absolute configured root has a parent and a final component");
+
+        assert_eq!(
+            derived,
+            Path::new("/srv/signalbox/workspace.sessions").join(first.into_uuid().to_string())
+        );
+    }
+
+    /// A session with no provisioned directory binds the configured root, which
+    /// is exactly what every session bound before this derivation existed.
+    #[test]
+    fn an_unprovisioned_session_binds_the_configured_root() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+
+        let resolved =
+            SessionWorkspaceRoots::new(&configured).resolve(session(FIRST_SESSION_IDENTITY));
+
+        assert_eq!(resolved, SessionWorkspaceRoot::ConfiguredRoot);
+    }
+
+    /// A session whose derived directory exists binds that directory.
+    #[test]
+    fn a_provisioned_session_binds_its_derived_root() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+        let first = session(FIRST_SESSION_IDENTITY);
+        provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+        let roots = SessionWorkspaceRoots::new(&configured);
+        let expected = roots
+            .derived_path(first)
+            .expect("the fixture configured root has a parent and a final component");
+
+        let resolved = roots.resolve(first);
+
+        assert_eq!(resolved, SessionWorkspaceRoot::Derived { path: expected });
+    }
+
+    /// One composition serves two concurrent sessions from two roots: each
+    /// session's `read_file` observes only its own workspace, and neither
+    /// observes the configured root every session shared before.
+    #[tokio::test]
+    async fn two_sessions_read_only_their_own_derived_workspace() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+        let first = session(FIRST_SESSION_IDENTITY);
+        let second = session(SECOND_SESSION_IDENTITY);
+        provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+        provisioned_session_workspace(&configured, second, SECOND_SESSION_MARKER);
+        let (catalog, executor) = offline_daemon_composition(&configured);
+
+        let first_read = daemon_evidence(
+            catalog.clone(),
+            executor.clone(),
+            first,
+            read_marker_proposal(),
+        )
+        .await;
+        let second_read = daemon_evidence(catalog, executor, second, read_marker_proposal()).await;
+
+        assert_eq!(read_content(first_read), FIRST_SESSION_MARKER);
+        assert_eq!(read_content(second_read), SECOND_SESSION_MARKER);
+    }
+
+    /// A write through one session's workspace tools reaches only that
+    /// session's root: the other session's read is unchanged, and so is the
+    /// configured root's own copy of the same relative path.
+    #[tokio::test]
+    async fn a_session_write_is_invisible_to_another_session() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+        let first = session(FIRST_SESSION_IDENTITY);
+        let second = session(SECOND_SESSION_IDENTITY);
+        provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+        provisioned_session_workspace(&configured, second, SECOND_SESSION_MARKER);
+        let (catalog, executor) = offline_daemon_composition(&configured);
+
+        let write = daemon_evidence(
+            catalog.clone(),
+            executor.clone(),
+            first,
+            write_marker_proposal(FIRST_SESSION_REPLACEMENT),
+        )
+        .await;
+        let first_read = daemon_evidence(
+            catalog.clone(),
+            executor.clone(),
+            first,
+            read_marker_proposal(),
+        )
+        .await;
+        let second_read = daemon_evidence(catalog, executor, second, read_marker_proposal()).await;
+
+        // Panics unless the write completed; what it returned is not the claim.
+        completed_text(write);
+        assert_eq!(read_content(first_read), FIRST_SESSION_REPLACEMENT);
+        assert_eq!(read_content(second_read), SECOND_SESSION_MARKER);
+        assert_eq!(
+            fs::read_to_string(configured.join(SESSION_MARKER_PATH))
+                .expect("the configured marker is still readable"),
+            CONFIGURED_ROOT_MARKER
+        );
+    }
+
+    /// Two adapters pinned to two roots each answer for their own root, which
+    /// is what makes one composition able to serve two sessions at once.
+    #[test]
+    fn two_pinned_filesystems_answer_for_their_own_roots() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let first_root = parent.path().join("first");
+        let second_root = parent.path().join("second");
+        fs::create_dir(&first_root).expect("first fixture workspace exists");
+        fs::create_dir(&second_root).expect("second fixture workspace exists");
+        fs::write(first_root.join(SESSION_MARKER_PATH), FIRST_SESSION_MARKER)
+            .expect("first fixture content is written");
+        fs::write(second_root.join(SESSION_MARKER_PATH), SECOND_SESSION_MARKER)
+            .expect("second fixture content is written");
+        let first = PinnedWorkspaceFileSystem::pin_further_root(&first_root)
+            .expect("the first root is pinned");
+        let second = PinnedWorkspaceFileSystem::pin_further_root(&second_root)
+            .expect("the second root is pinned");
+
+        // Both adapters are handed the *same* path, so what each returns is
+        // evidence of the root it pinned and not of the path it was given.
+        let first_read = WorkspaceFileSystem::read_file_prefix(
+            &first,
+            &WorkspaceFileSystem::open_root(&first, &second_root)
+                .expect("the first adapter returns its own pinned root"),
+            Path::new(SESSION_MARKER_PATH),
+            FIRST_SESSION_MARKER.len(),
+        )
+        .expect("the first adapter reads its own root");
+        let second_read = WorkspaceFileSystem::read_file_prefix(
+            &second,
+            &WorkspaceFileSystem::open_root(&second, &first_root)
+                .expect("the second adapter returns its own pinned root"),
+            Path::new(SESSION_MARKER_PATH),
+            SECOND_SESSION_MARKER.len(),
+        )
+        .expect("the second adapter reads its own root");
+
+        assert_eq!(first_read.bytes, FIRST_SESSION_MARKER.as_bytes());
+        assert_eq!(second_read.bytes, SECOND_SESSION_MARKER.as_bytes());
+    }
+
+    /// Sessions whose only role is to occupy the retained set's remaining
+    /// capacity. Distinct from the two named sessions and from each other.
+    const FILLER_SESSION_IDENTITY_BASE: u128 = 0x6000;
+
+    /// Retains filler sessions until the bound is reached.
+    ///
+    /// The iteration lives here rather than in a test body, which stays
+    /// straight-line: what the test is about is which entry the next retention
+    /// evicts, not how the set was filled.
+    fn fill_remaining_capacity(retained: &mut RetainedSessionWorkspaces<u32>, filler: u32) {
+        for offset in 0..MAX_RETAINED_SESSION_WORKSPACES - 2 {
+            let identity = FILLER_SESSION_IDENTITY_BASE + offset as u128;
+            retained.retain(session(identity), filler);
+        }
+    }
+
+    /// The retained set is bounded: a further session drops the least recently
+    /// used entry rather than growing the descriptor count without limit.
+    #[test]
+    fn retaining_beyond_the_bound_evicts_the_least_recently_used_session() {
+        const FIRST_RETAINED: u32 = 1;
+        const SECOND_RETAINED: u32 = 2;
+        const OVERFLOWING_RETAINED: u32 = 3;
+        let mut retained = RetainedSessionWorkspaces::new();
+        let first = session(FIRST_SESSION_IDENTITY);
+        let second = session(SECOND_SESSION_IDENTITY);
+        let overflowing = session(FILLER_SESSION_IDENTITY_BASE - 1);
+        retained.retain(first, FIRST_RETAINED);
+        retained.retain(second, SECOND_RETAINED);
+        fill_remaining_capacity(&mut retained, FIRST_RETAINED);
+        // Reading `second` back makes it the most recently used entry, so the
+        // entry the overflowing session evicts is unambiguously `first`.
+        assert_eq!(retained.get(second), Some(SECOND_RETAINED));
+
+        retained.retain(overflowing, OVERFLOWING_RETAINED);
+
+        assert_eq!(retained.get(first), None);
+        assert_eq!(retained.get(second), Some(SECOND_RETAINED));
+        assert_eq!(retained.get(overflowing), Some(OVERFLOWING_RETAINED));
     }
 }

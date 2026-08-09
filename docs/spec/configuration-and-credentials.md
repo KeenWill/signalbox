@@ -10,6 +10,9 @@ verified against the implementing stack through this PR
 The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
 
+The derivation of each session's workspace root from the configured root is
+verified against this PR (`agent/per-session-workspaces`).
+
 The execution family's permission defaults and the confinement its bubblewrap
 profile does and does not provide are verified against this PR
 (`agent/exec-sandbox-net-fence`).
@@ -146,21 +149,23 @@ catalog, an invalid or unreadable referenced prompt file, or a failed Anthropic,
 OpenAI, or GitHub transport construction fails startup at the `Configuration`
 phase, before any database contact. A present invalid static tool mapping fails
 during that same pre-database configuration pass. After the database connects,
-an invalid workspace root or any failed tool-suite construction also fails at
-the `Configuration` phase. All tool dependencies are supplied by parsed
-configuration, the already-constructed database pool, or explicit credential and
-transport values; no tool family discovers ambient authority. Startup and
-shutdown logs carry the phase, an operator failure class, and small typed fields
-where present (session and turn ids, recovered-turn count, grace-window seconds)
-— never configuration values, paths, or URLs. The typed configuration error does
-not survive to the log: `run_hub` collapses every catalog-parse and
-adapter-construction variant (and likewise connection and migration errors) into
-a generic `Infrastructure` class carrying only its phase, so an operator cannot
-distinguish an unreadable catalog from an unknown field, bad version, or invalid
-limit (see Open edges). The eight deployment paths are accepted without I/O at
-environment parsing time; both catalogs and every template prompt file are read
-during startup. No credential file is read at startup (see credential lifecycle
-below).
+an invalid configured workspace root or any failed tool-suite construction also
+fails at the `Configuration` phase. A derived per-session root is composed on
+first use rather than at startup, so its failures are per-session tool failures
+described under [the mapping registry](#derived-session-workspace-roots). All
+tool dependencies are supplied by parsed configuration, the already-constructed
+database pool, or explicit credential and transport values; no tool family
+discovers ambient authority. Startup and shutdown logs carry the phase, an
+operator failure class, and small typed fields where present (session and turn
+ids, recovered-turn count, grace-window seconds) — never configuration values,
+paths, or URLs. The typed configuration error does not survive to the log:
+`run_hub` collapses every catalog-parse and adapter-construction variant (and
+likewise connection and migration errors) into a generic `Infrastructure` class
+carrying only its phase, so an operator cannot distinguish an unreadable catalog
+from an unknown field, bad version, or invalid limit (see Open edges). The eight
+deployment paths are accepted without I/O at environment parsing time; both
+catalogs and every template prompt file are read during startup. No credential
+file is read at startup (see credential lifecycle below).
 
 The deployed daemon supplies no Anthropic or OpenAI endpoint or timeout knob; it
 constructs each adapter with its defaults. The
@@ -548,15 +553,46 @@ symlink to its canonical regular-file path and passes that canonical path to the
 execution suite, which pins the program during construction; the daemon never
 derives it from its own executable path.
 
-The root is opened once during tool construction and its pinned authority is
-cloned into both workspace suites. The local Git suite independently binds that
-same root and requires a direct main worktree whose `.git` directory is inside
-the root. The three execution tools bind that root and share the one pinned
-supervisor runner. A nonexistent, non-directory, final-symlink, non-repository,
-linked, or externally administered root therefore fails startup for the complete
-mapped composition. The mapping-free base composition admits no root and
-constructs no Git or execution suite, so existing base-only deployments remain
-valid. The GitHub policy admits exactly `https://api.github.com:443` for
+The configured root is opened once during tool construction and its pinned
+authority is cloned into both workspace suites. The local Git suite
+independently binds that same root and requires a direct main worktree whose
+`.git` directory is inside the root. The three execution tools bind that root
+and share the one pinned supervisor runner. A nonexistent, non-directory,
+final-symlink, non-repository, linked, or externally administered configured
+root therefore fails startup for the complete mapped composition. The
+mapping-free base composition admits no root and constructs no Git or execution
+suite, so existing base-only deployments remain valid.
+
+<a id="derived-session-workspace-roots"></a>
+
+Each session binds its own workspace root, derived from the configured root by a
+fixed formula: the derived root is `<name>.sessions/<session identifier>` beside
+the configured root, where `<name>` is the configured root's own final path
+component and the session identifier is its UUID text. A session names no path
+and no configuration field or durable column supplies one, so the set of roots
+the daemon can open is fixed by the configured root alone. The derived parent is
+a sibling of the configured root rather than a child, because a per-session root
+inside the configured root would be readable, writable, and executable by every
+session still bound to the configured root.
+
+Provisioning that directory is deployment work: creating a direct main worktree
+there is what makes a session use it. A session whose derived directory does not
+exist binds the configured root, exactly as every session did before this
+derivation, so an unprovisioned deployment is unchanged.
+
+A derived root is opened, layout-checked, and supervisor-bound the first time
+that session invokes a workspace-root-bound tool, not at startup, because no
+session exists at startup. The composed executors are retained per session under
+a fixed bound of eight, the least recently used entry released first, which is
+what keeps open descriptors and pinned repositories finite. A retained binding
+is preferred over the derivation, so removing a derived directory under a live
+session produces that root's own typed failures rather than returning the
+session to the configured root. Failure to compose a derived root — an
+unopenable directory, a rejected repository layout, or a repository whose object
+format disagrees with the one the process-lifetime catalog compiled — closes
+that tool request as a known failure carrying sanitized detail and records a
+telemetry event naming the session and a closed reason. It never falls back to
+another root. The GitHub policy admits exactly `https://api.github.com:443` for
 authenticated requests. The code-host `change_request_ci_job_log` operation
 retains the tool-loop-owned exception for one credential-free download from its
 validated, pinned, bounded public HTTPS redirect destination; the pull-request
@@ -623,12 +659,12 @@ The launch is this. Bubblewrap receives `--die-with-parent`, `--new-session`,
 `/tmp`; creates `/etc`; and read-only binds `/usr`, `/bin`, `/lib`, `/lib64`,
 `/nix/store`, `/etc/alternatives`, `/etc/hosts`, `/etc/nsswitch.conf`, and
 `/etc/ssl`, each where it is present. It does not bind `/etc/resolv.conf`. It
-binds the configured workspace root read-write at `/workspace`, read-only binds
-the pinned execution supervisor — a host path that need not lie under that root
-— at `/signalbox-exec-dispatch`, and changes directory to `/workspace` or to the
-requested directory beneath it. The child environment is cleared and then set to
-`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every command is dispatched
-through the supervisor.
+binds the calling session's bound workspace root read-write at `/workspace`,
+read-only binds the pinned execution supervisor — a host path that need not lie
+under that root — at `/signalbox-exec-dispatch`, and changes directory to
+`/workspace` or to the requested directory beneath it. The child environment is
+cleared and then set to `LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every
+command is dispatched through the supervisor.
 
 The profile does not provide the following, and no other daemon-local control
 supplies them:

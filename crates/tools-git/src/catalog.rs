@@ -1,5 +1,6 @@
 use std::{fs, path::Path};
 
+use git2::ObjectFormat;
 use signalbox_application::{
     CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence, ToolExecutionInvocation,
     ToolExecutor, ToolExecutorEvidence,
@@ -24,6 +25,29 @@ pub(super) const REPOSITORY_REJECTED_DETAIL: &str = "injected Git repository was
 pub(super) const PATH_REJECTED_DETAIL: &str = "Git path was rejected by the workspace boundary";
 
 pub(super) const OPERATION_FAILED_DETAIL: &str = "local Git operation failed";
+
+/// Object-identifier format one repository selects once.
+///
+/// The pinned repository's selection is compiled into this suite's argument
+/// validators, so the format is a property of the compiled catalog and not only
+/// of the executor. A composition that shares one catalog across several
+/// repositories can therefore compare this value rather than assume agreement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitObjectFormat {
+    /// Twenty-byte SHA-1 object identifiers.
+    Sha1,
+    /// Thirty-two-byte SHA-256 object identifiers.
+    Sha256,
+}
+
+impl GitObjectFormat {
+    const fn from_library(format: ObjectFormat) -> Self {
+        match format {
+            ObjectFormat::Sha1 => Self::Sha1,
+            ObjectFormat::Sha256 => Self::Sha256,
+        }
+    }
+}
 
 /// Seven local Git declarations and their injected-root executor.
 #[derive(Debug)]
@@ -88,6 +112,16 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitTools<FileSystem> {
                 operation_detail,
             },
         })
+    }
+
+    /// Returns the object format the pinned repository selected once.
+    ///
+    /// Exposed because the compiled argument validators carry this selection: a
+    /// caller sharing one compiled catalog across several pinned repositories
+    /// has to reject a repository that disagrees rather than validate arguments
+    /// against another repository's width.
+    pub const fn object_format(&self) -> GitObjectFormat {
+        GitObjectFormat::from_library(self.executor.repository_authority.object_format)
     }
 
     /// Separates immutable catalog and mutable executor composition roles.

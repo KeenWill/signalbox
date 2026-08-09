@@ -171,9 +171,11 @@ allowed_origins = [
 
 # Tool dependencies use the same closed mapping-table pattern as model
 # adapters. The two GitHub-backed families share one non-secret profile; the
-# credential value still arrives only through GITHUB_TOKEN_FILE. Workspace
-# tools pin this exact root, and conversation tools use daemon-composed
-# application reads over the configured database.
+# credential value still arrives only through GITHUB_TOKEN_FILE. Workspace,
+# local Git, and execution tools pin this root for a session with no derived
+# directory, and pin /srv/signalbox/workspace.sessions/<session-uuid> for a
+# session that has one; conversation tools use daemon-composed application
+# reads over the configured database.
 [[tool_mappings]]
 family = "code_host"
 adapter = "github"
