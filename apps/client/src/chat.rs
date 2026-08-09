@@ -1213,6 +1213,7 @@ fn update_turns_from_event(
         | SessionEvent::TurnModelSettingsResolved { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
+        | SessionEvent::RunnerStateTransition { .. }
         | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ChildSpawned { .. }
         | SessionEvent::ChildWaiting { .. }

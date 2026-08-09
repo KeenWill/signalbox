@@ -45,7 +45,8 @@ use signalbox_persistence::{
     outbox::{
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState, OutboxCorruption,
         OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
-        RunnerStateTransitionOutboxTestSource, append_runner_state_transition_for_test,
+        RunnerStateTransitionOutboxTestEvent, RunnerStateTransitionOutboxTestSource,
+        append_runner_state_transition_for_test,
     },
     runner_protocol::{
         RunnerConnectionTransition, RunnerProtocolCorruption, RunnerProtocolStore,
@@ -9935,13 +9936,15 @@ async fn s32_inv032_inv044_runner_pinned_outbox_round_trips() -> Result<(), Box<
         placement_outbox_facts(&pool, session, "pinned").await?;
     append_runner_state_transition_for_test(
         &pool,
-        session,
-        pin.lease.runner(),
-        placement_revision,
-        pin.placement.request().sandbox,
-        None,
-        DispatchedRunnerState::Pinned,
-        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Pinned,
+            RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        ),
     )
     .await?;
     let event = dispatch_next_outbox_event(&pool).await?;
@@ -9991,13 +9994,15 @@ async fn s32_inv032_inv044_runner_suspect_outbox_round_trips() -> Result<(), Box
     .await?;
     append_runner_state_transition_for_test(
         &pool,
-        session,
-        pin.lease.runner(),
-        placement_revision,
-        pin.placement.request().sandbox,
-        None,
-        DispatchedRunnerState::Suspect,
-        source,
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Suspect,
+            source,
+        ),
     )
     .await?;
     store
@@ -10061,13 +10066,15 @@ async fn s32_inv032_inv044_runner_connected_outbox_round_trips() -> Result<(), B
     .await?;
     append_runner_state_transition_for_test(
         &pool,
-        session,
-        pin.lease.runner(),
-        placement_revision,
-        pin.placement.request().sandbox,
-        None,
-        DispatchedRunnerState::Connected,
-        source,
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Connected,
+            source,
+        ),
     )
     .await?;
     let event = dispatch_next_outbox_event(&pool).await?;
@@ -10109,13 +10116,15 @@ async fn s32_inv032_inv044_runner_lost_before_pin_outbox_round_trips() -> Result
         placement_outbox_facts(&pool, placement.session(), "runner_lost_before_pin").await?;
     append_runner_state_transition_for_test(
         &pool,
-        placement.session(),
-        runner,
-        placement_revision,
-        placement.request().sandbox,
-        Some(exact_runner_directory()),
-        DispatchedRunnerState::RunnerLostBeforePin,
-        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        RunnerStateTransitionOutboxTestEvent::new(
+            placement.session(),
+            runner,
+            placement_revision,
+            placement.request().sandbox,
+            Some(exact_runner_directory()),
+            DispatchedRunnerState::RunnerLostBeforePin,
+            RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        ),
     )
     .await?;
     let event = dispatch_next_outbox_event(&pool).await?;
@@ -10149,13 +10158,15 @@ async fn s32_inv032_inv044_runner_lost_outbox_round_trips() -> Result<(), Box<dy
         placement_outbox_facts(&pool, session, "runner_lost").await?;
     append_runner_state_transition_for_test(
         &pool,
-        session,
-        pin.lease.runner(),
-        placement_revision,
-        pin.placement.request().sandbox,
-        None,
-        DispatchedRunnerState::RunnerLost,
-        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::RunnerLost,
+            RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        ),
     )
     .await?;
     append_abandoned_projection(&pool, session, None).await?;
@@ -10200,13 +10211,15 @@ async fn s32_inv032_inv044_runner_pre_pin_replaced_outbox_round_trips() -> Resul
         placement_outbox_facts(&pool, placement.session(), "pre_pin_replaced").await?;
     append_runner_state_transition_for_test(
         &pool,
-        placement.session(),
-        successor,
-        placement_revision,
-        placement.request().sandbox,
-        Some(exact_runner_directory()),
-        DispatchedRunnerState::Replaced,
-        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        RunnerStateTransitionOutboxTestEvent::new(
+            placement.session(),
+            successor,
+            placement_revision,
+            placement.request().sandbox,
+            Some(exact_runner_directory()),
+            DispatchedRunnerState::Replaced,
+            RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        ),
     )
     .await?;
     let event = dispatch_next_outbox_event(&pool).await?;
@@ -10244,13 +10257,15 @@ async fn s32_inv032_inv044_runner_pinned_replaced_outbox_round_trips() -> Result
         placement_outbox_facts(&pool, session, "runner_replaced").await?;
     append_runner_state_transition_for_test(
         &pool,
-        session,
-        pin.lease.runner(),
-        placement_revision,
-        pin.placement.request().sandbox,
-        None,
-        DispatchedRunnerState::Replaced,
-        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Replaced,
+            RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        ),
     )
     .await?;
     let event = dispatch_next_outbox_event(&pool).await?;
@@ -10294,13 +10309,15 @@ async fn s32_inv032_inv044_runner_working_directory_changed_outbox_round_trips()
         placement_outbox_facts(&pool, session, "runner_replaced").await?;
     append_runner_state_transition_for_test(
         &pool,
-        session,
-        pin.lease.runner(),
-        placement_revision,
-        pin.placement.request().sandbox,
-        Some(replacement_directory.clone()),
-        DispatchedRunnerState::WorkingDirectoryChanged,
-        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            Some(replacement_directory.clone()),
+            DispatchedRunnerState::WorkingDirectoryChanged,
+            RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        ),
     )
     .await?;
     let event = dispatch_next_outbox_event(&pool).await?;
@@ -10344,13 +10361,15 @@ async fn s32_inv032_inv044_runner_directory_relocation_rejects_replaced_state()
         placement_outbox_facts(&pool, session, "runner_replaced").await?;
     let rejected = append_runner_state_transition_for_test(
         &pool,
-        session,
-        pin.lease.runner(),
-        placement_revision,
-        pin.placement.request().sandbox,
-        Some(replacement_directory),
-        DispatchedRunnerState::Replaced,
-        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            Some(replacement_directory),
+            DispatchedRunnerState::Replaced,
+            RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        ),
     )
     .await
     .expect_err("a directory relocation cannot publish an ordinary replacement state");
@@ -10374,13 +10393,15 @@ async fn s32_inv032_inv044_runner_abandoned_outbox_round_trips() -> Result<(), B
         placement_outbox_facts(&pool, session, "abandoned").await?;
     append_runner_state_transition_for_test(
         &pool,
-        session,
-        pin.lease.runner(),
-        placement_revision,
-        pin.placement.request().sandbox,
-        None,
-        DispatchedRunnerState::Abandoned,
-        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Abandoned,
+            RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        ),
     )
     .await?;
     let event = dispatch_next_outbox_event(&pool).await?;
@@ -10414,13 +10435,15 @@ async fn s32_inv032_inv044_runner_outbox_dispatch_rejects_cross_wired_source()
         placement_outbox_facts(&pool, session, "pinned").await?;
     append_runner_state_transition_for_test(
         &pool,
-        session,
-        pin.lease.runner(),
-        placement_revision,
-        pin.placement.request().sandbox,
-        None,
-        DispatchedRunnerState::Pinned,
-        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Pinned,
+            RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        ),
     )
     .await?;
     sqlx::query("ALTER TABLE runner_state_transition_outbox_event DISABLE TRIGGER ALL")
@@ -10463,13 +10486,15 @@ async fn s32_inv032_inv044_runner_outbox_insert_rejects_cross_wired_source()
         placement_outbox_facts(&pool, session, "pinned").await?;
     let rejected = append_runner_state_transition_for_test(
         &pool,
-        session,
-        RunnerId::from_uuid(uuid(FOREIGN_RUNNER)),
-        placement_revision,
-        pin.placement.request().sandbox,
-        None,
-        DispatchedRunnerState::Pinned,
-        RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            RunnerId::from_uuid(uuid(FOREIGN_RUNNER)),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Pinned,
+            RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        ),
     )
     .await
     .expect_err("a cross-wired runner event cannot commit");

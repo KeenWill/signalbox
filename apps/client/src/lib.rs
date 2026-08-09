@@ -3983,6 +3983,7 @@ fn terminal_event_state(
         | SessionEvent::ToolApprovalDecided { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
+        | SessionEvent::RunnerStateTransition { .. }
         | SessionEvent::TurnCompleted { .. }
         | SessionEvent::TurnFailed { .. }
         | SessionEvent::TurnRefused { .. }
@@ -4149,6 +4150,7 @@ fn terminal_snapshot_selection(
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. }
+        | SessionEvent::RunnerStateTransition { .. }
         | SessionEvent::ChildSpawned { .. }
         | SessionEvent::ChildWaiting { .. }
         | SessionEvent::SessionMessage { .. }

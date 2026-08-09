@@ -18,9 +18,9 @@ use signalbox_process_protocol::{
     ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
     ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
     ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
-    ReviewTargetSubject, ReviewWorkflow, SessionEvent, ToolApprovalEventDecider,
-    ToolApprovalEventDecision, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
-    TurnState, UsageProvenance,
+    ReviewTargetSubject, ReviewWorkflow, RunnerSandboxProfile, RunnerStateTransitionState,
+    SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance,
 };
 
 use crate::{
@@ -1642,6 +1642,28 @@ impl<'a> Output<'a> {
                      tool_attempt={tool_attempt_id}"
                 ),
             },
+            SessionEvent::RunnerStateTransition {
+                runner_id,
+                placement_revision,
+                sandbox_profile,
+                working_directory,
+                state,
+            } => {
+                let working_directory = working_directory.as_deref().map_or_else(
+                    || String::from("none"),
+                    |directory| self.render_field(directory, TextField::DelimitedOnLine),
+                );
+                writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} runner_state_transition \
+                     runner={runner_id} placement_revision={} sandbox={} \
+                     working_directory={} state={}",
+                    placement_revision.value(),
+                    runner_sandbox_profile(*sandbox_profile),
+                    working_directory,
+                    runner_state_transition_state(*state),
+                )
+            }
             SessionEvent::ToolApprovalDecided {
                 turn_id,
                 tool_request_id,
@@ -2694,6 +2716,26 @@ fn model_call_state(state: ModelCallState) -> &'static str {
     }
 }
 
+const fn runner_sandbox_profile(profile: RunnerSandboxProfile) -> &'static str {
+    match profile {
+        RunnerSandboxProfile::Ambient => "ambient",
+        RunnerSandboxProfile::WorkspaceRestricted => "workspace_restricted",
+    }
+}
+
+const fn runner_state_transition_state(state: RunnerStateTransitionState) -> &'static str {
+    match state {
+        RunnerStateTransitionState::Pinned => "pinned",
+        RunnerStateTransitionState::Suspect => "suspect",
+        RunnerStateTransitionState::Connected => "connected",
+        RunnerStateTransitionState::RunnerLostBeforePin => "runner_lost_before_pin",
+        RunnerStateTransitionState::RunnerLost => "runner_lost",
+        RunnerStateTransitionState::Replaced => "replaced",
+        RunnerStateTransitionState::WorkingDirectoryChanged => "working_directory_changed",
+        RunnerStateTransitionState::Abandoned => "abandoned",
+    }
+}
+
 const fn current_model_call_state(state: CurrentModelCallState) -> &'static str {
     match state {
         CurrentModelCallState::Prepared {} => "prepared",
@@ -2982,9 +3024,10 @@ mod tests {
         ImportedTextPreview, InputContent, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
         ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ReviewDiffSide,
         ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
-        ReviewTargetSnapshot, ReviewTargetSubject, ServerMessage, SessionEvent,
-        ToolApprovalEventDecider, ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry,
-        TurnState, UsageProvenance,
+        ReviewTargetSnapshot, ReviewTargetSubject, RunnerSandboxProfile,
+        RunnerStateTransitionState, ServerMessage, SessionEvent, ToolApprovalEventDecider,
+        ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+        UsageProvenance,
     };
     use uuid::Uuid;
 
@@ -4352,6 +4395,22 @@ mod tests {
 
         expect![[r#"
             event=1 session=00000000-0000-0000-0000-000000000001 model_call_transition turn=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 state=cancellation_requested
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_renders_runner_working_directory_change() {
+        let rendered = render_event(SessionEvent::RunnerStateTransition {
+            runner_id: wire_uuid(2),
+            placement_revision: CanonicalU64::new(3),
+            sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: Some(String::from("workspace root\nproject")),
+            state: RunnerStateTransitionState::WorkingDirectoryChanged,
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted working_directory=workspace\u{20}root\u{a}project state=working_directory_changed
         "#]]
         .assert_eq(&rendered);
     }
