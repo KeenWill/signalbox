@@ -65,10 +65,20 @@ class Counter:
 
     count: int = 0
     covered: int = 0
+    # Whether the toolchain actually emitted this counter, everywhere it was
+    # summed. An omitted counter reads as zero, which is indistinguishable from
+    # one that measured nothing — and a *partly* omitted measure is worse
+    # still: summing one file that reports 10/10 functions with one that omits
+    # the counter leaves a nonzero total that looks like a whole measurement.
+    # A delta against that compares the current run to part of the baseline.
+    present: bool = True
 
     def add(self, other: "Counter") -> None:
         self.count += other.count
         self.covered += other.covered
+        # Absence is contagious across a sum: a measure is only wholly present
+        # when every file contributing to it reported it.
+        self.present = self.present and other.present
 
     @property
     def percent(self) -> float:
@@ -125,7 +135,7 @@ def read_counter(summary: dict, name: str) -> Counter:
     """
     block = summary.get(name)
     if not isinstance(block, dict):
-        return Counter()
+        return Counter(present=False)
     return Counter(count=int(block.get("count", 0)), covered=int(block.get("covered", 0)))
 
 
@@ -431,10 +441,19 @@ def measure_row(name: str, current: Counter, baseline: "Counter | None") -> str:
     50% as a fabricated `-50.00 pp` regression against a measure the baseline
     never made. A baseline that genuinely counted nothing is the same case:
     there is no share to compare against either way.
+
+    A *partly* emitted counter is the same defect wearing a nonzero total. If
+    one baseline file reports functions and another omits them, the sum is
+    nonzero and looks like a whole measurement, while it covers only the files
+    that happened to report it — so a delta against it compares this run to
+    part of the baseline. `Counter.present` carries that distinction through
+    the sum, and an incomplete measure gets no delta for the same reason an
+    absent one does not.
     """
     cells = [name, str(current.covered), str(current.count), percent(current)]
     if baseline is not None:
-        cells.append(delta(current, baseline) if baseline.count else "not in baseline")
+        comparable = baseline.count and baseline.present
+        cells.append(delta(current, baseline) if comparable else "not in baseline")
     return "| " + " | ".join(cells) + " |"
 
 

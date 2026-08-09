@@ -30,6 +30,7 @@ from summarize_coverage import (  # noqa: E402
     crate_of,
     least_covered_files,
     load_baseline,
+    measure_row,
     main,
     read_file_summaries,
     render,
@@ -638,7 +639,11 @@ class BaselineLoadingTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("No baseline to compare against", rendered.getvalue())
-        self.assertNotIn("-100.00 pp", rendered.getvalue())
+        # No percentage-point figure at all, rather than a specific one. The
+        # current export is 60% and the corrupt baseline reads as 200%, so
+        # removing the guard renders -140.00 pp — naming -100.00 pp here made
+        # the assertion pass whether or not the guard existed.
+        self.assertNotIn(" pp", rendered.getvalue())
 
     def test_a_fully_covered_baseline_is_still_accepted(self) -> None:
         """The guard: covered == count is the boundary, not an impossibility."""
@@ -688,6 +693,39 @@ class BaselineLoadingTests(unittest.TestCase):
 
         self.assertEqual(reason, "")
         self.assertIsNotNone(baseline)
+
+    def test_a_partly_measured_baseline_counter_gets_no_delta(self) -> None:
+        """A counter one baseline file reports and another omits sums to a
+        nonzero total that looks whole, while covering only the files that
+        happened to report it. A delta against that compares this run to part
+        of the baseline, so the row says so instead."""
+        baseline_document = export(
+            coverage_file("/repo/crates/domain/src/a.rs", lines=10, covered=10),
+            coverage_file("/repo/crates/domain/src/b.rs", lines=10, covered=10),
+        )
+        del baseline_document["data"][0]["files"][1]["summary"]["functions"]
+        summaries = [summary for _, summary in read_file_summaries(baseline_document)]
+        total = total_of(summaries)
+
+        row = measure_row("Functions", Counter(count=20, covered=10), total.functions)
+
+        self.assertIn("not in baseline", row)
+        self.assertNotIn(" pp", row)
+
+    def test_a_wholly_measured_baseline_counter_still_gets_its_delta(self) -> None:
+        """The guard: presence tracking must not start suppressing the deltas
+        the report exists to show."""
+        baseline_document = export(
+            coverage_file("/repo/crates/domain/src/a.rs", lines=10, covered=10),
+            coverage_file("/repo/crates/domain/src/b.rs", lines=10, covered=10),
+        )
+        summaries = [summary for _, summary in read_file_summaries(baseline_document)]
+        total = total_of(summaries)
+
+        row = measure_row("Functions", Counter(count=20, covered=10), total.functions)
+
+        self.assertIn(" pp", row)
+        self.assertNotIn("not in baseline", row)
 
     def test_a_missing_baseline_file_reports_a_reason(self) -> None:
         """An extraction that produced nothing leaves no file, and reading

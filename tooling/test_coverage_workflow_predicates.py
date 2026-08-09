@@ -1176,12 +1176,14 @@ def comment_payload_blocks() -> list[RunBlock]:
 #   that actually run, satisfy the exhaustiveness check; a program that lands
 #   covered by nothing else fails as though it were unregistered.
 #
-# The coverage-delta work on #484 owns both workflow files and adds seven
-# programs between them. All seven are registered here by role so the failure
-# that greets them names each one and what it needs. The two document
-# predicates arrive with the whole fixture table below already written and need
-# only promotion; the five baseline-selection filters need fixtures of their
-# own, which belong with the work that introduces them.
+# The coverage-delta work owns both workflow files and adds seven programs
+# between them. All seven have landed and are declared present, so deleting one
+# now fails this module rather than silently retiring its tests. The two
+# document predicates were promoted onto the fixture table that was already
+# written for them; the five baseline-selection filters arrived with fixtures of
+# their own, written alongside the work that introduced them — a candidate
+# ordering, an artifact lookup, and a test-step conclusion, each driven from one
+# table so a case cannot exist for the Rust copy and be missing for the native.
 PRESENT = "present"
 PENDING = "pending"
 
@@ -1215,6 +1217,11 @@ RUST_COMMENT_PAYLOAD = "rust-comment-payload"
 NATIVE_COMMENT_PAYLOAD = "native-comment-payload"
 RUST_STICKY_SELECTOR = "rust-sticky-selector"
 NATIVE_STICKY_SELECTOR = "native-sticky-selector"
+RUST_CANDIDATE_SELECTION = "rust-baseline-candidate-selection"
+NATIVE_CANDIDATE_SELECTION = "native-baseline-candidate-selection"
+RUST_ARTIFACT_LOOKUP = "rust-baseline-artifact-lookup"
+NATIVE_ARTIFACT_LOOKUP = "native-baseline-artifact-lookup"
+NATIVE_STEP_CONCLUSION = "native-test-step-conclusion"
 
 PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
     PredicateSpec(
@@ -1250,18 +1257,18 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
         tokens=("startswith", NATIVE_MARKER),
     ),
     PredicateSpec(
-        identifier="rust-baseline-candidate-selection",
-        exercised=False,
+        identifier=RUST_CANDIDATE_SELECTION,
+        exercised=True,
         workflow=COVERAGE_WORKFLOW.name,
-        presence=PENDING,
+        presence=PRESENT,
         role="orders the main-branch runs a baseline may be taken from",
         tokens=("workflow_runs", "@tsv"),
     ),
     PredicateSpec(
-        identifier="rust-baseline-artifact-lookup",
-        exercised=False,
+        identifier=RUST_ARTIFACT_LOOKUP,
+        exercised=True,
         workflow=COVERAGE_WORKFLOW.name,
-        presence=PENDING,
+        presence=PRESENT,
         role="finds the coverage artifact uploaded by one candidate run",
         tokens=(".artifacts[]",),
     ),
@@ -1269,31 +1276,31 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
         identifier=RUST_DOCUMENT_PREDICATE,
         exercised=True,
         workflow=COVERAGE_WORKFLOW.name,
-        presence=PENDING,
+        presence=PRESENT,
         role="decides whether a baseline llvm-cov export is one the summarizer can read",
         tokens=("llvm.coverage.json.export",),
     ),
     PredicateSpec(
-        identifier="native-baseline-candidate-selection",
-        exercised=False,
+        identifier=NATIVE_CANDIDATE_SELECTION,
+        exercised=True,
         workflow=SWIFT_WORKFLOW.name,
-        presence=PENDING,
+        presence=PRESENT,
         role="orders the main-branch runs a baseline may be taken from",
         tokens=("workflow_runs", "@tsv"),
     ),
     PredicateSpec(
-        identifier="native-baseline-artifact-lookup",
-        exercised=False,
+        identifier=NATIVE_ARTIFACT_LOOKUP,
+        exercised=True,
         workflow=SWIFT_WORKFLOW.name,
-        presence=PENDING,
+        presence=PRESENT,
         role="finds the coverage artifact uploaded by one candidate run",
         tokens=(".artifacts[]",),
     ),
     PredicateSpec(
-        identifier="native-test-step-conclusion",
-        exercised=False,
+        identifier=NATIVE_STEP_CONCLUSION,
+        exercised=True,
         workflow=SWIFT_WORKFLOW.name,
-        presence=PENDING,
+        presence=PRESENT,
         role="judges whether a candidate run finished the tests its measurement rests on",
         tokens=(".jobs[]", "run_attempt"),
     ),
@@ -1301,7 +1308,7 @@ PREDICATE_SPECS: tuple[PredicateSpec, ...] = (
         identifier=NATIVE_DOCUMENT_PREDICATE,
         exercised=True,
         workflow=SWIFT_WORKFLOW.name,
-        presence=PENDING,
+        presence=PRESENT,
         role="decides whether a baseline xccov report is one the summarizer can read",
         tokens=(".targets",),
     ),
@@ -2538,6 +2545,343 @@ def predicate_errors_on_readable_documents(
     return errors
 
 
+# The names the workflows give these filters at run time. Passed explicitly
+# rather than through `replayed_arguments`, which substitutes a `<NAME>`
+# placeholder for a shell variable it has no synthetic value for: `--argjson
+# exact "<exact>"` is not JSON and jq would exit before deciding anything, so a
+# fixture built on the placeholder would prove only that jq rejects it.
+RUST_ARTIFACT_NAME = "rust-coverage"
+NATIVE_ARTIFACT_NAME = "native-coverage"
+NATIVE_TEST_STEP = "Run native unit-test bundles"
+
+
+def workflow_run(identifier: int, head_sha: str, created_at: str) -> dict:
+    """One entry of the runs listing the candidate filter orders."""
+    return {"id": identifier, "head_sha": head_sha, "created_at": created_at}
+
+
+def runs_page(*runs: dict) -> dict:
+    """One page of the workflow-runs listing, as the API returns it."""
+    return {"workflow_runs": list(runs)}
+
+
+def artifacts_page(*artifacts: dict) -> dict:
+    """One page of the artifacts listing for a single run."""
+    return {"artifacts": list(artifacts)}
+
+
+def uploaded_artifact(name: str, identifier: int, expired: bool) -> dict:
+    """One artifact entry, carrying the three fields the lookup emits."""
+    return {
+        "name": name,
+        "id": identifier,
+        "expired": expired,
+        "created_at": "2026-08-01T00:00:00Z",
+    }
+
+
+def ran_step(name: str, conclusion: str) -> dict:
+    return {"name": name, "conclusion": conclusion}
+
+
+def attempted_job(attempt: "int | None", *steps: dict) -> dict:
+    """One job record. `attempt` is None for a record predating the field."""
+    job: dict = {"name": "swift-validate", "steps": list(steps)}
+    if attempt is not None:
+        job["run_attempt"] = attempt
+    return job
+
+
+def jobs_page(*jobs: dict) -> dict:
+    return {"jobs": list(jobs)}
+
+
+@dataclass(frozen=True)
+class CandidateCase:
+    """One runs listing the candidate filter must order a named way."""
+
+    name: str
+    exact: dict
+    runs: dict
+    cap: int
+    expected: tuple[str, ...]
+
+
+def tsv(label: str, identifier: int, head_sha: str, created_at: str) -> str:
+    return "\t".join((label, str(identifier), head_sha, created_at))
+
+
+RECENT_RUNS = (
+    workflow_run(901, "aaaaaaa", "2026-08-01T00:00:00Z"),
+    workflow_run(902, "bbbbbbb", "2026-07-01T00:00:00Z"),
+    workflow_run(903, "ccccccc", "2026-06-01T00:00:00Z"),
+)
+BASE_RUN = workflow_run(500, "basesha", "2026-01-01T00:00:00Z")
+
+# One table for both copies: the two filters are the same program in two
+# workflows, so a case that exists for one and not the other would be exactly
+# the gap this module was built to refuse.
+CANDIDATE_CASES: tuple[CandidateCase, ...] = (
+    CandidateCase(
+        name="the base run is older than every recent run",
+        exact=runs_page(BASE_RUN),
+        runs=runs_page(*RECENT_RUNS),
+        cap=10,
+        expected=(
+            tsv("base", 500, "basesha", "2026-01-01T00:00:00Z"),
+            tsv("latest-main", 901, "aaaaaaa", "2026-08-01T00:00:00Z"),
+            tsv("latest-main", 902, "bbbbbbb", "2026-07-01T00:00:00Z"),
+            tsv("latest-main", 903, "ccccccc", "2026-06-01T00:00:00Z"),
+        ),
+    ),
+    CandidateCase(
+        name="no run measured the base commit",
+        exact=runs_page(),
+        runs=runs_page(*RECENT_RUNS),
+        cap=2,
+        expected=(
+            tsv("latest-main", 901, "aaaaaaa", "2026-08-01T00:00:00Z"),
+            tsv("latest-main", 902, "bbbbbbb", "2026-07-01T00:00:00Z"),
+        ),
+    ),
+    CandidateCase(
+        name="the base run is also among the recent runs",
+        exact=runs_page(RECENT_RUNS[0]),
+        runs=runs_page(*RECENT_RUNS[:2]),
+        cap=10,
+        expected=(
+            tsv("base", 901, "aaaaaaa", "2026-08-01T00:00:00Z"),
+            tsv("latest-main", 902, "bbbbbbb", "2026-07-01T00:00:00Z"),
+        ),
+    ),
+    CandidateCase(
+        name="the base takes one of the cap's slots rather than sitting outside it",
+        exact=runs_page(BASE_RUN),
+        runs=runs_page(*RECENT_RUNS),
+        cap=3,
+        expected=(
+            tsv("base", 500, "basesha", "2026-01-01T00:00:00Z"),
+            tsv("latest-main", 901, "aaaaaaa", "2026-08-01T00:00:00Z"),
+            tsv("latest-main", 902, "bbbbbbb", "2026-07-01T00:00:00Z"),
+        ),
+    ),
+)
+
+
+def candidate_selection_failures(identifier: str) -> list[str]:
+    """Every case the candidate filter orders wrongly, outside test bodies.
+
+    The label is checked as well as the ordering, because it is what the
+    rendered comment says the delta is attributable to: a run promoted to
+    `base` that did not measure the base commit is a false attribution, not a
+    cosmetic mislabel.
+    """
+    program = one_program_for(identifier)
+    problems: list[str] = []
+    for case in CANDIDATE_CASES:
+        result = run_jq(
+            program,
+            json.dumps(case.runs),
+            "-r",
+            "--argjson",
+            "exact",
+            json.dumps(case.exact),
+            "--argjson",
+            "cap",
+            str(case.cap),
+        )
+        if result.status != 0:
+            problems.append(
+                f"{identifier} on {case.name!r} exited {result.status}, which ends the "
+                f"scan instead of choosing a baseline: {result.stderr.strip()}"
+            )
+            continue
+        emitted = tuple(line for line in result.stdout.splitlines() if line.strip())
+        if emitted != case.expected:
+            problems.append(
+                f"{identifier} on {case.name!r} emitted {emitted} but must emit "
+                f"{case.expected}"
+            )
+    return problems
+
+
+@dataclass(frozen=True)
+class ArtifactCase:
+    """One artifacts listing the lookup must reduce to one line, or to nothing."""
+
+    name: str
+    page: dict
+    expected: str
+
+
+ARTIFACT_CASES: tuple[ArtifactCase, ...] = (
+    ArtifactCase(
+        name="the run uploaded the artifact",
+        page=artifacts_page(uploaded_artifact("<NAME>", 4242, False)),
+        expected="4242\tfalse\t2026-08-01T00:00:00Z",
+    ),
+    ArtifactCase(
+        name="the artifact has passed its retention",
+        page=artifacts_page(uploaded_artifact("<NAME>", 4243, True)),
+        expected="4243\ttrue\t2026-08-01T00:00:00Z",
+    ),
+    ArtifactCase(
+        name="the run uploaded artifacts, none of them this one",
+        page=artifacts_page(uploaded_artifact("something-else", 1, False)),
+        expected="",
+    ),
+    ArtifactCase(
+        name="the run uploaded nothing at all",
+        page=artifacts_page(),
+        expected="",
+    ),
+    ArtifactCase(
+        name="two uploads carry the wanted name",
+        # `first`, not `last`: the filter has to commit to one of them, and the
+        # rest of the step reads the id, the expiry and the date as one record.
+        # Without a case where the two differ, swapping `first` for `last`
+        # changes which artifact is downloaded and no fixture notices.
+        page=artifacts_page(
+            uploaded_artifact("<NAME>", 4245, False),
+            uploaded_artifact("<NAME>", 4246, True),
+        ),
+        expected="4245\tfalse\t2026-08-01T00:00:00Z",
+    ),
+    ArtifactCase(
+        name="the wanted artifact sits beside others",
+        page=artifacts_page(
+            uploaded_artifact("something-else", 1, False),
+            uploaded_artifact("<NAME>", 4244, False),
+            uploaded_artifact("another-thing", 2, False),
+        ),
+        expected="4244\tfalse\t2026-08-01T00:00:00Z",
+    ),
+)
+
+
+def artifact_lookup_failures(identifier: str, artifact_name: str) -> list[str]:
+    """Every artifacts listing the lookup reduces wrongly, outside test bodies.
+
+    An empty line is a real answer here — "this run uploaded no such artifact",
+    which the scan reads as a reason to try an older candidate — so it is
+    checked as carefully as a found one.
+    """
+    program = one_program_for(identifier)
+    problems: list[str] = []
+    for case in ARTIFACT_CASES:
+        page = json.dumps(case.page).replace("<NAME>", artifact_name)
+        result = run_jq(program, page, "-r", "--arg", "name", artifact_name)
+        if result.status != 0:
+            problems.append(
+                f"{identifier} on {case.name!r} exited {result.status} instead of "
+                f"answering: {result.stderr.strip()}"
+            )
+            continue
+        if result.stdout.strip() != case.expected.strip():
+            problems.append(
+                f"{identifier} on {case.name!r} emitted {result.stdout.strip()!r} but "
+                f"must emit {case.expected.strip()!r}"
+            )
+    return problems
+
+
+@dataclass(frozen=True)
+class StepConclusionCase:
+    """One jobs listing, and the one word the filter must reduce it to."""
+
+    name: str
+    page: dict
+    expected: str
+
+
+STEP_CONCLUSION_CASES: tuple[StepConclusionCase, ...] = (
+    StepConclusionCase(
+        name="one attempt, the step succeeded",
+        page=jobs_page(attempted_job(1, ran_step("<STEP>", "success"))),
+        expected="yes",
+    ),
+    StepConclusionCase(
+        name="one attempt, the step failed",
+        page=jobs_page(attempted_job(1, ran_step("<STEP>", "failure"))),
+        expected="no",
+    ),
+    StepConclusionCase(
+        name="no job ran a step of that name",
+        page=jobs_page(attempted_job(1, ran_step("Something else", "success"))),
+        expected="missing",
+    ),
+    StepConclusionCase(
+        name="only the failed jobs were re-run, so the later attempt omits this step",
+        page=jobs_page(
+            attempted_job(1, ran_step("<STEP>", "success")),
+            attempted_job(2, ran_step("Something else", "success")),
+        ),
+        expected="yes",
+    ),
+    StepConclusionCase(
+        name="the step was re-run and passed the second time",
+        page=jobs_page(
+            attempted_job(1, ran_step("<STEP>", "failure")),
+            attempted_job(2, ran_step("<STEP>", "success")),
+        ),
+        expected="yes",
+    ),
+    StepConclusionCase(
+        name="the step was re-run and failed the second time",
+        page=jobs_page(
+            attempted_job(1, ran_step("<STEP>", "success")),
+            attempted_job(2, ran_step("<STEP>", "failure")),
+        ),
+        expected="no",
+    ),
+    StepConclusionCase(
+        name="two jobs of one attempt ran the step and one failed",
+        page=jobs_page(
+            attempted_job(1, ran_step("<STEP>", "success")),
+            attempted_job(1, ran_step("<STEP>", "failure")),
+        ),
+        expected="no",
+    ),
+    StepConclusionCase(
+        name="a job record predating the run_attempt field",
+        page=jobs_page(attempted_job(None, ran_step("<STEP>", "success"))),
+        expected="yes",
+    ),
+    StepConclusionCase(
+        name="the run listed no jobs",
+        page=jobs_page(),
+        expected="missing",
+    ),
+)
+
+
+def step_conclusion_failures(identifier: str, step_name: str) -> list[str]:
+    """Every jobs listing the step filter judges wrongly, outside test bodies.
+
+    `missing` is deliberately distinct from `no`: a run whose step never
+    existed predates the step's current name and says nothing about whether the
+    tests ran, while `no` is a run that tried and failed. Collapsing them would
+    make a renamed step read as a broken one.
+    """
+    program = one_program_for(identifier)
+    problems: list[str] = []
+    for case in STEP_CONCLUSION_CASES:
+        page = json.dumps(case.page).replace("<STEP>", step_name)
+        result = run_jq(program, page, "-r", "--arg", "step", step_name)
+        if result.status != 0:
+            problems.append(
+                f"{identifier} on {case.name!r} exited {result.status} instead of "
+                f"judging: {result.stderr.strip()}"
+            )
+            continue
+        if result.stdout.strip() != case.expected:
+            problems.append(
+                f"{identifier} on {case.name!r} judged {result.stdout.strip()!r} but "
+                f"must judge {case.expected!r}"
+            )
+    return problems
+
+
 class JqBackedTestCase(unittest.TestCase):
     """Base for tests that execute the real jq binary.
 
@@ -3317,6 +3661,46 @@ class JqNumericContractTests(JqBackedTestCase):
 
         self.assertTrue(result.errored)
         self.assertIn("endswith", result.stderr)
+
+
+# ---------------------------------------------------------------------------
+# The baseline-selection filters
+# ---------------------------------------------------------------------------
+
+
+class BaselineSelectionTests(JqBackedTestCase):
+    """The three filters that choose which measurement a delta is taken against.
+
+    These decide nothing about a document's shape, so the recorded-document
+    table above cannot speak for them: they pick a run, find its artifact, and
+    judge whether that run finished its tests. A wrong answer here does not
+    produce an unreadable baseline — it produces a readable one that measures
+    the wrong commit, which is the failure no downstream check can see.
+
+    Both copies of each paired filter are driven from one table, so a case
+    cannot exist for the Rust workflow and be missing for the native.
+    """
+
+    def test_the_rust_candidate_filter_orders_every_listing(self) -> None:
+        self.assertEqual(candidate_selection_failures(RUST_CANDIDATE_SELECTION), [])
+
+    def test_the_native_candidate_filter_orders_every_listing(self) -> None:
+        self.assertEqual(candidate_selection_failures(NATIVE_CANDIDATE_SELECTION), [])
+
+    def test_the_rust_artifact_lookup_reduces_every_listing(self) -> None:
+        self.assertEqual(
+            artifact_lookup_failures(RUST_ARTIFACT_LOOKUP, RUST_ARTIFACT_NAME), []
+        )
+
+    def test_the_native_artifact_lookup_reduces_every_listing(self) -> None:
+        self.assertEqual(
+            artifact_lookup_failures(NATIVE_ARTIFACT_LOOKUP, NATIVE_ARTIFACT_NAME), []
+        )
+
+    def test_the_native_step_filter_judges_every_jobs_listing(self) -> None:
+        self.assertEqual(
+            step_conclusion_failures(NATIVE_STEP_CONCLUSION, NATIVE_TEST_STEP), []
+        )
 
 
 if __name__ == "__main__":
