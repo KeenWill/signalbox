@@ -260,6 +260,8 @@ const SYNTHETIC_COMPLETION_REPORT: &str = "Completed the requested operation.";
 const SYNTHETIC_FAILURE_REPORT: &str = "Failed to complete the requested operation.";
 const SYNTHETIC_CONTRACTED_FAILURE_REPORT: &str = "The operation wasn't completed.";
 const SYNTHETIC_NEVER_COMPLETION_REPORT: &str = "Never completed the requested operation.";
+const SYNTHETIC_DEFERRED_COMPLETION_REPORT: &str =
+    "The requested operation has yet to be completed.";
 const SYNTHETIC_NO_ERRORS_COMPLETION_REPORT: &str =
     "Completed the requested operation with no errors.";
 const SYNTHETIC_WITHOUT_FAILURE_COMPLETION_REPORT: &str =
@@ -668,6 +670,7 @@ enum GitMetadataEntryKind {
 struct GitMetadataEntrySnapshot {
     kind: GitMetadataEntryKind,
     mode: Option<u32>,
+    links: Option<u64>,
 }
 
 type GitReferenceInventory = BTreeMap<Vec<u8>, GitReferenceTarget>;
@@ -1625,6 +1628,25 @@ fn workspace_forced_case_passed(
     arguments: &serde_json::Value,
     result: &serde_json::Value,
 ) -> EvalResult<bool> {
+    let expected_fields: &[&str] = match name {
+        APPLY_PATCH_NAME => &["operations_applied", EVAL_RECEIPT_FIELD],
+        EDIT_FILE_NAME => &["path", "replacements", "bytes_written", EVAL_RECEIPT_FIELD],
+        WRITE_FILE_NAME => &["path", "bytes_written", "created", EVAL_RECEIPT_FIELD],
+        READ_FILE_NAME => &[
+            "path",
+            "content",
+            "bytes_read",
+            "total_bytes",
+            "truncated",
+            EVAL_RECEIPT_FIELD,
+        ],
+        LIST_DIRECTORY_NAME => &["entries", "truncated", EVAL_RECEIPT_FIELD],
+        GLOB_FILES_NAME | SEARCH_FILES_NAME => &["matches", "truncated", EVAL_RECEIPT_FIELD],
+        _ => return Ok(false),
+    };
+    if !json_object_has_exact_fields(result, expected_fields) {
+        return Ok(false);
+    }
     let passed = match name {
         APPLY_PATCH_NAME => {
             result["operations_applied"] == 1
@@ -1733,6 +1755,17 @@ fn workspace_forced_case_passed(
             result["matches"].as_array().is_some_and(|matches| {
                 matches.as_slice().first().is_some_and(|matched| {
                     matches.len() == 1
+                        && json_object_has_exact_fields(
+                            matched,
+                            &[
+                                "path",
+                                "line",
+                                "column",
+                                "text_start_column",
+                                "text",
+                                "line_truncated",
+                            ],
+                        )
                         && matched["path"] == WORKSPACE_SEARCH_PATH
                         && matched["line"] == line_index + 1
                         && matched["column"] == column
@@ -1787,7 +1820,12 @@ fn result_entries_equal(value: &serde_json::Value, expected: &[(String, &'static
         entries.len() == expected.len()
             && entries
                 .iter()
-                .filter_map(|entry| Some((entry["path"].as_str()?, entry["kind"].as_str()?)))
+                .filter_map(|entry| {
+                    if !json_object_has_exact_fields(entry, &["path", "kind"]) {
+                        return None;
+                    }
+                    Some((entry["path"].as_str()?, entry["kind"].as_str()?))
+                })
                 .eq(expected.iter().map(|(path, kind)| (path.as_str(), *kind)))
     })
 }
@@ -2351,9 +2389,14 @@ fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetada
         } else {
             worktree_mode(&entry.path())?
         };
+        let links = if kind == GitMetadataEntryKind::File {
+            worktree_link_count(&entry.path())?
+        } else {
+            None
+        };
         entries.insert(
             PathBuf::from(entry.file_name()),
-            GitMetadataEntrySnapshot { kind, mode },
+            GitMetadataEntrySnapshot { kind, mode, links },
         );
     }
     Ok(entries)
@@ -3486,6 +3529,14 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
         "written",
         "wrote",
     ];
+    let deferred_completion = words.windows(3).any(|claim| {
+        claim[0] == "yet" && claim[1] == "to" && negative_outcomes.contains(&claim[2].as_str())
+    }) || words.windows(4).any(|claim| {
+        claim[0] == "yet"
+            && claim[1] == "to"
+            && claim[2] == "be"
+            && negative_outcomes.contains(&claim[3].as_str())
+    });
     let scoped_negation = report
         .split([';', '.', ',', '!', '?', '\n'])
         .map(normalized_report_words)
@@ -3529,6 +3580,7 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
         || negative_no_claim
         || negative_no_file_claim
         || negative_nothing_claim
+        || deferred_completion
         || scoped_negation
 }
 
@@ -3678,6 +3730,18 @@ fn final_response_report_rejects_never_completed() {
         &synthetic_result_with_receipt(),
     );
     tracker.observe_response_text(SYNTHETIC_NEVER_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_deferred_completion() {
+    let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &synthetic_result_with_receipt(),
+    );
+    tracker.observe_response_text(SYNTHETIC_DEFERRED_COMPLETION_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
 }
@@ -4241,7 +4305,17 @@ fn workspace_natural_read_result_passed(
     let Ok(result) = serde_json::from_str::<serde_json::Value>(&content) else {
         return false;
     };
-    result["path"] == WORKSPACE_SEED_PATH
+    json_object_has_exact_fields(
+        &result,
+        &[
+            "path",
+            "content",
+            "bytes_read",
+            "total_bytes",
+            "truncated",
+            EVAL_RECEIPT_FIELD,
+        ],
+    ) && result["path"] == WORKSPACE_SEED_PATH
         && result["content"] == WORKSPACE_SEED
         && result["bytes_read"] == WORKSPACE_SEED.len()
         && result["total_bytes"] == WORKSPACE_SEED.len()
@@ -4271,7 +4345,10 @@ fn workspace_natural_write_result_passed(
     let Ok(result) = serde_json::from_str::<serde_json::Value>(&content) else {
         return false;
     };
-    result["path"] == WORKSPACE_ANSWER_PATH
+    json_object_has_exact_fields(
+        &result,
+        &["path", "bytes_written", "created", EVAL_RECEIPT_FIELD],
+    ) && result["path"] == WORKSPACE_ANSWER_PATH
         && result["bytes_written"] == WORKSPACE_ANSWER.len()
         && result["created"] == true
 }
@@ -7047,6 +7124,40 @@ fn forced_git_status_verifier_rejects_top_level_metadata_file_mode_drift() -> Ev
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn forced_git_status_verifier_rejects_a_top_level_metadata_hard_link() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STATUS_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let external = tempfile::tempdir()?;
+    let head = Repository::open(suite.workspace.path())?
+        .path()
+        .join("HEAD");
+    let alias = external.path().join("head-alias");
+    fs::write(&alias, fs::read(&head)?)?;
+    fs::remove_file(&head)?;
+    fs::hard_link(&alias, &head)?;
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": git_status_entries_json(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
 #[test]
 fn forced_git_status_verifier_rejects_incorrect_entry_metadata() -> EvalResult {
     let suite = FamilySuite::git()?;
@@ -7566,6 +7677,31 @@ fn forced_workspace_read_verifier_rejects_an_unbounded_result() -> EvalResult {
 }
 
 #[test]
+fn forced_workspace_read_verifier_rejects_an_unknown_result_field() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == READ_FILE_NAME)
+        .expect("the workspace read fixture exists");
+    let prefix = WORKSPACE_SEED
+        .get(..WORKSPACE_FORCED_READ_MAX_BYTES)
+        .expect("the seeded workspace fixture covers the forced bound");
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "content": prefix,
+        "bytes_read": prefix.len(),
+        "total_bytes": WORKSPACE_SEED.len(),
+        "truncated": true,
+        "error": "synthetic contradictory field",
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_workspace_read_verifier_rejects_a_mutated_fixture() -> EvalResult {
     let suite = FamilySuite::workspace()?;
     let case = WORKSPACE_CASES
@@ -7706,6 +7842,26 @@ fn forced_workspace_listing_verifiers_reject_the_wrong_entry_kind() -> EvalResul
 
     assert!(!suite.forced_case_result_passed(list, &list_result)?);
     assert!(!suite.forced_case_result_passed(glob, &glob_result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_list_verifier_rejects_an_unknown_entry_field() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == LIST_DIRECTORY_NAME)
+        .expect("the workspace list fixture exists");
+    let mut entries = workspace_listing_json(expected_workspace_listing());
+    entries[0]["error"] = serde_json::json!("synthetic contradictory field");
+    let result = serde_json::json!({
+        "entries": entries,
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
@@ -8430,6 +8586,27 @@ fn workspace_natural_execution_accepts_the_exact_full_read_result() {
 }
 
 #[test]
+fn workspace_natural_execution_rejects_an_unknown_read_result_field() {
+    let snapshot = successful_workspace_natural_snapshot();
+    let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &serde_json::json!({
+            "path": WORKSPACE_SEED_PATH,
+            "content": WORKSPACE_SEED,
+            "bytes_read": WORKSPACE_SEED.len(),
+            "total_bytes": WORKSPACE_SEED.len(),
+            "truncated": false,
+            "error": "synthetic contradictory field",
+            EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+        })
+        .to_string(),
+    );
+
+    assert!(!workspace_natural_read_result_passed(&snapshot, &tracker));
+}
+
+#[test]
 fn workspace_natural_execution_accepts_exact_read_and_write_results() {
     let snapshot = successful_workspace_natural_snapshot();
     let tracker = OperationTracker::default();
@@ -8456,6 +8633,25 @@ fn workspace_natural_execution_rejects_inaccurate_write_evidence() {
     assert!(!workspace_natural_result_payloads_passed(
         &snapshot, &tracker
     ));
+}
+
+#[test]
+fn workspace_natural_execution_rejects_an_unknown_write_result_field() {
+    let snapshot = successful_workspace_natural_snapshot();
+    let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+        &serde_json::json!({
+            "path": WORKSPACE_ANSWER_PATH,
+            "bytes_written": WORKSPACE_ANSWER.len(),
+            "created": true,
+            "error": "synthetic contradictory field",
+            EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+        })
+        .to_string(),
+    );
+
+    assert!(!workspace_natural_write_result_passed(&snapshot, &tracker));
 }
 
 #[test]
