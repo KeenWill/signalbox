@@ -744,6 +744,12 @@ GH_TOKEN = re.compile(r"gh(?![-\w])")
 # comment beside the one it meant to rewrite.
 PAGINATION_FLAG = "--paginate"
 REQUEST_BODY_FLAG = "--input"
+REQUEST_METHOD_FLAG = "-X"
+# The two branches a publishing step takes: rewrite the existing comment, or
+# create the first one. Both must send the payload; only one runs per run.
+BODY_CARRYING_METHODS = ("PATCH", "POST")
+# The shell reduction that keeps only the first id the selector emitted.
+FIRST_LINE_REDUCTION = re.compile(r"%%\$'\\n'\*")
 
 
 def gh_api_commands(script: str) -> list[list[str]]:
@@ -801,13 +807,19 @@ def unpaginated_selectors() -> list[str]:
 
 
 def payload_handoff_problems() -> list[str]:
-    """Payload files written somewhere the API request does not read from.
+    """Body-carrying requests that do not read the payload the workflow wrote.
 
     Runs outside test bodies. The workflow writes the payload by redirecting jq
     into a file and then hands that file to `gh api --input`. Nothing connects
     the two but the name, so a redirection that lost its target, or an
     `--input` naming something else, leaves the request with no body while jq
-    still exits zero and this module still sees a well-formed payload.
+    still exits zero and a well-formed payload still exists here.
+
+    Every request is checked, not the set of them. There are two — the PATCH
+    that rewrites an existing comment and the POST that creates the first one —
+    and asking only whether some request uses the payload passes a workflow
+    whose POST branch does not. That branch runs on every pull request that has
+    no coverage comment yet, which is every pull request exactly once.
     """
     problems: list[str] = []
     for identifier, workflow in (
@@ -825,18 +837,129 @@ def payload_handoff_problems() -> list[str]:
                     "file, so nothing writes the body the API request reads"
                 )
                 continue
-            read_back = [
-                words[words.index(REQUEST_BODY_FLAG) + 1]
+            requests = [
+                words
                 for words in gh_api_commands(block.script)
-                if REQUEST_BODY_FLAG in words
-                and words.index(REQUEST_BODY_FLAG) + 1 < len(words)
+                if REQUEST_METHOD_FLAG in words
+                and words.index(REQUEST_METHOD_FLAG) + 1 < len(words)
+                and words[words.index(REQUEST_METHOD_FLAG) + 1] in BODY_CARRYING_METHODS
             ]
-            if written not in read_back:
+            if len(requests) < len(BODY_CARRYING_METHODS):
                 problems.append(
-                    f"{workflow.name}: the payload is written to {written!r} but the request "
-                    f"reads {read_back!r}, so the comment would be posted with no body"
+                    f"{workflow.name}: expected a request per branch "
+                    f"({', '.join(BODY_CARRYING_METHODS)}), found {len(requests)}"
+                )
+            problems.extend(
+                f"{workflow.name}: the {words[words.index(REQUEST_METHOD_FLAG) + 1]} request "
+                f"does not send {written!r}, so that branch posts no body"
+                for words in requests
+                if REQUEST_BODY_FLAG not in words
+                or words.index(REQUEST_BODY_FLAG) + 1 >= len(words)
+                or words[words.index(REQUEST_BODY_FLAG) + 1] != written
+            )
+    return problems
+
+
+def unpinned_selector_consumers() -> list[str]:
+    """Publishing steps that do not reduce the selector output to one line.
+
+    Runs outside test bodies. The selectors emit one id per matching comment,
+    and the shell keeps only the first before building the PATCH endpoint. That
+    reduction is the reason emitting several ids is safe, and nothing in the
+    filter states it, so a step that started consuming the whole value would
+    send a multiline comment id and update nothing while every filter check
+    stayed green.
+    """
+    return [
+        f"{workflow.name}: no step reduces the selector output to its first line, so a "
+        "duplicate marker comment would make the request carry several ids at once"
+        for workflow in SELECTOR_WORKFLOWS.values()
+        if not any(
+            FIRST_LINE_REDUCTION.search(block.script) for block in read_run_blocks(workflow)
+        )
+    ]
+
+
+def report_producer_path_problems() -> list[str]:
+    """Report producers that write their comment away from the report they upload.
+
+    Runs outside test bodies. The publishing job reads the comment out of the
+    artifact the measuring job uploads, and that artifact is a directory. A
+    producer keeping the `comment.md` name while redirecting somewhere else is
+    still a producer by every other check here, but the file leaves the
+    uploaded directory and the publishing job falls back to reporting that the
+    run measured nothing.
+    """
+    problems: list[str] = []
+    for workflow in (COVERAGE_WORKFLOW, SWIFT_WORKFLOW):
+        marker = emitted_marker(workflow)
+        for block in read_run_blocks(workflow):
+            group = marker_emitting_group(block.script, marker)
+            if group is None or REPORT_FILE not in group:
+                continue
+            written = marker_group_output(block.script, marker)
+            report = report_path_in(group)
+            if written is None or report is None:
+                problems.append(
+                    f"{workflow.name}/{block.job}: could not read where the comment or the "
+                    "report is written, so nothing checks they land together"
+                )
+                continue
+            if written.rsplit("/", 1)[0] != report.rsplit("/", 1)[0]:
+                problems.append(
+                    f"{workflow.name}/{block.job}: the comment is written to {written!r} but "
+                    f"the report it wraps is at {report!r}; only the report's directory is "
+                    "uploaded, so the publishing job would find no comment"
                 )
     return problems
+
+
+def report_path_in(group: str) -> str | None:
+    """The report file a producer group splices in, outside test bodies."""
+    for emission_words in shell_command_words(group):
+        if emission_words and emission_words[0] == "cat":
+            for word in emission_words[1:]:
+                if REPORT_FILE in word:
+                    return word
+    return None
+
+
+def shell_command_words(group: str) -> list[list[str]]:
+    """Every command in a brace group, as words, outside test bodies."""
+    commands: list[list[str]] = []
+    index, length = 0, len(group)
+    while index < length:
+        while index < length and group[index] in " \t\n;":
+            index += 1
+        if index >= length:
+            break
+        if group[index] == "#":
+            newline = group.find("\n", index)
+            index = length if newline < 0 else newline
+            continue
+        words, following = read_command_words(group, index)
+        if words:
+            commands.append(words)
+        index = following + 1 if following > index else index + 1
+    return commands
+
+
+def marker_group_output(script: str, marker: str) -> str | None:
+    """The file a producer's brace group is redirected into, outside test bodies."""
+    lines = script.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "{":
+            start = index
+        elif stripped.startswith("}") and start is not None:
+            if marker in "\n".join(lines[start + 1 : index]):
+                if ">" not in stripped:
+                    return None
+                target, kind, _ = read_shell_word(stripped, stripped.index(">") + 1)
+                return None if kind == "end-of-command" else substitute_shell_variables(target)
+            start = None
+    return None
 
 
 def redirect_target_after(script: str, program: str) -> str | None:
@@ -2005,6 +2128,11 @@ def selector_cases(identifier: str) -> list[SelectorCase]:
             expected=(),
         ),
         SelectorCase(
+            name="a pull request with no comments yet",
+            page=comments_page(),
+            expected=(),
+        ),
+        SelectorCase(
             name="an ordinary comment from a person",
             page=comments_page({"id": FOREIGN_COMMENT_ID, "body": "an ordinary review comment"}),
             expected=(),
@@ -2095,7 +2223,9 @@ def selectors_not_stopped_by_a_bodyless_comment() -> list[str]:
     ]
 
 
-def replayed_arguments(extracted: ExtractedProgram, body_path: Path) -> tuple[str, ...]:
+def replayed_arguments(
+    extracted: ExtractedProgram, body_path: Path | None = None
+) -> tuple[str, ...]:
     """The workflow's own jq arguments, with only its body file redirected.
 
     Runs outside test bodies. Every option the workflow passes is replayed
@@ -2118,7 +2248,7 @@ def replayed_arguments(extracted: ExtractedProgram, body_path: Path) -> tuple[st
             name = arguments[index + 1][0]
             value_text, value_kind = arguments[index + 2]
             replayed.extend([text, name])
-            if text in JQ_OPTIONS_TAKING_A_FILE:
+            if text in JQ_OPTIONS_TAKING_A_FILE and body_path is not None:
                 replayed.append(str(body_path))
             elif value_kind == "shell-expansion":
                 replayed.append(substitute_shell_variables(value_text))
@@ -2207,7 +2337,11 @@ def predicate_disagreements(
     disagreements: list[str] = []
     for program in landed:
         for recorded in documents:
-            result = run_jq(program.program, json.dumps(recorded.document), "-e")
+            result = run_jq(
+                program.program,
+                json.dumps(recorded.document),
+                *replayed_arguments(program),
+            )
             if result.errored:
                 disagreements.append(
                     f"{recorded.name}: the predicate errored instead of deciding "
@@ -2238,7 +2372,11 @@ def predicate_errors_on_readable_documents(
         for recorded in documents:
             if not recorded.loader_reads:
                 continue
-            result = run_jq(program.program, json.dumps(recorded.document), "-e")
+            result = run_jq(
+                program.program,
+                json.dumps(recorded.document),
+                *replayed_arguments(program),
+            )
             if result.errored:
                 errors.append(f"{recorded.name}: {result.stderr.strip()}")
     return errors
@@ -2496,6 +2634,30 @@ class WorkflowReadingTests(unittest.TestCase):
         while jq still exits zero and a well-formed payload still exists
         here."""
         self.assertEqual(payload_handoff_problems(), [])
+
+    def test_both_publishing_branches_send_the_payload(self) -> None:
+        """A run either rewrites the existing comment or creates the first one,
+        and only one branch executes per run. Asking whether some request sends
+        the payload passes a workflow whose POST branch does not — and that
+        branch runs on every pull request exactly once, the first time it gets
+        a coverage comment at all."""
+        self.assertEqual(payload_handoff_problems(), [])
+
+    def test_the_selector_output_is_reduced_to_one_line(self) -> None:
+        """The selectors emit one id per matching comment, and emitting several
+        is only safe because the shell keeps the first before building the
+        PATCH endpoint. Nothing in the filter says so, so a step that started
+        consuming the whole value would send several ids as one identifier and
+        update nothing, while every filter check stayed green."""
+        self.assertEqual(unpinned_selector_consumers(), [])
+
+    def test_the_comment_is_written_beside_the_report_it_wraps(self) -> None:
+        """The publishing job reads the comment out of an uploaded directory.
+        A producer that kept the `comment.md` name while redirecting elsewhere
+        is still a producer by every other check here, but the file leaves the
+        uploaded directory and the publishing job reports that the run measured
+        nothing."""
+        self.assertEqual(report_producer_path_problems(), [])
 
     def test_every_jq_invocation_in_the_workflows_is_readable(self) -> None:
         """The exhaustiveness check is only worth as much as the scan beneath
