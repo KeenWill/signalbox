@@ -360,6 +360,10 @@ fn authorized(facts: PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization {
     authorized_with_effect(facts, ToolEffectClass::EffectFree)
 }
 
+fn external_authorized(facts: PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization {
+    authorized_with_effect(facts, ToolEffectClass::ExternalEffect)
+}
+
 fn offer_request() -> RunnerLeaseOfferRequest {
     RunnerLeaseOfferRequest {
         lease: RunnerLeaseId::from_uuid(uuid(LEASE)),
@@ -665,6 +669,36 @@ fn idempotent_catalog() -> RunnerCatalog {
     .expect("the idempotent fixture catalog is internally consistent")
 }
 
+fn side_effecting_catalog() -> RunnerCatalog {
+    let inspect = RunnerToolDeclaration::new(
+        tool("inspect"),
+        model_definition(),
+        ToolPermissionDefault::Auto,
+        RunnerToolEffectClass::SideEffecting,
+        ToolAdmissibleLoci::RunnerOnly {
+            selector: RunnerSelector::CapabilityClass(class()),
+        },
+    );
+    let policy = CredentialProfilePolicy::try_new(
+        profile(),
+        [(tool("inspect"), CredentialToolApproval::SessionPolicy)],
+    )
+    .expect("the side-effecting fixture profile references its declared tool");
+    let replacement_policy = CredentialProfilePolicy::try_new(
+        replacement_profile(),
+        [(tool("inspect"), CredentialToolApproval::SessionPolicy)],
+    )
+    .expect("the side-effecting replacement profile references its declared tool");
+    RunnerCatalog::try_new(
+        [class()],
+        [inspect],
+        [policy, replacement_policy],
+        [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
+    )
+    .expect("the side-effecting fixture catalog is internally consistent")
+}
+
 fn advertisement() -> RunnerAdvertisement {
     RunnerAdvertisement::new(
         [class()],
@@ -731,9 +765,57 @@ async fn stored_pin_fixture(
     ),
     Box<dyn Error>,
 > {
+    stored_pin_fixture_with_authorization(
+        pool,
+        authorized,
+        catalog(),
+        no_permission_overrides(),
+        "effect_free",
+    )
+    .await
+}
+
+async fn stored_side_effecting_pin_fixture(
+    pool: &PgPool,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPin,
+    ),
+    Box<dyn Error>,
+> {
+    stored_pin_fixture_with_authorization(
+        pool,
+        external_authorized,
+        side_effecting_catalog(),
+        permission_overrides(RunnerToolPermissionOverride::Auto),
+        "external_effect",
+    )
+    .await
+}
+
+async fn stored_pin_fixture_with_authorization(
+    pool: &PgPool,
+    authorize: fn(PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization,
+    fixture_catalog: RunnerCatalog,
+    fixture_overrides: RunnerToolPermissionOverrides,
+    fixture_effect_kind: &'static str,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPin,
+    ),
+    Box<dyn Error>,
+> {
     insert_session(pool).await?;
     insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    set_fixture_physical_attempt_effect(pool, INITIAL_PHYSICAL_ATTEMPT, fixture_effect_kind)
+        .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), fixture_catalog);
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
@@ -747,7 +829,7 @@ async fn stored_pin_fixture(
             credential_profile: Some(profile()),
             workspace: WorkspaceRequirement::None,
             sandbox: RunnerSandboxProfile::Ambient,
-            permission_overrides: no_permission_overrides(),
+            permission_overrides: fixture_overrides,
         },
     );
     store.store_placement(&placement, None, None).await?;
@@ -758,7 +840,7 @@ async fn stored_pin_fixture(
             RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
                 .expect("the fixture working directory is valid"),
             None,
-            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            authorize(INITIAL_PHYSICAL_ATTEMPT),
             offer_request(),
         )
         .expect("the validated registration pins the placement");
@@ -823,16 +905,73 @@ async fn stored_later_lease_fixture(
     ),
     Box<dyn Error>,
 > {
-    let (store, expected_enrollment, registration, pin) = stored_pin_fixture(pool).await?;
+    stored_later_lease_fixture_with_authorization(
+        pool,
+        authorized,
+        catalog(),
+        no_permission_overrides(),
+        "effect_free",
+    )
+    .await
+}
+
+async fn stored_side_effecting_later_lease_fixture(
+    pool: &PgPool,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPin,
+        RunnerLease,
+    ),
+    Box<dyn Error>,
+> {
+    stored_later_lease_fixture_with_authorization(
+        pool,
+        external_authorized,
+        side_effecting_catalog(),
+        permission_overrides(RunnerToolPermissionOverride::Auto),
+        "external_effect",
+    )
+    .await
+}
+
+async fn stored_later_lease_fixture_with_authorization(
+    pool: &PgPool,
+    authorize: fn(PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization,
+    fixture_catalog: RunnerCatalog,
+    fixture_overrides: RunnerToolPermissionOverrides,
+    fixture_effect_kind: &'static str,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPin,
+        RunnerLease,
+    ),
+    Box<dyn Error>,
+> {
+    let (store, expected_enrollment, registration, pin) = stored_pin_fixture_with_authorization(
+        pool,
+        authorize,
+        fixture_catalog,
+        fixture_overrides,
+        fixture_effect_kind,
+    )
+    .await?;
     terminalize_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
+    set_fixture_physical_attempt_effect(pool, LATER_LEASE_PHYSICAL_ATTEMPT, fixture_effect_kind)
+        .await?;
     let lease = pin
         .placement
         .offer_lease(
             &expected_enrollment,
             registration.registration(),
             pin.grant.as_ref(),
-            authorized(LATER_LEASE_PHYSICAL_ATTEMPT),
+            authorize(LATER_LEASE_PHYSICAL_ATTEMPT),
             RunnerLeaseOfferRequest {
                 lease: RunnerLeaseId::from_uuid(uuid(LEASE + 1)),
                 tool: tool("inspect"),
@@ -1016,6 +1155,29 @@ async fn insert_physical_attempt(
         .execute(pool)
         .await?;
     inserted?;
+    Ok(())
+}
+
+async fn set_fixture_physical_attempt_effect(
+    pool: &PgPool,
+    facts: PhysicalAttemptFacts,
+    effect_kind: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET effect_class = $2
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(facts.attempt))
+    .bind(effect_kind)
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1399,6 +1561,79 @@ async fn mark_interrupted_attempt_ambiguous(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+async fn record_execution_possible_lease_loss(
+    pool: &PgPool,
+    lease: &RunnerLease,
+) -> Result<(), sqlx::Error> {
+    let correlation = lease.correlation();
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, $2, 2, 'lost_execution_possible')",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = 2
+          WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
+async fn record_no_execution_lease_loss(
+    pool: &PgPool,
+    lease: &RunnerLease,
+) -> Result<(), sqlx::Error> {
+    let correlation = lease.correlation();
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, $2, 2, 'lost_unclaimed')",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = 2
+          WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_no_execution_proof
+            (lease_id, generation, attempt_id, session_id,
+             runner_id, tool_name, turn_id,
+             issuing_turn_attempt_id, request_id, dispatch_generation)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .bind(correlation.dispatch.attempt().into_uuid())
+    .bind(correlation.dispatch.session().into_uuid())
+    .bind(correlation.runner.into_uuid())
+    .bind(correlation.tool.as_str())
+    .bind(correlation.dispatch.turn().into_uuid())
+    .bind(correlation.dispatch.issuing_attempt().into_uuid())
+    .bind(correlation.dispatch.request().into_uuid())
+    .bind(Decimal::from(correlation.dispatch.generation().as_u64()))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
 }
 
 async fn insert_runner_recovery_turn(
@@ -6343,7 +6578,7 @@ async fn s32_inv029_inv044_runner_recovery_stop_preserves_tool_ambiguity()
     let (_container, pool) = migrated_postgres().await?;
     let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
     insert_external_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone(), idempotent_catalog());
+    let store = RunnerProtocolStore::new(pool.clone(), side_effecting_catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
@@ -6377,6 +6612,7 @@ async fn s32_inv029_inv044_runner_recovery_stop_preserves_tool_ambiguity()
         .expect("the external-effect fixture pins the placement");
     store.store_pin(&pin, &registration).await?;
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_execution_possible_lease_loss(&pool, &pin.lease).await?;
     mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
     let producing_call = ModelCallId::from_uuid(uuid(
         INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
@@ -6839,10 +7075,11 @@ async fn s32_inv009_inv033_delegated_runner_recovery_releases_runtime_slot_and_w
 async fn s32_inv009_inv044_runner_recovery_rejects_cross_wired_lease_runner()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (_, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let session = pin.placement.session();
     let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_execution_possible_lease_loss(&pool, &pin.lease).await?;
     mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
     sqlx::query("ALTER TABLE runner_lease_generation DISABLE TRIGGER ALL")
         .execute(&pool)
@@ -6970,7 +7207,8 @@ async fn s32_inv009_inv044_runner_recovery_rejects_non_ambiguous_tool_attempt()
 async fn s32_inv009_inv044_runner_recovery_rejects_completed_lease_attempt()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
+    let (store, expected_enrollment, registration, pin) =
+        stored_side_effecting_pin_fixture(&pool).await?;
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
     let claimed = duplicate_lease(&pin.lease, registration.registration())
         .claim(pin.lease.correlation())
@@ -7003,6 +7241,108 @@ async fn s32_inv009_inv044_runner_recovery_rejects_completed_lease_attempt()
     Ok(())
 }
 
+/// INV-009 / INV-044: an offered lease is not evidence that runner loss
+/// interrupted execution.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rejects_offered_lease_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session: pin.placement.session(),
+            turn: TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await
+    .expect_err("runner recovery cannot retain an attempt whose lease is only offered");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a claimed lease without a durable loss event is not
+/// evidence that runner loss interrupted execution.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rejects_claimed_lease_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin) =
+        stored_side_effecting_pin_fixture(&pool).await?;
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the exact fixture lease correlation claims");
+    store.store_lease(&claimed).await?;
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session: pin.placement.session(),
+            turn: TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await
+    .expect_err("runner recovery cannot retain an attempt whose lease is only claimed");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a no-execution loss cannot be reclassified as an
+/// execution-possible interrupted attempt.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rejects_no_execution_lease_loss()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_no_execution_lease_loss(&pool, &pin.lease).await?;
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session: pin.placement.session(),
+            turn: TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await
+    .expect_err("runner recovery cannot retain a proven no-execution lease loss");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-009 / INV-044: an older ambiguous attempt under the same placement
 /// revision cannot impersonate the operation interrupted at a later loss.
 #[tokio::test]
@@ -7011,9 +7351,10 @@ async fn s32_inv009_inv044_runner_loss_attempt_matches_exact_active_round()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, pin, later_lease) =
-        stored_later_lease_fixture(&pool).await?;
+        stored_side_effecting_later_lease_fixture(&pool).await?;
     store.store_lease(&later_lease).await?;
     let stale_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_execution_possible_lease_loss(&pool, &pin.lease).await?;
     mark_interrupted_attempt_ambiguous(&pool, stale_attempt).await?;
     let rejected = insert_runner_recovery_turn_with_interrupted_loss(
         &pool,
@@ -7128,13 +7469,14 @@ async fn s32_inv009_inv044_runner_loss_rejects_retired_claimed_retry_attempt()
 async fn s32_inv009_inv044_runner_recovery_rejects_additional_round_ambiguity()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (_, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let session = pin.placement.session();
     let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
     let producing_call = ModelCallId::from_uuid(uuid(
         INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
     ));
+    record_execution_possible_lease_loss(&pool, &pin.lease).await?;
     mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
     sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
         .execute(&pool)
@@ -7204,10 +7546,11 @@ async fn s32_inv009_inv044_runner_recovery_rejects_additional_round_ambiguity()
 async fn s32_inv009_inv044_pinned_runner_recovery_wait_round_trips_exact_loss()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let (store, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let session = pin.placement.session();
     let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_execution_possible_lease_loss(&pool, &pin.lease).await?;
     mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
     insert_runner_recovery_turn_with_interrupted_loss(
         &pool,
@@ -7237,6 +7580,92 @@ async fn s32_inv009_inv044_pinned_runner_recovery_wait_round_trips_exact_loss()
         loaded_placement.interrupted_tool_attempt(),
         Some(interrupted_attempt)
     );
+    assert_eq!(loaded_wait.turn(), turn);
+    assert_eq!(loaded_wait.runner(), expected_enrollment.runner());
+    assert_eq!(loaded_wait.placement_revision(), pin.placement.revision());
+    assert_eq!(
+        loaded_wait.interrupted_tool_attempt(),
+        Some(interrupted_attempt)
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: execution-possible loss of retryable pure work parks the
+/// turn with its exact in-flight source attempt for successor reissuance.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_retryable_pure_loss_wait_retains_in_flight_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_execution_possible_lease_loss(&pool, &pin.lease).await?;
+    insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await?;
+    let loaded_wait = store
+        .load_runner_recovery_wait(session)
+        .await?
+        .expect("the retryable pure loss retains its runner recovery wait");
+
+    assert_eq!(loaded_wait.turn(), turn);
+    assert_eq!(loaded_wait.runner(), expected_enrollment.runner());
+    assert_eq!(loaded_wait.placement_revision(), pin.placement.revision());
+    assert_eq!(
+        loaded_wait.interrupted_tool_attempt(),
+        Some(interrupted_attempt)
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: durable no-execution proof keeps even side-effecting
+/// work retryable and parks the turn with its exact in-flight source attempt.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_unclaimed_loss_wait_retains_in_flight_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_no_execution_lease_loss(&pool, &pin.lease).await?;
+    insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await?;
+    let loaded_wait = store
+        .load_runner_recovery_wait(session)
+        .await?
+        .expect("the unclaimed loss retains its runner recovery wait");
+
     assert_eq!(loaded_wait.turn(), turn);
     assert_eq!(loaded_wait.runner(), expected_enrollment.runner());
     assert_eq!(loaded_wait.placement_revision(), pin.placement.revision());
@@ -7357,9 +7786,10 @@ async fn s32_inv009_inv044_runner_recovery_wait_rejects_cross_wired_revision()
 async fn s32_inv009_inv044_runner_recovery_wait_requires_loss_recorded_attempt()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let (_, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
     let session = pin.placement.session();
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    record_execution_possible_lease_loss(&pool, &pin.lease).await?;
     mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
     let rejected = insert_runner_recovery_turn_with_interrupted_loss(
         &pool,
