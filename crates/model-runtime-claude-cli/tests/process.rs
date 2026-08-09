@@ -66,6 +66,10 @@ async fn hook_progress_events_do_not_replace_the_init_handshake() {
     let completion = completed(&result.evidence);
 
     assert_eq!(completion.finish, CompletionFinish::EndTurn);
+    assert_eq!(
+        completion.content,
+        vec![AssistantPart::Text(fixtures::ANSWER.to_string())]
+    );
     assert_eq!(completion.usage, expected_usage());
     assert_eq!(result.spawns, 1);
 }

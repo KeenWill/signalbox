@@ -150,7 +150,7 @@ impl<C: Clone> EventDecoder<C> {
             DecodeFailure::stream_protocol("event has no string `type` discriminator")
         })?;
         match event_type {
-            "system" => self.system(text, value, sink),
+            "system" => self.system(value, sink),
             "assistant" => self.assistant(text, sink),
             "user" => self.user(value),
             "result" => self.result(value, sink),
@@ -166,7 +166,6 @@ impl<C: Clone> EventDecoder<C> {
 
     fn system(
         &mut self,
-        text: &str,
         value: Value,
         sink: &mut RedactingSink<'_, C>,
     ) -> Result<(), DecodeFailure> {
@@ -175,7 +174,6 @@ impl<C: Clone> EventDecoder<C> {
             subtype,
             Some("hook_started" | "hook_progress" | "hook_response")
         ) {
-            sink.extend_dropped_context(text);
             return Ok(());
         }
         if subtype != Some("init") {
