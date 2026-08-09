@@ -31,13 +31,13 @@ import XCTest
 /// canvases are the accepted cost of a corpus that shows each screen at every
 /// shape the application ships in.
 ///
-/// Two tests prune a canvas, each for a reason stated on it and each a
-/// rendering that would be wrong rather than redundant: the Templates gate
-/// skips both phone canvases, having no compact destination to enter it
-/// through, and the presented creation sheet skips the portrait phone canvas
-/// alone, which records the form clipped. Nothing else is pruned; a
-/// near-duplicate of one screen across two canvases is a reference, not a
-/// saving.
+/// One test prunes a canvas, for a reason stated on it and because the
+/// rendering would be wrong rather than redundant: the Templates gate skips
+/// both phone canvases, having no compact destination to enter it through.
+/// Nothing else is pruned. The presented creation sheet was the other, until
+/// the arithmetic on its note showed it was recording the application's own
+/// clipping rather than the canvas's; a near-duplicate of one screen across two
+/// canvases is a reference, not a saving, and so is an unflattering one.
 ///
 /// Every one of these is a change detector, which is what a golden is. They
 /// catch an unintended visual change to a screen no assertion describes; they
@@ -221,25 +221,35 @@ final class LiveScreenSnapshotTests: XCTestCase {
         namesUsedMoreThanOnce(in: claimedRenderingTestNames)
     }
 
-    /// The two coverage detectors report the thing they exist to report.
+    /// The duplicate detector reports a duplicate.
     ///
-    /// The two tests below run them over the suite's real lists, which are
-    /// consistent — no name missing, no name claimed twice. That is the answer
-    /// those tests want and the reason neither of them can vouch for the
-    /// detector that produced it: an implementation returning `[]` for every
-    /// input passes both, and the enforcement is off with nothing red. So each
-    /// detector is also handed an input whose answer is known and is not empty.
+    /// The coverage tests below run these detectors over the suite's real
+    /// lists, which are consistent — no name missing, no name claimed twice.
+    /// That is the answer those tests want and the reason neither of them can
+    /// vouch for the detector that produced it: an implementation returning
+    /// `[]` for every input passes both, and the enforcement is off with
+    /// nothing red. So each detector is also handed input whose answer is known
+    /// and is not empty.
     ///
-    /// Straight-line cases rather than a table, per
-    /// `docs/agents/testing-style.md` rule 2: a failure names the case that
-    /// produced it. The inputs are letters because the names themselves carry
-    /// no meaning here — what is under test is counting and membership, not the
-    /// suite's mapping, which is what the other two tests check.
-    func testTheCoverageDetectorsAnswerTheirOwnQuestion() {
+    /// One detector per test, per `docs/agents/testing-style.md` rule 7: these
+    /// two helpers are independent, and a single plural test would report a
+    /// regression in either under one name. Straight-line cases inside each,
+    /// per rule 2, so a failure names the case. The inputs are letters because
+    /// the names carry no meaning here — what is under test is counting, not
+    /// the suite's mapping, which is what the coverage tests check.
+    func testTheDuplicateDetectorReportsADuplicate() {
         XCTAssertEqual(Self.namesUsedMoreThanOnce(in: ["a", "b", "a"]), ["a"])
         XCTAssertEqual(Self.namesUsedMoreThanOnce(in: ["a", "a", "b", "b"]), ["a", "b"])
         XCTAssertEqual(Self.namesUsedMoreThanOnce(in: ["a", "b"]), [])
         XCTAssertEqual(Self.namesUsedMoreThanOnce(in: []), [])
+    }
+
+    /// The membership detector reports a missing name.
+    ///
+    /// Split from the duplicate detector's test for the reason given there:
+    /// they are separate helpers answering separate questions, and a failure
+    /// should name which enforcement stopped working.
+    func testTheMembershipDetectorReportsAMissingName() {
         XCTAssertEqual(Self.names(in: ["a", "b"], missingFrom: ["a"]), ["b"])
         XCTAssertEqual(Self.names(in: ["b", "a"], missingFrom: []), ["a", "b"])
         XCTAssertEqual(Self.names(in: ["a"], missingFrom: ["a", "b"]), [])
@@ -326,17 +336,25 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// the scenario names it, and the presenting controller is inside the
     /// canvas window, so this renderer does capture it.
     ///
-    /// Only the portrait phone canvas is skipped, and only because its
-    /// rendering is broken rather than merely redundant. A presented sheet lays
-    /// out against the presentation's own metrics, and the sheet this screen
-    /// presents is `ProcessSessionCreationSheet`, which declares
-    /// `minWidth: 520` — wider than the 390-point portrait canvas — so what
-    /// that one records is the form centred and clipped on both edges, reading
-    /// "cel" and "Cr" where its buttons are and "w Session" where its title is.
-    /// That is the canvas cutting into a presentation, not the application, and
-    /// it is the same fact `SnapshotCanvas.sheet` exists for: its 540-point
-    /// width is what clears that minimum.
-    /// `testSessionCreationSheetContent` records the content at that width.
+    /// Every canvas, including the portrait phone one that records the form
+    /// clipped — because that clipping is the application's and not the
+    /// canvas's. `ProcessSessionCreationSheet` declares `minWidth: 520`, and a
+    /// sheet presented on a horizontally compact phone gets that phone's width:
+    /// 390 points here, 402 on the `iPhone 17 Pro` this suite pins, and no
+    /// shipping iPhone reaches 520 in portrait. So the golden reading "cel" and
+    /// "Cr" where its buttons are, and "w Session" where its title is, is what
+    /// a portrait phone shows, and a reference for it is worth having twice
+    /// over: it is the only record of that presentation, and it is what will
+    /// change the day the declared minimum is reconciled with the devices the
+    /// sheet is presented on.
+    ///
+    /// It was skipped until the review wave on debaa425 argued the opposite —
+    /// that the canvas was cutting into a presentation a device would not cut.
+    /// The arithmetic is what settles it: 390 and 402 are both far below 520,
+    /// so the canvas is reproducing the clip rather than causing it. What
+    /// `SnapshotCanvas.sheet` gives, at 540 points, is the content at the width
+    /// it asks for, which no phone canvas can be; that is a second question and
+    /// `testSessionCreationSheetContent` is where it is asked.
     ///
     /// The landscape phone canvas is not skipped, and the reason it once was
     /// did not survive being looked at. It is 844 points wide, so nothing
@@ -361,6 +379,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// would put the clipping threshold 100 points low and make a canvas that
     /// still clips look like one that fits.
     func testSessionListPresentingTheCreationSheet() async {
+        await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPhonePortrait)
         await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPhoneLandscape)
         await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPadPortrait)
         await assertLiveScreenSnapshot(of: rootView(for: .newSession), canvas: .iPadLandscape)

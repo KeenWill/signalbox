@@ -168,7 +168,7 @@ extension LiveScreenSnapshotTests {
     func testLegacySessionDetailForAnArchivedSessionWithNoEvents() async throws {
         let session = try await fixtureSession(
             MockSignalboxFixtures.archivedSessionID,
-            archived: true
+            in: .archived
         )
         await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhonePortrait)
         await assertLiveScreenSnapshot(of: legacyDetailScreen(session), canvas: .iPhoneLandscape)
@@ -294,6 +294,43 @@ extension LiveScreenSnapshotTests {
         AppCoordinator(isMockMode: false, screenshotScenario: .setup)
     }
 
+    /// Which collection the mock is asked for, as an axis rather than an answer.
+    ///
+    /// `docs/style.md` section 3: a boolean is an answer with its question
+    /// erased, and `archived: true` at a call site is exactly that — the reader
+    /// has to find the parameter to learn what was asked, and a future call
+    /// picking the wrong collection still compiles. `in: .archived` carries the
+    /// question.
+    ///
+    /// It converts to a `Bool` one line below because that is what
+    /// `LegacySignalboxClientProtocol.listSessions(archived:)` takes. Changing
+    /// that is a client API change and not this suite's to make; the label is
+    /// put where the calls are.
+    enum ArchiveScope {
+        case active
+        case archived
+
+        var listsArchivedSessions: Bool {
+            switch self {
+            case .active:
+                return false
+            case .archived:
+                return true
+            }
+        }
+
+        /// Names the scope in the diagnostic, so a missing fixture says which
+        /// collection was searched.
+        var collectionName: String {
+            switch self {
+            case .active:
+                return "active"
+            case .archived:
+                return "archived"
+            }
+        }
+    }
+
     /// Reads a fixture session back out of the mock rather than building one.
     ///
     /// A separate `MockSignalboxService` instance from the coordinator's, and
@@ -303,14 +340,15 @@ extension LiveScreenSnapshotTests {
     /// suite owning a fixture, which is the thing the seam exists to avoid.
     private func fixtureSession(
         _ sessionID: String,
-        archived: Bool = false,
+        in scope: ArchiveScope = .active,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws -> SignalboxSessionMetadata {
-        let sessions = try await MockSignalboxService().listSessions(archived: archived)
+        let sessions = try await MockSignalboxService()
+            .listSessions(archived: scope.listsArchivedSessions)
         return try XCTUnwrap(
             sessions.first { $0.id == SignalboxSessionID(rawValue: sessionID) },
-            "the mock serves no \(archived ? "archived" : "active") session \(sessionID)",
+            "the mock serves no \(scope.collectionName) session \(sessionID)",
             file: file,
             line: line
         )
