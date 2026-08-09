@@ -1789,8 +1789,8 @@ mod tests {
     ///
     /// Exhaustive over `ObservationFact` so a new text-bearing fact cannot be
     /// added without deciding whether the credential could ride out on it.
-    /// Where one emitted fact's provider text belongs, if it carries any.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    /// Where one emitted fact's provider-controlled text belongs.
+    #[derive(Clone, Debug, Eq, PartialEq)]
     enum EmittedText<'a> {
         /// A fragment extending one identified delta stream.
         Fragment {
@@ -1798,19 +1798,25 @@ mod tests {
             index: u32,
             text: &'a str,
         },
-        /// A complete value that stands alone rather than extending a stream.
-        Complete(&'a str),
-        /// Carries no provider text at all.
+        /// Complete values standing alone rather than extending a stream.
+        Complete(Vec<&'a str>),
+        /// Carries no provider-controlled text at all.
         Absent,
     }
 
-    /// Classifies one fact's provider text.
+    /// Classifies every provider-controlled string one fact carries.
     ///
-    /// Exhaustive over `ObservationFact` so a new text-bearing fact cannot be
-    /// added without deciding whether a credential could ride out on it. Named
-    /// and separately tested rather than inlined into a test body, because a
-    /// misclassification here would silently weaken every check built on it.
-    const fn emitted_text(fact: &ObservationFact) -> EmittedText<'_> {
+    /// Deliberately mirrors [`redact_observation_fact`]: production decides
+    /// which fields a credential can reach by redacting them, so a field it
+    /// scrubs and this classifier reports as `Absent` is a field no INV-035
+    /// case would ever inspect — deleting that production redaction would
+    /// leave the suite green while the credential is emitted. The two matches
+    /// are meant to name the same surface, and only `SendCommenced` and
+    /// `UsageReported` carry nothing.
+    ///
+    /// Exhaustive over `ObservationFact` and over `FinishReason` so a new
+    /// text-bearing shape cannot be added without deciding the question.
+    fn emitted_text(fact: &ObservationFact) -> EmittedText<'_> {
         match fact {
             ObservationFact::TextDelta { index, text } => EmittedText::Fragment {
                 stream: EmittedStream::Text,
@@ -1827,14 +1833,35 @@ mod tests {
                 index: *index,
                 text: fragment.as_str(),
             },
-            ObservationFact::ToolCallProposed(proposal) => {
-                EmittedText::Complete(proposal.arguments_json.as_str())
+            ObservationFact::ToolCallProposed(proposal) => EmittedText::Complete(vec![
+                proposal.id.as_str(),
+                proposal.name.as_str(),
+                proposal.arguments_json.as_str(),
+            ]),
+            ObservationFact::ProviderModelReported(model) => {
+                EmittedText::Complete(vec![model.as_str()])
             }
-            ObservationFact::SendCommenced
-            | ObservationFact::ExchangeEstablished(_)
-            | ObservationFact::ProviderModelReported(_)
-            | ObservationFact::UsageReported(_)
-            | ObservationFact::FinishReported(_) => EmittedText::Absent,
+            ObservationFact::ExchangeEstablished(exchange) => EmittedText::Complete(
+                exchange
+                    .provider_request_id
+                    .iter()
+                    .map(ProviderRequestId::as_str)
+                    .collect(),
+            ),
+            ObservationFact::FinishReported(finish) => EmittedText::Complete(match finish {
+                FinishReason::StopSequence { sequence } => {
+                    sequence.as_deref().into_iter().collect()
+                }
+                FinishReason::Unrecognized { provider_token } => vec![provider_token.as_str()],
+                FinishReason::EndTurn
+                | FinishReason::MaxOutputTokens
+                | FinishReason::ContextWindowExceeded
+                | FinishReason::ToolUse
+                | FinishReason::Refusal => Vec::new(),
+            }),
+            ObservationFact::SendCommenced | ObservationFact::UsageReported(_) => {
+                EmittedText::Absent
+            }
         }
     }
 
@@ -1874,13 +1901,15 @@ mod tests {
             );
         }
         for observation in observed {
-            if let EmittedText::Complete(text) = emitted_text(&observation.fact) {
-                assert!(
-                    !text.contains(secret),
-                    "the credential must not be emitted; found it in a complete value on \
-                     correlation {}: {text}",
-                    observation.correlation
-                );
+            if let EmittedText::Complete(values) = emitted_text(&observation.fact) {
+                for text in values {
+                    assert!(
+                        !text.contains(secret),
+                        "the credential must not be emitted; found it in a complete value on \
+                         correlation {}: {text}",
+                        observation.correlation
+                    );
+                }
             }
         }
     }
@@ -1950,8 +1979,35 @@ mod tests {
                 text: "{\"a\":1}",
             }
         );
+        // Every field production redacts is reported as inspectable text. A
+        // field scrubbed there but `Absent` here is one no case would check.
+        assert_eq!(
+            emitted_text(&ObservationFact::ProviderModelReported(
+                ProviderReportedModel::new("fixture-model")
+            )),
+            EmittedText::Complete(vec!["fixture-model"])
+        );
+        assert_eq!(
+            emitted_text(&ObservationFact::ExchangeEstablished(ExchangeFacts {
+                provider_request_id: Some(ProviderRequestId::new("fixture-request")),
+                http_status: Some(200),
+            })),
+            EmittedText::Complete(vec!["fixture-request"])
+        );
+        assert_eq!(
+            emitted_text(&ObservationFact::FinishReported(
+                FinishReason::Unrecognized {
+                    provider_token: String::from("fixture-token"),
+                }
+            )),
+            EmittedText::Complete(vec!["fixture-token"])
+        );
         assert_eq!(
             emitted_text(&ObservationFact::FinishReported(FinishReason::EndTurn)),
+            EmittedText::Complete(Vec::new())
+        );
+        assert_eq!(
+            emitted_text(&ObservationFact::SendCommenced),
             EmittedText::Absent
         );
     }
@@ -2026,6 +2082,44 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// INV-035: the credential is scrubbed from the facts that carry a single
+    /// provider-controlled value, not only from the delta streams.
+    ///
+    /// Each of these is redacted by `redact_observation_fact`, so each is a
+    /// way a credential could reach a consumer; without a case that emits one
+    /// carrying the credential, deleting that production redaction would leave
+    /// this suite green.
+    #[test]
+    fn inv_035_single_value_facts_are_credential_scrubbed() {
+        let key = credential("fixture/secret");
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
+                "model-fixture/secret-v1",
+            )),
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ExchangeEstablished(ExchangeFacts {
+                provider_request_id: Some(ProviderRequestId::new("req-fixture/secret")),
+                http_status: Some(200),
+            }),
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::FinishReported(FinishReason::Unrecognized {
+                provider_token: String::from("stop-fixture/secret"),
+            }),
+        });
+        sink.flush();
+        drop(sink);
+
+        assert_no_stream_carries(&observed, "fixture/secret");
+        assert_eq!(observed.len(), 3, "every observed fact is forwarded");
     }
 
     /// INV-035: a credential spelled as a surrogate pair survives a boundary
