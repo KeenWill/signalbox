@@ -1797,6 +1797,9 @@ mod tests {
     const CARGO_PROFILE_OPTION_PREFIX: &str = "--profile=";
     const CARGO_CONFIG_OPTION: &str = "--config";
     const CARGO_CONFIG_OPTION_PREFIX: &str = "--config=";
+    const CARGO_COLOR_OPTION: &str = "--color";
+    const CARGO_CHANGE_DIRECTORY_OPTION: &str = "-C";
+    const CARGO_UNSTABLE_OPTION: &str = "-Z";
     const CARGO_RELEASE_OPTION: &str = "--release";
     const MCP_JSON_RPC_VERSION: &str = "2.0";
     const SYNTHETIC_WRONG_JSON_RPC_VERSION: &str = "1.0";
@@ -1952,8 +1955,12 @@ done
                     Some(CARGO_TEST_SUBCOMMAND | CARGO_TEST_SUBCOMMAND_ALIAS)
                 ) {
                     found_test_subcommand = true;
-                } else if !argument.as_bytes().starts_with(b"+")
-                    && !argument.as_bytes().starts_with(b"-")
+                } else if cargo_global_option_takes_value(argument) {
+                    arguments.get(index + 1)?;
+                    index += 2;
+                    continue;
+                } else if !argument.as_encoded_bytes().starts_with(b"+")
+                    && !argument.as_encoded_bytes().starts_with(b"-")
                 {
                     return None;
                 }
@@ -1984,12 +1991,19 @@ done
         })
     }
 
+    fn cargo_global_option_takes_value(argument: &OsStr) -> bool {
+        matches!(
+            argument.to_str(),
+            Some(CARGO_COLOR_OPTION | CARGO_CHANGE_DIRECTORY_OPTION | CARGO_UNSTABLE_OPTION)
+        )
+    }
+
     fn normalized_cargo_config_override(
         config: &OsStr,
         invocation_directory: &Path,
     ) -> Option<OsString> {
         (!config.is_empty()).then(|| {
-            if config.as_bytes().contains(&b'=') || Path::new(config).is_absolute() {
+            if config.as_encoded_bytes().contains(&b'=') || Path::new(config).is_absolute() {
                 config.to_os_string()
             } else {
                 invocation_directory.join(config).into_os_string()
@@ -2574,6 +2588,27 @@ done
         let arguments = [
             OsStr::new(CARGO_PROGRAM_STEM),
             OsStr::new(CARGO_TEST_SUBCOMMAND_ALIAS),
+            OsStr::new(CARGO_PROFILE_OPTION),
+            OsStr::new(CARGO_DEV_PROFILE),
+        ];
+
+        assert_eq!(
+            cargo_test_profile_from_arguments(&arguments),
+            Some(OsString::from(CARGO_DEV_PROFILE))
+        );
+    }
+
+    #[test]
+    fn cargo_test_profile_consumes_values_of_global_options() {
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new(CARGO_COLOR_OPTION),
+            OsStr::new("always"),
+            OsStr::new(CARGO_CHANGE_DIRECTORY_OPTION),
+            OsStr::new("synthetic-workspace"),
+            OsStr::new(CARGO_UNSTABLE_OPTION),
+            OsStr::new("unstable-options"),
+            OsStr::new(CARGO_TEST_SUBCOMMAND),
             OsStr::new(CARGO_PROFILE_OPTION),
             OsStr::new(CARGO_DEV_PROFILE),
         ];
