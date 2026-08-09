@@ -73,9 +73,10 @@ and checked-in example are verified through PR #376 (`agent/runner-daemon`).
 Runner credential use during provisioning or execution remains committed
 unimplemented functionality as labeled below. The credential-profile and
 credential-pool grammar, its fail-closed admission, the deliveries this build
-supplies, the fail-closed rejection of reserved Codex deliveries, and the
-retirement of the Anthropic key-file environment channel are verified against
-this stack's parser pull request (`agent/credential-pools-parser`), in
+supplies, the fail-closed rejection of reserved Codex deliveries, the
+operator-chosen model-provider profile names, and the retirement of both
+provider key-file environment channels are verified against this stack's parser
+pull request (`agent/credential-pools-parser`), in
 `apps/signalboxd/src/credential_pools.rs` and
 `apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, the
 Codex `file`, `codex_home`, and `oauth` deliveries, durable quarantine, and the
@@ -2176,13 +2177,13 @@ deployment-side rules that code cannot enforce are stated in
   safe in configuration, errors, logs, and durable records; values are safe only
   at the adapter boundary. Why: value rotation preserves the stable name so no
   record or log ever needs the secret (INV-035). The two integration constants
-  are `brave-search-primary` and `github-primary`. Model-provider references are
-  configured profile names, but this build does spell four of them: an
-  `anthropic` mapping must name `anthropic-primary` and an `openai` mapping must
-  name `openai-primary` — any other name is a typed startup failure — while
-  `codex-subscription-primary` and `claude-subscription-primary` are the
-  defaults a CLI runtime falls back to when its mapping names nothing else, and
-  are not enforced.
+  are `brave-search-primary` and `github-primary`. Every model-provider
+  reference is an operator-chosen profile name: once a mapping names a pool
+  rather than a profile, no build-provided constant is compared against any
+  model-provider name, so an `anthropic` or `openai` profile may be called
+  whatever the deployment calls its account. `codex-subscription-primary` and
+  `claude-subscription-primary` remain the defaults a CLI runtime falls back to
+  when its mapping names nothing else, and are not enforced.
 
 - **File-based supply, reread per preparation.** Each `FileCredentialAccess`
   instance binds one consumer-scoped map of references to deployment paths. A
@@ -2310,22 +2311,9 @@ deployment-side rules that code cannot enforce are stated in
 
 ### Committed unimplemented functionality — credential lifecycle
 
-No present composition supplies any of the four topics below; each names the
+No present composition supplies any of the three topics below; each names the
 child that owes it. They sit here rather than among the entries above so that a
 reader can take an entry's position for its tier.
-
-- **Operator-chosen provider names.** Removing those four spellings is the pool
-  grammar's doing, not this build's: once a mapping names a pool rather than a
-  profile, every model-provider name is the operator's and no build-provided
-  constant is compared against it. Until that child lands, an operator writing a
-  differently named `anthropic` or `openai` profile gets a rejected
-  configuration, so this page states the spellings rather than the intent.
-
-- **Catalog-backed model credential maps.** No present composition gives a model
-  adapter the complete catalog of that adapter's `file` profiles; the singleton
-  construction above is what ships. The child that removes the conditional
-  channels builds that complete map instead. The scoping and reread rules in the
-  next bullet hold for both shapes and are current behavior today.
 
 - **Pool-policy credential history.** No present repository stores a
   family-to-pool-policy snapshot or migrates an existing family-to-reference
