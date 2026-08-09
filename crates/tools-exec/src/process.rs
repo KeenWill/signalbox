@@ -4021,13 +4021,15 @@ mod tests {
         assert!(request.arguments.starts_with(&expected_isolation_prefix));
     }
 
-    /// The resolver configuration and the certificate-authority bundle were
-    /// bound only so that outbound DNS and TLS would work inside the sandbox.
-    /// The unshared network namespace leaves them nothing to serve, and binding
-    /// them anyway would tell a later reader that egress is still expected to
-    /// function here.
+    /// `/etc/resolv.conf` and `/etc/ssl` were bound only so that outbound DNS
+    /// and TLS would work inside the sandbox. The unshared network namespace
+    /// leaves them nothing to serve, and binding them anyway would tell a later
+    /// reader that egress is still expected to function here. This pins those
+    /// two paths and nothing broader: `/etc/hosts` and `/etc/nsswitch.conf`
+    /// stay bound on purpose, and the read-only runtime may carry certificate
+    /// material of its own.
     #[test]
-    fn sandboxed_request_binds_no_resolver_or_certificate_authority_state() {
+    fn sandboxed_request_omits_the_etc_resolv_conf_and_etc_ssl_binds() {
         let workspace_root = Path::new(TEST_SANDBOX_WORKSPACE_ROOT);
 
         let request = bwrap_request(

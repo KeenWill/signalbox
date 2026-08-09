@@ -609,24 +609,38 @@ Only the explicit `[tool_approval_postures]` table changes a declaration's
 resolved posture; family composition itself does not.
 
 `sandboxed_exec` and `cargo_diagnostics` share one daemon-local bubblewrap
-profile whose confinement is stated here because its name overstates it. The
-profile unshares the user, mount, PID, IPC, UTS, and network namespaces, mounts
-a fresh `/proc`, `/dev`, and `/tmp`, binds a read-only operating-system runtime,
-clears the ambient environment, and binds the configured workspace root
-read-write at `/workspace`. The unshared network namespace denies IP egress, so
-a sandboxed command opens no connection to a remote host. It does not isolate an
-`AF_UNIX` pathname socket, which is reached through the filesystem rather than
-the network: a socket lying inside the workspace root stays connectable, and one
-fronting a proxy would carry egress with it. The profile binds neither a home
-nor a configuration directory, so a daemon or adapter credential file placed
-outside the workspace root is not reachable. Nothing enforces that placement:
-credential settings are admitted on presence alone and are never checked against
-the workspace root, so a credential configured inside it — like any secret the
-repository itself carries — is bound along with the workspace and is readable.
-The command may write anything under that root, including the repository's
-`.git`. The profile imposes no resource limits, drops no uid or gid, and applies
-no seccomp or landlock policy, so it does not contain a deliberately hostile
-program. It is not the runner's `WorkspaceRestricted` profile described by
+profile. Its name claims more than it delivers, so this page states the profile
+as an enforced part and an explicitly unenforced part rather than as a single
+guarantee.
+
+The profile enforces exactly this. It unshares the user, mount, PID, IPC, UTS,
+and network namespaces; mounts a fresh `/proc`, `/dev`, and `/tmp`; binds a
+read-only operating-system runtime; clears the ambient environment; binds the
+configured workspace root read-write at `/workspace`; and binds neither a home
+nor a configuration directory. A sandboxed command therefore opens no IP
+connection, and reads nothing outside the workspace root and that read-only
+runtime.
+
+The profile does not provide the following, and no other daemon-local control
+supplies them:
+
+- Socket families other than IP are unfenced, because a network namespace scopes
+  IP. An `AF_UNIX` pathname socket inside the workspace root stays connectable,
+  and one fronting a proxy carries egress with it; `AF_VSOCK` to a host CID
+  remains available wherever the platform provides it.
+- A credential inside the workspace root is readable. Credential settings are
+  admitted on presence alone and are never checked against that root, so one
+  configured inside it is bound along with the workspace, as is any secret the
+  repository itself carries.
+- Everything under the workspace root is writable, including the repository's
+  `.git`.
+- `cargo_diagnostics` compiles and runs the workspace's own build scripts,
+  procedural macros, and test binaries under this profile, so an automatic call
+  executes whatever code the workspace already contains.
+- No resource limit, uid or gid drop, seccomp policy, or landlock policy
+  applies, so the profile does not contain a deliberately hostile program.
+
+This is not the runner's `WorkspaceRestricted` profile described by
 [sandbox profiles and approval](runner-protocol.md#sandbox-profiles-and-approval),
 which additionally drops capabilities and brokers egress through a hostname
 allowlist, and which no present runner surface provides.
