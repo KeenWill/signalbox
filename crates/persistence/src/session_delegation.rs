@@ -26,15 +26,16 @@ use crate::{
         DELEGATION_FIND_RELATION_FOR_WAIT, DELEGATION_LOAD_RELATION, ordered_session_pair,
     },
     mapping::{
-        DelegationPolicyStorageKind, DelegationRejectionStorageKind, bound_child_action_from_str,
+        DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
+        DelegationWakeStorageKind, bound_child_action_from_str,
         delegation_message_direction_from_str, delegation_message_direction_to_str,
         delegation_outcome_kind_from_str, delegation_outcome_reason_from_str,
         delegation_policy_kind_from_str, delegation_rejection_kind_from_str,
         delegation_rejection_kind_to_str, delegation_transition_failure_from_str,
-        delegation_transition_failure_to_str, delegation_wait_mode_from_str,
-        delegation_wait_mode_to_str, durable_command_id_from_uuid, session_id_from_uuid,
-        session_id_to_uuid, tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid,
-        turn_id_to_uuid,
+        delegation_transition_failure_to_str, delegation_update_kind_to_str,
+        delegation_wait_mode_from_str, delegation_wait_mode_to_str, delegation_wake_subject_to_str,
+        durable_command_id_from_uuid, session_id_from_uuid, session_id_to_uuid,
+        tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     tool_loop::{
         ToolLoopRepositoryError, decode_attempt, load_active_batch_from_connection,
@@ -2007,7 +2008,7 @@ async fn append_wait_update(
              update_kind, spawning_tool_request_id, child_session_id,
              awaiting_tool_request_id, wait_mode)
          SELECT event_sequence, event_kind, storage_version, session_id,
-                'child_waiting', $3, $4, $5, $6
+                $7::text, $3, $4, $5, $6
            FROM header",
     )
     .bind(STORAGE_VERSION)
@@ -2016,6 +2017,9 @@ async fn append_wait_update(
     .bind(session_id_to_uuid(wait.child()))
     .bind(tool_request_id_to_uuid(wait.awaiting_request()))
     .bind(delegation_wait_mode_to_str(wait.mode()))
+    .bind(delegation_update_kind_to_str(
+        DelegationUpdateStorageKind::ChildWaiting,
+    ))
     .execute(connection)
     .await?;
     Ok(())
@@ -2302,7 +2306,7 @@ async fn append_message_update(
              sender_session_id, recipient_session_id, message_ordinal,
              content_text)
          SELECT event_sequence, event_kind, storage_version, session_id,
-                'session_message', $3, $4, $5, $2, $6, $7
+                $8::text, $3, $4, $5, $2, $6, $7
            FROM header",
     )
     .bind(STORAGE_VERSION)
@@ -2312,6 +2316,9 @@ async fn append_message_update(
     .bind(session_id_to_uuid(sender))
     .bind(Decimal::from(ordinal.get()))
     .bind(message.content().as_str())
+    .bind(delegation_update_kind_to_str(
+        DelegationUpdateStorageKind::SessionMessage,
+    ))
     .execute(connection)
     .await?;
     Ok(())
@@ -2334,13 +2341,16 @@ async fn append_message_wake(
             (event_sequence, event_kind, storage_version, session_id,
              spawning_tool_request_id, subject_kind, message_id)
          SELECT event_sequence, event_kind, storage_version, session_id,
-                $3, 'message', $4
+                $3, $5::text, $4
            FROM header",
     )
     .bind(STORAGE_VERSION)
     .bind(session_id_to_uuid(recipient))
     .bind(tool_request_id_to_uuid(spawning_request))
     .bind(message.into_uuid())
+    .bind(delegation_wake_subject_to_str(
+        DelegationWakeStorageKind::Message,
+    ))
     .execute(connection)
     .await?;
     Ok(())
@@ -2364,13 +2374,16 @@ async fn append_result_wake(
              spawning_tool_request_id, subject_kind,
              result_spawning_request_id, awaiting_tool_request_id)
          SELECT event_sequence, event_kind, storage_version, session_id,
-                $3, 'result', $3, $4
+                $3, $5::text, $3, $4
            FROM header",
     )
     .bind(STORAGE_VERSION)
     .bind(session_id_to_uuid(parent))
     .bind(tool_request_id_to_uuid(spawning_request))
     .bind(awaiting_request.map(tool_request_id_to_uuid))
+    .bind(delegation_wake_subject_to_str(
+        DelegationWakeStorageKind::Result,
+    ))
     .execute(connection)
     .await?;
     Ok(())

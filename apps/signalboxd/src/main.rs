@@ -1926,7 +1926,7 @@ mod tests {
         future::{Future, pending, ready},
         io::{self, Write},
         rc::Rc,
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, OnceLock},
         time::Duration,
     };
 
@@ -1973,25 +1973,18 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
-    struct CapturedOutput(Arc<Mutex<Vec<u8>>>);
-
-    impl CapturedOutput {
-        fn text(&self) -> String {
-            String::from_utf8(
-                self.0
-                    .lock()
-                    .expect("captured telemetry lock is available")
-                    .clone(),
-            )
-            .expect("captured telemetry is UTF-8")
-        }
+    thread_local! {
+        /// Telemetry captured on this thread alone.
+        static CAPTURED_OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     }
+
+    /// Appends every formatted event to the emitting thread's own buffer.
+    #[derive(Clone, Copy, Default)]
+    struct CapturedOutput;
 
     impl Write for CapturedOutput {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            let mut bytes = self.0.lock().expect("captured telemetry lock is available");
-            bytes.extend_from_slice(buffer);
+            CAPTURED_OUTPUT.with(|captured| captured.borrow_mut().extend_from_slice(buffer));
             Ok(buffer.len())
         }
 
@@ -2004,34 +1997,56 @@ mod tests {
         type Writer = Self;
 
         fn make_writer(&'writer self) -> Self::Writer {
-            self.clone()
+            *self
         }
     }
 
-    fn capture_startup_cause(cause: SanitizedStartupCause<'_>) -> String {
-        let output = CapturedOutput::default();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(output.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            let _ = erase_startup_cause(RuntimePhase::Configuration, cause);
+    /// Records the telemetry `record` emits on this thread.
+    ///
+    /// The subscriber is installed once for the whole test process rather than
+    /// scoped to this thread. `tracing` caches each callsite's interest
+    /// process-wide, but `set_default` binds a subscriber to one thread, so a
+    /// sibling test that reaches a callsite first on another thread registers
+    /// it against no subscriber at all -- recording it as uninteresting for
+    /// every thread, including the one that installed a capture. The event then
+    /// is not merely written late; it is never emitted, and the assertion reads
+    /// an empty buffer.
+    ///
+    /// Writes are routed per thread so concurrent tests never read each other's
+    /// events, which keeps assertions on both presence and absence honest.
+    ///
+    /// The operator-filter tests below deliberately keep their own scoped
+    /// subscribers: they assert on what a given filter enables rather than on
+    /// captured text, and a thread-scoped default still overrides this one.
+    fn capture_operator_telemetry(record: impl FnOnce()) -> String {
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+
+        INSTALLED.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(CapturedOutput)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other global telemetry subscriber is installed");
         });
-        output.text()
+        CAPTURED_OUTPUT.with(|captured| captured.borrow_mut().clear());
+        record();
+        CAPTURED_OUTPUT
+            .with(|captured| String::from_utf8(captured.borrow().clone()))
+            .expect("captured telemetry is UTF-8")
+    }
+
+    fn capture_startup_cause(cause: SanitizedStartupCause<'_>) -> String {
+        capture_operator_telemetry(|| {
+            let _ = erase_startup_cause(RuntimePhase::Configuration, cause);
+        })
     }
 
     fn capture_database_close_failure(error: &SingleHubGuardError) -> String {
-        let output = CapturedOutput::default();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(output.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        capture_operator_telemetry(|| {
             report_database_close_failure(error);
-        });
-        output.text()
+        })
     }
 
     #[test]
