@@ -2446,14 +2446,32 @@ async fn append_runner_connection_health_events(
     enrollment: RunnerEnrollmentId,
     snapshot: RunnerConnectionSnapshot,
 ) -> Result<(), RunnerProtocolStoreError> {
-    let state = match (snapshot.state(), snapshot.cause()) {
-        (RunnerConnectionState::Suspect, RunnerConnectionCause::HeartbeatMissed) => {
-            DispatchedRunnerState::Suspect
+    let expected_state = match snapshot.cause() {
+        RunnerConnectionCause::Established | RunnerConnectionCause::HeartbeatRecovered => {
+            RunnerConnectionState::Connected
         }
-        (RunnerConnectionState::Connected, RunnerConnectionCause::HeartbeatRecovered) => {
-            DispatchedRunnerState::Connected
+        RunnerConnectionCause::HeartbeatMissed => RunnerConnectionState::Suspect,
+        RunnerConnectionCause::DaemonShutdown | RunnerConnectionCause::RunnerShutdown => {
+            RunnerConnectionState::Shutdown
         }
-        _ => return Ok(()),
+        RunnerConnectionCause::HeartbeatTimeout
+        | RunnerConnectionCause::TransportClosed
+        | RunnerConnectionCause::ProtocolFailure
+        | RunnerConnectionCause::EnrollmentRevoked => RunnerConnectionState::Lost,
+    };
+    if snapshot.state() != expected_state {
+        return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+    }
+    let state = match snapshot.cause() {
+        RunnerConnectionCause::HeartbeatMissed => DispatchedRunnerState::Suspect,
+        RunnerConnectionCause::HeartbeatRecovered => DispatchedRunnerState::Connected,
+        RunnerConnectionCause::Established
+        | RunnerConnectionCause::DaemonShutdown
+        | RunnerConnectionCause::RunnerShutdown
+        | RunnerConnectionCause::HeartbeatTimeout
+        | RunnerConnectionCause::TransportClosed
+        | RunnerConnectionCause::ProtocolFailure
+        | RunnerConnectionCause::EnrollmentRevoked => return Ok(()),
     };
     let placements = sqlx::query(
         "SELECT placement.session_id, placement.event_ordinal,

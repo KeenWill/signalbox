@@ -7,6 +7,9 @@
 
 use std::{error::Error, fmt};
 
+#[cfg(feature = "postgres-integration")]
+use std::num::NonZeroU64;
+
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_domain::{
@@ -24,12 +27,16 @@ use crate::{
     lock_inventory,
     mapping::{
         accepted_input_id_to_uuid, defaults_version_from_numeric, defaults_version_to_numeric,
+        dispatched_runner_state_from_str, dispatched_runner_state_to_str,
         durable_command_id_from_uuid, input_position_from_numeric, input_position_to_numeric,
         model_change_adjustments_from_json, model_settings_from_json,
         model_settings_overlay_from_json, session_id_from_uuid, session_id_to_uuid,
         turn_id_to_uuid,
     },
 };
+
+#[cfg(feature = "postgres-integration")]
+use crate::runner_protocol::RunnerConnectionEpoch;
 
 const SESSION_CREATED: &str = "session_created";
 const SESSION_MODEL_SETTINGS_CHANGED: &str = "session_model_settings_changed";
@@ -2006,17 +2013,9 @@ async fn load_event(
                 .map(RunnerWorkingDirectory::try_new)
                 .transpose()
                 .map_err(|_| OutboxCorruption::InvalidRunnerEvent)?;
-            let state = match row.try_get::<String, _>("state_kind")?.as_str() {
-                "pinned" => DispatchedRunnerState::Pinned,
-                "suspect" => DispatchedRunnerState::Suspect,
-                "connected" => DispatchedRunnerState::Connected,
-                "runner_lost_before_pin" => DispatchedRunnerState::RunnerLostBeforePin,
-                "runner_lost" => DispatchedRunnerState::RunnerLost,
-                "replaced" => DispatchedRunnerState::Replaced,
-                "working_directory_changed" => DispatchedRunnerState::WorkingDirectoryChanged,
-                "abandoned" => DispatchedRunnerState::Abandoned,
-                _ => return Err(OutboxCorruption::InvalidRunnerEvent.into()),
-            };
+            let state_kind = row.try_get::<String, _>("state_kind")?;
+            let state = dispatched_runner_state_from_str(&state_kind)
+                .ok_or(OutboxCorruption::InvalidRunnerEvent)?;
             let runner_uuid = row.try_get::<Uuid, _>("runner_id")?;
             let source_sandbox = row.try_get::<String, _>("source_sandbox_profile")?;
             let source_working_directory =
@@ -2082,7 +2081,11 @@ async fn load_event(
                         && source_selector == Some(runner_uuid))
                         || (source_event == "runner_replaced"
                             && source_state == "pinned"
-                            && source_pinned == Some(runner_uuid))
+                            && source_pinned == Some(runner_uuid)
+                            && !(row.try_get::<Option<Uuid>, _>("prior_lost_runner_id")?
+                                == Some(runner_uuid)
+                                && row.try_get::<Option<String>, _>("prior_working_directory")?
+                                    != source_working_directory))
                 }
                 DispatchedRunnerState::WorkingDirectoryChanged => {
                     source_event == "runner_replaced"
@@ -2537,7 +2540,7 @@ pub(crate) struct RunnerStateOutboxEvent {
 #[doc(hidden)]
 pub struct RunnerStateTransitionOutboxTestSource {
     placement_event_ordinal: u64,
-    connection: Option<(RunnerEnrollmentId, u64, u64)>,
+    connection: Option<(RunnerEnrollmentId, RunnerConnectionEpoch, NonZeroU64)>,
 }
 
 #[cfg(feature = "postgres-integration")]
@@ -2554,8 +2557,8 @@ impl RunnerStateTransitionOutboxTestSource {
     pub const fn connection(
         placement_event_ordinal: u64,
         enrollment: RunnerEnrollmentId,
-        epoch: u64,
-        event_ordinal: u64,
+        epoch: RunnerConnectionEpoch,
+        event_ordinal: NonZeroU64,
     ) -> Self {
         Self {
             placement_event_ordinal,
@@ -2569,8 +2572,8 @@ impl RunnerStateTransitionOutboxTestSource {
             connection: self.connection.map(|(enrollment, epoch, event_ordinal)| {
                 RunnerConnectionOutboxSource {
                     enrollment,
-                    epoch,
-                    event_ordinal,
+                    epoch: epoch.get(),
+                    event_ordinal: event_ordinal.get(),
                 }
             }),
         }
@@ -2920,16 +2923,7 @@ async fn append_runner_state_transition(
         RunnerSandboxProfile::Ambient => "ambient",
         RunnerSandboxProfile::WorkspaceRestricted => "workspace_restricted",
     };
-    let state = match state {
-        DispatchedRunnerState::Pinned => "pinned",
-        DispatchedRunnerState::Suspect => "suspect",
-        DispatchedRunnerState::Connected => "connected",
-        DispatchedRunnerState::RunnerLostBeforePin => "runner_lost_before_pin",
-        DispatchedRunnerState::RunnerLost => "runner_lost",
-        DispatchedRunnerState::Replaced => "replaced",
-        DispatchedRunnerState::WorkingDirectoryChanged => "working_directory_changed",
-        DispatchedRunnerState::Abandoned => "abandoned",
-    };
+    let state = dispatched_runner_state_to_str(state);
     let (connection_enrollment, connection_epoch, connection_event_ordinal) =
         match source.connection {
             Some(connection) => (

@@ -1,6 +1,8 @@
 -- Typed durable runner-state transitions for session followers.
 
 ALTER TABLE outbox_event
+    -- Supersedes outbox_event_kind_closed from
+    -- 202608030003_model_session_settings.sql.
     DROP CONSTRAINT outbox_event_kind_closed;
 
 ALTER TABLE outbox_event
@@ -161,12 +163,35 @@ BEGIN
     END IF;
 
     IF NEW.state_kind IN ('suspect', 'connected') THEN
+        PERFORM 1
+          FROM runner_current_session_placement AS current_placement
+         WHERE current_placement.session_id = placement.session_id
+           AND current_placement.event_ordinal = placement.event_ordinal;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'runner connection outbox source is not the current placement'
+                USING ERRCODE = '23514';
+        END IF;
+
         SELECT *
           INTO STRICT connection
           FROM runner_connection_event
          WHERE enrollment_id = NEW.connection_enrollment_id
            AND connection_epoch = NEW.connection_epoch
            AND event_ordinal = NEW.connection_event_ordinal;
+        PERFORM 1
+          FROM runner_connection_event AS later
+         WHERE later.enrollment_id = connection.enrollment_id
+           AND (
+                later.connection_epoch > connection.connection_epoch
+                OR (
+                    later.connection_epoch = connection.connection_epoch
+                    AND later.event_ordinal > connection.event_ordinal
+                )
+           );
+        IF FOUND THEN
+            RAISE EXCEPTION 'runner connection outbox source is not the latest event'
+                USING ERRCODE = '23514';
+        END IF;
         IF placement.state_kind <> 'pinned'
            OR placement.pinned_runner_id <> NEW.runner_id
            OR placement.registration_enrollment_id <>

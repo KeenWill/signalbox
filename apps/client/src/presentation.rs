@@ -1649,6 +1649,7 @@ impl<'a> Output<'a> {
                 working_directory,
                 state,
             } => {
+                let working_directory_present = working_directory.is_some();
                 let working_directory = working_directory.as_deref().map_or_else(
                     || String::from("none"),
                     |directory| self.render_field(directory, TextField::DelimitedOnLine),
@@ -1657,9 +1658,10 @@ impl<'a> Output<'a> {
                     self.stdout,
                     "event={cursor} session={session_id} runner_state_transition \
                      runner={runner_id} placement_revision={} sandbox={} \
-                     working_directory={} state={}",
+                     working_directory_present={} working_directory={} state={}",
                     placement_revision.value(),
                     runner_sandbox_profile(*sandbox_profile),
+                    working_directory_present,
                     working_directory,
                     runner_state_transition_state(*state),
                 )
@@ -3027,7 +3029,7 @@ mod tests {
         ImportedTextPreview, InputContent, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
         ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ReviewDiffSide,
         ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
-        ReviewTargetSnapshot, ReviewTargetSubject, RunnerSandboxProfile,
+        ReviewTargetSnapshot, ReviewTargetSubject, RunnerPlacementRevision, RunnerSandboxProfile,
         RunnerStateTransitionState, ServerMessage, SessionEvent, ToolApprovalEventDecider,
         ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
         UsageProvenance,
@@ -4437,16 +4439,43 @@ mod tests {
     fn follow_event_renders_runner_working_directory_change() {
         let rendered = render_event(SessionEvent::RunnerStateTransition {
             runner_id: wire_uuid(2),
-            placement_revision: CanonicalU64::new(3),
+            placement_revision: RunnerPlacementRevision::try_new(3)
+                .expect("the fixture placement revision is positive"),
             sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
             working_directory: Some(String::from("workspace root\nproject")),
             state: RunnerStateTransitionState::WorkingDirectoryChanged,
         });
 
         expect![[r#"
-            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted working_directory=workspace\u{20}root\u{a}project state=working_directory_changed
+            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted working_directory_present=true working_directory=workspace\u{20}root\u{a}project state=working_directory_changed
         "#]]
         .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_distinguishes_default_from_literal_none_working_directory() {
+        let default_directory = render_event(SessionEvent::RunnerStateTransition {
+            runner_id: wire_uuid(2),
+            placement_revision: RunnerPlacementRevision::try_new(3)
+                .expect("the fixture placement revision is positive"),
+            sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: None,
+            state: RunnerStateTransitionState::Pinned,
+        });
+        let literal_none = render_event(SessionEvent::RunnerStateTransition {
+            runner_id: wire_uuid(2),
+            placement_revision: RunnerPlacementRevision::try_new(3)
+                .expect("the fixture placement revision is positive"),
+            sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: Some(String::from("none")),
+            state: RunnerStateTransitionState::Pinned,
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted working_directory_present=false working_directory=none state=pinned
+            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted working_directory_present=true working_directory=none state=pinned
+        "#]]
+        .assert_eq(&format!("{default_directory}{literal_none}"));
     }
 
     #[test]

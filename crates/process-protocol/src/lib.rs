@@ -16,7 +16,9 @@ use serde::{
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::value::RawValue;
-use signalbox_domain::{ToolDecisionRationale, ToolDenialReason};
+use signalbox_domain::{
+    RunnerWorkingDirectory as DomainRunnerWorkingDirectory, ToolDecisionRationale, ToolDenialReason,
+};
 use uuid::Uuid;
 
 /// The single admitted process-protocol version.
@@ -5259,6 +5261,38 @@ pub enum RunnerSandboxProfile {
     WorkspaceRestricted,
 }
 
+/// Positive runner placement revision carried by follower-visible wire facts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct RunnerPlacementRevision(CanonicalU64);
+
+impl RunnerPlacementRevision {
+    /// Admits one positive placement revision.
+    pub const fn try_new(value: u64) -> Option<Self> {
+        if value == 0 {
+            None
+        } else {
+            Some(Self(CanonicalU64::new(value)))
+        }
+    }
+
+    /// Returns the positive integer carried by this placement revision.
+    pub const fn value(self) -> u64 {
+        self.0.value()
+    }
+}
+
+impl<'de> Deserialize<'de> for RunnerPlacementRevision {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        let value = CanonicalU64::deserialize(deserializer)?;
+        Self::try_new(value.value())
+            .ok_or_else(|| serde::de::Error::custom("runner placement revision must be positive"))
+    }
+}
+
 /// Closed runner state carried by one session update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -5552,7 +5586,7 @@ pub enum SessionEvent {
         /// Exact runner named by the transition.
         runner_id: CanonicalUuid,
         /// Positive placement revision whose immutable facts are projected.
-        placement_revision: CanonicalU64,
+        placement_revision: RunnerPlacementRevision,
         /// Placement-selected sandbox profile.
         sandbox_profile: RunnerSandboxProfile,
         /// Caller-selected directory, null when the runner default was selected.
@@ -6126,15 +6160,15 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
             ..
         } => validate_tool_approval_event_shape(decision, decider, rationale)?,
         SessionEvent::RunnerStateTransition {
-            placement_revision,
+            placement_revision: _,
             working_directory,
             ..
         } => {
-            if placement_revision.value() == 0
-                || working_directory.as_ref().is_some_and(|directory| {
-                    directory.is_empty() || directory.len() > 4_096 || directory.contains('\0')
-                })
-            {
+            if working_directory.as_ref().is_some_and(|directory| {
+                directory.is_empty()
+                    || directory.len() > DomainRunnerWorkingDirectory::MAX_BYTES
+                    || directory.contains('\0')
+            }) {
                 return Err(FrameValidationError::RunnerShape);
             }
         }
@@ -7860,12 +7894,12 @@ mod tests {
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
         ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject,
-        RunnerSandboxProfile, RunnerStateTransitionState, ServerFrame, ServerMessage, ServiceTier,
-        SessionEvent, SessionMetadata, SettingOverlay, SystemPromptMember, SystemPromptText,
-        ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnModelSettingsSnapshot,
-        TurnState, UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
-        encode_server_line, validate_adjustments,
+        RunnerPlacementRevision, RunnerSandboxProfile, RunnerStateTransitionState, ServerFrame,
+        ServerMessage, ServiceTier, SessionEvent, SessionMetadata, SettingOverlay,
+        SystemPromptMember, SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
+        TurnModelSettingsSnapshot, TurnState, UsageProvenance, decode_client_line,
+        decode_server_line, encode_client_line, encode_server_line, validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
@@ -14857,7 +14891,8 @@ mod tests {
                 session_id: uuid(3),
                 event: SessionEvent::RunnerStateTransition {
                     runner_id: uuid(4),
-                    placement_revision: CanonicalU64::new(5),
+                    placement_revision: RunnerPlacementRevision::try_new(5)
+                        .expect("the fixture placement revision is positive"),
                     sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
                     working_directory: Some(String::from("workspace/project")),
                     state: RunnerStateTransitionState::WorkingDirectoryChanged,
@@ -14869,23 +14904,8 @@ mod tests {
     }
 
     #[test]
-    fn runner_state_transition_rejects_zero_placement_revision() {
-        let error = ServerFrame::try_new(
-            RequestId::try_new(1).expect("fixture request identity is admitted"),
-            ServerMessage::SessionEvent {
-                cursor: CanonicalU64::new(2),
-                session_id: uuid(3),
-                event: SessionEvent::RunnerStateTransition {
-                    runner_id: uuid(4),
-                    placement_revision: CanonicalU64::new(0),
-                    sandbox_profile: RunnerSandboxProfile::Ambient,
-                    working_directory: None,
-                    state: RunnerStateTransitionState::Pinned,
-                },
-            },
-        )
-        .expect_err("runner transitions require a positive placement revision");
-
-        assert_eq!(error, FrameValidationError::RunnerShape);
+    fn runner_state_transition_revision_rejects_zero_at_construction_and_decode() {
+        assert_eq!(RunnerPlacementRevision::try_new(0), None);
+        assert!(serde_json::from_str::<RunnerPlacementRevision>(r#""0""#).is_err());
     }
 }
