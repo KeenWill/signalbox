@@ -61,7 +61,10 @@ BEGIN
                AND attempt.session_id = placement.session_id
                AND attempt.state_kind = 'terminal'
                AND attempt.terminal_disposition_kind = 'ambiguous'
-               AND lease_event.state_kind <> 'completed'
+               AND lease_event.state_kind IN (
+                    'lost_execution_possible',
+                    'lost_claimed'
+               )
                AND lease.runner_id = placement.lost_runner_id
                AND leased_placement.event_ordinal < placement.event_ordinal
                AND leased_placement.placement_revision =
