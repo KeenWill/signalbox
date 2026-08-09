@@ -316,6 +316,8 @@ const SYNTHETIC_NO_FILES_WERE_CREATED_COMPLETION_REPORT: &str = "Done; no files 
 const SYNTHETIC_VERB_FIRST_CREATION_DENIAL_REPORT: &str = "Done, but I did not create the file.";
 const SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT: &str =
     "Done, but I did not modify any files.";
+const SYNTHETIC_ADDITIONAL_FILE_MODIFICATION_REPORT: &str =
+    "Created exec-result.txt; I did not modify any additional files.";
 const SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT: &str = "Done, but no changes were made.";
 const SYNTHETIC_BARE_NO_MODIFICATIONS_DENIAL_REPORT: &str = "Done, but no modifications were made.";
 const SYNTHETIC_PERFECT_TENSE_NO_MODIFICATIONS_DENIAL_REPORT: &str =
@@ -4306,7 +4308,7 @@ fn report_denies_file_changes(report: &str) -> bool {
                     modification < file
                         && !scope[modification + 1..file]
                             .iter()
-                            .any(|word| word == "other")
+                            .any(|word| matches!(word.as_str(), "additional" | "other"))
                 })
             })
     });
@@ -4753,6 +4755,14 @@ fn final_response_report_accepts_a_read_only_modification_denial() {
 fn exec_file_creation_report_accepts_a_collateral_modification_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_an_additional_file_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ADDITIONAL_FILE_MODIFICATION_REPORT, false);
 
     assert!(tracker.final_response_reports_file_creation());
 }
@@ -5965,7 +5975,7 @@ fn cargo_diagnostic_location_is_valid(diagnostic: &CargoDiagnosticsEvalDiagnosti
 }
 
 fn cargo_diagnostic_completeness_is_valid(completeness: &str) -> bool {
-    matches!(completeness, "complete" | "truncated")
+    completeness == "complete"
 }
 
 fn cargo_diagnostic_span_is_valid(span: &serde_json::Value) -> bool {
@@ -10438,6 +10448,34 @@ fn forced_cargo_diagnostics_requires_complete_absent_location_evidence() {
         serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
             .expect("producer Cargo diagnostics serialize");
     diagnostic["file_completeness"] = serde_json::json!("truncated");
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_truncated_present_file() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["file"] = serde_json::json!(SYNTHETIC_CARGO_DIAGNOSTIC_FILE);
+    diagnostic["file_completeness"] = serde_json::json!("truncated");
+    diagnostic["span"] = synthetic_cargo_diagnostic_span();
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_truncated_message() {
+    let mut result = successful_cargo_diagnostics_result();
+    let mut diagnostic =
+        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
+            .expect("producer Cargo diagnostics serialize");
+    diagnostic["message_completeness"] = serde_json::json!("truncated");
     result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
