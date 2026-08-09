@@ -33,6 +33,8 @@ BEGIN
        OR NOT EXISTS (
             SELECT 1
               FROM tool_attempt AS attempt
+              JOIN runner_current_tool_attempt AS current_attempt
+                ON current_attempt.attempt_id = attempt.attempt_id
               JOIN tool_request AS request
                 ON request.request_id = attempt.request_id
                AND request.turn_id = attempt.turn_id

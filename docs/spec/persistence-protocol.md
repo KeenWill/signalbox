@@ -379,12 +379,13 @@ Representation rules, all enforced in the schema:
   against, and a nullable tool attempt naming the physical attempt the loss
   interrupted. Deferred checks require that runner and revision to name the
   session's current lost placement. A present tool attempt must also be terminal
-  and ambiguous, be the attempt the loss recorded, and carry runner-lease
-  lineage to that exact runner and placement revision; its issuing turn attempt
-  must be the same yielded chain-tip that authorizes the wait, and its producing
-  call must be the exact active tool-round boundary retained by that wait. A
-  nullable interrupted-attempt arm admits a retained tool round only when the
-  round contains no in-flight or ambiguous physical attempt. Lifecycle-side and
+  and ambiguous, be the current physical attempt for its request, be the attempt
+  the loss recorded, and carry runner-lease lineage to that exact runner and
+  placement revision; its issuing turn attempt must be the same yielded
+  chain-tip that authorizes the wait, and its producing call must be the exact
+  active tool-round boundary retained by that wait. A nullable
+  interrupted-attempt arm admits a retained tool round only when the round
+  contains no in-flight or ambiguous physical attempt. Lifecycle-side and
   placement-side checks lock the shared session-scheduler row before evaluating
   the relationship, so a concurrent placement advance cannot validate against a
   stale loss. The lifecycle transition matrix admits the phase from an

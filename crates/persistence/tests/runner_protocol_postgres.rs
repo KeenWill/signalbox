@@ -6459,6 +6459,90 @@ async fn s32_inv009_inv044_runner_loss_attempt_matches_exact_active_round()
     Ok(())
 }
 
+/// INV-009 / INV-044: a claimed-retry predecessor is no longer the physical
+/// attempt interrupted by loss after its replacement becomes current.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_loss_rejects_retired_claimed_retry_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_external_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), idempotent_catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: permission_overrides(RunnerToolPermissionOverride::Auto),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/idempotent".to_owned())
+                .expect("the idempotent fixture directory is valid"),
+            None,
+            authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::ExternalEffect),
+            offer_request(),
+        )
+        .expect("the idempotent registration pins its external-effect attempt");
+    store.store_pin(&pin, &registration).await?;
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the exact idempotent lease fence claims");
+    store.store_lease(&claimed).await?;
+    let loss = claimed
+        .lose()
+        .expect("claimed idempotent work admits a checked retry");
+    store_fixture_retryable_loss(&store, &pool, &loss).await?;
+    let replacement =
+        authorize_fixture_claimed_retry(&store, &loss, ToolEffectClass::ExternalEffect).await?;
+    let (_batch, retired, retry_authorization) = replacement.into_parts();
+    let retry = pin
+        .placement
+        .offer_retry(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            loss,
+            retry_authorization,
+        )
+        .expect("claimed idempotent work re-leases at the successor generation");
+    store_fixture_claimed_retry_replacement(&store, &pool, &retired, &retry).await?;
+    let retired_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session: pin.placement.session(),
+            turn: TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: retired_attempt,
+            recovery_interrupted_tool_attempt: Some(retired_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await
+    .expect_err("runner loss cannot retain a retired claimed-retry predecessor");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-009 / INV-044: a runner-loss wait reads back only from the exact
 /// current lost placement and retains the interrupted physical attempt.
 #[tokio::test]
