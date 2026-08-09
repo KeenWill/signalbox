@@ -5904,6 +5904,53 @@ scopes = ["model:invoke"]"#,
     }
 
     #[test]
+    fn configuration_rejects_an_oauth_endpoint_holding_user_information() {
+        // User information never reaches the request target, so it cannot
+        // distinguish two provisioning tuples, and it would put a secret in the
+        // static catalog. The delivery is undelivered either way; this asserts
+        // the grammar refuses the endpoint first, on its own terms.
+        for endpoint in [
+            "https://alice@example.test/token",
+            "https://alice:secret@example.test/token",
+            "https://:secret@example.test/token",
+        ] {
+            let oauth = CONFIGURATION.replace(
+                "delivery = \"ambient\"",
+                &format!(
+                    r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "{endpoint}"
+device_authorization_url = "https://example.test/device"
+scopes = ["model:invoke"]"#
+                ),
+            );
+
+            assert_eq!(
+                HubModelConfiguration::parse(&oauth).err(),
+                Some(HubModelConfigurationError::InvalidCredentialDelivery),
+                "{endpoint} should be rejected before the undelivered result"
+            );
+        }
+    }
+
+    #[test]
+    fn configuration_rejects_a_device_endpoint_holding_user_information() {
+        let oauth = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            r#"delivery = "oauth"
+client_id = "synthetic-client"
+token_url = "https://example.test/token"
+device_authorization_url = "https://alice:secret@example.test/device"
+scopes = ["model:invoke"]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&oauth).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
     fn configuration_parses_valid_oauth_before_refusing_it() {
         let oauth = CONFIGURATION.replace(
             "delivery = \"ambient\"",

@@ -1627,9 +1627,15 @@ durable family-to-reference entry; it consults no pool and chooses no member. An
 existing session therefore stays on the profile it was created with even after a
 pool's priorities change, which is the same durability the pinned-profile design
 already gave it. Because there is no exclusion, rotation, or failover state to
-consult, `tie_break` beyond `first_listed` and every trigger action are retained
-configuration rather than behavior; what each one is admitted to mean is stated
-below, and what an eventual selection attempt can end as is owned by
+consult, the settings that survive parsing are retained configuration rather
+than behavior: `round_robin` resolves nothing a first-listed member does not
+already resolve, and a retained trigger action never fires. The settings whose
+effect this build cannot supply are typed startup failures instead rather than
+retained-and-inert — `least_used`, any `headroom_reserve_percent`, a non-`stay`
+`on_headroom_low`, and a `switch_now` whose adapter cannot prove the cause — so
+the admitted subset below is exactly what a document may spell. What each
+admitted value is defined to mean is stated below, and what an eventual
+selection attempt can end as is owned by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine).
 
 A credential pool is the set of profiles that may substitute for one another for
@@ -2178,8 +2184,9 @@ deployment-side rules that code cannot enforce are stated in
 - **File-based supply, reread per preparation.** Each `FileCredentialAccess`
   instance binds one consumer-scoped map of references to deployment paths. A
   model adapter receives the complete catalog of that adapter's `file` profiles,
-  built from the profile catalog at startup
-  (`apps/signalboxd/src/main.rs:1070`), while web search and code-host
+  built from the profile catalog at startup — the direct HTTP adapters at
+  `apps/signalboxd/src/main.rs:1070`, and Claude CLI at
+  `apps/signalboxd/src/configuration.rs:1449` — while web search and code-host
   operations each receive a singleton map under their fixed integration
   constant.
 

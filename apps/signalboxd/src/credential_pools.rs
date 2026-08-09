@@ -284,9 +284,16 @@ const fn is_oauth_scope_token_byte(byte: u8) -> bool {
 fn validate_https_url(value: &str) -> Result<(), HubModelConfigurationError> {
     let parsed =
         Url::parse(value).map_err(|_| HubModelConfigurationError::InvalidCredentialDelivery)?;
-    // A fragment is never transmitted, so admitting one would give a single wire
-    // endpoint several stored provisioning-tuple identities.
-    if parsed.scheme() != "https" || parsed.host_str().is_none() || parsed.fragment().is_some() {
+    // Neither a fragment nor user information reaches the request target, so
+    // admitting either would give a single wire endpoint several stored
+    // provisioning-tuple identities. User information additionally carries a
+    // secret the reference-only at-rest boundary refuses to hold.
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
         return Err(HubModelConfigurationError::InvalidCredentialDelivery);
     }
     Ok(())
