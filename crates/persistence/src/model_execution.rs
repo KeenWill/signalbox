@@ -3305,6 +3305,25 @@ pub(crate) async fn load_delegated_runner_recovery_for_interrupt(
     )>,
     ModelCallRepositoryError,
 > {
+    let has_delegated_runner_recovery = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM turn_lifecycle
+             WHERE session_id = $1
+               AND origin_kind = 'delegation'
+               AND state_kind = 'active'
+               AND active_phase_kind = 'awaiting_runner_recovery'
+               AND NOT delegation_runtime_terminal
+               AND goal_turn_is_runtime_relevant(session_id, turn_id)
+        )",
+    )
+    .bind(session_id_to_uuid(requested_session))
+    .fetch_one(&mut *connection)
+    .await?;
+    if !has_delegated_runner_recovery {
+        return Ok(None);
+    }
+
     let session = match load_session_from_connection(connection, requested_session).await {
         Ok(Some(session)) => session,
         Ok(None) => return Ok(None),

@@ -2143,7 +2143,12 @@ pub(crate) async fn load_scheduling_projection(
             attempt.interrupt_command_id,
             attempt.interrupt_predecessor_turn_id AS attempt_interrupt_predecessor_turn_id,
             attempt.end_variant,
-            attempt.end_disposition
+            attempt.end_disposition,
+            runner_recovery_effect.command_id AS runner_recovery_interrupt_command_id,
+            runner_recovery_effect.yielded_turn_attempt_id
+                AS runner_recovery_yielded_attempt_id,
+            runner_recovery_effect.interrupted_tool_attempt_id
+                AS runner_recovery_interrupted_tool_attempt_id
          FROM queued_input_origin AS queued
          LEFT JOIN accepted_input AS accepted
            ON accepted.accepted_input_id = queued.accepted_input_id
@@ -2161,6 +2166,9 @@ pub(crate) async fn load_scheduling_projection(
                 turn.current_attempt_id,
                 turn.terminal_attempt_id
               )
+         LEFT JOIN turn_runner_recovery_interrupt_effect AS runner_recovery_effect
+           ON runner_recovery_effect.turn_id = turn.turn_id
+          AND runner_recovery_effect.session_id = turn.session_id
         WHERE queued.session_id = $1
           AND goal_turn_is_runtime_relevant(
                 queued.session_id, queued.turn_id
@@ -3022,19 +3030,52 @@ pub(crate) async fn load_scheduling_projection(
                             || attempt_turn != lifecycle_turn
                             || attempt_session != lifecycle_session
                             || attempt_state != "ended"
-                            || end_variant.as_deref() != Some("after_cancellation")
-                            || end_disposition.as_deref() != Some("cancelled")
                         {
                             return Err(SubmitInputCorruption::Inconsistent(
                                 "cancelled terminal attempt",
                             )
                             .into());
                         }
-                        let interrupt = require_applied_interrupt_from_attempt(
-                            &row,
-                            lifecycle_turn,
-                            &recorded_commands,
-                        )?;
+                        let (attempt_end, interrupt) = match (
+                            end_variant.as_deref(),
+                            end_disposition.as_deref(),
+                        ) {
+                            (Some("after_cancellation"), Some("cancelled")) => {
+                                let interrupt = require_applied_interrupt_from_attempt(
+                                    &row,
+                                    lifecycle_turn,
+                                    &recorded_commands,
+                                )?;
+                                (
+                                    TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                        CancellationStopDisposition::Cancelled,
+                                        interrupt,
+                                    ),
+                                    interrupt,
+                                )
+                            }
+                            (Some("without_stop"), Some("yielded_to_durable_wait")) => {
+                                let interrupt = require_applied_runner_recovery_interrupt(
+                                    &row,
+                                    lifecycle_turn,
+                                    stored_attempt_id,
+                                    None,
+                                    &recorded_commands,
+                                )?;
+                                (
+                                    TerminalAttemptEndReconstitutionInput::yielded_to_runner_recovery(
+                                        interrupt,
+                                    ),
+                                    interrupt,
+                                )
+                            }
+                            _ => {
+                                return Err(SubmitInputCorruption::Inconsistent(
+                                    "cancelled terminal attempt disposition",
+                                )
+                                .into());
+                            }
+                        };
                         let ended_call = terminal_model_call.map(ModelCallId::from_uuid);
                         if let Some(call) = terminal_model_call {
                             required_model_calls.insert(call);
@@ -3068,10 +3109,7 @@ pub(crate) async fn load_scheduling_projection(
                             terminal_execution: CancelledTurnExecutionReconstitutionInput::new(
                                 lifecycle_turn,
                                 stored_attempt_id,
-                                TerminalAttemptEndReconstitutionInput::after_cancellation(
-                                    CancellationStopDisposition::Cancelled,
-                                    interrupt,
-                                ),
+                                attempt_end,
                                 ended_call,
                                 interrupt,
                             )
@@ -3101,61 +3139,78 @@ pub(crate) async fn load_scheduling_projection(
                             )
                             .into());
                         }
-                        let interrupt = match end_variant.as_deref() {
-                            Some("after_cancellation") => require_applied_interrupt_from_attempt(
-                                &row,
-                                lifecycle_turn,
-                                &recorded_commands,
-                            )?,
-                            Some("without_stop") => require_applied_interrupt_for_turn(
-                                lifecycle_turn,
-                                &recorded_commands,
-                            )?,
-                            Some(value) => {
-                                return Err(SubmitInputCorruption::Unsupported {
-                                    field: "reconciliation attempt end_variant",
-                                    value: value.to_owned(),
-                                }
-                                .into());
+                        let (interrupt, reconciling_attempt_end) = match (
+                            end_variant.as_deref(),
+                            end_disposition.as_deref(),
+                        ) {
+                            (Some("without_stop"), Some("ambiguous")) => (
+                                require_applied_interrupt_for_turn(
+                                    lifecycle_turn,
+                                    &recorded_commands,
+                                )?,
+                                TerminalAttemptEndReconstitutionInput::without_stop(
+                                    UnstoppedAttemptDisposition::Ambiguous,
+                                ),
+                            ),
+                            (Some("without_stop"), Some("lost")) => (
+                                require_applied_interrupt_for_turn(
+                                    lifecycle_turn,
+                                    &recorded_commands,
+                                )?,
+                                TerminalAttemptEndReconstitutionInput::without_stop(
+                                    UnstoppedAttemptDisposition::Lost,
+                                ),
+                            ),
+                            (Some("after_cancellation"), Some("ambiguous")) => {
+                                let interrupt = require_applied_interrupt_from_attempt(
+                                    &row,
+                                    lifecycle_turn,
+                                    &recorded_commands,
+                                )?;
+                                (
+                                    interrupt,
+                                    TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                        CancellationStopDisposition::Ambiguous,
+                                        interrupt,
+                                    ),
+                                )
                             }
-                            None => {
-                                return Err(SubmitInputCorruption::Missing(
-                                    "reconciliation attempt end_variant",
+                            (Some("after_cancellation"), Some("lost")) => {
+                                let interrupt = require_applied_interrupt_from_attempt(
+                                    &row,
+                                    lifecycle_turn,
+                                    &recorded_commands,
+                                )?;
+                                (
+                                    interrupt,
+                                    TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                        CancellationStopDisposition::Lost,
+                                        interrupt,
+                                    ),
+                                )
+                            }
+                            (Some("without_stop"), Some("yielded_to_durable_wait")) => {
+                                let interrupt = require_applied_runner_recovery_interrupt(
+                                    &row,
+                                    lifecycle_turn,
+                                    stored_attempt_id,
+                                    terminal_tool_attempt,
+                                    &recorded_commands,
+                                )?;
+                                (
+                                        interrupt,
+                                        TerminalAttemptEndReconstitutionInput::yielded_to_runner_recovery(
+                                            interrupt,
+                                        ),
+                                    )
+                            }
+                            _ => {
+                                return Err(SubmitInputCorruption::Inconsistent(
+                                    "reconciliation terminal attempt disposition",
                                 )
                                 .into());
                             }
                         };
-                        let reconciling_attempt_end =
-                            match (end_variant.as_deref(), end_disposition.as_deref()) {
-                                (Some("without_stop"), Some("ambiguous")) => {
-                                    TerminalAttemptEndReconstitutionInput::without_stop(
-                                        UnstoppedAttemptDisposition::Ambiguous,
-                                    )
-                                }
-                                (Some("without_stop"), Some("lost")) => {
-                                    TerminalAttemptEndReconstitutionInput::without_stop(
-                                        UnstoppedAttemptDisposition::Lost,
-                                    )
-                                }
-                                (Some("after_cancellation"), Some("ambiguous")) => {
-                                    TerminalAttemptEndReconstitutionInput::after_cancellation(
-                                        CancellationStopDisposition::Ambiguous,
-                                        interrupt,
-                                    )
-                                }
-                                (Some("after_cancellation"), Some("lost")) => {
-                                    TerminalAttemptEndReconstitutionInput::after_cancellation(
-                                        CancellationStopDisposition::Lost,
-                                        interrupt,
-                                    )
-                                }
-                                _ => {
-                                    return Err(SubmitInputCorruption::Inconsistent(
-                                        "reconciliation terminal attempt disposition",
-                                    )
-                                    .into());
-                                }
-                            };
                         match (terminal_model_call, terminal_tool_attempt) {
                             (Some(terminal_call), None) => {
                                 required_model_calls.insert(terminal_call);
@@ -5112,6 +5167,47 @@ fn require_applied_interrupt_for_turn(
         );
     }
     Ok(interrupt)
+}
+
+fn require_applied_runner_recovery_interrupt(
+    row: &PgRow,
+    owning_turn: TurnId,
+    yielded_attempt: TurnAttemptId,
+    interrupted_tool_attempt: Option<Uuid>,
+    recorded_commands: &BTreeMap<DurableCommandId, ReconstitutedSubmitInput>,
+) -> Result<AppliedInterruptCommandResult, SubmitInputRepositoryError> {
+    let command =
+        durable_command_id_from_uuid(required(row, "runner_recovery_interrupt_command_id")?)
+            .map_err(|_| SubmitInputCorruption::Inconsistent("runner recovery command identity"))?;
+    let recorded_yielded_attempt: Uuid = required(row, "runner_recovery_yielded_attempt_id")?;
+    let recorded_interrupted_attempt: Option<Uuid> =
+        row.try_get("runner_recovery_interrupted_tool_attempt_id")?;
+    if recorded_yielded_attempt != yielded_attempt.into_uuid()
+        || recorded_interrupted_attempt != interrupted_tool_attempt
+    {
+        return Err(SubmitInputCorruption::Inconsistent("runner recovery interrupt effect").into());
+    }
+    let receipt = recorded_commands
+        .get(&command)
+        .ok_or(SubmitInputCorruption::Missing(
+            "runner recovery interrupt command",
+        ))?;
+    let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) = receipt.result()
+    else {
+        return Err(SubmitInputCorruption::Inconsistent(
+            "runner recovery interrupt was not applied",
+        )
+        .into());
+    };
+    origin
+        .applied_interrupt()
+        .copied()
+        .filter(|interrupt| {
+            interrupt.proof().command() == command && interrupt.proof().predecessor() == owning_turn
+        })
+        .ok_or_else(|| {
+            SubmitInputCorruption::Inconsistent("runner recovery interrupt authority").into()
+        })
 }
 
 fn accepted_origin_source_turn(delivery: DeliveryRequest) -> Option<TurnId> {

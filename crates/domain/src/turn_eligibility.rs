@@ -386,6 +386,17 @@ impl TerminalAttemptEndReconstitutionInput {
         }
     }
 
+    /// Supplies an attempt yielded to a runner-recovery wait together with
+    /// the exact interrupt that later consumed that wait.
+    pub const fn yielded_to_runner_recovery(interrupt: AppliedInterruptCommandResult) -> Self {
+        Self {
+            end: AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
+            },
+            interrupt: Some(interrupt),
+        }
+    }
+
     /// Borrows the stored typed attempt end.
     pub const fn end(&self) -> &AttemptEnd {
         &self.end
@@ -6100,17 +6111,20 @@ fn reconstitute_inner(
                 let interrupt = terminal_execution.interrupt;
                 let attempt_end = &terminal_execution.attempt_end;
                 let successor = records_by_turn.get(&interrupt.successor());
+                let attempt_end_matches = match attempt_end.end() {
+                    AttemptEnd::AfterCancellation {
+                        cause,
+                        disposition: CancellationStopDisposition::Cancelled,
+                    } => *cause == interrupt.proof() && attempt_end.interrupt() == Some(interrupt),
+                    AttemptEnd::WithoutStop {
+                        disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
+                    } => attempt_end.interrupt() == Some(interrupt),
+                    _ => false,
+                };
                 if terminal_execution.owning_turn != turn
                     || interrupt.session() != session
                     || interrupt.proof().predecessor() != turn
-                    || !matches!(
-                        attempt_end.end(),
-                        AttemptEnd::AfterCancellation {
-                            cause,
-                            disposition: CancellationStopDisposition::Cancelled,
-                        } if *cause == interrupt.proof()
-                    )
-                    || attempt_end.interrupt() != Some(interrupt)
+                    || !attempt_end_matches
                     || successor.is_none_or(|successor| {
                         successor.stored_session != session
                             || successor.accepted_input.id() != interrupt.accepted_input()
@@ -6486,6 +6500,9 @@ fn reconstitute_inner(
                         *cause == interrupt.proof()
                             && reconciling_attempt_end.interrupt() == Some(*interrupt)
                     }
+                    AttemptEnd::WithoutStop {
+                        disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
+                    } => reconciling_attempt_end.interrupt() == Some(*interrupt),
                     _ => false,
                 };
                 let successor = records_by_turn.get(&interrupt.successor());

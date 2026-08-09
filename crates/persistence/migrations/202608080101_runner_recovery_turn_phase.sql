@@ -423,9 +423,15 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    checked_session_id uuid := COALESCE(NEW.session_id, OLD.session_id);
+    checked_session_id uuid;
     checked_turn_id uuid;
 BEGIN
+    IF TG_OP = 'DELETE' THEN
+        checked_session_id := OLD.session_id;
+    ELSE
+        checked_session_id := NEW.session_id;
+    END IF;
+
     PERFORM 1
       FROM session_scheduler
      WHERE session_id = checked_session_id
@@ -724,29 +730,6 @@ BEGIN
                            AND waiting.wait_mode = 'foreground'
                            AND producing_call.turn_attempt_id
                                = stopped_attempt.turn_attempt_id
-                           AND cancelled.state_kind = 'terminal'
-                           AND cancelled.terminal_disposition_kind = 'cancelled'
-                           AND cancelled.terminal_attempt_id IS NULL
-                           AND cancelled.terminal_model_call_id IS NULL
-                    )
-                )
-                OR (
-                    stopped_attempt.state_kind = 'ended'
-                    AND stopped_attempt.end_variant = 'without_stop'
-                    AND stopped_attempt.end_disposition = 'yielded_to_durable_wait'
-                    AND stopped_attempt.interrupt_command_id IS NULL
-                    AND stopped_attempt.interrupt_predecessor_turn_id IS NULL
-                    AND EXISTS (
-                        SELECT 1
-                          FROM turn_runner_recovery_interrupt_effect AS effect
-                          JOIN turn_lifecycle AS cancelled
-                            ON cancelled.turn_id = effect.turn_id
-                           AND cancelled.session_id = effect.session_id
-                         WHERE effect.command_id = NEW.command_id
-                           AND effect.turn_id = NEW.expected_active_turn_id
-                           AND effect.session_id = NEW.session_id
-                           AND effect.yielded_turn_attempt_id =
-                                stopped_attempt.turn_attempt_id
                            AND cancelled.state_kind = 'terminal'
                            AND cancelled.terminal_disposition_kind = 'cancelled'
                            AND cancelled.terminal_attempt_id IS NULL
