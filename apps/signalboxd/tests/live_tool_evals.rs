@@ -21,7 +21,7 @@ use std::{
     fmt, fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex as StdMutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use git2::{
@@ -284,12 +284,14 @@ const SYNTHETIC_APPLIED_COMPLETION_REPORT: &str = "The patch was applied success
 const SYNTHETIC_NOT_APPLIED_REPORT: &str = "The patch was not applied.";
 const SYNTHETIC_NO_ERRORS_COMPLETION_REPORT: &str =
     "Completed the requested operation with no errors.";
+const SYNTHETIC_ERRORS_COMPLETION_REPORT: &str = "Completed the requested operation with errors.";
 const SYNTHETIC_WITHOUT_FAILURE_COMPLETION_REPORT: &str =
     "Completed the requested operation without failure.";
 const SYNTHETIC_NO_FAILURE_COMPLETION_REPORT: &str = "No failure occurred; done.";
 const SYNTHETIC_NOTHING_FAILED_COMPLETION_REPORT: &str = "Nothing failed; completed successfully.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
+const SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT: &str = "Read completed; no file was created.";
 const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
@@ -447,6 +449,7 @@ async fn run_case(
         (Some(case), [request], Some(expected_arguments)) => {
             match tracker.result_content(request.request_id) {
                 Some(content) => forced_case_completion_reported(
+                    case.name,
                     forced_execution_completed(
                         suite,
                         case,
@@ -490,8 +493,14 @@ fn forced_execution_completed(
     suite.forced_case_result_passed(case, evidence.result_content)
 }
 
-fn forced_case_completion_reported(execution_completed: bool, tracker: &OperationTracker) -> bool {
-    execution_completed && tracker.final_response_reports_completion()
+fn forced_case_completion_reported(
+    case_name: &str,
+    execution_completed: bool,
+    tracker: &OperationTracker,
+) -> bool {
+    let file_creation_required = matches!(case_name, APPLY_PATCH_NAME | WRITE_FILE_NAME);
+    execution_completed
+        && tracker.final_response_reports_completion_with_file_creation(file_creation_required)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -639,6 +648,7 @@ struct FamilySuite {
     catalog: MergedCatalog,
     executor: SharedFamilyExecutor,
     workspace_seed_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    workspace_seed_modified_times: BTreeMap<PathBuf, SystemTime>,
     git_pre_execution_worktree_entries: StdMutex<Option<BTreeMap<PathBuf, WorkspaceEntrySnapshot>>>,
     git_pre_execution_index_entries: StdMutex<Option<Vec<GitIndexCompleteEntrySnapshot>>>,
     git_pre_execution_objects: StdMutex<Option<GitObjectInventory>>,
@@ -668,6 +678,7 @@ struct GitFixtureSnapshot {
     metadata_root_mode: Option<u32>,
     metadata_top_level: BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
     index_entries: Vec<GitIndexEntrySnapshot>,
+    index_complete_entries: Vec<GitIndexCompleteEntrySnapshot>,
     index_extensions: Vec<GitIndexExtensionSnapshot>,
     static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reflog_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
@@ -937,6 +948,7 @@ impl FamilySuite {
             catalog: MergedCatalog::try_new([catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Git(executor)),
             workspace_seed_entries: BTreeMap::new(),
+            workspace_seed_modified_times: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
@@ -979,6 +991,7 @@ impl FamilySuite {
             )?;
         }
         let workspace_seed_entries = workspace_entries(workspace.path())?;
+        let workspace_seed_modified_times = workspace_modified_times(workspace.path())?;
         let reads = WorkspaceReadTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
         let mutations =
             WorkspaceMutationTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
@@ -996,6 +1009,7 @@ impl FamilySuite {
                 mutation: mutation_executor,
             }),
             workspace_seed_entries,
+            workspace_seed_modified_times,
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
@@ -1028,6 +1042,7 @@ impl FamilySuite {
                 search: search_executor,
             }),
             workspace_seed_entries: BTreeMap::new(),
+            workspace_seed_modified_times: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
@@ -1255,6 +1270,7 @@ impl FamilySuite {
             EvalFamily::Workspace => workspace_forced_case_passed(
                 self.workspace.path(),
                 &self.workspace_seed_entries,
+                &self.workspace_seed_modified_times,
                 case.name,
                 &arguments,
                 &result,
@@ -1294,13 +1310,20 @@ impl FamilySuite {
             Err(error) => return Err(error.into()),
         }
         let mut actual = workspace_entries(self.workspace.path())?;
+        let mut actual_modified_times = workspace_modified_times(self.workspace.path())?;
         let answer = actual.remove(Path::new(WORKSPACE_ANSWER_PATH));
+        actual_modified_times.remove(Path::new(WORKSPACE_ANSWER_PATH));
+        actual_modified_times.remove(Path::new(""));
         let expected_answer = WorkspaceEntrySnapshot::File {
             content: WORKSPACE_ANSWER.as_bytes().to_vec(),
             mode: WORKSPACE_CREATED_FILE_MODE,
             links: WORKSPACE_CREATED_FILE_LINKS,
         };
-        Ok(answer == Some(expected_answer) && actual == self.workspace_seed_entries)
+        let mut expected_modified_times = self.workspace_seed_modified_times.clone();
+        expected_modified_times.remove(Path::new(""));
+        Ok(answer == Some(expected_answer)
+            && actual == self.workspace_seed_entries
+            && actual_modified_times == expected_modified_times)
     }
 
     fn natural_execution_completed(
@@ -1311,7 +1334,7 @@ impl FamilySuite {
         match self.family {
             EvalFamily::Workspace => {
                 Ok(workspace_natural_result_payloads_passed(snapshot, tracker)
-                    && tracker.final_response_reports_completion())
+                    && tracker.final_response_reports_completion_with_file_creation(true))
             }
             EvalFamily::Web => Ok(web_natural_result_payloads_passed(snapshot, tracker)
                 && tracker.final_response_reports(WEB_FETCH_BODY)),
@@ -1336,13 +1359,29 @@ fn filesystem_entries(
     root: &Path,
     ignored_root_entry: Option<&Path>,
 ) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntrySnapshot>> {
-    let mut pending = vec![root.to_path_buf()];
-    let mut entries = BTreeMap::from([(
-        PathBuf::new(),
+    let root_metadata = fs::symlink_metadata(root)?;
+    let root_file_type = root_metadata.file_type();
+    let root_snapshot = if root_file_type.is_dir() {
         WorkspaceEntrySnapshot::Directory {
             mode: worktree_mode(root)?,
-        },
-    )]);
+        }
+    } else if root_file_type.is_file() {
+        WorkspaceEntrySnapshot::File {
+            content: fs::read(root)?,
+            mode: worktree_mode(root)?,
+            links: worktree_link_count(root)?,
+        }
+    } else if root_file_type.is_symlink() {
+        WorkspaceEntrySnapshot::Symlink
+    } else {
+        WorkspaceEntrySnapshot::Other
+    };
+    let mut pending = if root_file_type.is_dir() {
+        vec![root.to_path_buf()]
+    } else {
+        Vec::new()
+    };
+    let mut entries = BTreeMap::from([(PathBuf::new(), root_snapshot)]);
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
@@ -1383,6 +1422,16 @@ fn filesystem_entries(
         }
     }
     Ok(entries)
+}
+
+fn workspace_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
+    workspace_entries(root)?
+        .into_keys()
+        .map(|relative| {
+            let modified = fs::symlink_metadata(root.join(&relative))?.modified()?;
+            Ok((relative, modified))
+        })
+        .collect()
 }
 
 struct GitForcedVerification<'a> {
@@ -1642,7 +1691,13 @@ fn git_forced_case_passed(
     };
     Ok(passed
         && git_fixture_snapshot_matches(root, &repository, seed_fixture)?
-        && git_forced_index_matches(&repository, name, seed_fixture, pre_execution_index_entries)?
+        && git_forced_index_matches(
+            root,
+            &repository,
+            name,
+            seed_fixture,
+            pre_execution_index_entries,
+        )?
         && git_forced_objects_match(
             &repository,
             name,
@@ -1941,6 +1996,7 @@ fn worktree_link_count(path: &Path) -> EvalResult<Option<u64>> {
 fn workspace_forced_case_passed(
     root: &Path,
     seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
     name: &str,
     arguments: &serde_json::Value,
     result: &serde_json::Value,
@@ -2100,7 +2156,8 @@ fn workspace_forced_case_passed(
     }
     match name {
         READ_FILE_NAME | LIST_DIRECTORY_NAME | GLOB_FILES_NAME | SEARCH_FILES_NAME => {
-            Ok(workspace_entries(root)? == *seed_entries)
+            Ok(workspace_entries(root)? == *seed_entries
+                && workspace_modified_times(root)? == *seed_modified_times)
         }
         _ => Ok(true),
     }
@@ -2393,6 +2450,7 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         metadata_root_mode: worktree_mode(repository.path())?,
         metadata_top_level: git_metadata_top_level(root)?,
         index_entries: git_index_entries(&repository)?,
+        index_complete_entries: git_index_complete_entries(&repository)?,
         index_extensions: git_index_extensions(&repository)?,
         static_metadata_entries: git_static_metadata_entries(root)?,
         reflog_entries: git_reflog_entries(root)?,
@@ -2612,7 +2670,70 @@ fn git_index_with_expected_file(
     Ok(expected)
 }
 
+fn git_index_complete_entries_match(
+    root: &Path,
+    repository: &Repository,
+    baseline: &[GitIndexCompleteEntrySnapshot],
+    mutable_path: Option<&str>,
+) -> EvalResult<bool> {
+    let actual = git_index_complete_entries(repository)?;
+    let Some(mutable_path) = mutable_path else {
+        return Ok(actual == baseline);
+    };
+    let mutable_path_bytes = mutable_path.as_bytes();
+    let unchanged_actual = actual
+        .iter()
+        .filter(|entry| entry.semantic.path != mutable_path_bytes)
+        .collect::<Vec<_>>();
+    let unchanged_baseline = baseline
+        .iter()
+        .filter(|entry| entry.semantic.path != mutable_path_bytes)
+        .collect::<Vec<_>>();
+    if unchanged_actual != unchanged_baseline {
+        return Ok(false);
+    }
+    let Some(target) = actual
+        .iter()
+        .find(|entry| entry.semantic.path == mutable_path_bytes)
+    else {
+        return Ok(false);
+    };
+    git_index_entry_matches_worktree(root, mutable_path, target)
+}
+
+#[cfg(unix)]
+fn git_index_entry_matches_worktree(
+    root: &Path,
+    path: &str,
+    entry: &GitIndexCompleteEntrySnapshot,
+) -> EvalResult<bool> {
+    let metadata = fs::symlink_metadata(root.join(path))?;
+    let dev = u32::try_from(metadata.dev() & u64::from(u32::MAX)).ok();
+    let ino = u32::try_from(metadata.ino() & u64::from(u32::MAX)).ok();
+    Ok(metadata.file_type().is_file()
+        && i64::from(entry.ctime.seconds()) == metadata.ctime()
+        && i64::from(entry.ctime.nanoseconds()) == metadata.ctime_nsec()
+        && i64::from(entry.mtime.seconds()) == metadata.mtime()
+        && i64::from(entry.mtime.nanoseconds()) == metadata.mtime_nsec()
+        && (entry.dev == 0 || Some(entry.dev) == dev)
+        && Some(entry.ino) == ino
+        && entry.uid == metadata.uid()
+        && entry.gid == metadata.gid()
+        && u64::from(entry.file_size) == metadata.size())
+}
+
+#[cfg(not(unix))]
+fn git_index_entry_matches_worktree(
+    root: &Path,
+    path: &str,
+    entry: &GitIndexCompleteEntrySnapshot,
+) -> EvalResult<bool> {
+    let metadata = fs::symlink_metadata(root.join(path))?;
+    Ok(metadata.is_file() && u64::from(entry.file_size) == metadata.len())
+}
+
 fn git_forced_index_matches(
+    root: &Path,
     repository: &Repository,
     case_name: &str,
     seed_fixture: &GitFixtureSnapshot,
@@ -2636,15 +2757,16 @@ fn git_forced_index_matches(
         )?,
         _ => seed_fixture.index_entries.clone(),
     };
-    let complete_entries_match = match case_name {
-        GIT_BRANCH_CREATE_NAME | GIT_DIFF_NAME | GIT_LOG_NAME | GIT_STATUS_NAME => {
-            pre_execution_index_entries.is_some_and(|expected| {
-                git_index_complete_entries(repository).is_ok_and(|actual| actual == expected)
-            })
-        }
-        GIT_BRANCH_SWITCH_NAME | GIT_CREATE_COMMIT_NAME | GIT_STAGE_NAME => true,
-        _ => false,
+    let baseline = pre_execution_index_entries.unwrap_or(&seed_fixture.index_complete_entries);
+    let mutable_path = match case_name {
+        GIT_BRANCH_SWITCH_NAME => Some(GIT_SEED_PATH),
+        GIT_CREATE_COMMIT_NAME => Some(GIT_COMMIT_PATH),
+        GIT_STAGE_NAME => Some(GIT_STAGE_PATH),
+        GIT_BRANCH_CREATE_NAME | GIT_DIFF_NAME | GIT_LOG_NAME | GIT_STATUS_NAME => None,
+        _ => return Ok(false),
     };
+    let complete_entries_match =
+        git_index_complete_entries_match(root, repository, baseline, mutable_path)?;
     Ok(git_index_entries(repository)? == expected
         && git_index_extensions(repository)? == seed_fixture.index_extensions
         && complete_entries_match)
@@ -3169,6 +3291,21 @@ fn stage_path(root: &Path, path: &str) -> EvalResult {
     Ok(())
 }
 
+fn drift_git_index_ctime(root: &Path, path: &str) -> EvalResult {
+    let repository = Repository::open(root)?;
+    let mut index = repository.index()?;
+    let mut entry = index
+        .get_path(Path::new(path), 0)
+        .ok_or_else(|| io::Error::other("the Git index drift fixture is missing"))?;
+    entry.ctime = IndexTime::new(
+        entry.ctime.seconds().wrapping_add(1),
+        entry.ctime.nanoseconds(),
+    );
+    index.add(&entry)?;
+    index.write()?;
+    Ok(())
+}
+
 fn install_git_merge_state(root: &Path, seed: Oid) -> EvalResult {
     let repository = Repository::open(root)?;
     let merge_parent = repository.find_commit(seed)?.parent_id(0)?;
@@ -3337,7 +3474,13 @@ fn git_natural_state_passed_in_window(
             GIT_NATURAL_PATH,
             GIT_NATURAL_CONTENT.as_bytes(),
         )?
-        && git_index_extensions(&repository)? == seed_fixture.index_extensions;
+        && git_index_extensions(&repository)? == seed_fixture.index_extensions
+        && git_index_complete_entries_match(
+            root,
+            &repository,
+            &seed_fixture.index_complete_entries,
+            Some(GIT_NATURAL_PATH),
+        )?;
     let commit_adds_expected_natural_fixture = commit_adds_exact_fixture(
         &repository,
         &head,
@@ -4089,10 +4232,17 @@ impl OperationTracker {
             .expect("operation-tracker lock is available")
             .final_response_text
             .as_deref()
-            .is_some_and(|text| text.contains(expected) && !report_denies_success(text))
+            .is_some_and(|text| text.contains(expected) && !report_denies_success(text, false))
     }
 
     fn final_response_reports_completion(&self) -> bool {
+        self.final_response_reports_completion_with_file_creation(false)
+    }
+
+    fn final_response_reports_completion_with_file_creation(
+        &self,
+        file_creation_required: bool,
+    ) -> bool {
         let state = self
             .state
             .lock()
@@ -4105,11 +4255,11 @@ impl OperationTracker {
                 report = report.replace(&receipt, "");
             }
         }
-        report_affirms_completion(&report)
+        report_affirms_completion(&report, file_creation_required)
     }
 }
 
-fn report_affirms_completion(report: &str) -> bool {
+fn report_affirms_completion(report: &str, file_creation_required: bool) -> bool {
     let words = normalized_report_words(report);
     let has_completion = [
         "applied",
@@ -4125,12 +4275,12 @@ fn report_affirms_completion(report: &str) -> bool {
     ]
     .iter()
     .any(|word| words.iter().any(|observed| observed == *word));
-    has_completion && !report_denies_success(report)
+    has_completion && !report_denies_success(report, file_creation_required)
 }
 
-fn report_denies_success(report: &str) -> bool {
+fn report_denies_success(report: &str, file_creation_required: bool) -> bool {
     let words = normalized_report_words(report);
-    report_words_deny_success(report, &words)
+    report_words_deny_success(report, &words, file_creation_required)
 }
 
 fn normalized_report_words(report: &str) -> Vec<String> {
@@ -4145,13 +4295,22 @@ fn normalized_report_words(report: &str) -> Vec<String> {
         .collect()
 }
 
-fn report_words_deny_success(report: &str, words: &[String]) -> bool {
+fn report_words_deny_success(report: &str, words: &[String], file_creation_required: bool) -> bool {
     let explicit_failure = report
         .split([';', '.', ',', '!', '?', '\n'])
         .map(normalized_report_words)
         .any(|clause| {
             clause.iter().enumerate().any(|(index, word)| {
-                ["cannot", "failed", "failure", "incomplete", "unable"].contains(&word.as_str())
+                [
+                    "cannot",
+                    "error",
+                    "errors",
+                    "failed",
+                    "failure",
+                    "incomplete",
+                    "unable",
+                ]
+                .contains(&word.as_str())
                     && !clause[..index].iter().rev().take(2).any(|qualifier| {
                         matches!(
                             qualifier.as_str(),
@@ -4164,19 +4323,20 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
     let negative_no_claim = words
         .windows(2)
         .any(|pair| pair[0] == "no" && negative_no_objects.contains(&pair[1].as_str()));
-    let negative_no_file_claim = words.iter().enumerate().any(|(index, word)| {
-        word == "no"
-            && words.get(index + 1).is_some_and(|object| object == "file")
-            && ["created", "exists", "found", "written"]
-                .iter()
-                .any(|outcome| {
-                    words
-                        .iter()
-                        .skip(index + 2)
-                        .take(4)
-                        .any(|word| word == outcome)
-                })
-    });
+    let negative_no_file_claim = file_creation_required
+        && words.iter().enumerate().any(|(index, word)| {
+            word == "no"
+                && words.get(index + 1).is_some_and(|object| object == "file")
+                && ["created", "exists", "found", "written"]
+                    .iter()
+                    .any(|outcome| {
+                        words
+                            .iter()
+                            .skip(index + 2)
+                            .take(4)
+                            .any(|word| word == outcome)
+                    })
+        });
     let negative_nothing_claim = words.iter().enumerate().any(|(index, word)| {
         word == "nothing"
             && !words.get(index + 1).is_some_and(|qualifier| {
@@ -4371,7 +4531,11 @@ fn forced_case_completion_rejects_a_receipt_only_answer() {
     );
     tracker.observe_response_text(SYNTHETIC_EVAL_RECEIPT, false);
 
-    assert!(!forced_case_completion_reported(true, &tracker));
+    assert!(!forced_case_completion_reported(
+        READ_FILE_NAME,
+        true,
+        &tracker
+    ));
 }
 
 #[test]
@@ -4488,6 +4652,14 @@ fn final_response_report_accepts_completion_with_no_errors() {
 }
 
 #[test]
+fn final_response_report_rejects_completion_with_errors() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ERRORS_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
 fn final_response_report_accepts_completion_without_failure() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_WITHOUT_FAILURE_COMPLETION_REPORT, false);
@@ -4567,7 +4739,15 @@ fn final_response_report_rejects_a_no_file_written_claim() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NO_FILE_WRITTEN_REPORT, false);
 
-    assert!(!tracker.final_response_reports_completion());
+    assert!(!tracker.final_response_reports_completion_with_file_creation(true));
+}
+
+#[test]
+fn effect_free_final_response_accepts_a_file_creation_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
 }
 
 #[test]
@@ -6068,6 +6248,23 @@ fn git_natural_state_rejects_skip_worktree_index_drift() -> EvalResult {
 }
 
 #[test]
+fn git_natural_state_rejects_unrelated_stat_cache_drift() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (seed, seed_refs, seed_fixture) = seed_git_repository_with_refs(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    drift_git_index_ctime(workspace.path(), GIT_SEED_PATH)?;
+
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+        &seed_fixture,
+    )?);
+    Ok(())
+}
+
+#[test]
 fn git_natural_state_rejects_index_extension_drift() -> EvalResult {
     let workspace = tempfile::tempdir()?;
     let (seed, seed_refs, seed_fixture) = seed_git_repository_with_refs(workspace.path())?;
@@ -6574,6 +6771,26 @@ fn forced_git_stage_verifier_accepts_the_exact_staged_blob() -> EvalResult {
             .flatten()
     );
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_stage_verifier_rejects_unrelated_stat_cache_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STAGE_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STAGE_NAME)
+        .expect("the Git stage fixture exists");
+    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    drift_git_index_ctime(suite.workspace.path(), GIT_SEED_PATH)?;
+    let result = serde_json::json!({
+        "staged_paths": 1,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
@@ -8708,6 +8925,48 @@ fn forced_workspace_read_verifier_rejects_collateral_mutation() -> EvalResult {
     .to_string();
 
     assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_read_verifier_rejects_collateral_mtime_drift() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == READ_FILE_NAME)
+        .expect("the workspace read fixture exists");
+    let collateral = suite.workspace.path().join(WORKSPACE_GLOB_NONMATCHING_PATH);
+    fs::File::open(collateral)?.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    let prefix = WORKSPACE_SEED
+        .get(..WORKSPACE_FORCED_READ_MAX_BYTES)
+        .expect("the workspace fixture covers the forced bound");
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "content": prefix,
+        "bytes_read": prefix.len(),
+        "total_bytes": WORKSPACE_SEED.len(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_inventory_rejects_a_symlink_replacing_its_root() -> EvalResult {
+    let parent = tempfile::tempdir()?;
+    let root = parent.path().join("workspace-root");
+    let moved = parent.path().join("moved-workspace");
+    fs::create_dir(&root)?;
+    fs::write(root.join(WORKSPACE_SEED_PATH), WORKSPACE_SEED)?;
+    let expected = workspace_entries(&root)?;
+    fs::rename(&root, &moved)?;
+    symlink(&moved, &root)?;
+
+    assert_ne!(workspace_entries(&root)?, expected);
     Ok(())
 }
 
