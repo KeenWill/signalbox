@@ -5939,24 +5939,7 @@ impl CaseOutcome {
         let Ok(result) = serde_json::from_str::<serde_json::Value>(&result.content) else {
             return false;
         };
-        if target == CARGO_DIAGNOSTICS_NAME {
-            return cargo_diagnostics_result_passed(&result);
-        }
-        let execution = &result;
-        let expected_confinement = match target {
-            SANDBOXED_EXEC_NAME => "filesystem_confined",
-            UNSANDBOXED_EXEC_NAME => "unsandboxed",
-            _ => return false,
-        };
-        if execution["confinement"]["kind"] != expected_confinement || !exited_cleanly(execution) {
-            return false;
-        }
-        let stdout_matches = match target {
-            SANDBOXED_EXEC_NAME => captured_stdout_is(execution, EXEC_FORCED_SANDBOXED_OUTPUT),
-            UNSANDBOXED_EXEC_NAME => captured_stdout_is(execution, EXEC_FORCED_READ_ONLY_OUTPUT),
-            _ => false,
-        };
-        stdout_matches && captured_stderr_is_empty(execution)
+        exec_forced_case_passed(target, &result)
     }
 }
 
