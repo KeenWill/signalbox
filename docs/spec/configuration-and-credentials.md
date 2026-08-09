@@ -81,11 +81,11 @@ this stack's parser pull request (`agent/credential-pools-parser`), in
 Codex `file`, `codex_home`, and `oauth` deliveries, durable quarantine, and the
 availability successor calls owned by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-together with durable session pool-policy
-snapshots and legacy family-to-reference migration, remain the foundation
-proposal at the bottom of their implementing stack and become verified only with
-those child pull requests; every other paragraph on this page describes behavior
-verified against the references above.
+together with durable session pool-policy snapshots and legacy
+family-to-reference migration, remain the foundation proposal at the bottom of
+their implementing stack and become verified only with those child pull
+requests; every other paragraph on this page describes behavior verified against
+the references above.
 
 ## Process configuration
 
@@ -768,10 +768,10 @@ This build provides exactly `anthropic`, `openai`, `claude_cli`, and
 profiles for any one adapter. Anthropic and OpenAI supply `file`; Claude CLI
 supplies `ambient` and `file`; and Codex CLI supplies only `ambient`. The
 grammar also recognizes the Codex `file`, `codex_home`, and `oauth` deliveries,
-whose fields this build validates in full and then rejects as undelivered. OpenAI admits
-the reasoning levels `none` through `max` — `ultra` is the Codex effort value
-and is rejected — and the provider-tagged tiers `auto`, `default`, `flex`,
-`scale`, `priority`, and `fast`.
+whose fields this build validates in full and then rejects as undelivered.
+OpenAI admits the reasoning levels `none` through `max` — `ultra` is the Codex
+effort value and is rejected — and the provider-tagged tiers `auto`, `default`,
+`flex`, `scale`, `priority`, and `fast`.
 
 A Codex mapping also requires `[codex_cli]` with an absolute executable path
 naming an existing regular file and an absolute, existing `working_directory`;
@@ -849,15 +849,15 @@ acknowledged work is configuration-independent (INV-034).
 ## Credential deliveries
 
 A `[[credential_profiles]]` entry accepts exactly `name`, `adapter`,
-`billing_kind`, and `delivery`, plus whichever fields the selected delivery owns,
-and rejects every other key as unknown
+`billing_kind`, and `delivery`, plus whichever fields the selected delivery
+owns, and rejects every other key as unknown
 (`apps/signalboxd/src/credential_pools.rs:43`). Which adapter a profile
-authenticates is the profile's own `adapter`, and the secret reaches the provider
-through the delivery this section describes rather than through a process
-environment variable. Startup still rejects a document that gives two
-`claude_cli` mappings different profiles, as `ConflictingClaudeCredentialProfiles`
-— a single CLI adapter process environment exposes one login, so two names for it
-would be two labels on one credential.
+authenticates is the profile's own `adapter`, and the secret reaches the
+provider through the delivery this section describes rather than through a
+process environment variable. Startup still rejects a document that gives two
+`claude_cli` mappings different profiles, as
+`ConflictingClaudeCredentialProfiles` — a single CLI adapter process environment
+exposes one login, so two names for it would be two labels on one credential.
 
 A profile's closed `delivery` states how its secret reaches the provider. The
 grammar admits four, and an adapter admits a subset of them. Each
@@ -872,9 +872,9 @@ both CLI adapters, and `file` is delivered for `anthropic`, `openai`, and
 `claude_cli`; those are the deliveries described immediately below. The grammar
 also admits `codex_cli` `file`, `codex_home`, and `oauth`, and parsing validates
 each of their fields in full and then rejects the profile as
-`UndeliveredCredentialDelivery`
-(`apps/signalboxd/src/credential_pools.rs:154`), so such a document fails startup
-rather than running with an inert setting. Their contracts are stated under
+`UndeliveredCredentialDelivery` (`apps/signalboxd/src/credential_pools.rs:154`),
+so such a document fails startup rather than running with an inert setting.
+Their contracts are stated under
 [undelivered deliveries](#committed-unimplemented-functionality--undelivered-deliveries)
 below.
 
@@ -901,20 +901,18 @@ cannot; this contract says which for every delivery, and there is no third case.
   one would trade that rule away for a guarantee an ordinary `cp` defeats
   anyway.
 - `codex_home` — *partly established, and not admitted by this build.* Device
-  and inode identity under the
-  custody walk, together with the forced file credential backend, establish that
-  two homes are distinct *stores*. Independence of the token *families* inside
-  them is required of the deployment, because a home copied from another has its
-  own device and inode while carrying the same refresh token, and the daemon
-  cannot detect the sharing: the store's contents are exactly what it never
-  reads.
+  and inode identity under the custody walk, together with the forced file
+  credential backend, establish that two homes are distinct *stores*.
+  Independence of the token *families* inside them is required of the
+  deployment, because a home copied from another has its own device and inode
+  while carrying the same refresh token, and the daemon cannot detect the
+  sharing: the store's contents are exactly what it never reads.
 - `oauth` — *established, and not admitted by this build*, by comparing the
-  provisioning tuple as parsed
-  canonical components — scheme, lowercased host, effective port, path, and
-  query — and never as configured bytes. Two spellings that a URL parser sends
-  to the same request target are therefore one identity rather than two, and
-  fragments and user information are rejected at admission because neither
-  reaches the request target at all.
+  provisioning tuple as parsed canonical components — scheme, lowercased host,
+  effective port, path, and query — and never as configured bytes. Two spellings
+  that a URL parser sends to the same request target are therefore one identity
+  rather than two, and fragments and user information are rejected at admission
+  because neither reaches the request target at all.
 
 Two exceptions, and only these two. `quarantine` excludes a member from every
 pool rather than from the one that observed it, so an authorization that turns
@@ -954,14 +952,15 @@ absolute deployment-owned path and, only for a CLI adapter, required TOML string
 `env_key`. The path is 1 through 4,096 UTF-8 bytes and NUL-free; startup rejects
 every other string before any credential preparation. The path is read per
 preparation and never cached, narrowed by the trailing-line-termination rule
-below. The `anthropic` adapter forms an HTTP header from the value. A direct-HTTP
-adapter rejects `env_key` because it does not use a child environment. A CLI
-adapter requires the one credential variable its adapter contract names —
-`ANTHROPIC_API_KEY` for `claude_cli` — and rejects every other value, including
-forwarded and process-control names such as `HOME`, `CLAUDE_CONFIG_DIR`,
-`CODEX_HOME`, and `PATH`. The `codex_cli` spelling of this delivery, which would
-supply the value to the fresh process under `env_key`, is validated and then
-rejected; [undelivered deliveries](#committed-unimplemented-functionality--undelivered-deliveries)
+below. The `anthropic` adapter forms an HTTP header from the value. A
+direct-HTTP adapter rejects `env_key` because it does not use a child
+environment. A CLI adapter requires the one credential variable its adapter
+contract names — `ANTHROPIC_API_KEY` for `claude_cli` — and rejects every other
+value, including forwarded and process-control names such as `HOME`,
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `PATH`. The `codex_cli` spelling of this
+delivery, which would supply the value to the fresh process under `env_key`, is
+validated and then rejected;
+[undelivered deliveries](#committed-unimplemented-functionality--undelivered-deliveries)
 owns its contract.
 
 Claude file delivery receives the complete adapter-scoped catalog of declared
@@ -1260,18 +1259,17 @@ parks a turn on a bounded member, or enforces `max_concurrent_invocations`. No
 deployment can make that bound take effect either: it is a `codex_home` field,
 and while the grammar parses and range-checks it, the profile carrying it is
 then rejected as an undelivered delivery, so no bound is ever retained and there
-is no build in which the bound is accepted and inert. That is deliberate,
-and it is the same fail-closed admission rule that rejects
-`headroom_reserve_percent` and `least_used` below. A retained-but-unenforced
-bound would be worse than no bound: an operator who writes
-`max_concurrent_invocations = 1` does so precisely to avoid the concurrent
-refresh race described above, so accepting the setting while every invocation
-still ran unbounded would produce that race in the moment the operator acted to
-prevent it, and the profile would quarantine for a reason its configuration said
-to avoid. The bound and its enforcement therefore become admissible together, in
-the child that composes both. The rest of this subsection is the contract that
-child must satisfy, and no present migration, repository operation, active turn
-phase, or runtime supplies any of it.
+is no build in which the bound is accepted and inert. That is deliberate, and it
+is the same fail-closed admission rule that rejects `headroom_reserve_percent`
+and `least_used` below. A retained-but-unenforced bound would be worse than no
+bound: an operator who writes `max_concurrent_invocations = 1` does so precisely
+to avoid the concurrent refresh race described above, so accepting the setting
+while every invocation still ran unbounded would produce that race in the moment
+the operator acted to prevent it, and the profile would quarantine for a reason
+its configuration said to avoid. The bound and its enforcement therefore become
+admissible together, in the child that composes both. The rest of this
+subsection is the contract that child must satisfy, and no present migration,
+repository operation, active turn phase, or runtime supplies any of it.
 
 Where `max_concurrent_invocations` is set and reached, that member is skipped
 during selection exactly as an excluded member is, and selection continues
