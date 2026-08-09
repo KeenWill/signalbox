@@ -1118,7 +1118,11 @@ pub enum RepoWatchDispatchContextShape {
 
 impl RepoWatchEventKindNameV1 {
     /// Every event-kind name, in an inventory the compiler forces to be
-    /// revisited and [`Self::inventory_predecessor`] forces to stay linked.
+    /// revisited and a paired `inventory_predecessor` forces to stay linked.
+    ///
+    /// That pairing is test-gated, so it is named here in plain text rather
+    /// than linked: a rustdoc link would resolve only under `cfg(test)` and
+    /// break the documentation build.
     ///
     /// The chain below is the first guard: each arm names its successor, so
     /// adding a variant makes the `match` non-exhaustive and the crate stops
