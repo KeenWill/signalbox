@@ -4135,11 +4135,30 @@ fn report_denies_file_changes(report: &str) -> bool {
             && claim[2] == "no"
             && matches!(claim[3].as_str(), "modification" | "modifications")
     });
+    let verb_first_modification_denial = words.iter().enumerate().any(|(index, word)| {
+        let scope = &words[index + 1..words.len().min(index + 6)];
+        let modification = scope
+            .iter()
+            .position(|word| matches!(word.as_str(), "modify" | "modified"));
+        let file = scope
+            .iter()
+            .position(|word| matches!(word.as_str(), "file" | "files"));
+        word == "not"
+            && modification.is_some_and(|modification| {
+                file.is_some_and(|file| {
+                    modification < file
+                        && !scope[modification + 1..file]
+                            .iter()
+                            .any(|word| word == "other")
+                })
+            })
+    });
     no_changes
         || no_file_change
         || no_modifications_made
         || no_modifications_have_been_made
         || no_existential_modifications
+        || verb_first_modification_denial
 }
 
 fn normalized_report_words(report: &str) -> Vec<String> {
@@ -4204,8 +4223,6 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
         "found",
         "match",
         "matched",
-        "modified",
-        "modify",
         "saved",
         "updated",
         "write",
@@ -4554,6 +4571,22 @@ fn exec_file_creation_report_rejects_a_verb_first_modification_denial() {
     tracker.observe_response_text(SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn final_response_report_accepts_a_read_only_modification_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_collateral_modification_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
 }
 
 #[test]
