@@ -5527,7 +5527,7 @@ done
 
         assert_eq!(
             permission_default(SANDBOXED_EXEC_NAME),
-            signalbox_domain::ToolPermissionDefault::Confirm
+            ToolPermissionDefault::Confirm
         );
         assert_eq!(
             permission_default(CARGO_DIAGNOSTICS_NAME),
