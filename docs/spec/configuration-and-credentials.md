@@ -481,14 +481,23 @@ fail-closed:
   whose own fields [credential deliveries](#credential-deliveries) owns. The
   name is 1 through 256 UTF-8 bytes, unpadded, and NUL-free. Duplicate names,
   unknown adapters, unknown kinds, an unknown delivery, a delivery its adapter
-  does not admit, and unknown fields are rejected. Parsing opens no credential
-  path and contacts no provider. After configuration-independent recovery and
-  before scheduling, startup establishes each `codex_home` identity as its
-  delivery contract requires; every other credential remains lazy, matching the
-  no-preflight rule below. Billing kind belongs to authentication, not to the
-  adapter a mapping selects. A profile name is otherwise opaque to code: no
-  build-provided constant is compared against it, so a deployment names its
-  accounts as it chooses.
+  does not admit, and unknown fields are rejected. Where a delivery determines
+  the authentication kind, a disagreeing `billing_kind` is rejected too: `file`
+  authenticates with a provider API key, so it admits only `api_metered`, and
+  `oauth` constructs a subscription login, so it admits only `subscription`.
+  `ambient` and `codex_home` name a login the operator established and admit
+  either, because the daemon cannot tell which one it is. Why reject rather than
+  infer: the field is what terminal cost derivation trusts to choose between a
+  real charge and a metered equivalent, so an accepted contradiction silently
+  misreports spend, and inferring it would overwrite an operator's statement
+  about the two deliveries where the answer genuinely varies. Parsing opens no
+  credential path and contacts no provider. After configuration-independent
+  recovery and before scheduling, startup establishes each `codex_home` identity
+  as its delivery contract requires; every other credential remains lazy,
+  matching the no-preflight rule below. Billing kind belongs to authentication,
+  not to the adapter a mapping selects. A profile name is otherwise opaque to
+  code: no build-provided constant is compared against it, so a deployment names
+  its accounts as it chooses.
 - At least one `[[credential_pools]]` entry is required.
   [Credential pools and selection](#credential-pools-and-selection) owns its
   complete grammar and admission rules.
@@ -829,6 +838,16 @@ CLI owns, reads, and writes. That path is likewise 1 through 4,096 UTF-8 bytes
 and NUL-free, and malformed static input fails startup. Its only optional field
 is `max_concurrent_invocations`, a TOML integer from 1 through 4,294,967,295;
 zero, a negative or larger integer, and every non-integer value are rejected.
+Supplying the directory is necessary but not sufficient: the invocation must
+also force the CLI's file credential backend and disable its keyring, automatic,
+and every other external store, exactly as the OAuth delivery already does.
+Without that, a CLI configured for its process-wide keyring reads an
+authentication context this walk never verified, two custody-approved homes
+resolve the same external login, and both the containment property and the
+distinct-identity check are bypassed without either being violated on its own
+terms. Failure to enforce the backend is a typed pre-send delivery failure and
+starts no child.
+
 The daemon supplies the directory as that process's credential home and never
 opens or interprets its entries. Static parsing records only the lexically
 normalized path. After the configuration-independent recovery scan completes but
@@ -1174,33 +1193,42 @@ provider; the first later call preparation that needs a profile lazily refreshes
 it. This keeps access tokens out of the database and preserves
 configuration-independent recovery even when a token endpoint is unavailable.
 
-Dispatch supplies each invocation a scratch credential home carrying a
-daemon-minted access token together with the non-secret account identity
-harvested at provisioning. Both are required: the CLI's stored authentication
-shape carries an account identifier beside the token, and a subscription request
-forms a per-account header from it, so a store holding only an access token
-cannot produce a well-formed request. The identity is configuration-grade rather
-than secret, and including it changes nothing about what is withheld — the
-refresh token still never reaches a scratch home. Dispatch is the only path that
-builds one. Scratch homes live beneath a single daemon-owned `0700` root, are
-themselves `0700`, contain only daemon-owned `0600` regular files, and are
-created and removed through descriptor-relative operations that reject symlinks;
-normal completion removes the home before the invocation returns. Before
-accepting work at every startup the daemon scavenges every entry it can prove is
-an owned scratch home beneath that root, and an ownership, type, or containment
-mismatch fails startup and removes nothing — so a host or daemon crash can leave
-only effective-user-restricted residue until the next startup, never an
-indefinitely trusted login store. Dispatch also explicitly forces the CLI's file
-or ephemeral backend to that home while disabling ambient, keyring, helper, and
-external stores. Failure to enforce that selection is a typed pre-send delivery
-failure and starts no CLI child. The access token is otherwise retained only in
-memory. The refresh token is not absent from the design — it is the whole of it
-— but it stays with the daemon and is never copied into a scratch home.
-Withholding it is what buys the concurrency: a CLI process holding a refresh
-token could decide to refresh, so N concurrent processes could race exactly as
-they do under `codex_home`. Holding none, they share no mutable authorization
-state, and the daemon refreshes once under its row lock on behalf of all of
-them.
+Dispatch supplies each invocation a scratch credential home carrying the
+complete authentication state the CLI needs to form a request, minus the refresh
+token. That is the daemon-minted access token, the identity token the
+authorization issued with it, and the non-secret account metadata harvested at
+provisioning. The rule is stated as *completeness minus one exclusion* rather
+than as a list of fields, because a list is what has already been wrong twice: a
+store holding only an access token cannot form the per-account header, and one
+holding only the access token and account identity still cannot supply the plan
+and deployment-environment claims the CLI decodes from the identity token to
+choose its request headers and routing. Whatever else that CLI's stored shape
+requires and the daemon holds goes in on the same footing; only the refresh
+token is withheld, and withholding it is what buys the concurrency.
+
+Every token written into a scratch home seeds the adapter's exact-value redactor
+before it is written, not only the access token. An identity token is a bearer
+credential for the same account, and one that reached a log or a debug rendering
+would be exactly the disclosure the scratch-home discipline exists to prevent.
+Dispatch is the only path that builds one. Scratch homes live beneath a single
+daemon-owned `0700` root, are themselves `0700`, contain only daemon-owned
+`0600` regular files, and are created and removed through descriptor-relative
+operations that reject symlinks; normal completion removes the home before the
+invocation returns. Before accepting work at every startup the daemon scavenges
+every entry it can prove is an owned scratch home beneath that root, and an
+ownership, type, or containment mismatch fails startup and removes nothing — so
+a host or daemon crash can leave only effective-user-restricted residue until
+the next startup, never an indefinitely trusted login store. Dispatch also
+explicitly forces the CLI's file or ephemeral backend to that home while
+disabling ambient, keyring, helper, and external stores. Failure to enforce that
+selection is a typed pre-send delivery failure and starts no CLI child. The
+access token is otherwise retained only in memory. The refresh token is not
+absent from the design — it is the whole of it — but it stays with the daemon
+and is never copied into a scratch home. Withholding it is what buys the
+concurrency: a CLI process holding a refresh token could decide to refresh, so N
+concurrent processes could race exactly as they do under `codex_home`. Holding
+none, they share no mutable authorization state, and the daemon refreshes once
+under its row lock on behalf of all of them.
 
 Before the token is written or any child starts, preparation seeds the CLI
 adapter's exact-value redactor with that access token. The redactor covers the
@@ -1317,13 +1345,16 @@ This is the same fail-closed admission rule that rejects
 stay in the grammar so that an adapter gaining a native token for a cause admits
 that pair with no configuration change.
 
-Selection happens at model-call preparation, never at session creation. In this
-build it is deliberately degenerate: for the resolved target's family,
-preparation resolves the mapped pool and takes its admissible preferred member —
-the lowest priority value, and the first declared among equals. No exclusion,
-rotation, or failover state exists to consult, so `tie_break` beyond
-`first_listed` and every trigger action are retained configuration rather than
-behavior.
+**Committed unimplemented functionality — pool-based preparation.** No present
+preparation path resolves a pool or selects a member. Configuration parsing
+takes each pool's admissible preferred member — the lowest priority value, first
+declared among equals — session creation pins that reference in the session's
+credential snapshot, and preparation resolves the pinned reference from the
+durable family-to-reference entry without consulting a pool at all. The
+implementing child moves that choice to preparation, where the paragraphs below
+place it. Until then `tie_break` beyond `first_listed` and every trigger action
+are retained configuration rather than behavior, and an existing session stays
+on the profile it was created with even after a pool's priorities change.
 
 **Committed unimplemented functionality — pool selection state.** No present
 repository interns an immutable pool-policy revision, stores a session's
