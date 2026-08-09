@@ -315,6 +315,8 @@ const SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT: &str = "Done, but no changes were
 const SYNTHETIC_BARE_NO_MODIFICATIONS_DENIAL_REPORT: &str = "Done, but no modifications were made.";
 const SYNTHETIC_PERFECT_TENSE_NO_MODIFICATIONS_DENIAL_REPORT: &str =
     "Done, but no modifications have been made.";
+const SYNTHETIC_EXISTENTIAL_NO_MODIFICATIONS_DENIAL_REPORT: &str =
+    "Done, but there were no modifications.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
@@ -3972,7 +3974,16 @@ fn report_denies_file_changes(report: &str) -> bool {
             && claim[3] == "been"
             && claim[4] == "made"
     });
-    no_file_change || no_modifications_made || no_modifications_have_been_made
+    let no_existential_modifications = words.windows(4).any(|claim| {
+        claim[0] == "there"
+            && matches!(claim[1].as_str(), "was" | "were")
+            && claim[2] == "no"
+            && matches!(claim[3].as_str(), "modification" | "modifications")
+    });
+    no_file_change
+        || no_modifications_made
+        || no_modifications_have_been_made
+        || no_existential_modifications
 }
 
 fn normalized_report_words(report: &str) -> Vec<String> {
@@ -4406,6 +4417,14 @@ fn exec_file_creation_report_rejects_a_perfect_tense_no_modifications_denial() {
         SYNTHETIC_PERFECT_TENSE_NO_MODIFICATIONS_DENIAL_REPORT,
         false,
     );
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_existential_no_modifications_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EXISTENTIAL_NO_MODIFICATIONS_DENIAL_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
 }
