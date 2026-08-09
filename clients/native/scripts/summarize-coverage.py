@@ -332,10 +332,10 @@ def baseline_note(baseline: Baseline, measurement_incomplete: bool = False) -> l
     return provenance + [
         "",
         "Native coverage is measured on a `main` push only when that push touched",
-        "`clients/native/**`, so a baseline can sit many commits behind `main`",
-        "whichever of the two it is; the date above is how old this one is. The",
-        "delta is in percentage points, over a file set that differs from the",
-        "baseline's wherever a file was added or removed.",
+        "`clients/native/**` or this workflow file itself, so a baseline can sit",
+        "many commits behind `main` whichever of the two it is; the date above is",
+        "how old this one is. The delta is in percentage points, over a file set",
+        "that differs from the baseline's wherever a file was added or removed.",
     ]
 
 

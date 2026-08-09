@@ -419,8 +419,9 @@ class BaselineDeltaTests(unittest.TestCase):
 
     def test_the_baseline_commit_and_date_are_named(self) -> None:
         """Native coverage is measured on a main push only when that push
-        touched the native client, so a baseline can be far behind `main`.
-        The date is the only thing that tells a reader how far."""
+        touched the native client or this workflow file itself, so a
+        baseline can be far behind `main`. The date is the only thing that
+        tells a reader how far."""
         baseline = baseline_of(covered=50)
 
         rendered = summarize_coverage.render(
