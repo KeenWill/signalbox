@@ -3930,17 +3930,57 @@ fn reconstitute_inner(
         }
     }
 
-    let queue_work = input.turns.iter().map(|record| {
-        AcceptedInputQueueWork::new(record.queue_session, record.queue_turn, record.order)
-    });
-    let total_order = derive_accepted_input_total_order(queue_work).map_err(|error| {
-        AcceptedInputSchedulingReconstitutionFailure::InvalidQueueOrder { error }
-    })?;
     let records_by_turn = input
         .turns
         .iter()
         .map(|record| (record.turn, record))
         .collect::<BTreeMap<_, _>>();
+    let preceding_non_accepted_terminal_turn = input
+        .preceding_non_accepted_terminal
+        .as_ref()
+        .map(|(stored_session, turn, _, _)| {
+            if *stored_session != session || records_by_turn.contains_key(turn) {
+                return Err(
+                    AcceptedInputSchedulingReconstitutionFailure::TurnSessionMismatch {
+                        turn: *turn,
+                    },
+                );
+            }
+            Ok(*turn)
+        })
+        .transpose()?;
+    let preceding_non_accepted_successor =
+        preceding_non_accepted_terminal_turn.and_then(|predecessor| {
+            input
+                .turns
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record.order.priority(),
+                        AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                            predecessor: candidate,
+                        } if candidate == predecessor
+                    )
+                })
+                .min_by_key(|record| record.order.acceptance_position())
+                .map(|record| record.turn)
+        });
+    // The generic accepted-input order owns only accepted origins. Its first
+    // runtime-relevant record can instead be the immediate successor of the
+    // separately authenticated non-accepted terminal boundary; treat that one
+    // external edge as the derivation root while retaining and validating the
+    // original interrupt priority below.
+    let queue_work = input.turns.iter().map(|record| {
+        let order = if Some(record.turn) == preceding_non_accepted_successor {
+            AcceptedInputQueueOrder::ordinary(record.order.acceptance_position())
+        } else {
+            record.order
+        };
+        AcceptedInputQueueWork::new(record.queue_session, record.queue_turn, order)
+    });
+    let total_order = derive_accepted_input_total_order(queue_work).map_err(|error| {
+        AcceptedInputSchedulingReconstitutionFailure::InvalidQueueOrder { error }
+    })?;
     let mut delegated_turns = BTreeMap::new();
     for fact in input.delegated_turns.iter().copied() {
         let turn = fact.turn();
@@ -3951,7 +3991,12 @@ fn reconstitute_inner(
         }
     }
     for record in records_by_turn.values() {
-        if !origin_delivery_matches_record(record.origin_delivery, record, &records_by_turn) {
+        if !origin_delivery_matches_record(
+            record.origin_delivery,
+            record,
+            &records_by_turn,
+            preceding_non_accepted_terminal_turn,
+        ) {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::OriginDeliveryMismatch {
                     turn: record.turn,
@@ -6695,6 +6740,9 @@ fn reconstitute_inner(
         input.active_acceptance_tail.as_ref(),
         &records_by_turn,
         &accepted_input_turns,
+        preceding_non_accepted_terminal
+            .as_ref()
+            .map(|(turn, _, _)| *turn),
     )?;
 
     if let Some(call) = active_compaction_call
@@ -6726,6 +6774,7 @@ fn reconstitute_active_acceptance_tail(
     candidate: Option<&SessionAcceptanceTailReconstitutionInput>,
     records_by_turn: &BTreeMap<TurnId, &AcceptedInputTurnSchedulingRecord>,
     accepted_input_turns: &BTreeMap<AcceptedInputId, TurnId>,
+    preceding_non_accepted_terminal: Option<TurnId>,
 ) -> Result<Option<SessionAcceptanceTail>, AcceptedInputSchedulingReconstitutionFailure> {
     let (active, candidate) = match (active, candidate) {
         (None, None) => return Ok(None),
@@ -6885,6 +6934,7 @@ fn reconstitute_active_acceptance_tail(
                                     record.origin_delivery,
                                     record,
                                     records_by_turn,
+                                    preceding_non_accepted_terminal,
                                 )
                         })
                     }
@@ -7064,6 +7114,7 @@ fn origin_delivery_matches_record(
     delivery: DeliveryRequest,
     record: &AcceptedInputTurnSchedulingRecord,
     records_by_turn: &BTreeMap<TurnId, &AcceptedInputTurnSchedulingRecord>,
+    preceding_non_accepted_terminal: Option<TurnId>,
 ) -> bool {
     if let TurnConfigurationProvenance::InheritedForReclassifiedSteering(binding) =
         &record.configuration_provenance
@@ -7109,7 +7160,11 @@ fn origin_delivery_matches_record(
             AcceptedInputQueuePriority::InterruptImmediatelyAfter { predecessor },
         ) => {
             expected_active_turn == predecessor
-                && historical_target_precedes_origin(expected_active_turn, record, records_by_turn)
+                && (historical_target_precedes_origin(
+                    expected_active_turn,
+                    record,
+                    records_by_turn,
+                ) || preceding_non_accepted_terminal == Some(expected_active_turn))
         }
         (
             DeliveryRequest::StartWhenNoActiveTurn { .. }
