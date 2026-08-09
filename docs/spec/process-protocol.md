@@ -1407,9 +1407,17 @@ runtime evidence because a valid snapshot has already begun. A follow request
 closes the spool immediately after transmitting the snapshot, before waiting for
 live events.
 
-Session-list, transcript-read, and follow-snapshot construction share bounded
-admission that reserves application-pool capacity for non-snapshot work. The
-exact reservation is owned by this contract.
+Every read that holds a pooled connection across more than one statement shares
+one bounded admission that reserves application-pool capacity for non-snapshot
+work. That is session-list, transcript-read, follow-snapshot, goal-read,
+imported-conversation-read, and conversation-list construction; the review
+target, run, finding, and finding-list reads, each of which spans a
+repeatable-read transaction; and the coherent review-orchestration snapshot,
+which draws two units rather than one. A single-statement point read — session
+metadata or session defaults — returns its connection immediately and takes no
+admission. The exact reservation is owned by this contract, and every request
+states its admission class before dispatch, so no read verb reaches the pool by
+omission.
 
 Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 
