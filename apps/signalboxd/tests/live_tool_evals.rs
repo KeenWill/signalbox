@@ -292,6 +292,8 @@ const SYNTHETIC_NEVER_COMPLETION_REPORT: &str = "Never completed the requested o
 const SYNTHETIC_NO_ERRORS_COMPLETION_REPORT: &str =
     "Completed the requested operation with no errors.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
+const SYNTHETIC_NO_FILE_WAS_CHANGED_COMPLETION_REPORT: &str = "Done; no file was changed.";
+const SYNTHETIC_NO_FILES_WERE_MODIFIED_COMPLETION_REPORT: &str = "Done; no files were modified.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
@@ -3331,8 +3333,21 @@ fn report_denies_success(report: &str) -> bool {
 }
 
 fn report_denies_file_changes(report: &str) -> bool {
-    normalized_report_words(report).windows(3).any(|claim| {
-        claim[0] == "no" && claim[1] == "file" && matches!(claim[2].as_str(), "change" | "changes")
+    let words = normalized_report_words(report);
+    words.iter().enumerate().any(|(index, word)| {
+        word == "no"
+            && words
+                .get(index + 1)
+                .is_some_and(|object| matches!(object.as_str(), "file" | "files"))
+            && ["change", "changed", "changes", "modified"]
+                .iter()
+                .any(|outcome| {
+                    words
+                        .iter()
+                        .skip(index + 2)
+                        .take(4)
+                        .any(|word| word == outcome)
+                })
     })
 }
 
@@ -3584,6 +3599,22 @@ fn final_response_report_accepts_completion_with_no_file_changes() {
 fn exec_file_creation_report_rejects_completion_with_no_file_changes() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_auxiliary_no_file_change() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_FILE_WAS_CHANGED_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_plural_no_file_change() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_FILES_WERE_MODIFIED_COMPLETION_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
 }
