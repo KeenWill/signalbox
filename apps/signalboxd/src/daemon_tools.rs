@@ -1674,6 +1674,8 @@ mod tests {
     const SYNTHETIC_BRIDGE_TOOL_DESCRIPTION: &str = "Projects a synthetic bridge tool.";
     const SYNTHETIC_BRIDGE_TOOL_SCHEMA: &str =
         r#"{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}"#;
+    const SYNTHETIC_MCP_SERVER_NAME: &str = "synthetic";
+    const SYNTHETIC_MCP_IGNORED_ARGUMENT: &str = "ready path";
 
     #[cfg(target_os = "linux")]
     #[track_caller]
@@ -1705,8 +1707,12 @@ mod tests {
     fn captured_catalog_path_uses_semantic_mcp_configuration() {
         let config = serde_json::to_string_pretty(&serde_json::json!({
             "mcpServers": {
-                "synthetic": {
-                    "args": ["--serve", SYNTHETIC_CAPTURED_CATALOG_PATH, "ready path"]
+                (SYNTHETIC_MCP_SERVER_NAME): {
+                    "args": [
+                        "--serve",
+                        SYNTHETIC_CAPTURED_CATALOG_PATH,
+                        SYNTHETIC_MCP_IGNORED_ARGUMENT,
+                    ]
                 }
             }
         }))
@@ -1768,6 +1774,7 @@ mod tests {
 
     const CLAUDE_MCP_BRIDGE_BINARY: &str = "signalbox-claude-mcp-bridge";
     const CARGO_TARGET_DIRECTORY_MARKER_FILENAME: &str = "CACHEDIR.TAG";
+    const EMPTY_CARGO_TARGET_DIRECTORY_MARKER: &[u8] = b"";
     const CARGO_TEST_PROFILE: &str = "test";
     const CARGO_DEV_PROFILE: &str = "dev";
     const CARGO_RELEASE_PROFILE: &str = "release";
@@ -2286,7 +2293,7 @@ done
             .expect("Cargo profile directory has a name");
         let profile = match profile_dir_name.to_str() {
             Some("debug") => OsString::from(input.debug_profile),
-            Some("release") => OsString::from("release"),
+            Some(CARGO_RELEASE_PROFILE) => OsString::from(CARGO_RELEASE_PROFILE),
             _ => profile_dir_name.to_os_string(),
         };
         let artifact_parent = profile_dir
@@ -2380,13 +2387,14 @@ done
 
     #[test]
     fn bridge_artifact_selection_maps_debug_to_the_explicit_test_profile() {
-        let executable = Path::new("synthetic-target/debug/deps/daemon-tools-test");
+        let target_dir = Path::new("synthetic-target");
+        let executable = target_dir.join("debug/deps/daemon-tools-test");
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
-            executable,
-            target_dir: Path::new("synthetic-target"),
+            executable: &executable,
+            target_dir,
             configured_target_dir: None,
-            default_target_dir: Path::new("synthetic-target"),
+            default_target_dir: target_dir,
             debug_profile: CARGO_TEST_PROFILE,
             expected_profile: CARGO_TEST_PROFILE,
             expected_target: None,
@@ -2430,7 +2438,7 @@ done
             configured_target_dir: None,
             default_target_dir: Path::new("synthetic-target"),
             debug_profile: CARGO_TEST_PROFILE,
-            expected_profile: "release",
+            expected_profile: CARGO_RELEASE_PROFILE,
             expected_target: None,
             recognized_target: None,
         });
@@ -2632,7 +2640,7 @@ done
             cli_target_dir
                 .path()
                 .join(CARGO_TARGET_DIRECTORY_MARKER_FILENAME),
-            [],
+            EMPTY_CARGO_TARGET_DIRECTORY_MARKER,
         )
         .expect("Cargo target directory marker is written");
 
@@ -5072,15 +5080,15 @@ done
 
         assert_eq!(
             permission_default(SANDBOXED_EXEC_NAME),
-            signalbox_domain::ToolPermissionDefault::Auto
+            ToolPermissionDefault::Auto
         );
         assert_eq!(
             permission_default(CARGO_DIAGNOSTICS_NAME),
-            signalbox_domain::ToolPermissionDefault::Auto
+            ToolPermissionDefault::Auto
         );
         assert_eq!(
             permission_default(UNSANDBOXED_EXEC_NAME),
-            signalbox_domain::ToolPermissionDefault::AlwaysConfirm
+            ToolPermissionDefault::AlwaysConfirm
         );
     }
 }
