@@ -1744,6 +1744,7 @@ mod tests {
     struct CargoTestInvocation {
         profile: OsString,
         config_overrides: Vec<OsString>,
+        ignore_rust_version: bool,
         invocation_directory: PathBuf,
     }
 
@@ -1816,6 +1817,7 @@ mod tests {
     const SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE: &str = "unstable-options";
     const CARGO_RELEASE_OPTION: &str = "--release";
     const CARGO_RELEASE_SHORT_OPTION: &str = "-r";
+    const CARGO_IGNORE_RUST_VERSION_OPTION: &str = "--ignore-rust-version";
     const MCP_JSON_RPC_VERSION: &str = "2.0";
     const SYNTHETIC_WRONG_JSON_RPC_VERSION: &str = "1.0";
     #[cfg(target_os = "linux")]
@@ -1947,6 +1949,7 @@ done
         }
         let mut profile = None;
         let mut config_overrides = Vec::new();
+        let mut ignore_rust_version = false;
         let mut found_test_subcommand = false;
         let mut index = 1;
         while let Some(argument) = arguments.get(index).copied() {
@@ -2007,11 +2010,15 @@ done
             ) {
                 profile = Some(OsString::from(CARGO_RELEASE_PROFILE));
             }
+            if argument == OsStr::new(CARGO_IGNORE_RUST_VERSION_OPTION) {
+                ignore_rust_version = true;
+            }
             index += 1;
         }
         found_test_subcommand.then(|| CargoTestInvocation {
             profile: profile.unwrap_or_else(|| OsString::from(CARGO_TEST_PROFILE)),
             config_overrides,
+            ignore_rust_version,
             invocation_directory: invocation_directory.to_path_buf(),
         })
     }
@@ -2710,6 +2717,25 @@ done
                 OsStr::new(CARGO_CONFIG_OPTION),
                 expected_path.as_os_str(),
             ]
+        );
+    }
+
+    #[test]
+    fn bridge_build_preserves_the_parent_rust_version_override() {
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new(CARGO_TEST_SUBCOMMAND),
+            OsStr::new(CARGO_IGNORE_RUST_VERSION_OPTION),
+        ];
+        let invocation = cargo_test_invocation_from_arguments(&arguments, Path::new("."))
+            .expect("the synthetic Cargo test invocation is admitted");
+        let mut command = Command::new(CARGO_PROGRAM_STEM);
+        apply_cargo_rust_version_policy(&mut command, invocation.ignore_rust_version);
+
+        assert!(invocation.ignore_rust_version);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new(CARGO_IGNORE_RUST_VERSION_OPTION)]
         );
     }
 
@@ -3842,6 +3868,7 @@ done
             &workspace,
         );
         apply_cargo_config_overrides(&mut build_command, &invocation.config_overrides);
+        apply_cargo_rust_version_policy(&mut build_command, invocation.ignore_rust_version);
         if let Some(rustc) = normalized_rustc_override(&invocation.invocation_directory) {
             build_command.env("RUSTC", rustc);
         }
@@ -3883,6 +3910,12 @@ done
     fn apply_cargo_config_overrides(command: &mut Command, config_overrides: &[OsString]) {
         for config in config_overrides {
             command.arg(CARGO_CONFIG_OPTION).arg(config);
+        }
+    }
+
+    fn apply_cargo_rust_version_policy(command: &mut Command, ignore_rust_version: bool) {
+        if ignore_rust_version {
+            command.arg(CARGO_IGNORE_RUST_VERSION_OPTION);
         }
     }
 
