@@ -22,6 +22,8 @@ use crate::wire::{
     UserEvent,
 };
 
+const SYNTHETIC_ASSISTANT_MODEL: &str = "<synthetic>";
+
 fn reject_duplicate_json_members(line: &str) -> Result<(), DecodeFailure> {
     let duplicate = provider_json_has_duplicate_members(line)
         .map_err(|error| DecodeFailure::stream_protocol(error.to_string()))?;
@@ -293,7 +295,7 @@ impl<C: Clone> EventDecoder<C> {
             .is_none_or(|observed| observed == &event.message.model);
         if !model_matches_init {
             return Err(DecodeFailure::stream_protocol(format!(
-                "Claude assistant model `{}` does not resolve the system init model",
+                "Claude assistant model `{}` matches neither system init nor the pinned CLI sentinel",
                 redact_text(&event.message.model)
             )));
         }
@@ -785,13 +787,7 @@ impl<C: Clone> EventDecoder<C> {
 }
 
 fn assistant_model_matches_init(initialized: &str, assistant: &str) -> bool {
-    if initialized == assistant {
-        return true;
-    }
-    assistant
-        .strip_prefix(initialized)
-        .and_then(|suffix| suffix.strip_prefix('-'))
-        .is_some_and(|date| date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()))
+    initialized == assistant || assistant == SYNTHETIC_ASSISTANT_MODEL
 }
 
 fn tool_result_text(value: &Value) -> Option<&str> {

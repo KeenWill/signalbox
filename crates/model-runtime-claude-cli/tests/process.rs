@@ -75,8 +75,8 @@ async fn hook_progress_events_do_not_replace_the_init_handshake() {
 }
 
 #[tokio::test]
-async fn assistant_accepts_the_init_alias_with_a_dated_resolution() {
-    let result = execute_scenario("resolved_model_alias", OperationShape::Text).await;
+async fn assistant_accepts_the_pinned_cli_synthetic_model_sentinel() {
+    let result = execute_scenario("synthetic_assistant_model", OperationShape::Text).await;
     let completion = completed(&result.evidence);
 
     assert_eq!(completion.finish, CompletionFinish::EndTurn);

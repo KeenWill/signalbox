@@ -94,18 +94,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         success("end_turn", Some(fixtures::ANSWER))?;
         return Ok(());
     }
-    if scenario == "resolved_model_alias" {
-        system_init_with_identity(&arguments, fixtures::SESSION_ID, fixtures::MODEL_ALIAS)?;
+    if scenario == "synthetic_assistant_model" {
+        system_init_with_identity(&arguments, fixtures::SESSION_ID, fixtures::MODEL)?;
         assistant_text_with_identity(
             fixtures::MESSAGE_ID,
-            fixtures::MODEL_RESOLVED,
+            fixtures::SYNTHETIC_ASSISTANT_MODEL,
             fixtures::ANSWER,
         )?;
         success("end_turn", Some(fixtures::ANSWER))?;
         return Ok(());
     }
     if scenario == "conflicting_assistant_model" {
-        system_init_with_identity(&arguments, fixtures::SESSION_ID, fixtures::MODEL_ALIAS)?;
+        system_init_with_identity(&arguments, fixtures::SESSION_ID, fixtures::MODEL)?;
         assistant_text_with_identity(
             fixtures::MESSAGE_ID,
             fixtures::OTHER_MODEL,
