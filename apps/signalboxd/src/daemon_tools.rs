@@ -201,7 +201,18 @@ const SESSION_WORKSPACE_DIRECTORY_SUFFIX: &str = ".sessions";
 /// recently used entry is dropped when a further session arrives.
 const MAX_RETAINED_SESSION_WORKSPACES: usize = 8;
 
-const SESSION_WORKSPACE_UNAVAILABLE_DETAIL: &str = "session workspace is unavailable";
+const SESSION_WORKSPACE_COMPOSITION_DETAIL: &str = "session workspace could not be composed";
+
+const SESSION_WORKSPACE_OBJECT_FORMAT_DETAIL: &str =
+    "session workspace repository uses another object format";
+
+const SESSION_WORKSPACE_UNRESOLVABLE_DETAIL: &str = "session workspace root is unresolvable";
+
+const SESSION_WORKSPACE_SHARED_DETAIL: &str =
+    "session workspace root is shared with another session";
+
+const SESSION_WORKSPACE_REPLACED_DETAIL: &str =
+    "session workspace root changed since this session bound it";
 
 /// Derives each session's workspace root from the configured root by a fixed
 /// formula.
@@ -301,8 +312,23 @@ pub enum SessionWorkspaceRoot {
 enum RecordedSessionBinding {
     /// The session bound the configured root.
     ConfiguredRoot,
-    /// The session bound its own derived root.
-    DerivedRoot,
+    /// The session bound its own derived root, whose filesystem identity is
+    /// retained so a directory replaced at the same pathname is refused rather
+    /// than composed as though it were the same workspace.
+    DerivedRoot {
+        /// Identity of the directory this session bound.
+        identity: ComposedRootIdentity,
+    },
+}
+
+impl RecordedSessionBinding {
+    /// Returns the identity this binding pinned, if it pinned a derived root.
+    const fn derived_identity(self) -> Option<ComposedRootIdentity> {
+        match self {
+            Self::ConfiguredRoot => None,
+            Self::DerivedRoot { identity } => Some(identity),
+        }
+    }
 }
 
 /// What a session's next workspace-bound request binds.
@@ -327,15 +353,30 @@ const fn decide_session_root(
         (None, SessionWorkspaceRoot::ConfiguredRoot)
         | (Some(RecordedSessionBinding::ConfiguredRoot), _) => SessionRootDecision::ConfiguredRoot,
         (
-            None | Some(RecordedSessionBinding::DerivedRoot),
+            None | Some(RecordedSessionBinding::DerivedRoot { .. }),
             SessionWorkspaceRoot::Derived { .. },
         ) => SessionRootDecision::ComposeDerived,
         (None, SessionWorkspaceRoot::Unresolvable)
         | (
-            Some(RecordedSessionBinding::DerivedRoot),
+            Some(RecordedSessionBinding::DerivedRoot { .. }),
             SessionWorkspaceRoot::ConfiguredRoot | SessionWorkspaceRoot::Unresolvable,
         ) => SessionRootDecision::Unresolvable,
     }
+}
+
+/// Whether a session other than `session` already bound the directory a
+/// composition just found.
+///
+/// Asked of the directory rather than of the pathname, because two pathnames
+/// can name one directory and each would compose successfully on its own.
+fn another_session_bound(
+    bindings: &BTreeMap<SessionId, RecordedSessionBinding>,
+    session: SessionId,
+    composed: ComposedRootIdentity,
+) -> bool {
+    bindings
+        .iter()
+        .any(|(bound, binding)| *bound != session && binding.derived_identity() == Some(composed))
 }
 
 /// Filesystem identity of one root pathname.
@@ -369,6 +410,7 @@ struct WorkspaceBoundExecutors<FileSystem: WorkspaceMutationFileSystem, ExecRunn
     unsandboxed_exec: ExecExecutor<UnsandboxedCommandRunner<ExecRunner>>,
     cargo_diagnostics: CargoDiagnosticsExecutor<ExecRunner>,
     git_object_format: GitObjectFormat,
+    root_identity: ComposedRootIdentity,
 }
 
 impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
@@ -383,6 +425,7 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
             unsandboxed_exec: self.unsandboxed_exec.clone(),
             cargo_diagnostics: self.cargo_diagnostics.clone(),
             git_object_format: self.git_object_format,
+            root_identity: self.root_identity,
         }
     }
 }
@@ -465,6 +508,7 @@ where
                 unsandboxed_exec,
                 cargo_diagnostics,
                 git_object_format,
+                root_identity: opening_identity,
             },
         })
     }
@@ -1191,6 +1235,12 @@ enum SessionWorkspaceFailure {
     /// The derived path could not be classified, is not a directory, or has
     /// gone away under a session that already bound it.
     UnresolvableRoot,
+    /// The derived root is the same directory as the configured root or as
+    /// another session's, so binding it would defeat the isolation the
+    /// derivation exists to establish.
+    SharedRootIdentity,
+    /// A different directory now stands at the pathname this session bound.
+    ReplacedRootIdentity,
 }
 
 impl SessionWorkspaceFailure {
@@ -1200,6 +1250,52 @@ impl SessionWorkspaceFailure {
             Self::Composition(_) => "composition_rejected",
             Self::ObjectFormatDisagreement => "object_format_disagreement",
             Self::UnresolvableRoot => "derived_root_unresolvable",
+            Self::SharedRootIdentity => "derived_root_shared",
+            Self::ReplacedRootIdentity => "derived_root_replaced",
+        }
+    }
+}
+
+/// Sanitized details naming why a session's workspace-bound tools are
+/// unavailable.
+///
+/// The reason travels in the tool result rather than in a second operator
+/// event: the tool loop already emits one failed-attempt event at its single
+/// admission site, and a closed discriminant in the durable result is better
+/// provenance than a log line beside it. Each value is a fixed string naming a
+/// closed reason, so nothing about the deployment's paths reaches the model.
+#[derive(Clone, Debug)]
+struct SessionWorkspaceFailureDetails {
+    composition: ToolExecutionErrorDetail,
+    object_format: ToolExecutionErrorDetail,
+    unresolvable_root: ToolExecutionErrorDetail,
+    shared_root: ToolExecutionErrorDetail,
+    replaced_root: ToolExecutionErrorDetail,
+}
+
+impl SessionWorkspaceFailureDetails {
+    fn try_new() -> Result<Self, DaemonToolsConstructionError> {
+        let detail = |value: &str| {
+            ToolExecutionErrorDetail::try_new(value.to_owned())
+                .map_err(|_| DaemonToolsConstructionError::SessionWorkspaceDetail)
+        };
+        Ok(Self {
+            composition: detail(SESSION_WORKSPACE_COMPOSITION_DETAIL)?,
+            object_format: detail(SESSION_WORKSPACE_OBJECT_FORMAT_DETAIL)?,
+            unresolvable_root: detail(SESSION_WORKSPACE_UNRESOLVABLE_DETAIL)?,
+            shared_root: detail(SESSION_WORKSPACE_SHARED_DETAIL)?,
+            replaced_root: detail(SESSION_WORKSPACE_REPLACED_DETAIL)?,
+        })
+    }
+
+    /// Names the closed reason one failure carries into the tool result.
+    fn detail(&self, failure: SessionWorkspaceFailure) -> ToolExecutionErrorDetail {
+        match failure {
+            SessionWorkspaceFailure::Composition(_) => self.composition.clone(),
+            SessionWorkspaceFailure::ObjectFormatDisagreement => self.object_format.clone(),
+            SessionWorkspaceFailure::UnresolvableRoot => self.unresolvable_root.clone(),
+            SessionWorkspaceFailure::SharedRootIdentity => self.shared_root.clone(),
+            SessionWorkspaceFailure::ReplacedRootIdentity => self.replaced_root.clone(),
         }
     }
 }
@@ -1335,7 +1431,7 @@ struct SessionWorkspaceExecutors<FileSystem: WorkspaceMutationFileSystem, ExecRu
     git_identity: GitIdentity,
     exec_runner: ExecRunner,
     configured: WorkspaceBoundExecutors<FileSystem, ExecRunner>,
-    unavailable_detail: ToolExecutionErrorDetail,
+    failure_details: SessionWorkspaceFailureDetails,
     state: Arc<Mutex<SessionWorkspaceState<WorkspaceBoundExecutors<FileSystem, ExecRunner>>>>,
 }
 
@@ -1348,7 +1444,7 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
             git_identity: self.git_identity.clone(),
             exec_runner: self.exec_runner.clone(),
             configured: self.configured.clone(),
-            unavailable_detail: self.unavailable_detail.clone(),
+            failure_details: self.failure_details.clone(),
             state: Arc::clone(&self.state),
         }
     }
@@ -1378,15 +1474,13 @@ where
             git_identity,
             exec_runner,
         } = composition;
-        let unavailable_detail =
-            ToolExecutionErrorDetail::try_new(SESSION_WORKSPACE_UNAVAILABLE_DETAIL.to_owned())
-                .map_err(|_| DaemonToolsConstructionError::SessionWorkspaceDetail)?;
+        let failure_details = SessionWorkspaceFailureDetails::try_new()?;
         Ok(Self {
             roots,
             git_identity,
             exec_runner,
             configured: families.executors,
-            unavailable_detail,
+            failure_details,
             state: Arc::new(Mutex::new(SessionWorkspaceState::new())),
         })
     }
@@ -1408,12 +1502,22 @@ where
         let derived = self.roots.resolve(session);
         let path = match decide_session_root(recorded, &derived) {
             SessionRootDecision::ConfiguredRoot => {
-                self.state
-                    .lock()
-                    .await
+                let mut state = self.state.lock().await;
+                // First writer wins. A concurrent first request for this
+                // session may have recorded a derived binding while this one
+                // was probing, and honouring that record is what makes the
+                // binding stable rather than last-write-wins.
+                return match *state
                     .bindings
-                    .insert(session, RecordedSessionBinding::ConfiguredRoot);
-                return Ok(self.configured.clone());
+                    .entry(session)
+                    .or_insert(RecordedSessionBinding::ConfiguredRoot)
+                {
+                    RecordedSessionBinding::ConfiguredRoot => Ok(self.configured.clone()),
+                    RecordedSessionBinding::DerivedRoot { .. } => state
+                        .retained
+                        .get(session)
+                        .ok_or(SessionWorkspaceFailure::UnresolvableRoot),
+                };
             }
             SessionRootDecision::Unresolvable => {
                 return Err(SessionWorkspaceFailure::UnresolvableRoot);
@@ -1438,10 +1542,34 @@ where
         if families.executors.git_object_format != self.configured.git_object_format {
             return Err(SessionWorkspaceFailure::ObjectFormatDisagreement);
         }
+        let composed = families.executors.root_identity;
+        // Two pathnames can name one directory — a bind mount, or a derived
+        // path exposing the configured root — and each would pass composition
+        // on its own. The isolation this derivation exists to establish is a
+        // property of the directory, not of the pathname, so it is checked
+        // against the identity every other binding pinned.
+        if composed == self.configured.root_identity {
+            return Err(SessionWorkspaceFailure::SharedRootIdentity);
+        }
         let mut state = self.state.lock().await;
-        state
+        if another_session_bound(&state.bindings, session, composed) {
+            return Err(SessionWorkspaceFailure::SharedRootIdentity);
+        }
+        match *state
             .bindings
-            .insert(session, RecordedSessionBinding::DerivedRoot);
+            .entry(session)
+            .or_insert(RecordedSessionBinding::DerivedRoot { identity: composed })
+        {
+            // A concurrent first request bound the configured root; its record
+            // wins, and this composition is released rather than retained.
+            RecordedSessionBinding::ConfiguredRoot => return Ok(self.configured.clone()),
+            // The pathname now names a different directory than the one this
+            // session bound, so the session is not resuming its own workspace.
+            RecordedSessionBinding::DerivedRoot { identity } if identity != composed => {
+                return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
+            }
+            RecordedSessionBinding::DerivedRoot { .. } => {}
+        }
         Ok(state.retained.retain(session, families.executors))
     }
 
@@ -1460,13 +1588,13 @@ where
         let mut executors = match self.resolve(session).await {
             Ok(executors) => executors,
             Err(failure) => {
-                tracing::warn!(
-                    session_id = %session.into_uuid(),
-                    reason = failure.discriminant(),
-                    "session workspace tools are unavailable"
-                );
+                // No event is emitted here. The tool loop already emits one
+                // failed-attempt event at its single admission site, and the
+                // closed reason travels in the durable result below rather than
+                // in a second operator event beside it.
+                let _ = failure.discriminant();
                 return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
-                    detail: Some(self.unavailable_detail.clone()),
+                    detail: Some(self.failure_details.detail(failure)),
                 }));
             }
         };
@@ -2604,6 +2732,13 @@ mod tests {
         );
     }
 
+    /// A directory identity a recorded binding pinned. Both members only need
+    /// to be some value a real `stat` could report.
+    const FIXTURE_BOUND_IDENTITY: ComposedRootIdentity = ComposedRootIdentity {
+        device: 0x10,
+        inode: 0x20,
+    };
+
     /// The two sessions the per-session workspace tests give separate roots.
     /// Each value only needs to be distinct from the other.
     const FIRST_SESSION_IDENTITY: u128 = 0x5001;
@@ -3058,11 +3193,86 @@ mod tests {
     #[test]
     fn a_derived_binding_fails_closed_once_its_directory_is_gone() {
         let decision = decide_session_root(
-            Some(RecordedSessionBinding::DerivedRoot),
+            Some(RecordedSessionBinding::DerivedRoot {
+                identity: FIXTURE_BOUND_IDENTITY,
+            }),
             &SessionWorkspaceRoot::ConfiguredRoot,
         );
 
         assert_eq!(decision, SessionRootDecision::Unresolvable);
+    }
+
+    /// A recorded derived binding names the directory it bound, so a caller can
+    /// tell a resumed workspace from a replacement at the same pathname.
+    #[test]
+    fn a_derived_binding_names_the_identity_it_pinned() {
+        let binding = RecordedSessionBinding::DerivedRoot {
+            identity: FIXTURE_BOUND_IDENTITY,
+        };
+
+        assert_eq!(binding.derived_identity(), Some(FIXTURE_BOUND_IDENTITY));
+    }
+
+    /// A configured binding pins no derived identity, so it never collides with
+    /// a derived root another session composed.
+    #[test]
+    fn a_configured_binding_names_no_derived_identity() {
+        let binding = RecordedSessionBinding::ConfiguredRoot;
+
+        assert_eq!(binding.derived_identity(), None);
+    }
+
+    /// Two pathnames naming one directory are one workspace, so a second
+    /// session composing the directory a first session bound is refused.
+    #[test]
+    fn a_directory_another_session_bound_is_refused() {
+        let first = session(FIRST_SESSION_IDENTITY);
+        let second = session(SECOND_SESSION_IDENTITY);
+        let bindings = BTreeMap::from([(
+            first,
+            RecordedSessionBinding::DerivedRoot {
+                identity: FIXTURE_BOUND_IDENTITY,
+            },
+        )]);
+
+        assert!(another_session_bound(
+            &bindings,
+            second,
+            FIXTURE_BOUND_IDENTITY
+        ));
+    }
+
+    /// A session resuming the directory it bound itself is not a collision.
+    #[test]
+    fn the_directory_a_session_bound_itself_is_not_a_collision() {
+        let first = session(FIRST_SESSION_IDENTITY);
+        let bindings = BTreeMap::from([(
+            first,
+            RecordedSessionBinding::DerivedRoot {
+                identity: FIXTURE_BOUND_IDENTITY,
+            },
+        )]);
+
+        assert!(!another_session_bound(
+            &bindings,
+            first,
+            FIXTURE_BOUND_IDENTITY
+        ));
+    }
+
+    /// A session bound to the configured root pins no derived directory, so it
+    /// never makes another session's derived root read as shared.
+    #[test]
+    fn a_configured_binding_is_not_a_derived_collision() {
+        let first = session(FIRST_SESSION_IDENTITY);
+        let second = session(SECOND_SESSION_IDENTITY);
+        let bindings = BTreeMap::from([(first, RecordedSessionBinding::ConfiguredRoot)]);
+
+        assert!(!another_session_bound(
+            &bindings,
+            second,
+            FIXTURE_BOUND_IDENTITY
+        ));
     }
 
     /// The retained set is bounded: a further session drops the least recently

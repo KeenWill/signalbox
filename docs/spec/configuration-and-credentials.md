@@ -608,13 +608,19 @@ set a request is still holding is never released to make room, because releasing
 it would let that session's next request compose a second set beside the one
 already mutating its tree. The retained set may therefore exceed eight by the
 number of sessions executing a workspace-bound tool at that moment, and returns
-to the bound as those requests return. Failure to compose a derived root — an
+to the bound as those requests return. Isolation is checked against the
+directory rather than the pathname, since two pathnames can name one directory:
+a composed root whose identity is the configured root's, or one another session
+already bound, is refused. Failure to compose or bind a derived root — an
 unopenable directory, a rejected repository layout, a root replaced during
-composition, or a repository whose object format disagrees with the one the
-process-lifetime catalog compiled — closes that tool request as a known failure
-carrying sanitized detail and records a telemetry event naming the session and a
-closed reason. It never falls back to another root. The GitHub policy admits
-exactly `https://api.github.com:443` for authenticated requests. The code-host
+composition or since the session bound it, a root shared with another session or
+with the configured root, or a repository whose object format disagrees with the
+one the process-lifetime catalog compiled — closes that tool request as a known
+failure whose sanitized detail names the closed reason. No second operator event
+is emitted for it: the tool loop's single failed-attempt admission site owns
+that telemetry, and the reason travels in the durable result. It never falls
+back to another root. The GitHub policy admits exactly
+`https://api.github.com:443` for authenticated requests. The code-host
 `change_request_ci_job_log` operation retains the tool-loop-owned exception for
 one credential-free download from its validated, pinned, bounded public HTTPS
 redirect destination; the pull-request suite has no such exception. Model
