@@ -423,9 +423,15 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    checked_session_id uuid := COALESCE(NEW.session_id, OLD.session_id);
+    checked_session_id uuid;
     checked_turn_id uuid;
 BEGIN
+    IF TG_OP = 'DELETE' THEN
+        checked_session_id := OLD.session_id;
+    ELSE
+        checked_session_id := NEW.session_id;
+    END IF;
+
     PERFORM 1
       FROM session_scheduler
      WHERE session_id = checked_session_id
