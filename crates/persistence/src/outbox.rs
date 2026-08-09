@@ -1964,8 +1964,8 @@ async fn load_delegation_update(
     .ok_or(OutboxCorruption::MissingTypedRecord)?;
     let spawning_request = ToolRequestId::from_uuid(row.try_get("spawning_tool_request_id")?);
     let update_kind: String = row.try_get("update_kind")?;
-    match update_kind.as_str() {
-        "child_spawned" => {
+    match decode_delegation_update_kind(&update_kind)? {
+        DelegationUpdateKind::ChildSpawned => {
             let child = required_session(&row, "child_session_id")?;
             let policy_kind: Option<String> = row.try_get("policy_kind")?;
             let stopped: Option<String> = row.try_get("on_parent_stopped")?;
@@ -1986,7 +1986,7 @@ async fn load_delegation_update(
                 policy,
             })
         }
-        "child_waiting" => Ok(DispatchedDelegationUpdate::ChildWaiting {
+        DelegationUpdateKind::ChildWaiting => Ok(DispatchedDelegationUpdate::ChildWaiting {
             spawning_request,
             child: required_session(&row, "child_session_id")?,
             awaiting_request: ToolRequestId::from_uuid(required_uuid(
@@ -1999,7 +1999,7 @@ async fn load_delegation_update(
                     .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
             )?,
         }),
-        "child_lifecycle_disposition" => {
+        DelegationUpdateKind::ChildLifecycleDisposition => {
             Ok(DispatchedDelegationUpdate::ChildLifecycleDisposition {
                 spawning_request,
                 child: required_session(&row, "child_session_id")?,
@@ -2017,7 +2017,7 @@ async fn load_delegation_update(
                 provenance: decode_delegation_provenance(&row)?,
             })
         }
-        "child_result" => Ok(DispatchedDelegationUpdate::ChildResult {
+        DelegationUpdateKind::ChildResult => Ok(DispatchedDelegationUpdate::ChildResult {
             spawning_request,
             child: required_session(&row, "child_session_id")?,
             outcome: decode_delegation_outcome(
@@ -2033,7 +2033,7 @@ async fn load_delegation_update(
             provenance: decode_delegation_provenance(&row)?,
             content: row.try_get("content_text")?,
         }),
-        "session_message" => Ok(DispatchedDelegationUpdate::SessionMessage {
+        DelegationUpdateKind::SessionMessage => Ok(DispatchedDelegationUpdate::SessionMessage {
             spawning_request,
             message: DelegationMessageId::from_uuid(required_uuid(&row, "message_id")?),
             sender: required_session(&row, "sender_session_id")?,
@@ -2044,7 +2044,6 @@ async fn load_delegation_update(
                 .try_get::<Option<String>, _>("content_text")?
                 .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
         }),
-        _ => Err(OutboxCorruption::InvalidDelegationEvent.into()),
     }
 }
 
@@ -2069,11 +2068,12 @@ async fn load_delegation_wake(
     let spawning_uuid: Uuid = row.try_get("spawning_tool_request_id")?;
     let spawning_request = ToolRequestId::from_uuid(spawning_uuid);
     let subject: String = row.try_get("subject_kind")?;
-    match subject.as_str() {
-        "result"
-            if row.try_get::<Option<Uuid>, _>("result_spawning_request_id")?
-                == Some(spawning_uuid) =>
-        {
+    match decode_delegation_wake_subject(&subject)? {
+        DelegationWakeSubject::Result => {
+            if row.try_get::<Option<Uuid>, _>("result_spawning_request_id")? != Some(spawning_uuid)
+            {
+                return Err(OutboxCorruption::InvalidDelegationEvent.into());
+            }
             Ok(DispatchedDelegationWake::Result {
                 spawning_request,
                 awaiting_request: row
@@ -2081,11 +2081,10 @@ async fn load_delegation_wake(
                     .map(ToolRequestId::from_uuid),
             })
         }
-        "message" => Ok(DispatchedDelegationWake::Message {
+        DelegationWakeSubject::Message => Ok(DispatchedDelegationWake::Message {
             spawning_request,
             message: DelegationMessageId::from_uuid(required_uuid(&row, "message_id")?),
         }),
-        _ => Err(OutboxCorruption::InvalidDelegationEvent.into()),
     }
 }
 
@@ -2111,6 +2110,59 @@ fn required_positive_sequence(
         .map_err(|_| OutboxCorruption::InvalidDelegationEvent)?
         .ok_or(OutboxCorruption::InvalidDelegationEvent)?;
     decode_positive_sequence(value).map_err(|_| OutboxCorruption::InvalidDelegationEvent)
+}
+
+/// Closed `update_kind` spelling the delegation update table admits.
+///
+/// Naming the spelling set as a type keeps the dispatch below exhaustive: a new
+/// admitted spelling cannot be routed without adding a variant here, and the
+/// variant cannot be added without every consumer's match failing to compile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DelegationUpdateKind {
+    /// A parent committed one child relationship and its spawn policy.
+    ChildSpawned,
+    /// A parent registered one foreground or background wait.
+    ChildWaiting,
+    /// Parent termination evaluated one relationship edge.
+    ChildLifecycleDisposition,
+    /// A terminal child result became durable for its parent.
+    ChildResult,
+    /// One relationship message became durable for its recipient.
+    SessionMessage,
+}
+
+/// Decodes the durable `update_kind` spelling.
+pub fn decode_delegation_update_kind(
+    value: &str,
+) -> Result<DelegationUpdateKind, OutboxCorruption> {
+    match value {
+        "child_spawned" => Ok(DelegationUpdateKind::ChildSpawned),
+        "child_waiting" => Ok(DelegationUpdateKind::ChildWaiting),
+        "child_lifecycle_disposition" => Ok(DelegationUpdateKind::ChildLifecycleDisposition),
+        "child_result" => Ok(DelegationUpdateKind::ChildResult),
+        "session_message" => Ok(DelegationUpdateKind::SessionMessage),
+        _ => Err(OutboxCorruption::InvalidDelegationEvent),
+    }
+}
+
+/// Closed `subject_kind` spelling the delegation wake table admits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DelegationWakeSubject {
+    /// A child result is available to its parent.
+    Result,
+    /// One message is available to the event's recipient session.
+    Message,
+}
+
+/// Decodes the durable `subject_kind` spelling.
+pub fn decode_delegation_wake_subject(
+    value: &str,
+) -> Result<DelegationWakeSubject, OutboxCorruption> {
+    match value {
+        "result" => Ok(DelegationWakeSubject::Result),
+        "message" => Ok(DelegationWakeSubject::Message),
+        _ => Err(OutboxCorruption::InvalidDelegationEvent),
+    }
 }
 
 /// Decodes the durable `on_parent_stopped` / `on_parent_cancelled` spelling.

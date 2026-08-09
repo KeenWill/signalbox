@@ -43,12 +43,14 @@ use signalbox_persistence::{
     create_session::CreateSessionRepository,
     local_test_connection_options, migrate,
     outbox::{
-        DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
-        DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
-        DispatchedDelegationWaitMode, DispatchedDelegationWake, DispatchedModelCallDisposition,
-        DispatchedModelCallState, DispatchedReconciliationOperation, DispatchedToolBatchState,
+        DelegationUpdateKind, DelegationWakeSubject, DispatchedBoundChildAction,
+        DispatchedDelegationOutcome, DispatchedDelegationPolicy, DispatchedDelegationProvenance,
+        DispatchedDelegationReason, DispatchedDelegationUpdate, DispatchedDelegationWaitMode,
+        DispatchedDelegationWake, DispatchedModelCallDisposition, DispatchedModelCallState,
+        DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
         OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatcher,
-        decode_bound_action, decode_delegation_outcome, decode_delegation_reason, decode_wait_mode,
+        decode_bound_action, decode_delegation_outcome, decode_delegation_reason,
+        decode_delegation_update_kind, decode_delegation_wake_subject, decode_wait_mode,
     },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -63,6 +65,7 @@ const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
 const DELEGATION_UPDATES: &str = "delegation_update_outbox_event";
+const DELEGATION_WAKES: &str = "delegation_wake_outbox_event";
 
 /// The session whose committed event is made undecodable.
 const UNDECODABLE_SESSION: u128 = 0x0d01;
@@ -84,6 +87,19 @@ const ARBITRARY_CALL_SEED: u128 = 0x0e09;
 const ARBITRARY_ATTEMPT_SEED: u128 = 0x0e0a;
 const ARBITRARY_FRONTIER_SEED: u128 = 0x0e0b;
 const ARBITRARY_ORDINAL: u64 = 1;
+
+/// One relationship identity per planted update kind. They must differ: the
+/// table's partial unique indexes are indexes, not triggers, so they stay
+/// enforced even while referential triggers are disabled.
+const SPAWNED_REQUEST_SEED: u128 = 0x0f01;
+const WAITING_REQUEST_SEED: u128 = 0x0f02;
+const LIFECYCLE_REQUEST_SEED: u128 = 0x0f03;
+const RESULT_REQUEST_SEED: u128 = 0x0f04;
+const MESSAGE_REQUEST_SEED: u128 = 0x0f05;
+const DISPATCH_SESSION: u128 = 0x0d03;
+const DISPATCH_CREATE_COMMAND: u128 = 0x0d13;
+const RESULT_CONTENT: &str = "delegated result content";
+const MESSAGE_CONTENT: &str = "relationship message content";
 
 fn session(value: u128) -> SessionId {
     SessionId::from_uuid(Uuid::from_u128(value))
@@ -150,6 +166,41 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
 // None of them states a durable spelling — production defines that table in
 // exactly one place, and the assertions below read the other side from the
 // database rather than restating it here.
+
+/// Every delegation update kind, in an inventory the compiler keeps complete.
+fn every_delegation_update_kind() -> Vec<DelegationUpdateKind> {
+    let mut kinds = Vec::new();
+    let mut next = Some(DelegationUpdateKind::ChildSpawned);
+    while let Some(current) = next {
+        next = match current {
+            DelegationUpdateKind::ChildSpawned => Some(DelegationUpdateKind::ChildWaiting),
+            DelegationUpdateKind::ChildWaiting => {
+                Some(DelegationUpdateKind::ChildLifecycleDisposition)
+            }
+            DelegationUpdateKind::ChildLifecycleDisposition => {
+                Some(DelegationUpdateKind::ChildResult)
+            }
+            DelegationUpdateKind::ChildResult => Some(DelegationUpdateKind::SessionMessage),
+            DelegationUpdateKind::SessionMessage => None,
+        };
+        kinds.push(current);
+    }
+    kinds
+}
+
+/// Every delegation wake subject, in an inventory the compiler keeps complete.
+fn every_delegation_wake_subject() -> Vec<DelegationWakeSubject> {
+    let mut subjects = Vec::new();
+    let mut next = Some(DelegationWakeSubject::Result);
+    while let Some(current) = next {
+        next = match current {
+            DelegationWakeSubject::Result => Some(DelegationWakeSubject::Message),
+            DelegationWakeSubject::Message => None,
+        };
+        subjects.push(current);
+    }
+    subjects
+}
 
 /// Every bound-child action, in an inventory the compiler keeps complete.
 fn every_bound_child_action() -> Vec<DispatchedBoundChildAction> {
@@ -495,7 +546,7 @@ async fn admitted_spellings(
     table: &str,
     column: &str,
 ) -> Result<BTreeSet<String>, Box<dyn Error>> {
-    let definition: String = sqlx::query_scalar(
+    let definitions: Vec<String> = sqlx::query_scalar(
         "SELECT pg_get_constraintdef(constraint_entry.oid)
            FROM pg_constraint AS constraint_entry
            JOIN pg_attribute AS column_entry
@@ -504,13 +555,27 @@ async fn admitted_spellings(
           WHERE constraint_entry.conrelid = $1::regclass
             AND constraint_entry.contype = 'c'
             AND array_length(constraint_entry.conkey, 1) = 1
-            AND column_entry.attname = $2",
+            AND column_entry.attname = $2
+          ORDER BY constraint_entry.conname",
     )
     .bind(table)
     .bind(column)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await?;
-    Ok(admitted_text_literals(&definition))
+    // A second single-column check on the same column — a nonemptiness or
+    // normalization guard, say — would make "the value set" ambiguous, and
+    // picking either one silently would report a decoder mismatch that has
+    // nothing to do with the admitted discriminators. Refuse to guess.
+    let [definition] = definitions.as_slice() else {
+        return Err(format!(
+            "expected exactly one single-column CHECK closing {table}.{column}, found {}: \
+             {definitions:?}; the value-set constraint can no longer be identified by shape \
+             alone, so this lookup must name the one it means",
+            definitions.len()
+        )
+        .into());
+    };
+    Ok(admitted_text_literals(definition))
 }
 
 /// Asserts storage and the production decoder close over the same set.
@@ -519,6 +584,12 @@ async fn admitted_spellings(
 /// so neither side is restated here. A spelling storage admits that the decoder
 /// rejects is the stall; a variant no admitted spelling reaches is a decoder
 /// arm storage can never produce.
+///
+/// This establishes *coverage*, not meaning: it cannot distinguish a
+/// permutation of the closed set. Which spelling carries which meaning is
+/// pinned pairwise by the `each_*_spelling_decodes_to_its_variant` tests, and
+/// the two claims are deliberately kept apart — this one needs a database and
+/// names no literal, those name literals and need none.
 #[track_caller]
 fn assert_storage_and_decoder_agree<Value: PartialEq + fmt::Debug>(
     admitted: &BTreeSet<String>,
@@ -594,6 +665,147 @@ fn row_decoded_families_are_enumerated() {
     assert_eq!(every_reconciliation_operation().len(), 2);
 }
 
+// The set agreement above is blind to a permutation: swapping two decoder arms
+// leaves the decoded set identical, so lifecycle events would report the wrong
+// outcome with every assertion still green. These pin the pairing itself.
+//
+// The literal is spelled at the assertion because the test cares about this
+// exact pairing, and the value it is compared against is produced by the real
+// decoder rather than by a table standing in for it. A literal that drifts away
+// from what storage admits fails the durable assertion below, so the two halves
+// cannot both be satisfied by a wrong spelling.
+
+/// Each durable update-kind spelling decodes to the kind it names.
+///
+/// This is the arm the tripwire analysis named: `child_result` and
+/// `child_lifecycle_disposition` are written by production code, and mistyping
+/// either routes a committed row to the fail-closed arm, which stalls the
+/// singleton cursor for every session.
+#[test]
+fn each_delegation_update_kind_spelling_decodes_to_its_variant() {
+    assert_eq!(
+        decode_delegation_update_kind("child_spawned").unwrap(),
+        DelegationUpdateKind::ChildSpawned
+    );
+    assert_eq!(
+        decode_delegation_update_kind("child_waiting").unwrap(),
+        DelegationUpdateKind::ChildWaiting
+    );
+    assert_eq!(
+        decode_delegation_update_kind("child_lifecycle_disposition").unwrap(),
+        DelegationUpdateKind::ChildLifecycleDisposition
+    );
+    assert_eq!(
+        decode_delegation_update_kind("child_result").unwrap(),
+        DelegationUpdateKind::ChildResult
+    );
+    assert_eq!(
+        decode_delegation_update_kind("session_message").unwrap(),
+        DelegationUpdateKind::SessionMessage
+    );
+}
+
+/// Each durable wake-subject spelling decodes to the subject it names.
+#[test]
+fn each_delegation_wake_subject_spelling_decodes_to_its_variant() {
+    assert_eq!(
+        decode_delegation_wake_subject("result").unwrap(),
+        DelegationWakeSubject::Result
+    );
+    assert_eq!(
+        decode_delegation_wake_subject("message").unwrap(),
+        DelegationWakeSubject::Message
+    );
+}
+
+/// Each durable outcome spelling decodes to the outcome it names.
+#[test]
+fn each_delegation_outcome_spelling_decodes_to_its_variant() {
+    assert_eq!(
+        decode_delegation_outcome("result_returned").unwrap(),
+        DispatchedDelegationOutcome::ResultReturned
+    );
+    assert_eq!(
+        decode_delegation_outcome("child_failed").unwrap(),
+        DispatchedDelegationOutcome::ChildFailed
+    );
+    assert_eq!(
+        decode_delegation_outcome("child_stopped").unwrap(),
+        DispatchedDelegationOutcome::ChildStopped
+    );
+    assert_eq!(
+        decode_delegation_outcome("child_cancelled").unwrap(),
+        DispatchedDelegationOutcome::ChildCancelled
+    );
+    assert_eq!(
+        decode_delegation_outcome("continue_running").unwrap(),
+        DispatchedDelegationOutcome::ContinueRunning
+    );
+    assert_eq!(
+        decode_delegation_outcome("already_terminal").unwrap(),
+        DispatchedDelegationOutcome::AlreadyTerminal
+    );
+}
+
+/// Each durable reason spelling decodes to the reason it names.
+#[test]
+fn each_delegation_reason_spelling_decodes_to_its_variant() {
+    assert_eq!(
+        decode_delegation_reason("child_completed").unwrap(),
+        DispatchedDelegationReason::ChildCompleted
+    );
+    assert_eq!(
+        decode_delegation_reason("child_execution_failed").unwrap(),
+        DispatchedDelegationReason::ChildExecutionFailed
+    );
+    assert_eq!(
+        decode_delegation_reason("child_result_unavailable").unwrap(),
+        DispatchedDelegationReason::ChildResultUnavailable
+    );
+    assert_eq!(
+        decode_delegation_reason("child_cancelled").unwrap(),
+        DispatchedDelegationReason::ChildCancelled
+    );
+    assert_eq!(
+        decode_delegation_reason("parent_stopped_parent_and_descendants").unwrap(),
+        DispatchedDelegationReason::ParentStoppedWithDescendants
+    );
+    assert_eq!(
+        decode_delegation_reason("parent_cancelled_parent_and_descendants").unwrap(),
+        DispatchedDelegationReason::ParentCancelledWithDescendants
+    );
+}
+
+/// Each durable wait-mode spelling decodes to the mode it names.
+#[test]
+fn each_delegation_wait_mode_spelling_decodes_to_its_variant() {
+    assert_eq!(
+        decode_wait_mode("foreground").unwrap(),
+        DispatchedDelegationWaitMode::Foreground
+    );
+    assert_eq!(
+        decode_wait_mode("background").unwrap(),
+        DispatchedDelegationWaitMode::Background
+    );
+}
+
+/// Each durable bound-action spelling decodes to the action it names.
+#[test]
+fn each_bound_child_action_spelling_decodes_to_its_variant() {
+    assert_eq!(
+        decode_bound_action("keep_running").unwrap(),
+        DispatchedBoundChildAction::KeepRunning
+    );
+    assert_eq!(
+        decode_bound_action("stop").unwrap(),
+        DispatchedBoundChildAction::Stop
+    );
+    assert_eq!(
+        decode_bound_action("cancel").unwrap(),
+        DispatchedBoundChildAction::Cancel
+    );
+}
+
 /// Storage and the decoder close over the same delegation spellings.
 ///
 /// This is the tripwire itself, for the four columns a single-argument decoder
@@ -607,6 +819,18 @@ async fn delegation_storage_and_decoder_close_over_the_same_spellings() -> Resul
 {
     let (container, pool) = migrated_postgres().await?;
 
+    assert_storage_and_decoder_agree(
+        &admitted_spellings(&pool, DELEGATION_UPDATES, "update_kind").await?,
+        decode_delegation_update_kind,
+        &every_delegation_update_kind(),
+        "update_kind",
+    );
+    assert_storage_and_decoder_agree(
+        &admitted_spellings(&pool, DELEGATION_WAKES, "subject_kind").await?,
+        decode_delegation_wake_subject,
+        &every_delegation_wake_subject(),
+        "subject_kind",
+    );
     assert_storage_and_decoder_agree(
         &admitted_spellings(&pool, DELEGATION_UPDATES, "outcome_kind").await?,
         decode_delegation_outcome,
@@ -730,6 +954,350 @@ async fn an_undecodable_committed_row_stalls_every_session() -> Result<(), Box<d
         rust_decimal::Decimal::from(2_u64),
         "an unrelated session's event is committed behind the undecodable row, and the stalled \
          cursor makes it permanently undeliverable"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Row dispatch for every admitted update kind
+// ---------------------------------------------------------------------------
+//
+// The spelling assertions above prove the decoder routes each admitted
+// `update_kind`, but not that the arm it routes to reads the right columns.
+// These plant one committed row per kind and dispatch it through the real
+// `OutboxDispatcher`, asserting the exact decoded variant.
+//
+// Referential triggers are disabled around the inserts. The relationship rows
+// these updates point at are not what the decoder reads, and building them
+// honestly costs roughly 700 lines across ~35 tables — the relation and its
+// update are bidirectionally coupled by deferred constraint triggers, so
+// neither can be inserted without the other. What is *not* disabled is what
+// matters: `delegation_update_subject_shape` and
+// `delegation_update_provenance_shape` are CHECK constraints, and the five
+// per-kind unique indexes are indexes. Neither is a trigger, so both stay
+// enforced and every row below is exactly the shape storage admits. The
+// sequence allocator on the header table is likewise left enabled, so
+// `event_sequence` is assigned the way production assigns it.
+
+// Each planter writes its header and typed record in one statement so the
+// deferred "header requires a typed record" constraint is satisfied at commit,
+// and each states only the columns its kind admits — the omitted ones must be
+// NULL, and `delegation_update_subject_shape` still enforces that.
+
+/// Plants a background spawn update.
+async fn plant_child_spawned(
+    pool: &PgPool,
+    session: Uuid,
+    spawning: Uuid,
+    child: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
+            VALUES ('delegation_update', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_update_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             update_kind, spawning_tool_request_id, child_session_id, policy_kind,
+             delegation_event_ordinal, delegation_event_kind)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                'child_spawned', $2, $3, 'background', 1, 'spawned'
+           FROM header",
+    )
+    .bind(session)
+    .bind(spawning)
+    .bind(child)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Plants a foreground wait registration.
+async fn plant_child_waiting(
+    pool: &PgPool,
+    session: Uuid,
+    spawning: Uuid,
+    child: Uuid,
+    awaiting: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
+            VALUES ('delegation_update', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_update_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             update_kind, spawning_tool_request_id, child_session_id,
+             awaiting_tool_request_id, wait_mode)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                'child_waiting', $2, $3, $4, 'foreground'
+           FROM header",
+    )
+    .bind(session)
+    .bind(spawning)
+    .bind(child)
+    .bind(awaiting)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Plants a parent-stop lifecycle disposition with command provenance.
+async fn plant_child_lifecycle_disposition(
+    pool: &PgPool,
+    session: Uuid,
+    spawning: Uuid,
+    child: Uuid,
+    turn: Uuid,
+    durable_command: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
+            VALUES ('delegation_update', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_update_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             update_kind, spawning_tool_request_id, child_session_id,
+             delegation_event_ordinal, delegation_event_kind, outcome_kind, reason_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_command_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                'child_lifecycle_disposition', $2, $3, 1, 'outcome_recorded',
+                'child_stopped', 'parent_stopped_parent_and_descendants',
+                'parent_turn_command', $1, $4, $5
+           FROM header",
+    )
+    .bind(session)
+    .bind(spawning)
+    .bind(child)
+    .bind(turn)
+    .bind(durable_command)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Plants a returned child result with child-turn provenance.
+async fn plant_child_result(
+    pool: &PgPool,
+    session: Uuid,
+    spawning: Uuid,
+    child: Uuid,
+    turn: Uuid,
+    content: &str,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
+            VALUES ('delegation_update', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_update_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             update_kind, spawning_tool_request_id, child_session_id, outcome_kind,
+             reason_kind, provenance_kind, provenance_session_id, provenance_turn_id,
+             result_spawning_request_id, content_text)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                'child_result', $2, $3, 'result_returned', 'child_completed',
+                'child_turn', $3, $4, $2, $5
+           FROM header",
+    )
+    .bind(session)
+    .bind(spawning)
+    .bind(child)
+    .bind(turn)
+    .bind(content)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Plants a relationship message addressed to the owning session.
+async fn plant_session_message(
+    pool: &PgPool,
+    session: Uuid,
+    spawning: Uuid,
+    message: Uuid,
+    sender: Uuid,
+    content: &str,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
+            VALUES ('delegation_update', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_update_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             update_kind, spawning_tool_request_id, message_id, sender_session_id,
+             recipient_session_id, message_ordinal, content_text)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                'session_message', $2, $3, $4, $1, 1, $5
+           FROM header",
+    )
+    .bind(session)
+    .bind(spawning)
+    .bind(message)
+    .bind(sender)
+    .bind(content)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Offers the next committed event and returns the decoded record.
+async fn dispatch_next_kind(
+    dispatcher: &OutboxDispatcher,
+) -> Result<DispatchedOutboxEventKind, Box<dyn Error>> {
+    let mut captured = None;
+    let outcome = dispatcher
+        .dispatch_next(|event| {
+            captured = Some(event.kind().clone());
+            OutboxDeliveryDecision::Delivered
+        })
+        .await?;
+    captured.ok_or_else(|| format!("dispatcher offered no event, reporting {outcome:?}").into())
+}
+
+/// Every admitted update kind dispatches to the variant it names.
+///
+/// This is the end the tripwire analysis pointed at: `child_result` and
+/// `child_lifecycle_disposition` are written by production code, and an arm
+/// that cannot decode its own committed row stalls the singleton cursor for
+/// every session rather than losing one event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let parent = Uuid::from_u128(DISPATCH_SESSION);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(DISPATCH_SESSION, DISPATCH_CREATE_COMMAND))
+        .await?;
+
+    sqlx::query("ALTER TABLE delegation_update_outbox_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_message_delivery DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let spawned = Uuid::from_u128(SPAWNED_REQUEST_SEED);
+    let waiting = Uuid::from_u128(WAITING_REQUEST_SEED);
+    let lifecycle = Uuid::from_u128(LIFECYCLE_REQUEST_SEED);
+    let result = Uuid::from_u128(RESULT_REQUEST_SEED);
+    let message_request = Uuid::from_u128(MESSAGE_REQUEST_SEED);
+    let child = Uuid::from_u128(ARBITRARY_CHILD_SESSION_SEED);
+    let turn = Uuid::from_u128(ARBITRARY_TURN_SEED);
+    let durable = Uuid::from_u128(ARBITRARY_COMMAND_SEED);
+    let message = Uuid::from_u128(ARBITRARY_MESSAGE_SEED);
+    let sender = Uuid::from_u128(ARBITRARY_SENDER_SESSION_SEED);
+
+    plant_child_spawned(&pool, parent, spawned, child).await?;
+    plant_child_waiting(&pool, parent, waiting, child, waiting).await?;
+    plant_child_lifecycle_disposition(&pool, parent, lifecycle, child, turn, durable).await?;
+    plant_child_result(&pool, parent, result, child, turn, RESULT_CONTENT).await?;
+    plant_session_message(
+        &pool,
+        parent,
+        message_request,
+        message,
+        sender,
+        MESSAGE_CONTENT,
+    )
+    .await?;
+    // The decoder reads `delivery_sequence` through a join, so the message kind
+    // needs its delivery row; the other four read only their own columns.
+    sqlx::query(
+        "INSERT INTO session_message_delivery
+            (message_id, spawning_tool_request_id, recipient_session_id,
+             delivery_sequence, delivery_kind)
+         VALUES ($1, $2, $3, 1, 'message')",
+    )
+    .bind(message)
+    .bind(message_request)
+    .bind(parent)
+    .execute(&pool)
+    .await?;
+
+    sqlx::query("ALTER TABLE session_message_delivery ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE delegation_update_outbox_event ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert_eq!(
+        dispatch_next_kind(&dispatcher).await?,
+        DispatchedOutboxEventKind::SessionCreated,
+        "the session's own creation event is committed ahead of the planted updates"
+    );
+    assert_eq!(
+        dispatch_next_kind(&dispatcher).await?,
+        DispatchedOutboxEventKind::DelegationUpdate(DispatchedDelegationUpdate::ChildSpawned {
+            spawning_request: ToolRequestId::from_uuid(spawned),
+            child: SessionId::from_uuid(child),
+            policy: DispatchedDelegationPolicy::Background,
+        })
+    );
+    assert_eq!(
+        dispatch_next_kind(&dispatcher).await?,
+        DispatchedOutboxEventKind::DelegationUpdate(DispatchedDelegationUpdate::ChildWaiting {
+            spawning_request: ToolRequestId::from_uuid(waiting),
+            child: SessionId::from_uuid(child),
+            awaiting_request: ToolRequestId::from_uuid(waiting),
+            mode: DispatchedDelegationWaitMode::Foreground,
+        })
+    );
+    assert_eq!(
+        dispatch_next_kind(&dispatcher).await?,
+        DispatchedOutboxEventKind::DelegationUpdate(
+            DispatchedDelegationUpdate::ChildLifecycleDisposition {
+                spawning_request: ToolRequestId::from_uuid(lifecycle),
+                child: SessionId::from_uuid(child),
+                event_ordinal: ARBITRARY_ORDINAL,
+                outcome: DispatchedDelegationOutcome::ChildStopped,
+                reason: DispatchedDelegationReason::ParentStoppedWithDescendants,
+                provenance: DispatchedDelegationProvenance::ParentTurnCommand {
+                    session: SessionId::from_uuid(parent),
+                    turn: TurnId::from_uuid(turn),
+                    command: DurableCommandId::from_uuid(durable),
+                },
+            }
+        )
+    );
+    assert_eq!(
+        dispatch_next_kind(&dispatcher).await?,
+        DispatchedOutboxEventKind::DelegationUpdate(DispatchedDelegationUpdate::ChildResult {
+            spawning_request: ToolRequestId::from_uuid(result),
+            child: SessionId::from_uuid(child),
+            outcome: DispatchedDelegationOutcome::ResultReturned,
+            reason: DispatchedDelegationReason::ChildCompleted,
+            provenance: DispatchedDelegationProvenance::ChildTurn {
+                session: SessionId::from_uuid(child),
+                turn: TurnId::from_uuid(turn),
+            },
+            content: Some(RESULT_CONTENT.to_owned()),
+        })
+    );
+    assert_eq!(
+        dispatch_next_kind(&dispatcher).await?,
+        DispatchedOutboxEventKind::DelegationUpdate(DispatchedDelegationUpdate::SessionMessage {
+            spawning_request: ToolRequestId::from_uuid(message_request),
+            message: DelegationMessageId::from_uuid(message),
+            sender: SessionId::from_uuid(sender),
+            recipient: SessionId::from_uuid(parent),
+            message_ordinal: ARBITRARY_ORDINAL,
+            delivery_sequence: ARBITRARY_ORDINAL,
+            content: MESSAGE_CONTENT.to_owned(),
+        })
     );
 
     pool.close().await;
