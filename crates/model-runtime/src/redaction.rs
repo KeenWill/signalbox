@@ -2604,6 +2604,44 @@ mod tests {
         assert_no_stream_carries(&observed, "fixture/secret");
     }
 
+    /// INV-035: a proposal's provider-controlled id and name are scrubbed
+    /// alongside its arguments, pinned to their exact redacted values.
+    ///
+    /// `redact_tool_proposal` scrubs all three fields, but the sibling case
+    /// below carries the credential only in `arguments_json`, so without this
+    /// one nothing drives a credential through a proposal's `id` or `name`
+    /// and a regression there would reach no assertion. Exact values rather
+    /// than mere absence: replacing a whole field would satisfy an absence
+    /// check while discarding the safe bytes around the credential.
+    #[test]
+    fn inv_035_proposed_identifiers_and_names_are_credential_scrubbed() {
+        let key = credential("fixture/secret");
+        let mut observed = Vec::new();
+        let mut sink = CredentialRedactingSink::new(&mut observed, &key);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolCallProposed(ToolCallProposal {
+                id: ToolCallId::new("id-fixture/secret-1"),
+                name: ToolName::new("name-fixture/secret-tool"),
+                arguments_json: r#"{"k":"fixture/secret"}"#.to_string(),
+            }),
+        });
+        sink.flush();
+        drop(sink);
+
+        assert_eq!(
+            observed,
+            vec![Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::ToolCallProposed(ToolCallProposal {
+                    id: ToolCallId::new("id-[redacted]-1"),
+                    name: ToolName::new("name-[redacted]-tool"),
+                    arguments_json: r#"{"k":"[redacted]"}"#.to_string(),
+                }),
+            }]
+        );
+    }
+
     /// INV-035: a disguised credential in proposed arguments is scrubbed by
     /// the sink itself, pinned to the exact forwarded proposal.
     ///
