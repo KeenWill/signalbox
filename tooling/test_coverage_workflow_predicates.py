@@ -36,6 +36,7 @@ document is synthetic and built in this file.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -2215,6 +2216,37 @@ class JqNumericContractTests(JqBackedTestCase):
 
         self.assertTrue(result.errored)
         self.assertIn("endswith", result.stderr)
+
+
+def unused_module_helpers() -> list[str]:
+    """Helpers this module defines and never calls, outside test bodies.
+
+    A fixture builder that is defined and never invoked is what a coverage gap
+    looks like from the inside: the helper reads as though something exercises
+    it while nothing does. Exactly that reached review here — a builder for the
+    whole native comment body was written, and the test meant to consume it was
+    not, so the native payload program went unexercised against everything the
+    workflow appends to a report.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    defined = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
+    called = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    return [name for name in defined if name not in called]
+
+
+class HarnessIntegrityTests(unittest.TestCase):
+    """Checks on this module rather than on the pipeline it tests."""
+
+    def test_every_helper_this_module_defines_is_used(self) -> None:
+        """A fixture builder nothing calls is a gap wearing the clothes of
+        coverage, and one already reached review in this file. Cheaper to
+        assert than to notice."""
+        self.assertEqual(unused_module_helpers(), [])
 
 
 if __name__ == "__main__":
