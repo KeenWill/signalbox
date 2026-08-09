@@ -356,6 +356,23 @@ fn definitions_distinguish_read_from_write_effects() {
 }
 
 #[test]
+fn plan_write_schema_declares_its_closed_union_as_an_object() {
+    let catalog = catalog();
+    let write_name = ToolName::try_new(PLAN_WRITE_NAME.to_owned()).expect("fixture name is valid");
+    let schema: serde_json::Value = serde_json::from_str(
+        catalog
+            .definition(&write_name)
+            .expect("write definition exists")
+            .input_schema()
+            .as_str(),
+    )
+    .expect("plan write schema is JSON");
+
+    assert_eq!(schema["type"], serde_json::json!("object"));
+    assert!(schema["oneOf"].is_array());
+}
+
+#[test]
 fn status_arguments_reject_values_outside_the_closed_vocabulary() {
     let catalog = catalog();
     let name = ToolName::try_new(PLAN_WRITE_NAME.to_owned()).expect("fixture name is valid");
