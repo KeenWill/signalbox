@@ -46,7 +46,8 @@ use crate::lock_inventory::{
 };
 use crate::mapping::{
     runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
-    tool_permission_default_from_str, tool_permission_default_to_str,
+    runner_sandbox_from_str, runner_sandbox_to_str, tool_permission_default_from_str,
+    tool_permission_default_to_str,
 };
 use crate::outbox::{
     self, DispatchedRunnerState, OutboxEvent, RunnerConnectionOutboxSource, RunnerStateOutboxEvent,
@@ -2892,7 +2893,7 @@ async fn insert_registration(
         )
         .bind(registration.enrollment().into_uuid())
         .bind(Decimal::from(revision.get()))
-        .bind(encode_sandbox(sandbox))
+        .bind(runner_sandbox_to_str(sandbox))
         .execute(&mut **transaction)
         .await?;
     }
@@ -3280,7 +3281,7 @@ async fn insert_placement_record(
     )
     .bind(workspace_kind)
     .bind(requested_repository)
-    .bind(encode_sandbox(request.sandbox))
+    .bind(runner_sandbox_to_str(request.sandbox))
     .bind(count_decimal(permission_overrides.len())?)
     .bind(state.kind)
     .bind(state.lost_runner)
@@ -4774,7 +4775,7 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
         workspace_credential_profile: workspace
             .and_then(|workspace| workspace.credential_profile.as_ref())
             .map(CredentialProfileName::as_str),
-        workspace_sandbox: workspace.map(|workspace| encode_sandbox(workspace.sandbox)),
+        workspace_sandbox: workspace.map(|workspace| runner_sandbox_to_str(workspace.sandbox)),
         workspace_relative_path: workspace.map(|workspace| workspace.relative_path.as_str()),
         workspace_recovery_kind,
         workspace_branch_name,
@@ -4979,19 +4980,8 @@ fn decode_approval(value: String) -> Result<CredentialToolApproval, RunnerProtoc
     }
 }
 
-const fn encode_sandbox(sandbox: RunnerSandboxProfile) -> &'static str {
-    match sandbox {
-        RunnerSandboxProfile::Ambient => "ambient",
-        RunnerSandboxProfile::WorkspaceRestricted => "workspace_restricted",
-    }
-}
-
 fn decode_sandbox(value: String) -> Result<RunnerSandboxProfile, RunnerProtocolStoreError> {
-    match value.as_str() {
-        "ambient" => Ok(RunnerSandboxProfile::Ambient),
-        "workspace_restricted" => Ok(RunnerSandboxProfile::WorkspaceRestricted),
-        _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
-    }
+    runner_sandbox_from_str(&value).ok_or_else(|| RunnerProtocolCorruption::InvalidEncoding.into())
 }
 
 const fn encode_workspace(workspace: WorkspaceCapability) -> &'static str {

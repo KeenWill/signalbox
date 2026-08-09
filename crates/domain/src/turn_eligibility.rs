@@ -3970,6 +3970,12 @@ fn reconstitute_inner(
     // separately authenticated non-accepted terminal boundary; treat that one
     // external edge as the derivation root while retaining and validating the
     // original interrupt priority below.
+    let ordinary_roots = input
+        .turns
+        .iter()
+        .filter(|record| record.order.priority() == AcceptedInputQueuePriority::Ordinary)
+        .map(|record| record.turn)
+        .collect::<BTreeSet<_>>();
     let queue_work = input.turns.iter().map(|record| {
         let order = if Some(record.turn) == preceding_non_accepted_successor {
             AcceptedInputQueueOrder::ordinary(record.order.acceptance_position())
@@ -3978,9 +3984,13 @@ fn reconstitute_inner(
         };
         AcceptedInputQueueWork::new(record.queue_session, record.queue_turn, order)
     });
-    let total_order = derive_accepted_input_total_order(queue_work).map_err(|error| {
-        AcceptedInputSchedulingReconstitutionFailure::InvalidQueueOrder { error }
-    })?;
+    let total_order = promote_external_interrupt_chain(
+        derive_accepted_input_total_order(queue_work).map_err(|error| {
+            AcceptedInputSchedulingReconstitutionFailure::InvalidQueueOrder { error }
+        })?,
+        preceding_non_accepted_successor,
+        &ordinary_roots,
+    );
     let mut delegated_turns = BTreeMap::new();
     for fact in input.delegated_turns.iter().copied() {
         let turn = fact.turn();
@@ -6766,6 +6776,32 @@ fn reconstitute_inner(
         active_executing_tool_batch,
         preceding_non_accepted_terminal,
     })
+}
+
+fn promote_external_interrupt_chain(
+    total_order: Vec<TurnId>,
+    external_successor: Option<TurnId>,
+    ordinary_roots: &BTreeSet<TurnId>,
+) -> Vec<TurnId> {
+    let Some(external_successor) = external_successor else {
+        return total_order;
+    };
+    let Some(chain_start) = total_order
+        .iter()
+        .position(|turn| *turn == external_successor)
+    else {
+        return total_order;
+    };
+    let chain_end = total_order[chain_start + 1..]
+        .iter()
+        .position(|turn| ordinary_roots.contains(turn))
+        .map(|offset| chain_start + 1 + offset)
+        .unwrap_or(total_order.len());
+    let mut promoted = Vec::with_capacity(total_order.len());
+    promoted.extend_from_slice(&total_order[chain_start..chain_end]);
+    promoted.extend_from_slice(&total_order[..chain_start]);
+    promoted.extend_from_slice(&total_order[chain_end..]);
+    promoted
 }
 
 fn reconstitute_active_acceptance_tail(
@@ -16691,6 +16727,38 @@ mod tests {
                 placement_revision: revision,
                 optional_tool_attempt: interrupted_tool_attempt,
             })
+        );
+    }
+
+    /// INV-009: an interrupt successor authenticated against an external
+    /// terminal predecessor remains ahead of older ordinary queued work.
+    #[test]
+    fn inv009_external_interrupt_chain_is_the_first_accepted_order_root() {
+        let older_ordinary = turn_id(811);
+        let external_successor = turn_id(812);
+        let interrupt_descendant = turn_id(813);
+        let later_ordinary = turn_id(814);
+        let ordinary_roots = BTreeSet::from([older_ordinary, later_ordinary]);
+
+        let promoted = super::promote_external_interrupt_chain(
+            vec![
+                older_ordinary,
+                external_successor,
+                interrupt_descendant,
+                later_ordinary,
+            ],
+            Some(external_successor),
+            &ordinary_roots,
+        );
+
+        assert_eq!(
+            promoted,
+            vec![
+                external_successor,
+                interrupt_descendant,
+                older_ordinary,
+                later_ordinary,
+            ]
         );
     }
 }

@@ -30,8 +30,8 @@ use crate::{
         dispatched_runner_state_from_str, dispatched_runner_state_to_str,
         durable_command_id_from_uuid, input_position_from_numeric, input_position_to_numeric,
         model_change_adjustments_from_json, model_settings_from_json,
-        model_settings_overlay_from_json, session_id_from_uuid, session_id_to_uuid,
-        turn_id_to_uuid,
+        model_settings_overlay_from_json, runner_sandbox_from_str, runner_sandbox_to_str,
+        session_id_from_uuid, session_id_to_uuid, turn_id_to_uuid,
     },
 };
 
@@ -1963,6 +1963,7 @@ async fn load_event(
                 "SELECT event.runner_id, event.placement_revision,
                         event.sandbox_profile, event.working_directory,
                         event.state_kind, event.connection_enrollment_id,
+                        event.connection_epoch, event.connection_event_ordinal,
                         placement.event_kind AS source_event_kind,
                         placement.state_kind AS source_state_kind,
                         placement.requested_sandbox_profile AS source_sandbox_profile,
@@ -2003,11 +2004,9 @@ async fn load_event(
                 row.try_get("placement_revision")?,
             )?)
             .ok_or(OutboxCorruption::InvalidRunnerEvent)?;
-            let sandbox = match row.try_get::<String, _>("sandbox_profile")?.as_str() {
-                "ambient" => RunnerSandboxProfile::Ambient,
-                "workspace_restricted" => RunnerSandboxProfile::WorkspaceRestricted,
-                _ => return Err(OutboxCorruption::InvalidRunnerEvent.into()),
-            };
+            let sandbox_text = row.try_get::<String, _>("sandbox_profile")?;
+            let sandbox = runner_sandbox_from_str(&sandbox_text)
+                .ok_or(OutboxCorruption::InvalidRunnerEvent)?;
             let working_directory = row
                 .try_get::<Option<String>, _>("working_directory")?
                 .map(RunnerWorkingDirectory::try_new)
@@ -2016,6 +2015,33 @@ async fn load_event(
             let state_kind = row.try_get::<String, _>("state_kind")?;
             let state = dispatched_runner_state_from_str(&state_kind)
                 .ok_or(OutboxCorruption::InvalidRunnerEvent)?;
+            let connection_source_shape_matches = match state {
+                DispatchedRunnerState::Suspect | DispatchedRunnerState::Connected => {
+                    row.try_get::<Option<Uuid>, _>("connection_enrollment_id")?
+                        .is_some()
+                        && row
+                            .try_get::<Option<Decimal>, _>("connection_epoch")?
+                            .is_some()
+                        && row
+                            .try_get::<Option<Decimal>, _>("connection_event_ordinal")?
+                            .is_some()
+                }
+                DispatchedRunnerState::Pinned
+                | DispatchedRunnerState::RunnerLostBeforePin
+                | DispatchedRunnerState::RunnerLost
+                | DispatchedRunnerState::Replaced
+                | DispatchedRunnerState::WorkingDirectoryChanged
+                | DispatchedRunnerState::Abandoned => {
+                    row.try_get::<Option<Uuid>, _>("connection_enrollment_id")?
+                        .is_none()
+                        && row
+                            .try_get::<Option<Decimal>, _>("connection_epoch")?
+                            .is_none()
+                        && row
+                            .try_get::<Option<Decimal>, _>("connection_event_ordinal")?
+                            .is_none()
+                }
+            };
             let runner_uuid = row.try_get::<Uuid, _>("runner_id")?;
             let source_sandbox = row.try_get::<String, _>("source_sandbox_profile")?;
             let source_working_directory =
@@ -2102,7 +2128,7 @@ async fn load_event(
                         && source_lost == Some(runner_uuid)
                 }
             };
-            if !source_matches {
+            if !connection_source_shape_matches || !source_matches {
                 return Err(OutboxCorruption::InvalidRunnerEvent.into());
             }
             DispatchedOutboxEventKind::RunnerStateTransition {
@@ -2919,10 +2945,7 @@ async fn append_runner_state_transition(
         state,
         source,
     } = event;
-    let sandbox = match sandbox {
-        RunnerSandboxProfile::Ambient => "ambient",
-        RunnerSandboxProfile::WorkspaceRestricted => "workspace_restricted",
-    };
+    let sandbox = runner_sandbox_to_str(sandbox);
     let state = dispatched_runner_state_to_str(state);
     let (connection_enrollment, connection_epoch, connection_event_ordinal) =
         match source.connection {
