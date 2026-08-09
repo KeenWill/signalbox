@@ -2362,6 +2362,21 @@ impl FailedModelCallTurnIdentities {
         self.pending_steering_reclassifications = identities;
         self
     }
+
+    /// Returns the failure-marker identity this bundle mints.
+    ///
+    /// Exposed alongside [`Self::terminal_frontier`] because the two are
+    /// minted into one collision domain: a retry after an identity collision
+    /// has to refresh *both*, and a caller that can only compare whole
+    /// bundles cannot tell a full refresh from one that reused half.
+    pub const fn failure_entry(&self) -> SemanticTranscriptEntryId {
+        self.failure_entry
+    }
+
+    /// Returns the terminal-frontier identity this bundle mints.
+    pub const fn terminal_frontier(&self) -> ContextFrontierId {
+        self.terminal_frontier
+    }
 }
 
 /// Fresh identities for an interrupt-cancelled turn.
