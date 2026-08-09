@@ -2113,7 +2113,11 @@ fn required_positive_sequence(
     decode_positive_sequence(value).map_err(|_| OutboxCorruption::InvalidDelegationEvent)
 }
 
-fn decode_bound_action(value: &str) -> Result<DispatchedBoundChildAction, OutboxCorruption> {
+/// Decodes the durable `on_parent_stopped` / `on_parent_cancelled` spelling.
+///
+/// Public so a test can drive it with the spellings the durable `CHECK`
+/// constraint actually admits, rather than restating the table beside it.
+pub fn decode_bound_action(value: &str) -> Result<DispatchedBoundChildAction, OutboxCorruption> {
     match value {
         "keep_running" => Ok(DispatchedBoundChildAction::KeepRunning),
         "stop" => Ok(DispatchedBoundChildAction::Stop),
@@ -2122,9 +2126,11 @@ fn decode_bound_action(value: &str) -> Result<DispatchedBoundChildAction, Outbox
     }
 }
 
-pub(crate) fn decode_wait_mode(
-    value: &str,
-) -> Result<DispatchedDelegationWaitMode, OutboxCorruption> {
+/// Decodes the durable `wait_mode` spelling.
+///
+/// Public so a test can drive it with the spellings the durable `CHECK`
+/// constraint actually admits, rather than restating the table beside it.
+pub fn decode_wait_mode(value: &str) -> Result<DispatchedDelegationWaitMode, OutboxCorruption> {
     match value {
         "foreground" => Ok(DispatchedDelegationWaitMode::Foreground),
         "background" => Ok(DispatchedDelegationWaitMode::Background),
@@ -2132,7 +2138,11 @@ pub(crate) fn decode_wait_mode(
     }
 }
 
-pub(crate) fn decode_delegation_outcome(
+/// Decodes the durable `outcome_kind` spelling.
+///
+/// Public so a test can drive it with the spellings the durable `CHECK`
+/// constraint actually admits, rather than restating the table beside it.
+pub fn decode_delegation_outcome(
     value: &str,
 ) -> Result<DispatchedDelegationOutcome, OutboxCorruption> {
     match value {
@@ -2146,7 +2156,11 @@ pub(crate) fn decode_delegation_outcome(
     }
 }
 
-pub(crate) fn decode_delegation_reason(
+/// Decodes the durable `reason_kind` spelling.
+///
+/// Public so a test can drive it with the spellings the durable `CHECK`
+/// constraint actually admits, rather than restating the table beside it.
+pub fn decode_delegation_reason(
     value: &str,
 ) -> Result<DispatchedDelegationReason, OutboxCorruption> {
     match value {

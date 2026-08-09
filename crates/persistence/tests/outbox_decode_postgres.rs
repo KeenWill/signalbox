@@ -1,24 +1,27 @@
-//! Storage spellings the outbox decoder admits, and the stall one it cannot decode imposes.
+//! What the outbox decoder admits, and the stall a row it cannot decode imposes.
 //!
 //! The outbox dispatcher is a singleton over a single global cursor: one
 //! committed row it cannot decode is not a lost event for one session, it is a
-//! cursor that never advances again for *any* session. The tests here hold two
-//! separate lines against that.
+//! cursor that never advances again for *any* session. Two separate lines are
+//! held against that here.
 //!
-//! The first is a compile-time line. Every enum below is enumerated by an
-//! exhaustive `match` with no wildcard arm, so a new dispatched variant stops
-//! this crate compiling until it names the exact text storage carries for it —
-//! and, for every column closed by a single-column `CHECK`, that constraint is
-//! asserted to admit exactly the same set. A spelling that reaches storage
-//! without a decoder arm is precisely the stall, so the two sides are pinned
-//! against each other rather than trusted to stay aligned. The one column
-//! closed jointly with another carries its spellings in a compile-enumerated
-//! assertion instead, noted where it appears.
+//! The first is a compile-time line. Every dispatched enum below is enumerated
+//! by an exhaustive `match` with no wildcard arm, which *produces* the
+//! inventory rather than sitting beside a hand-written one, so a new variant
+//! stops this crate compiling until this file accounts for it.
 //!
-//! The second is a behavioral line:
-//! `an_undecodable_committed_row_stalls_every_session` records what the
-//! dispatcher does today when a committed row cannot be decoded, including the
-//! effect on an unrelated session's already-committed event.
+//! The second is a durable line, and it deliberately states no spellings of its
+//! own. `docs/style.md` gives each closed discriminator written to PostgreSQL
+//! one encoder and one decoder and forbids a second spelling table, so a test
+//! that restated the decoder's literals could pass while the decoder itself was
+//! mistyped — the exact regression this file exists to catch. Instead the
+//! spellings come from the durable `CHECK` constraint in the live catalogue and
+//! are fed through the *production* decoder, asserting that what storage admits
+//! and what the decoder produces are the same closed set.
+//!
+//! The third is behavioral: `an_undecodable_committed_row_stalls_every_session`
+//! records what the dispatcher does today when a committed row cannot be
+//! decoded, including the effect on an unrelated session's committed event.
 
 #![allow(
     clippy::expect_used,
@@ -27,7 +30,7 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::{collections::BTreeSet, error::Error};
+use std::{collections::BTreeSet, error::Error, fmt};
 
 use signalbox_domain::{
     ContextFrontierId, CreateSession, DelegationMessageId, DirectModelSelection, DurableCommandId,
@@ -45,6 +48,7 @@ use signalbox_persistence::{
         DispatchedDelegationWaitMode, DispatchedDelegationWake, DispatchedModelCallDisposition,
         DispatchedModelCallState, DispatchedReconciliationOperation, DispatchedToolBatchState,
         OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatcher,
+        decode_bound_action, decode_delegation_outcome, decode_delegation_reason, decode_wait_mode,
     },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -57,6 +61,8 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_outbox_decode";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+
+const DELEGATION_UPDATES: &str = "delegation_update_outbox_event";
 
 /// The session whose committed event is made undecodable.
 const UNDECODABLE_SESSION: u128 = 0x0d01;
@@ -136,15 +142,14 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
 }
 
 // ---------------------------------------------------------------------------
-// Storage spellings, enumerated by the compiler
+// Inventories the compiler keeps complete
 // ---------------------------------------------------------------------------
 //
-// Each `*_storage_name` below is the decoder's text contract restated as a
-// total function. None carries a wildcard arm, so adding a dispatched variant
-// fails to compile here until the new variant names the text storage carries —
-// and each `every_*` inventory is produced *by* an exhaustive match rather than
-// kept beside one, per `docs/style.md`, so a new variant also joins the set the
-// durable `CHECK` assertions below compare against.
+// Each inventory is produced by an exhaustive match naming its own successor,
+// so it cannot fall behind the enum: adding a variant fails to compile here.
+// None of them states a durable spelling — production defines that table in
+// exactly one place, and the assertions below read the other side from the
+// database rather than restating it here.
 
 /// Every bound-child action, in an inventory the compiler keeps complete.
 fn every_bound_child_action() -> Vec<DispatchedBoundChildAction> {
@@ -161,14 +166,6 @@ fn every_bound_child_action() -> Vec<DispatchedBoundChildAction> {
     actions
 }
 
-fn bound_child_action_storage_name(action: DispatchedBoundChildAction) -> &'static str {
-    match action {
-        DispatchedBoundChildAction::KeepRunning => "keep_running",
-        DispatchedBoundChildAction::Stop => "stop",
-        DispatchedBoundChildAction::Cancel => "cancel",
-    }
-}
-
 /// Every delegation wait mode, in an inventory the compiler keeps complete.
 fn every_delegation_wait_mode() -> Vec<DispatchedDelegationWaitMode> {
     let mut modes = Vec::new();
@@ -183,13 +180,6 @@ fn every_delegation_wait_mode() -> Vec<DispatchedDelegationWaitMode> {
         modes.push(current);
     }
     modes
-}
-
-fn delegation_wait_mode_storage_name(mode: DispatchedDelegationWaitMode) -> &'static str {
-    match mode {
-        DispatchedDelegationWaitMode::Foreground => "foreground",
-        DispatchedDelegationWaitMode::Background => "background",
-    }
 }
 
 /// Every delegation outcome, in an inventory the compiler keeps complete.
@@ -220,17 +210,6 @@ fn every_delegation_outcome() -> Vec<DispatchedDelegationOutcome> {
     outcomes
 }
 
-fn delegation_outcome_storage_name(outcome: DispatchedDelegationOutcome) -> &'static str {
-    match outcome {
-        DispatchedDelegationOutcome::ResultReturned => "result_returned",
-        DispatchedDelegationOutcome::ChildFailed => "child_failed",
-        DispatchedDelegationOutcome::ChildStopped => "child_stopped",
-        DispatchedDelegationOutcome::ChildCancelled => "child_cancelled",
-        DispatchedDelegationOutcome::ContinueRunning => "continue_running",
-        DispatchedDelegationOutcome::AlreadyTerminal => "already_terminal",
-    }
-}
-
 /// Every delegation reason, in an inventory the compiler keeps complete.
 fn every_delegation_reason() -> Vec<DispatchedDelegationReason> {
     let mut reasons = Vec::new();
@@ -259,21 +238,6 @@ fn every_delegation_reason() -> Vec<DispatchedDelegationReason> {
     reasons
 }
 
-fn delegation_reason_storage_name(reason: DispatchedDelegationReason) -> &'static str {
-    match reason {
-        DispatchedDelegationReason::ChildCompleted => "child_completed",
-        DispatchedDelegationReason::ChildExecutionFailed => "child_execution_failed",
-        DispatchedDelegationReason::ChildResultUnavailable => "child_result_unavailable",
-        DispatchedDelegationReason::ChildCancelled => "child_cancelled",
-        DispatchedDelegationReason::ParentStoppedWithDescendants => {
-            "parent_stopped_parent_and_descendants"
-        }
-        DispatchedDelegationReason::ParentCancelledWithDescendants => {
-            "parent_cancelled_parent_and_descendants"
-        }
-    }
-}
-
 /// Every delegation policy, in an inventory the compiler keeps complete.
 fn every_delegation_policy() -> Vec<DispatchedDelegationPolicy> {
     let mut policies = Vec::new();
@@ -289,13 +253,6 @@ fn every_delegation_policy() -> Vec<DispatchedDelegationPolicy> {
         policies.push(current);
     }
     policies
-}
-
-fn delegation_policy_storage_name(policy: DispatchedDelegationPolicy) -> &'static str {
-    match policy {
-        DispatchedDelegationPolicy::Background => "background",
-        DispatchedDelegationPolicy::Bound { .. } => "bound",
-    }
 }
 
 /// Every delegation provenance, in an inventory the compiler keeps complete.
@@ -328,19 +285,10 @@ fn every_delegation_provenance() -> Vec<DispatchedDelegationProvenance> {
     provenances
 }
 
-fn delegation_provenance_storage_name(provenance: DispatchedDelegationProvenance) -> &'static str {
-    match provenance {
-        DispatchedDelegationProvenance::ChildTurn { .. } => "child_turn",
-        DispatchedDelegationProvenance::ParentTurnCommand { .. } => "parent_turn_command",
-        DispatchedDelegationProvenance::ParentGoalCommand { .. } => "parent_goal_command",
-    }
-}
-
 /// Every delegation update, in an inventory the compiler keeps complete.
 ///
 /// The variants carry relationship identities that only a fixture can supply,
-/// so this lives here rather than on the enum, exactly as the repository's
-/// other identity-carrying inventories do.
+/// so this lives here rather than on the enum.
 fn every_delegation_update() -> Vec<DispatchedDelegationUpdate> {
     let mut updates = Vec::new();
     let mut next = Some(DispatchedDelegationUpdate::ChildSpawned {
@@ -405,18 +353,6 @@ fn every_delegation_update() -> Vec<DispatchedDelegationUpdate> {
     updates
 }
 
-fn delegation_update_storage_name(update: &DispatchedDelegationUpdate) -> &'static str {
-    match update {
-        DispatchedDelegationUpdate::ChildSpawned { .. } => "child_spawned",
-        DispatchedDelegationUpdate::ChildWaiting { .. } => "child_waiting",
-        DispatchedDelegationUpdate::ChildLifecycleDisposition { .. } => {
-            "child_lifecycle_disposition"
-        }
-        DispatchedDelegationUpdate::ChildResult { .. } => "child_result",
-        DispatchedDelegationUpdate::SessionMessage { .. } => "session_message",
-    }
-}
-
 /// Every delegation wake, in an inventory the compiler keeps complete.
 fn every_delegation_wake() -> Vec<DispatchedDelegationWake> {
     let mut wakes = Vec::new();
@@ -435,13 +371,6 @@ fn every_delegation_wake() -> Vec<DispatchedDelegationWake> {
         wakes.push(current);
     }
     wakes
-}
-
-fn delegation_wake_storage_name(wake: DispatchedDelegationWake) -> &'static str {
-    match wake {
-        DispatchedDelegationWake::Result { .. } => "result",
-        DispatchedDelegationWake::Message { .. } => "message",
-    }
 }
 
 /// Every model-call disposition, in an inventory the compiler keeps complete.
@@ -469,18 +398,6 @@ fn every_model_call_disposition() -> Vec<DispatchedModelCallDisposition> {
     dispositions
 }
 
-fn model_call_disposition_storage_name(
-    disposition: DispatchedModelCallDisposition,
-) -> &'static str {
-    match disposition {
-        DispatchedModelCallDisposition::Completed => "completed",
-        DispatchedModelCallDisposition::KnownFailed => "known_failed",
-        DispatchedModelCallDisposition::Refused => "refused",
-        DispatchedModelCallDisposition::Cancelled => "cancelled",
-        DispatchedModelCallDisposition::Ambiguous => "ambiguous",
-    }
-}
-
 /// Every model-call state, in an inventory the compiler keeps complete.
 fn every_model_call_state() -> Vec<DispatchedModelCallState> {
     let mut states = Vec::new();
@@ -499,15 +416,6 @@ fn every_model_call_state() -> Vec<DispatchedModelCallState> {
         states.push(current);
     }
     states
-}
-
-fn model_call_state_storage_name(state: DispatchedModelCallState) -> &'static str {
-    match state {
-        DispatchedModelCallState::Prepared => "prepared",
-        DispatchedModelCallState::InFlight => "in_flight",
-        DispatchedModelCallState::CancellationRequested => "cancellation_requested",
-        DispatchedModelCallState::Terminal(_) => "terminal",
-    }
 }
 
 /// Every tool-batch state, in an inventory the compiler keeps complete.
@@ -535,14 +443,6 @@ fn every_tool_batch_state() -> Vec<DispatchedToolBatchState> {
         states.push(current);
     }
     states
-}
-
-fn tool_batch_state_storage_name(state: DispatchedToolBatchState) -> &'static str {
-    match state {
-        DispatchedToolBatchState::Proposed { .. } => "proposed",
-        DispatchedToolBatchState::ResultsProjected { .. } => "results_projected",
-        DispatchedToolBatchState::RecoveryRequired { .. } => "recovery_required",
-    }
 }
 
 /// Every reconciliation operation, in an inventory the compiler keeps complete.
@@ -613,17 +513,44 @@ async fn admitted_spellings(
     Ok(admitted_text_literals(&definition))
 }
 
+/// Asserts storage and the production decoder close over the same set.
+///
+/// Every spelling comes from the database and is decoded by the real decoder,
+/// so neither side is restated here. A spelling storage admits that the decoder
+/// rejects is the stall; a variant no admitted spelling reaches is a decoder
+/// arm storage can never produce.
 #[track_caller]
-fn assert_same_spellings(admitted: &BTreeSet<String>, decoded: &BTreeSet<String>, column: &str) {
+fn assert_storage_and_decoder_agree<Value: PartialEq + fmt::Debug>(
+    admitted: &BTreeSet<String>,
+    decode: fn(&str) -> Result<Value, OutboxCorruption>,
+    inventory: &[Value],
+    column: &str,
+) {
+    let decoded: Vec<Value> = admitted
+        .iter()
+        .map(|spelling| {
+            decode(spelling).unwrap_or_else(|corruption| {
+                panic!(
+                    "durable {column} admits {spelling:?}, which the outbox decoder rejects \
+                     ({corruption:?}); a committed row carrying it can never be decoded, and \
+                     stalls the singleton outbox cursor for every session"
+                )
+            })
+        })
+        .collect();
     assert_eq!(
-        admitted, decoded,
-        "durable storage for {column} admits exactly the spellings the dispatched enum decodes; \
-         a spelling on only one side either stalls the singleton outbox cursor or is unreachable"
+        decoded.len(),
+        inventory.len(),
+        "durable {column} admits {} spellings but the dispatched enum has {} variants",
+        decoded.len(),
+        inventory.len()
     );
-}
-
-fn spellings<Value: Copy>(values: &[Value], name: fn(Value) -> &'static str) -> BTreeSet<String> {
-    values.iter().map(|value| name(*value).to_owned()).collect()
+    inventory.iter().for_each(|variant| {
+        assert!(
+            decoded.contains(variant),
+            "no spelling durable {column} admits decodes to {variant:?}"
+        );
+    });
 }
 
 /// The literal extractor decides every constraint assertion below, so its own
@@ -649,235 +576,66 @@ fn admitted_text_literals_reads_a_rendered_check_definition() {
     );
 }
 
-/// Every dispatched delegation update names a distinct storage spelling.
+/// Families decoded from a row's shape rather than from one text column.
 ///
-/// The inventory is the compiler's: `every_delegation_update` is produced by an
-/// exhaustive match, so a new variant fails to compile there, and this
-/// assertion then fails until the new variant's spelling is stated.
+/// No single-argument decoder exists to drive these with the schema's own
+/// literals, so they are enumerated only: adding a variant fails to compile in
+/// the inventory above, which is what forces this file to be revisited. The
+/// counts are stated so that a variant added *and* removed still trips here.
 #[test]
-fn every_delegation_update_names_its_storage_spelling() {
-    assert_eq!(
-        every_delegation_update()
-            .iter()
-            .map(delegation_update_storage_name)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "child_spawned",
-            "child_waiting",
-            "child_lifecycle_disposition",
-            "child_result",
-            "session_message",
-        ])
-    );
-}
-
-/// The delegation families the tripwire names carry the spellings storage uses.
-#[test]
-fn every_delegation_component_names_its_storage_spelling() {
-    assert_eq!(
-        spellings(&every_delegation_wake(), delegation_wake_storage_name),
-        BTreeSet::from(["result".to_owned(), "message".to_owned()])
-    );
-    assert_eq!(
-        spellings(&every_delegation_policy(), delegation_policy_storage_name),
-        BTreeSet::from(["background".to_owned(), "bound".to_owned()])
-    );
-    assert_eq!(
-        spellings(&every_bound_child_action(), bound_child_action_storage_name),
-        BTreeSet::from([
-            "keep_running".to_owned(),
-            "stop".to_owned(),
-            "cancel".to_owned()
-        ])
-    );
-    assert_eq!(
-        spellings(
-            &every_delegation_wait_mode(),
-            delegation_wait_mode_storage_name
-        ),
-        BTreeSet::from(["foreground".to_owned(), "background".to_owned()])
-    );
-    assert_eq!(
-        spellings(
-            &every_delegation_provenance(),
-            delegation_provenance_storage_name
-        ),
-        BTreeSet::from([
-            "child_turn".to_owned(),
-            "parent_turn_command".to_owned(),
-            "parent_goal_command".to_owned(),
-        ])
-    );
-}
-
-/// The lifecycle families carry the spellings storage uses.
-///
-/// `terminal_disposition_kind` has no single-column check for the durable
-/// assertion below to read, so this is the only place its spellings are stated.
-#[test]
-fn every_lifecycle_component_names_its_storage_spelling() {
-    assert_eq!(
-        spellings(&every_model_call_state(), model_call_state_storage_name),
-        BTreeSet::from([
-            "prepared".to_owned(),
-            "in_flight".to_owned(),
-            "cancellation_requested".to_owned(),
-            "terminal".to_owned(),
-        ])
-    );
-    assert_eq!(
-        spellings(
-            &every_model_call_disposition(),
-            model_call_disposition_storage_name
-        ),
-        BTreeSet::from([
-            "completed".to_owned(),
-            "known_failed".to_owned(),
-            "refused".to_owned(),
-            "cancelled".to_owned(),
-            "ambiguous".to_owned(),
-        ])
-    );
-    assert_eq!(
-        spellings(&every_tool_batch_state(), tool_batch_state_storage_name),
-        BTreeSet::from([
-            "proposed".to_owned(),
-            "results_projected".to_owned(),
-            "recovery_required".to_owned(),
-        ])
-    );
-}
-
-/// The reconciliation inventory is shape-decoded rather than text-decoded, so
-/// it carries no spelling; it is enumerated here so a new ambiguous operation
-/// still fails to compile until this file considers it.
-#[test]
-fn every_reconciliation_operation_is_enumerated() {
+fn row_decoded_families_are_enumerated() {
+    assert_eq!(every_delegation_update().len(), 5);
+    assert_eq!(every_delegation_wake().len(), 2);
+    assert_eq!(every_delegation_policy().len(), 2);
+    assert_eq!(every_delegation_provenance().len(), 3);
+    assert_eq!(every_model_call_state().len(), 4);
+    assert_eq!(every_model_call_disposition().len(), 5);
+    assert_eq!(every_tool_batch_state().len(), 3);
     assert_eq!(every_reconciliation_operation().len(), 2);
 }
 
-// ---------------------------------------------------------------------------
-// Durable constraint agreement
-// ---------------------------------------------------------------------------
-
-/// The delegation update spellings storage admits are exactly those decoded.
+/// Storage and the decoder close over the same delegation spellings.
 ///
-/// This is the tripwire itself. `crates/persistence/src/outbox.rs` decodes
-/// `update_kind` into `DispatchedDelegationUpdate`; a spelling the durable
-/// `CHECK` admits without a decoder arm becomes `InvalidDelegationEvent` on a
-/// committed row, which stalls the singleton cursor for every session.
+/// This is the tripwire itself, for the four columns a single-argument decoder
+/// closes. `outcome_kind` and `reason_kind` are the columns the
+/// `child_lifecycle_disposition` and `child_result` arms read, which is where
+/// the concern was raised: those events are written by production code, and a
+/// spelling storage admits without a decoder arm stalls the global cursor.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_update_storage_admits_exactly_the_decoded_spellings()
--> Result<(), Box<dyn Error>> {
-    let (container, pool) = migrated_postgres().await?;
-    let updates = "delegation_update_outbox_event";
-
-    assert_same_spellings(
-        &admitted_spellings(&pool, updates, "update_kind").await?,
-        &every_delegation_update()
-            .iter()
-            .map(|update| delegation_update_storage_name(update).to_owned())
-            .collect(),
-        "update_kind",
-    );
-    assert_same_spellings(
-        &admitted_spellings(&pool, updates, "outcome_kind").await?,
-        &spellings(&every_delegation_outcome(), delegation_outcome_storage_name),
-        "outcome_kind",
-    );
-    assert_same_spellings(
-        &admitted_spellings(&pool, updates, "reason_kind").await?,
-        &spellings(&every_delegation_reason(), delegation_reason_storage_name),
-        "reason_kind",
-    );
-    assert_same_spellings(
-        &admitted_spellings(&pool, updates, "provenance_kind").await?,
-        &spellings(
-            &every_delegation_provenance(),
-            delegation_provenance_storage_name,
-        ),
-        "provenance_kind",
-    );
-    assert_same_spellings(
-        &admitted_spellings(&pool, updates, "wait_mode").await?,
-        &spellings(
-            &every_delegation_wait_mode(),
-            delegation_wait_mode_storage_name,
-        ),
-        "wait_mode",
-    );
-    assert_same_spellings(
-        &admitted_spellings(&pool, updates, "policy_kind").await?,
-        &spellings(&every_delegation_policy(), delegation_policy_storage_name),
-        "policy_kind",
-    );
-    assert_same_spellings(
-        &admitted_spellings(&pool, updates, "on_parent_stopped").await?,
-        &spellings(&every_bound_child_action(), bound_child_action_storage_name),
-        "on_parent_stopped",
-    );
-    assert_same_spellings(
-        &admitted_spellings(&pool, updates, "on_parent_cancelled").await?,
-        &spellings(&every_bound_child_action(), bound_child_action_storage_name),
-        "on_parent_cancelled",
-    );
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
-/// The delegation wake subjects storage admits are exactly those decoded.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_wake_storage_admits_exactly_the_decoded_spellings() -> Result<(), Box<dyn Error>>
+async fn delegation_storage_and_decoder_close_over_the_same_spellings() -> Result<(), Box<dyn Error>>
 {
     let (container, pool) = migrated_postgres().await?;
 
-    assert_same_spellings(
-        &admitted_spellings(&pool, "delegation_wake_outbox_event", "subject_kind").await?,
-        &spellings(&every_delegation_wake(), delegation_wake_storage_name),
-        "subject_kind",
+    assert_storage_and_decoder_agree(
+        &admitted_spellings(&pool, DELEGATION_UPDATES, "outcome_kind").await?,
+        decode_delegation_outcome,
+        &every_delegation_outcome(),
+        "outcome_kind",
     );
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
-/// The model-call and tool-batch spellings storage admits are exactly those decoded.
-///
-/// Only the two columns closed by a single-column `CHECK` are asserted here.
-/// `terminal_disposition_kind` is closed jointly with `call_state_kind` by a
-/// multi-column shape constraint, so its admitted set cannot be read off one
-/// column's definition; `every_model_call_disposition` still enumerates it, so
-/// a new disposition fails to compile in this file regardless.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn lifecycle_transition_storage_admits_exactly_the_decoded_spellings()
--> Result<(), Box<dyn Error>> {
-    let (container, pool) = migrated_postgres().await?;
-
-    assert_same_spellings(
-        &admitted_spellings(
-            &pool,
-            "model_call_transition_outbox_event",
-            "call_state_kind",
-        )
-        .await?,
-        &spellings(&every_model_call_state(), model_call_state_storage_name),
-        "call_state_kind",
+    assert_storage_and_decoder_agree(
+        &admitted_spellings(&pool, DELEGATION_UPDATES, "reason_kind").await?,
+        decode_delegation_reason,
+        &every_delegation_reason(),
+        "reason_kind",
     );
-    assert_same_spellings(
-        &admitted_spellings(
-            &pool,
-            "tool_batch_transition_outbox_event",
-            "transition_kind",
-        )
-        .await?,
-        &spellings(&every_tool_batch_state(), tool_batch_state_storage_name),
-        "transition_kind",
+    assert_storage_and_decoder_agree(
+        &admitted_spellings(&pool, DELEGATION_UPDATES, "wait_mode").await?,
+        decode_wait_mode,
+        &every_delegation_wait_mode(),
+        "wait_mode",
+    );
+    assert_storage_and_decoder_agree(
+        &admitted_spellings(&pool, DELEGATION_UPDATES, "on_parent_stopped").await?,
+        decode_bound_action,
+        &every_bound_child_action(),
+        "on_parent_stopped",
+    );
+    assert_storage_and_decoder_agree(
+        &admitted_spellings(&pool, DELEGATION_UPDATES, "on_parent_cancelled").await?,
+        decode_bound_action,
+        &every_bound_child_action(),
+        "on_parent_cancelled",
     );
 
     pool.close().await;
