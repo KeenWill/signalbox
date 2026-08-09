@@ -30,23 +30,34 @@ configured for a crate at all.
 
 The check fails when
 
-1. a `[workspace] members` entry has no `[lints] workspace = true` in its own
-   manifest, so the workspace lint table — panic forms included — does not
-   reach it, or
+1. a workspace member has no `[lints] workspace = true` in its own manifest,
+   so the workspace lint table — panic forms included — does not reach it, or
 2. the `[workspace.lints.clippy]` table stops denying one of the required
    panic forms, whether by deletion or by demotion to `warn`/`allow`.
 
-Ground truth for rule 1 is the `members` list in the root manifest, not a
-directory glob, so a crate that exists on disk but is not a member is out of
-scope exactly as it is for Cargo. `forbid` satisfies rule 2 wherever `deny`
-does, being strictly stronger.
+Membership is whatever `cargo metadata` resolves, never a reading of the
+`members` list and never a directory glob. Those two disagree with Cargo in
+opposite directions, and only the resolved list is right about both. A crate
+under the workspace root that a member depends on by path is a member even
+though nothing lists it, which is precisely the silently-exempt crate this
+checker exists to catch; a crate matched by a `members` glob but named in
+`exclude` is not a member, and flagging it would fail CI over a contract that
+does not apply to it. Asking Cargo costs one `--no-deps` invocation, reads no
+dependency graph, and cannot drift from what `cargo clippy --workspace`
+actually lints.
+
+`forbid` satisfies rule 2 wherever `deny` does, being strictly stronger.
 
 Run from the repository root; exits nonzero with a per-failure report naming
-every manifest involved.
+every manifest involved. A workspace whose membership cannot be resolved is a
+failure, never a pass: a gate that cannot see the crates it covers reports
+nothing useful.
 """
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -83,41 +94,80 @@ def lint_level(configured: object) -> str | None:
     return None
 
 
-def member_directories(root_manifest: dict) -> list[str]:
-    """Return every `[workspace] members` entry, expanding glob entries."""
-    workspace = root_manifest.get("workspace")
-    members = workspace.get("members") if isinstance(workspace, dict) else None
-    if not isinstance(members, list):
-        return []
-    directories: list[str] = []
-    for entry in members:
-        if not isinstance(entry, str):
-            continue
-        if "*" in entry:
-            directories.extend(
-                sorted(str(path) for path in Path().glob(entry) if path.is_dir())
-            )
-        else:
-            directories.append(entry)
-    return directories
+class MembershipError(Exception):
+    """Raised when Cargo cannot tell us which packages are workspace members."""
 
 
-def check_inheritance(directory: str, failures: list[str]) -> None:
-    """Record a failure unless `directory`'s manifest inherits workspace lints."""
-    manifest_path = Path(directory) / "Cargo.toml"
+def member_manifests() -> list[Path]:
+    """Return the manifest of every package Cargo resolves as a member.
+
+    `--no-deps` keeps this to the workspace itself: Cargo expands `members`
+    globs, applies `exclude`, and adds the path dependencies it treats as
+    implicit members, without resolving or downloading a dependency graph.
+    """
+    try:
+        completed = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        raise MembershipError(f"could not run cargo metadata: {error}") from error
+    if completed.returncode != 0:
+        # Every diagnostic line, not just the last: Cargo reports the cause
+        # first and the workspace that pulled the manifest in last, so a tail
+        # would name the workspace and drop the reason.
+        detail = " / ".join(
+            line.strip() for line in completed.stderr.splitlines() if line.strip()
+        )
+        raise MembershipError(
+            f"cargo metadata failed: {detail or 'no diagnostic'}"
+        )
+    try:
+        metadata = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise MembershipError(
+            f"cargo metadata emitted unreadable JSON: {error}"
+        ) from error
+    manifests_by_id = {
+        package["id"]: package["manifest_path"]
+        for package in metadata.get("packages", [])
+        if "id" in package and "manifest_path" in package
+    }
+    members = metadata.get("workspace_members", [])
+    missing = [identifier for identifier in members if identifier not in manifests_by_id]
+    if missing:
+        raise MembershipError(
+            f"cargo metadata named {len(missing)} member(s) it did not describe"
+        )
+    return sorted(Path(manifests_by_id[identifier]) for identifier in members)
+
+
+def display_path(manifest_path: Path) -> str:
+    """Return `manifest_path` relative to the working directory when possible."""
+    try:
+        return str(manifest_path.resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(manifest_path)
+
+
+def check_inheritance(manifest_path: Path, failures: list[str]) -> None:
+    """Record a failure unless the member's manifest inherits workspace lints."""
+    shown = display_path(manifest_path)
     try:
         manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
     except OSError:
-        failures.append(f"workspace member has no readable manifest: {manifest_path}")
+        failures.append(f"workspace member has no readable manifest: {shown}")
         return
     except tomllib.TOMLDecodeError as error:
-        failures.append(f"unparseable manifest {manifest_path}: {error}")
+        failures.append(f"unparseable manifest {shown}: {error}")
         return
     lints = manifest.get("lints")
     inherits = isinstance(lints, dict) and lints.get("workspace") is True
     if not inherits:
         failures.append(
-            f"{manifest_path} does not inherit workspace lints "
+            f"{shown} does not inherit workspace lints "
             f"(needs a [lints] section with workspace = true), so the panic "
             f"denies do not apply to it"
         )
@@ -164,11 +214,19 @@ def main() -> int:
 
     check_panic_lints(root_manifest, failures)
 
-    directories = member_directories(root_manifest)
-    if not directories:
-        failures.append("Cargo.toml lists no [workspace] members to check")
-    for directory in directories:
-        check_inheritance(directory, failures)
+    try:
+        manifests = member_manifests()
+    except MembershipError as error:
+        print("panic-gate check FAILED:")
+        for failure in failures:
+            print(f"  - {failure}")
+        print(f"  - {error}")
+        return 1
+
+    if not manifests:
+        failures.append("cargo metadata resolved no workspace members to check")
+    for manifest_path in manifests:
+        check_inheritance(manifest_path, failures)
 
     if failures:
         print("panic-gate check FAILED:")
@@ -178,7 +236,7 @@ def main() -> int:
     print(
         f"panic-gate check passed "
         f"({len(REQUIRED_PANIC_LINTS)} panic lints denied, "
-        f"{len(directories)} members inherit them)"
+        f"{len(manifests)} members inherit them)"
     )
     return 0
 

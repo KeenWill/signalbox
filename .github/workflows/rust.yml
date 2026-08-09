@@ -47,7 +47,9 @@ jobs:
       # Gates normally: the tree satisfies this today, so the step can only
       # fail on a regression. Clippy enforces the panic denies but cannot see
       # a member that opts out of inheriting them, which is the hole this
-      # closes.
+      # closes. Reads `cargo metadata --no-deps` for the member set, which
+      # resolves no dependency graph and compiles nothing, so it belongs above
+      # the cache step with the other non-compiling checks.
       - name: Check panic-gate coverage
         run: python3 scripts/check_panic_gate.py
       # Report-only. The tree still violates the conventions this checker
