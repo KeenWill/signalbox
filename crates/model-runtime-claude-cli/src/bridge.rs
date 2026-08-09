@@ -37,8 +37,8 @@ pub(crate) struct CatalogTool {
 
 #[derive(Serialize)]
 struct ToolListResponse<'a> {
-    jsonrpc: &'static str,
     id: serde_json::Value,
+    jsonrpc: &'static str,
     result: ToolListResult<'a>,
 }
 
@@ -149,8 +149,8 @@ fn serve(catalog_path: PathBuf, ready_path: PathBuf) -> ExitCode {
             "initialize" => initialize_response(request.id, &request.params),
             "tools/list" => {
                 let response = ToolListResponse {
-                    jsonrpc: "2.0",
                     id: request.id.unwrap_or(serde_json::Value::Null),
+                    jsonrpc: "2.0",
                     result: ToolListResult {
                         tools: &catalog.tools,
                     },
