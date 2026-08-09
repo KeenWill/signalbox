@@ -3241,11 +3241,13 @@ pub(crate) async fn load_scheduling_projection(
                                 )
                             }
                             (Some("without_stop"), Some("yielded_to_durable_wait")) => {
+                                let interrupted_tool_attempt =
+                                    row.try_get("runner_recovery_interrupted_tool_attempt_id")?;
                                 let interrupt = require_applied_runner_recovery_interrupt(
                                     &row,
                                     lifecycle_turn,
                                     stored_attempt_id,
-                                    None,
+                                    interrupted_tool_attempt,
                                     &recorded_commands,
                                 )?;
                                 (

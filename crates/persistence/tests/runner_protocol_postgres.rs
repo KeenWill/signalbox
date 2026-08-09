@@ -6787,6 +6787,17 @@ async fn s32_inv029_inv044_stop_retires_retryable_runner_attempt() -> Result<(),
             |_| (vec![result_entry], terminal_frontier),
         )
         .await?;
+    let reload = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa178)),
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa179)),
+                ContextFrontierId::from_uuid(uuid(0xa17a)),
+                TurnAttemptId::from_uuid(uuid(0xa17b)),
+            ),
+        )
+        .await?;
     let lifecycle: (String, Uuid) = sqlx::query_as(
         "SELECT terminal_disposition_kind, terminal_attempt_id
            FROM turn_lifecycle
@@ -6833,6 +6844,10 @@ async fn s32_inv029_inv044_stop_retires_retryable_runner_attempt() -> Result<(),
     assert_eq!(result.1, interrupted_attempt.into_uuid());
     assert_eq!(result.2, boundary.into_uuid());
     assert_eq!(closure_request, request.into_uuid());
+    assert!(
+        reload.is_some(),
+        "the cancelled retryable runner wait must reload before its queued successor starts"
+    );
     drop(pool);
     Ok(())
 }
