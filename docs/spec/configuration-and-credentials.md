@@ -915,15 +915,15 @@ cannot; this contract says which for every delivery, and there is no third case.
   deployment, because a home copied from another has its own device and inode
   while carrying the same refresh token, and the daemon cannot detect the
   sharing: the store's contents are exactly what it never reads.
-- `oauth` — *owed by the delivery, which this build does not admit.* No present
-  parser retains a provisioning tuple or compares one profile's against
-  another's; every `oauth` profile is refused outright. The delivery that admits
-  it owes the comparison over parsed canonical components — scheme, lowercased
-  host, effective port, path, and query — and never over the configured bytes,
-  so that two spellings a URL parser sends to the same request target are one
-  identity rather than two. What this build does supply is the admission half of
-  that rule: fragments and user information are rejected when the endpoint is
-  parsed, because neither reaches the request target at all.
+- `oauth` — *owed by the delivery, which this build does not admit.* Every
+  `oauth` profile is refused outright, so the parser retains no provisioning
+  tuple and never compares one profile's against another's. The delivery that
+  admits it owes the comparison over parsed canonical components — scheme,
+  lowercased host, effective port, path, and query — and never over the
+  configured bytes, so that two spellings a URL parser sends to the same request
+  target are one identity rather than two. What this build does supply is the
+  admission half of that rule: fragments and user information are rejected when
+  the endpoint is parsed, because neither reaches the request target at all.
 
 Two exceptions, and only these two. `quarantine` excludes a member from every
 pool rather than from the one that observed it, so an authorization that turns
@@ -963,14 +963,21 @@ absolute deployment-owned path and, only for a CLI adapter, required TOML string
 `env_key`. The path is 1 through 4,096 UTF-8 bytes and NUL-free; startup rejects
 every other string before any credential preparation. The path is read per
 preparation and never cached, narrowed by the trailing-line-termination rule
-below. The `anthropic` adapter forms an HTTP header from the value. A
-direct-HTTP adapter rejects `env_key` because it does not use a child
-environment. A CLI adapter requires the one credential variable its adapter
-contract names — `ANTHROPIC_API_KEY` for `claude_cli` — and rejects every other
-value, including forwarded and process-control names such as `HOME`,
-`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `PATH`. The `codex_cli` spelling of this
-delivery, which would supply the value to the fresh process under `env_key`, is
-validated and then rejected;
+below. Every adapter admits `file`, and how the value reaches the provider is
+fixed per adapter with no third case: a direct-HTTP adapter forms an HTTP header
+from it — `anthropic` its `x-api-key` header and `openai` its
+`Authorization: Bearer` header — while a CLI adapter routes it to the fresh
+process by the adapter contract stated below, which for `claude_cli` keeps the
+value out of the child environment entirely. Naming `openai` explicitly matters
+because `file` is the delivery that replaced its retired `OPENAI_API_KEY_FILE`
+channel, so leaving its header path to be inferred would leave that adapter with
+no stated replacement at all. A direct-HTTP adapter rejects `env_key` because it
+does not use a child environment. A CLI adapter requires the one credential
+variable its adapter contract names — `ANTHROPIC_API_KEY` for `claude_cli` — and
+rejects every other value, including forwarded and process-control names such as
+`HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `PATH`. The `codex_cli` spelling
+of this delivery, which would supply the value to the fresh process under
+`env_key` as `OPENAI_API_KEY`, is validated and then rejected;
 [undelivered deliveries](#committed-unimplemented-functionality--undelivered-deliveries)
 owns its contract.
 

@@ -313,6 +313,42 @@ class SoleOwnershipTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_exact_row_name_is_a_projection(self) -> None:
+        """The closed vocabulary includes the distinctive row names.
+
+        A page spelling `pre-call fail` is quoting this machine, and no earlier
+        token matched it, so an unlinked restatement of that row passed the
+        sole-owner gate.
+        """
+        result = check(
+            {
+                "docs/spec/persistence-protocol.md": (
+                    "# Persistence\n\n"
+                    "The pre-call fail ending stores one failure header.\n"
+                )
+            }
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("pre-call fail", result.stdout)
+
+    def test_generic_row_names_are_not_projections(self) -> None:
+        """`selected` and `terminal` stay out; they are ordinary English.
+
+        Including them would fire across most of the corpus and be satisfied by
+        decorative links, which is how a gate stops meaning anything.
+        """
+        result = check(
+            {
+                "docs/spec/persistence-protocol.md": (
+                    "# Persistence\n\n"
+                    "A selected row is terminal once its outcome is stored.\n"
+                )
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_owner_page_does_not_have_to_link_to_itself(self) -> None:
         result = check()
 

@@ -153,7 +153,7 @@ class SpecTierCheckerTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("never states that no present surface", result.stdout)
+        self.assertIn("never claims that no present surface", result.stdout)
 
     def test_future_marker_in_an_implemented_section_fails(self) -> None:
         result = check_config(
@@ -310,6 +310,87 @@ class SpecTierCheckerTests(unittest.TestCase):
             "# Configuration\n\n"
             "## Deliveries\n\n"
             "- A historical call with no present usage axis keeps its value.\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_inner_fence_marker_does_not_close_the_block(self) -> None:
+        """A fence closes only on the marker that opened it.
+
+        Toggling on any marker let prose after the real closing fence be
+        skipped, so an implemented section's future-ownership claim passed
+        unread.
+        """
+        result = check_config(
+            "# Configuration\n\n"
+            "## Deliveries\n\n"
+            "````\n"
+            "```\n"
+            "````\n\n"
+            "No present composition parses a pool.\n"
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("assigns behavior to a future change", result.stdout)
+
+    def test_content_inside_a_fence_is_still_skipped(self) -> None:
+        """The fence fix must not start reading code as prose."""
+        result = check_config(
+            "# Configuration\n\n"
+            "## Deliveries\n\n"
+            "The daemon reads two fields.\n\n"
+            "````markdown\n"
+            "```\n"
+            "No present composition parses a pool.\n"
+            "```\n"
+            "````\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_incidental_absence_text_is_not_a_claim(self) -> None:
+        """Rule 4 needs a claim, not the words appearing somewhere.
+
+        One fragment failed in both directions: matched anywhere it made rule 5
+        cry wolf, and it let a committed section pass without ever claiming
+        that no present surface provides it.
+        """
+        result = check_config(
+            "# Configuration\n\n"
+            "## Deliveries\n\n"
+            "Opening prose.\n\n"
+            "### Committed unimplemented functionality — pools\n\n"
+            "A historical call with no present usage axis keeps its value.\n"
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("never claims that no present surface", result.stdout)
+
+    def test_setext_tier_heading_is_detected(self) -> None:
+        """A tier label binds whatever syntax spells the heading."""
+        result = check_config(
+            "# Configuration\n\n"
+            "## Deliveries\n\n"
+            "Opening prose.\n\n"
+            "Deferred — headroom\n"
+            "-------------------\n\n"
+            "Routed to open questions.\n"
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("declares a tier at depth 2", result.stdout)
+
+    def test_escaped_pipe_in_a_cell_is_not_a_boundary(self) -> None:
+        """The implemented-cell rule reads cells, not pipe characters."""
+        result = check_config(
+            "# Configuration\n\n"
+            "## Deliveries\n\n"
+            "Opening prose.\n\n"
+            "### Committed unimplemented functionality — pools\n\n"
+            "No present composition parses a pool.\n\n"
+            "| Outcome | Tier |\n"
+            "| --- | --- |\n"
+            "| `a \\| Implemented` | Committed unimplemented — pools. |\n"
         )
 
         self.assertEqual(result.returncode, 0, result.stdout)
