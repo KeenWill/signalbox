@@ -324,6 +324,62 @@ class BaselineDeltaTests(unittest.TestCase):
         # down: a reader who stops at the first sentence must not be misled.
         self.assertNotIn("this branch's own doing", flowed)
 
+    def test_an_incomplete_run_still_names_the_exact_base(self) -> None:
+        """An unfinished run must still say *which* baseline it compared
+        against. The two complete-run branches distinguish the exact base from
+        a fallback because the distinction changes what the delta means, and
+        rendering both identically here left a reader unable to tell which
+        comparison they were looking at."""
+        rendered = summarize_coverage.render(
+            one_target_report(covered=60),
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline=baseline_of(covered=50, label=summarize_coverage.BASE),
+            measurement_incomplete=True,
+        )
+
+        flowed = " ".join(rendered.split())
+        self.assertIn("tests did not finish", flowed)
+        self.assertIn("is the base this pull request is open against", flowed)
+
+    def test_an_incomplete_run_against_a_fallback_stacks_both_caveats(self) -> None:
+        """The case the omission cost most: an unfinished run *and* a fallback
+        baseline are two independent reasons the delta is not this branch's,
+        and the reader needs both."""
+        rendered = summarize_coverage.render(
+            one_target_report(covered=60),
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline=baseline_of(covered=50, label=summarize_coverage.LATEST_MAIN),
+            measurement_incomplete=True,
+        )
+
+        flowed = " ".join(rendered.split())
+        self.assertIn("tests did not finish", flowed)
+        self.assertIn("not** the base this pull request is open against", flowed)
+        self.assertIn("stacked parent", flowed)
+
+    def test_the_two_incomplete_notes_differ(self) -> None:
+        """The guard that makes the two cases above meaningful: they must not
+        render the same prose, which is exactly what the defect was."""
+        def note(label: str) -> str:
+            return " ".join(
+                summarize_coverage.render(
+                    one_target_report(covered=60),
+                    REPOSITORY_ROOT,
+                    0,
+                    TITLE,
+                    baseline=baseline_of(covered=50, label=label),
+                    measurement_incomplete=True,
+                ).split()
+            )
+
+        self.assertNotEqual(
+            note(summarize_coverage.BASE), note(summarize_coverage.LATEST_MAIN)
+        )
+
     def test_a_complete_run_keeps_the_attribution(self) -> None:
         """Negative control for the case above: the withdrawal is driven by
         the flag, not present unconditionally."""

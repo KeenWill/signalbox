@@ -185,6 +185,13 @@ def baseline_note(baseline: Baseline, measurement_incomplete: bool = False) -> l
     """
     measured = f"`{baseline.sha}`, measured {baseline.date}."
     if measurement_incomplete:
+        # Which baseline this is still has to be said. The two complete-run
+        # branches below distinguish the exact base from a `latest-main`
+        # fallback because the distinction changes what the delta means, and an
+        # unfinished run does not make that distinction matter less — it stacks
+        # a second reason the number is not this branch's doing on top of the
+        # first. Rendering identical provenance for both left a reader unable
+        # to tell which comparison they were looking at.
         provenance = [
             "**This run's tests did not finish**, so the measurement above",
             "covers only the bundles that ran. The delta is therefore not",
@@ -193,6 +200,20 @@ def baseline_note(baseline: Baseline, measurement_incomplete: bool = False) -> l
             "whatever size they happen to be. The baseline it is measured",
             "against is",
             measured,
+            *(
+                [
+                    "That is the base this pull request is open against, so",
+                    "the unfinished tests are the only reason the delta is",
+                    "unattributable.",
+                ]
+                if baseline.label == BASE
+                else [
+                    "That is also **not** the base this pull request is open",
+                    "against, so on top of the tests that never ran the delta",
+                    "carries what landed on `main` in between, and any unmerged",
+                    "changes of a stacked parent.",
+                ]
+            ),
         ]
     elif baseline.label == BASE:
         provenance = [

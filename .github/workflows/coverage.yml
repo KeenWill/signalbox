@@ -463,7 +463,21 @@ jobs:
                     or (okfield("count") and okfield("covered") and sane);
                   .type == "llvm.coverage.json.export"
                   and ((.data | type) == "array")
-                  and all(.data[]; (.files | type) == "array")
+                  # An absent `files` key is an empty element, because that is
+                  # what `read_file_summaries` makes of it: `element.get(
+                  # "files", [])` deliberately tolerates an element carrying no
+                  # files at all. Requiring the key rejected an export the
+                  # loader reads without complaint — `data: [{}, {<valid>}]` —
+                  # and discarded a usable artifact in favour of an older one,
+                  # or of none. Keyed on presence rather than value, so an
+                  # explicit `null` is still refused: the loader would fail on
+                  # that, and the two must agree.
+                  #
+                  # No apostrophes in this comment, deliberately: the whole
+                  # program is a single-quoted shell word, so one would end it.
+                  and all(.data[];
+                        (if has("files") then .files else [] end)
+                        | type == "array")
                   and all(.data[]?.files[]?; has("filename"))
                   and all(.data[]?.files[]?;
                         (if has("summary") then .summary else {} end)
