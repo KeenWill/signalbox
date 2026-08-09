@@ -1636,9 +1636,16 @@ def run_extracted(identifier: str, document: str) -> JqResult:
     return run_jq(extracted.program, document, *raw_output)
 
 
-def selector_output_lines(identifier: str) -> list[str]:
-    """Every line a selector prints across the recorded comment pages, outside test bodies."""
-    pages = (
+def recorded_comment_pages() -> tuple[str, ...]:
+    """Comment pages a selector must survive, outside test bodies.
+
+    Every one of these is a page a real pull request can carry: this workflow's
+    own comment, the sibling workflow's, an ordinary comment from a person, and
+    each workflow's no-report body. A page whose comment has no body at all is
+    deliberately absent — the selector does fail on that, and it is recorded as
+    a divergence of its own rather than folded in here.
+    """
+    return (
         comments_page({"id": MARKER_COMMENT_ID, "body": rust_comment_body()}),
         comments_page({"id": MARKER_COMMENT_ID, "body": native_comment_body()}),
         comments_page({"id": FOREIGN_COMMENT_ID, "body": "an ordinary review comment"}),
@@ -1649,22 +1656,42 @@ def selector_output_lines(identifier: str) -> list[str]:
             {"id": MARKER_COMMENT_ID, "body": no_report_comment_body(SWIFT_WORKFLOW)}
         ),
     )
-    return [
-        line
-        for page in pages
-        for line in run_extracted(identifier, page).stdout.split()
-    ]
 
 
-def non_integer_selector_output(identifier: str) -> list[str]:
-    """Selector output that is not a plain integer, outside test bodies.
+def selector_incompatibilities(identifier: str) -> list[str]:
+    """Selector results a workflow could not use, outside test bodies.
 
-    The GitHub CLI runs these filters on its own jq implementation, which agrees
-    with the jq binary about numbers and differs about how strings are printed.
-    A selector that only ever emits comment ids therefore behaves identically
-    under both, and this is what checks that it only ever does.
+    Two things disqualify a result, and the status is checked first because a
+    filter that fails prints nothing, and judging it by its output alone reads
+    an aborted run as a clean no-match:
+
+    A nonzero exit. The workflow reads this filter through
+    `existing="$(gh api ... --jq ...)"` in a step run under `bash -e`, so a
+    failure on any page a pull request can carry aborts the step and leaves the
+    coverage comment standing at whatever the last successful run wrote.
+
+    Output that is not a plain integer. The GitHub CLI runs these filters on its
+    own jq implementation rather than the binary here, and the two agree about
+    numbers while differing about how they print strings. A selector that only
+    ever emits comment ids is therefore one whose behaviour does not depend on
+    which implementation runs it.
     """
-    return [line for line in selector_output_lines(identifier) if not line.lstrip("-").isdigit()]
+    problems: list[str] = []
+    for page in recorded_comment_pages():
+        result = run_extracted(identifier, page)
+        if result.status != 0:
+            problems.append(
+                f"{identifier} exited {result.status} on a page a pull request can carry, "
+                f"which aborts the publishing step: {result.stderr.strip()}"
+            )
+            continue
+        problems.extend(
+            f"{identifier} emitted {line!r}, which is not a comment id, so the two jq "
+            "implementations need not print it alike"
+            for line in result.stdout.split()
+            if not line.lstrip("-").isdigit()
+        )
+    return problems
 
 
 def payload_round_trip_failures() -> list[str]:
@@ -2333,20 +2360,24 @@ class StickySelectorTests(JqBackedTestCase):
             result.stdout.split(), [str(MARKER_COMMENT_ID), str(SECOND_MARKER_COMMENT_ID)]
         )
 
-    def test_the_selectors_emit_only_engine_independent_output(self) -> None:
-        """These two filters are reached through `gh api --jq`, so production
-        runs them on the GitHub CLI's own jq implementation rather than on the
-        jq binary this module executes. The two agree about numbers and differ
-        about how they print strings, and the CLI exposes its formatter only as
-        a modifier on a live API request, so there is no offline way to run the
-        real one without a network call this module refuses to make.
+    def test_the_selectors_survive_every_page_a_pull_request_can_carry(self) -> None:
+        """Each selector is run over every page it can meet and judged on its
+        exit status as well as its output.
 
-        Rather than assume the difference is harmless, this bounds it: the
-        selectors' contract is to emit comment ids, and if everything they emit
-        across the recorded pages is an integer, then the one behaviour the
-        implementations disagree about is unreachable from here."""
-        self.assertEqual(non_integer_selector_output(RUST_STICKY_SELECTOR), [])
-        self.assertEqual(non_integer_selector_output(NATIVE_STICKY_SELECTOR), [])
+        The status half is not decoration: the workflow reads the filter through
+        a command substitution in a step run under `bash -e`, so a filter that
+        fails on any of these pages aborts the step and leaves the previous
+        run's numbers standing as the current readout. A filter that fails also
+        prints nothing, so judging by output alone reads an aborted run as a
+        clean no-match.
+
+        The output half bounds the one behaviour where the GitHub CLI's jq
+        implementation and the binary here can disagree. The CLI exposes its
+        formatter only on a live API request, which this module will not make,
+        so instead of assuming the difference is harmless this checks that the
+        selectors only ever emit comment ids — a shape both print alike."""
+        self.assertEqual(selector_incompatibilities(RUST_STICKY_SELECTOR), [])
+        self.assertEqual(selector_incompatibilities(NATIVE_STICKY_SELECTOR), [])
 
     def test_a_comment_carrying_no_body_stops_the_selector(self) -> None:
         """An expected divergence, recorded rather than fixed: the workflow
