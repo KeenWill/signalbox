@@ -171,7 +171,30 @@ final class LiveScreenSnapshotTests: XCTestCase {
         ScreenshotScenario.allCases.compactMap { ScenarioDisposition.of($0).renderingTestName }
     }
 
-    /// The names no test on this class defines.
+    /// The names in `claimed` that `defined` does not contain.
+    ///
+    /// Takes both sides rather than reading them, so that
+    /// `testTheCoverageDetectorsAnswerTheirOwnQuestion` can hand it an input
+    /// with a known answer. Called only on the suite's real lists, its passing
+    /// would say nothing: those lists are consistent today, so an
+    /// implementation that returned `[]` unconditionally would be green and the
+    /// enforcement it exists for would be silently off.
+    static func names(in claimed: [String], missingFrom defined: Set<String>) -> [String] {
+        claimed.filter { !defined.contains($0) }.sorted()
+    }
+
+    /// The names `claimed` lists more than once. Parameterized for the reason
+    /// above, and it is the more important of the two: a duplicate is the
+    /// mistake this guard exists to catch and the one its own input never has.
+    static func namesUsedMoreThanOnce(in claimed: [String]) -> [String] {
+        var counts: [String: Int] = [:]
+        for name in claimed {
+            counts[name, default: 0] += 1
+        }
+        return counts.filter { $0.value > 1 }.map(\.key).sorted()
+    }
+
+    /// Every test this class defines, by method name.
     ///
     /// `defaultTestSuite` is the enumeration XCTest itself runs, so it sees an
     /// `async` test the Objective-C selector for one does not: a method written
@@ -179,23 +202,48 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// the runtime whether the class responds to `testFoo` would report every
     /// test in this file missing. A name here reads `-[Class testFoo]`, so the
     /// last space-separated component with its bracket removed is the method.
-    private static var claimedNamesMissingFromTheSuite: [String] {
-        let defined = Set(
+    private static var definedTestNames: Set<String> {
+        Set(
             defaultTestSuite.tests.map { test in
                 String(test.name.split(separator: " ").last ?? "")
                     .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
             }
         )
-        return claimedRenderingTestNames.filter { !defined.contains($0) }.sorted()
+    }
+
+    /// The names no test on this class defines.
+    private static var claimedNamesMissingFromTheSuite: [String] {
+        names(in: claimedRenderingTestNames, missingFrom: definedTestNames)
     }
 
     /// The names more than one scenario claims.
     private static var claimedNamesUsedMoreThanOnce: [String] {
-        var counts: [String: Int] = [:]
-        for name in claimedRenderingTestNames {
-            counts[name, default: 0] += 1
-        }
-        return counts.filter { $0.value > 1 }.map(\.key).sorted()
+        namesUsedMoreThanOnce(in: claimedRenderingTestNames)
+    }
+
+    /// The two coverage detectors report the thing they exist to report.
+    ///
+    /// The two tests below run them over the suite's real lists, which are
+    /// consistent — no name missing, no name claimed twice. That is the answer
+    /// those tests want and the reason neither of them can vouch for the
+    /// detector that produced it: an implementation returning `[]` for every
+    /// input passes both, and the enforcement is off with nothing red. So each
+    /// detector is also handed an input whose answer is known and is not empty.
+    ///
+    /// Straight-line cases rather than a table, per
+    /// `docs/agents/testing-style.md` rule 2: a failure names the case that
+    /// produced it. The inputs are letters because the names themselves carry
+    /// no meaning here — what is under test is counting and membership, not the
+    /// suite's mapping, which is what the other two tests check.
+    func testTheCoverageDetectorsAnswerTheirOwnQuestion() {
+        XCTAssertEqual(Self.namesUsedMoreThanOnce(in: ["a", "b", "a"]), ["a"])
+        XCTAssertEqual(Self.namesUsedMoreThanOnce(in: ["a", "a", "b", "b"]), ["a", "b"])
+        XCTAssertEqual(Self.namesUsedMoreThanOnce(in: ["a", "b"]), [])
+        XCTAssertEqual(Self.namesUsedMoreThanOnce(in: []), [])
+        XCTAssertEqual(Self.names(in: ["a", "b"], missingFrom: ["a"]), ["b"])
+        XCTAssertEqual(Self.names(in: ["b", "a"], missingFrom: []), ["a", "b"])
+        XCTAssertEqual(Self.names(in: ["a"], missingFrom: ["a", "b"]), [])
+        XCTAssertEqual(Self.names(in: [], missingFrom: ["a"]), [])
     }
 
     /// Every rendered scenario names a test that exists.

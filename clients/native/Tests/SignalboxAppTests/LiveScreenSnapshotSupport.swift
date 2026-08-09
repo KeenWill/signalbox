@@ -57,9 +57,18 @@ enum SnapshotCanvas: String, CaseIterable {
     /// scale decides a golden's pixel dimensions, so an unpinned one re-records
     /// the suite whenever a 2x device replaces a 3x one. A scale of 2 shows the
     /// same layout and typography a 3x rendering would while keeping each
-    /// golden a little over half the bytes, and it is the scale every shipping
-    /// iPhone and iPad renders at, so no canvas here records hairlines or asset
-    /// variants that no device produces.
+    /// golden a little over half the bytes.
+    ///
+    /// It is not the scale the pinned device renders at, and that is a trade
+    /// rather than a fact about the hardware. `iPhone 17 Pro` is a 3x screen:
+    /// the captures under `Screenshots/iOS/iphone-17-pro` are 1206 pixels wide
+    /// for 402 points, where a phone-canvas golden here is 780 pixels wide for
+    /// 390. What these references therefore cannot catch is anything that only
+    /// exists at device density — a hairline that rounds to a different pixel
+    /// count at 3x, or an asset with a distinct @3x variant. `Screenshots/iOS`
+    /// is the corpus recorded at device scale and is where that coverage lives;
+    /// this suite buys layout, typography and color at half the bytes and
+    /// leaves density to it.
     var displayScale: CGFloat { 2 }
 }
 
@@ -264,16 +273,23 @@ extension SnapshotCanvas {
 /// than the host phone's screen is the exception, and for one reason: the
 /// window's corner mask and the glass materials composite against the device,
 /// so every golden recorded on one still resolves differently on a different
-/// phone. That is the two iPad canvases and the 540-point `sheet` canvas —
-/// a width rule rather than an iPad rule, and stating it as the latter is what
+/// phone. That is the two iPad canvases and the 540-point `sheet` canvas — a
+/// width rule rather than an iPad rule, and stating it as the latter is what
 /// left `*.sheet.png` unclassified in the fallback warning
-/// `scripts/lib/snapshots.sh` prints. That is a property of changing the simulator and not of adding a
-/// canvas — every canvas in one run renders on the one destination
+/// `scripts/lib/snapshots.sh` prints.
+///
+/// It is a property of changing the simulator and not of adding a canvas —
+/// every canvas in one run renders on the one destination
 /// `scripts/lib/snapshots.sh` pins — so the cost of the matrix is paid once, in
 /// goldens that only CI's destination reproduces. CI pins that destination and
 /// `scripts/test-snapshots.sh` resolves the same one locally, so the suite is
 /// reproducible where it runs; a destination that is not CI's can legitimately
-/// fail the iPad-canvas goldens alone.
+/// fail the wide-canvas goldens alone — both iPad canvases and the sheet, the
+/// same three the rule above names. A phone-canvas golden survives a different
+/// iPhone *model*, which is what "verified byte-identical" above measured; a
+/// different *runtime* was never measured against anything, and the fallback
+/// warning in `scripts/lib/snapshots.sh` is where that distinction is spelled
+/// out for whoever is reading a failure.
 ///
 /// The third cost is the platform, and it is refused rather than bounded. This
 /// renderer is UIKit: it hosts in a `UIWindow`, pins `UITraitCollection`
