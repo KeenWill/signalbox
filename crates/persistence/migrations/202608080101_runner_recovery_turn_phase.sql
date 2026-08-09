@@ -82,7 +82,47 @@ BEGIN
                             'lost_execution_possible',
                             'lost_claimed'
                         )
-                        AND lease.effect_class = 'side_effecting'
+                        AND (
+                            lease.effect_class = 'side_effecting'
+                            OR (
+                                lease.effect_class = 'idempotent'
+                                AND EXISTS (
+                                    SELECT 1
+                                      FROM turn_runner_recovery_interrupt_effect
+                                        AS stopped_effect
+                                      JOIN turn_lifecycle AS stopped_turn
+                                        ON stopped_turn.session_id =
+                                            stopped_effect.session_id
+                                       AND stopped_turn.turn_id =
+                                            stopped_effect.turn_id
+                                     WHERE stopped_effect.session_id =
+                                            placement.session_id
+                                       AND stopped_effect.interrupted_tool_attempt_id =
+                                            attempt.attempt_id
+                                       AND stopped_turn.state_kind = 'terminal'
+                                       AND stopped_turn.terminal_disposition_kind =
+                                            'reconciliation_required'
+                                       AND stopped_turn.terminal_tool_attempt_id =
+                                            attempt.attempt_id
+                                )
+                            )
+                        )
+                    )
+                    OR (
+                        attempt.state_kind = 'terminal'
+                        AND attempt.terminal_disposition_kind = 'known_failed'
+                        AND attempt.error_kind = 'crash_lost'
+                        AND attempt.error_detail IS NULL
+                        AND (
+                            lease_event.state_kind = 'lost_unclaimed'
+                            OR (
+                                lease_event.state_kind IN (
+                                    'lost_execution_possible',
+                                    'lost_claimed'
+                                )
+                                AND lease.effect_class = 'pure'
+                            )
+                        )
                     )
                )
                AND lease.runner_id = placement.lost_runner_id
@@ -137,6 +177,67 @@ AFTER INSERT ON runner_session_placement_record
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_runner_placement_interrupted_attempt_complete();
+
+-- A stop may retire a no-execution external-effect attempt as crash-lost.
+-- The baseline attempt guard rejects that terminal evidence because it has no
+-- runner-lease context; admit only the exact authenticated lost-unclaimed wait.
+DO $migration$
+DECLARE
+    current_definition text;
+    replacement_definition text;
+    old_guard text := $old$
+            OR (
+                OLD.effect_class = 'external_effect'
+                AND NEW.error_kind = 'crash_lost'
+            )
+$old$;
+    new_guard text := $new$
+            OR (
+                OLD.effect_class = 'external_effect'
+                AND NEW.error_kind = 'crash_lost'
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM turn_lifecycle AS lifecycle
+                      JOIN runner_physical_attempt_lease_binding AS binding
+                        ON binding.attempt_id = OLD.attempt_id
+                      JOIN runner_lease_generation AS lease
+                        ON lease.lease_id = binding.lease_id
+                       AND lease.attempt_id = OLD.attempt_id
+                       AND lease.session_id = OLD.session_id
+                      JOIN runner_current_lease_event AS lease_head
+                        ON lease_head.lease_id = lease.lease_id
+                       AND lease_head.generation = lease.generation
+                      JOIN runner_lease_event AS lease_event
+                        ON lease_event.lease_id = lease_head.lease_id
+                       AND lease_event.generation = lease_head.generation
+                       AND lease_event.event_ordinal = lease_head.event_ordinal
+                     WHERE lifecycle.session_id = OLD.session_id
+                       AND lifecycle.turn_id = OLD.turn_id
+                       AND lifecycle.state_kind = 'active'
+                       AND lifecycle.active_phase_kind =
+                            'awaiting_runner_recovery'
+                       AND lifecycle.runner_recovery_tool_attempt_id =
+                            OLD.attempt_id
+                       AND lease_event.state_kind = 'lost_unclaimed'
+                )
+            )
+$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'reject_tool_attempt_invalid_change()'::regprocedure
+    ) INTO current_definition;
+    replacement_definition := replace(
+        current_definition,
+        old_guard,
+        new_guard
+    );
+    IF replacement_definition = current_definition THEN
+        RAISE EXCEPTION
+            'runner-recovery crash-loss insertion point is missing';
+    END IF;
+    EXECUTE replacement_definition;
+END;
+$migration$;
 
 ALTER TABLE turn_lifecycle
     ADD COLUMN runner_recovery_runner_id uuid,
@@ -717,6 +818,24 @@ BEGIN
                     AND cancelled.terminal_tool_attempt_id =
                         effect.interrupted_tool_attempt_id
                 )
+                OR (
+                    effect.interrupted_tool_attempt_id IS NOT NULL
+                    AND cancelled.terminal_disposition_kind = 'cancelled'
+                    AND cancelled.terminal_tool_attempt_id IS NULL
+                    AND EXISTS (
+                        SELECT 1
+                          FROM tool_attempt AS stopped_tool
+                         WHERE stopped_tool.attempt_id =
+                                effect.interrupted_tool_attempt_id
+                           AND stopped_tool.session_id = effect.session_id
+                           AND stopped_tool.turn_id = effect.turn_id
+                           AND stopped_tool.state_kind = 'terminal'
+                           AND stopped_tool.terminal_disposition_kind =
+                                'known_failed'
+                           AND stopped_tool.error_kind = 'crash_lost'
+                           AND stopped_tool.error_detail IS NULL
+                    )
+                )
            )
            AND yielded_attempt.state_kind = 'ended'
            AND yielded_attempt.end_variant = 'without_stop'
@@ -948,8 +1067,7 @@ BEGIN
      WHERE session_id = checked_session
        AND turn_id = checked_turn_id;
     IF FOUND THEN
-        IF runner_recovery_effect.interrupted_tool_attempt_id IS NOT NULL
-           OR checked_terminal_attempt IS DISTINCT FROM
+        IF checked_terminal_attempt IS DISTINCT FROM
                 runner_recovery_effect.yielded_turn_attempt_id
            OR checked_terminal_call IS NOT NULL
            OR NOT EXISTS (
@@ -963,6 +1081,22 @@ BEGIN
                    AND end_disposition = 'yielded_to_durable_wait'
                    AND interrupt_command_id IS NULL
                    AND interrupt_predecessor_turn_id IS NULL
+           )
+           OR (
+                runner_recovery_effect.interrupted_tool_attempt_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM tool_attempt AS stopped_tool
+                     WHERE stopped_tool.attempt_id =
+                            runner_recovery_effect.interrupted_tool_attempt_id
+                       AND stopped_tool.session_id = checked_session
+                       AND stopped_tool.turn_id = checked_turn_id
+                       AND stopped_tool.state_kind = 'terminal'
+                       AND stopped_tool.terminal_disposition_kind =
+                            'known_failed'
+                       AND stopped_tool.error_kind = 'crash_lost'
+                       AND stopped_tool.error_detail IS NULL
+                )
            )
         THEN
             RAISE EXCEPTION
@@ -1224,9 +1358,10 @@ BEGIN
 END;
 $migration$;
 
--- A runner loss yields the issuing turn attempt before preserving the
--- interrupted physical attempt as ambiguous. Extend the existing
--- reconciliation checker only for that exact authenticated pair.
+-- A runner loss yields the issuing turn attempt before preserving an
+-- execution-ambiguous physical attempt. Extend the existing reconciliation
+-- checker only for that exact authenticated pair; retryable attempts stopped
+-- as known crash loss use the cancellation checker above.
 DO $migration$
 DECLARE
     current_definition text;

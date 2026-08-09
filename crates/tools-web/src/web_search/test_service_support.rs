@@ -1,20 +1,14 @@
 use signalbox_application::{
-    CorrelatedDurableChildWait, InProcessToolDispatchGate, PrepareToolContinuationOutcome,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionService,
-    ToolExecutionServiceOutcome, ToolExecutionTransaction, ToolExecutorEvidence,
-    UuidV7ToolLoopIdGenerator,
+    FixtureToolExecutionTransaction, FixtureTransactionFailures, InProcessToolDispatchGate,
+    PreparedAttemptApproval, PreparedAttemptIdentities, PreparedAttemptProposal,
+    ToolExecutionService, ToolExecutionServiceOutcome, ToolExecutorEvidence,
+    UuidV7ToolLoopIdGenerator, prepared_single_attempt_batch,
 };
 use signalbox_domain::{
-    AcceptedInputId, ContextFrontierId, CorrelatedToolAttemptObservation, CurrentToolAttempt,
-    EndedToolAttempt, ModelCallId, NormalizedToolArguments,
-    ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId, SessionId,
-    ToolApprovalResolutionReconstitutionInput, ToolAttemptCrashOutcome,
+    ContextFrontierId, DurableCommandId, ModelCallId, NormalizedToolArguments, SessionId,
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptEnd, ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
-    ToolEffectClass, ToolExecutionError, ToolName, ToolRequestId, ToolRequestOrdinal,
-    ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
+    ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolName,
+    ToolRequestId, TurnAttemptId, TurnId,
 };
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
@@ -155,6 +149,8 @@ pub(super) const ATTEMPT_IDENTITY: u128 = 5;
 pub(super) const PRODUCING_CALL_IDENTITY: u128 = 6;
 
 pub(super) const FRONTIER_IDENTITY: u128 = 7;
+
+pub(super) const APPROVAL_IDENTITY: u128 = 8;
 
 pub(super) struct CountingCredentials {
     pub(super) resolutions: Arc<AtomicUsize>,
@@ -392,183 +388,50 @@ impl WebSearchTransport for ReflectedTitleTransport {
     }
 }
 
-pub(super) struct ExecutorFixtureTransaction {
-    pub(super) batch: signalbox_domain::ToolBatch,
-}
-
-impl ToolExecutionTransaction for ExecutorFixtureTransaction {
-    type Error = WebSearchExecutorError;
-
-    async fn resume_child_wait(
-        &mut self,
-        _session: SessionId,
-        _turn: TurnId,
-        _attempt: TurnAttemptId,
-    ) -> Result<bool, Self::Error> {
-        panic!("web-search fixtures never contain a delegated child wait")
-    }
-
-    async fn reread_durable_child_wait(
-        &mut self,
-        _wait: CorrelatedDurableChildWait,
-    ) -> Result<bool, Self::Error> {
-        panic!("web-search fixtures never park on a delegated child wait")
-    }
-
-    async fn reread_durable_completion(
-        &mut self,
-        _correlation: ToolAttemptDispatchCorrelation,
-    ) -> Result<bool, Self::Error> {
-        panic!("web-search fixtures never report a durable completion")
-    }
-
-    async fn load_active_batch(
-        &mut self,
-        _session: SessionId,
-        _turn: TurnId,
-    ) -> Result<Option<signalbox_domain::ToolBatch>, Self::Error> {
-        Ok(Some(self.batch.clone()))
-    }
-
-    async fn prepare_next_attempt(
-        &mut self,
-        _session: SessionId,
-        _turn: TurnId,
-        _attempt: ToolAttemptId,
-        _effect_class: ToolEffectClass,
-    ) -> Result<Option<CurrentToolAttempt>, Self::Error> {
-        panic!("fixture begins with one prepared attempt")
-    }
-
-    async fn authorize_attempt(
-        &mut self,
-        _session: SessionId,
-        _turn: TurnId,
-        attempt: ToolAttemptId,
-    ) -> Result<signalbox_domain::ToolDispatchAuthority, Self::Error> {
-        self.batch
-            .authorize_dispatch(attempt)
-            .map_err(|_| WebSearchExecutorError::ArgumentValidationDrift)
-    }
-
-    async fn reread_ambiguous_authorization(
-        &mut self,
-        _session: SessionId,
-        _turn: TurnId,
-        _attempt: ToolAttemptId,
-    ) -> Result<ToolAttemptAuthorizationStatus, Self::Error> {
-        panic!("fixture authorization is unambiguous")
-    }
-
-    async fn commit_preflight_error(
-        &mut self,
-        _session: SessionId,
-        _turn: TurnId,
-        _attempt: ToolAttemptId,
-        _error: ToolExecutionError,
-    ) -> Result<EndedToolAttempt, Self::Error> {
-        panic!("fixture arguments pass preflight")
-    }
-
-    async fn commit_observation(
-        &mut self,
-        observation: CorrelatedToolAttemptObservation,
-    ) -> Result<EndedToolAttempt, Self::Error> {
-        self.batch
-            .authorize_attempt(observation.correlation().attempt())
-            .map_err(|_| WebSearchExecutorError::ArgumentValidationDrift)?
-            .into_parts()
-            .0
-            .apply_terminal_observation(observation)
-            .map_err(|_| WebSearchExecutorError::ArgumentValidationDrift)
-    }
-
-    async fn reread_observation(
-        &mut self,
-        _observation: &CorrelatedToolAttemptObservation,
-    ) -> Result<RetainedToolAttemptObservationStatus, Self::Error> {
-        Ok(RetainedToolAttemptObservationStatus::Pending)
-    }
-
-    async fn classify_crash_loss<NextTurn>(
-        &mut self,
-        _session: SessionId,
-        _turn: TurnId,
-        _attempt: ToolAttemptId,
-        _identities: ToolCrashClosureIdentities,
-        _next_turn: NextTurn,
-    ) -> Result<ToolAttemptCrashOutcome, Self::Error>
-    where
-        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
-    {
-        Err(WebSearchExecutorError::EvidenceEncoding)
-    }
-
-    async fn prepare_continuation<NextSteering>(
-        &mut self,
-        _session: SessionId,
-        _turn: TurnId,
-        _producing_call: ModelCallId,
-        _identities: ToolContinuationIdentities,
-        _next_steering: NextSteering,
-    ) -> Result<PrepareToolContinuationOutcome, Self::Error>
-    where
-        NextSteering: FnMut(AcceptedInputId) -> (SemanticTranscriptEntryId, TurnId) + Send,
-    {
-        panic!("fixture has one prepared attempt")
-    }
+/// Serves this crate's prepared batch, failing in `web_search`'s own error type.
+///
+/// The transaction body itself is shared: every provider-adapter crate needs
+/// the same one-prepared-attempt behaviour, so it lives in
+/// `signalbox_application`'s `test-support` feature rather than being
+/// reimplemented beside each provider. What is `web_search`'s own, and stays
+/// here, is which of its error variants each failure surfaces as.
+pub(super) fn executor_fixture_transaction(
+    batch: signalbox_domain::ToolBatch,
+) -> FixtureToolExecutionTransaction<WebSearchExecutorError> {
+    FixtureToolExecutionTransaction::new(
+        batch,
+        FixtureTransactionFailures {
+            domain_rejection: WebSearchExecutorError::ArgumentValidationDrift,
+            declined_crash_classification: WebSearchExecutorError::EvidenceEncoding,
+        },
+    )
 }
 
 pub(super) fn prepared_web_search_batch() -> signalbox_domain::ToolBatch {
-    let session = SessionId::from_uuid(uuid::Uuid::from_u128(SESSION_IDENTITY));
-    let turn = TurnId::from_uuid(uuid::Uuid::from_u128(TURN_IDENTITY));
-    let producing_call = ModelCallId::from_uuid(uuid::Uuid::from_u128(PRODUCING_CALL_IDENTITY));
-    let request = ToolRequestReconstitutionInput::new(
-        ToolRequestId::from_uuid(uuid::Uuid::from_u128(REQUEST_IDENTITY)),
-        session,
-        turn,
-        producing_call,
-        ToolRequestOrdinal::from_u32(0),
-        ToolName::try_new(String::from(WEB_SEARCH_NAME)).expect("fixture name is valid"),
-        arguments(&serde_json::json!({"query": FIXTURE_QUERY}).to_string()),
+    prepared_single_attempt_batch(
+        PreparedAttemptIdentities {
+            session: SessionId::from_uuid(uuid::Uuid::from_u128(SESSION_IDENTITY)),
+            turn: TurnId::from_uuid(uuid::Uuid::from_u128(TURN_IDENTITY)),
+            producing_call: ModelCallId::from_uuid(uuid::Uuid::from_u128(PRODUCING_CALL_IDENTITY)),
+            request: ToolRequestId::from_uuid(uuid::Uuid::from_u128(REQUEST_IDENTITY)),
+            attempt: ToolAttemptId::from_uuid(uuid::Uuid::from_u128(ATTEMPT_IDENTITY)),
+            issuing_turn_attempt: TurnAttemptId::from_uuid(uuid::Uuid::from_u128(
+                ISSUING_ATTEMPT_IDENTITY,
+            )),
+            frontier: ContextFrontierId::from_uuid(uuid::Uuid::from_u128(FRONTIER_IDENTITY)),
+        },
+        PreparedAttemptProposal {
+            name: ToolName::try_new(String::from(WEB_SEARCH_NAME)).expect("fixture name is valid"),
+            arguments: arguments(&serde_json::json!({"query": FIXTURE_QUERY}).to_string()),
+            effect_class: ToolEffectClass::ExternalEffect,
+            // `web_search` is declared `ToolPermissionDefault::Confirm`, so a
+            // policy approval would describe a batch the application never
+            // prepares for it.
+            approval: PreparedAttemptApproval::UserConfirmation {
+                command: DurableCommandId::from_uuid(uuid::Uuid::from_u128(APPROVAL_IDENTITY)),
+            },
+        },
     )
-    .into_request();
-    let turn_attempt = TurnAttemptId::from_uuid(uuid::Uuid::from_u128(ISSUING_ATTEMPT_IDENTITY));
-    let approval = ToolApprovalResolutionReconstitutionInput::policy_auto(request.id())
-        .reconstitute()
-        .expect("policy approval fixture is valid");
-    let attempt = ToolAttemptReconstitutionInput::new(
-        ToolAttemptId::from_uuid(uuid::Uuid::from_u128(ATTEMPT_IDENTITY)),
-        request.id(),
-        session,
-        turn,
-        turn_attempt,
-        ToolEffectClass::ExternalEffect,
-        ToolDispatchGeneration::first(),
-        ToolAttemptReconstitutionState::Prepared,
-    )
-    .reconstitute()
-    .expect("prepared attempt fixture is valid");
-    let frontier = ResolvedContextFrontierReconstitutionInput::new(
-        session,
-        ContextFrontierId::from_uuid(uuid::Uuid::from_u128(FRONTIER_IDENTITY)),
-        Vec::new(),
-    )
-    .reconstitute()
-    .expect("empty frontier fixture is valid");
-
-    ToolBatchReconstitutionInput::new(
-        session,
-        turn,
-        producing_call,
-        frontier,
-        vec![request],
-        vec![approval],
-        vec![attempt],
-        ToolBatchPhaseReconstitutionInput::Executing { turn_attempt },
-    )
-    .reconstitute()
-    .expect("web_search batch fixture is valid")
 }
 
 pub(super) async fn execute_raw_credential_through_service(
@@ -587,9 +450,7 @@ pub(super) async fn execute_raw_credential_through_service(
     let batch = prepared_web_search_batch();
     let mut service = ToolExecutionService::new(
         UuidV7ToolLoopIdGenerator,
-        ExecutorFixtureTransaction {
-            batch: batch.clone(),
-        },
+        executor_fixture_transaction(batch.clone()),
         catalog,
         executor,
         InProcessToolDispatchGate::default(),
@@ -622,9 +483,7 @@ pub(super) async fn execute_formatted_raw_credential_through_service(
     let batch = prepared_web_search_batch();
     let mut service = ToolExecutionService::new(
         UuidV7ToolLoopIdGenerator,
-        ExecutorFixtureTransaction {
-            batch: batch.clone(),
-        },
+        executor_fixture_transaction(batch.clone()),
         catalog,
         executor,
         InProcessToolDispatchGate::default(),
@@ -652,9 +511,7 @@ pub(super) async fn execute_request_failure_through_service(
     let batch = prepared_web_search_batch();
     let mut service = ToolExecutionService::new(
         UuidV7ToolLoopIdGenerator,
-        ExecutorFixtureTransaction {
-            batch: batch.clone(),
-        },
+        executor_fixture_transaction(batch.clone()),
         catalog,
         executor,
         InProcessToolDispatchGate::default(),
@@ -682,9 +539,7 @@ where
     let batch = prepared_web_search_batch();
     let mut service = ToolExecutionService::new(
         UuidV7ToolLoopIdGenerator,
-        ExecutorFixtureTransaction {
-            batch: batch.clone(),
-        },
+        executor_fixture_transaction(batch.clone()),
         catalog,
         executor,
         InProcessToolDispatchGate::default(),

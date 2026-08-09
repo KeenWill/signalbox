@@ -1117,6 +1117,88 @@ pub enum RepoWatchDispatchContextShape {
 }
 
 impl RepoWatchEventKindNameV1 {
+    /// Every event-kind name, in an inventory the compiler forces to be
+    /// revisited and a paired `inventory_predecessor` forces to stay linked.
+    ///
+    /// That pairing is test-gated, so it is named here in plain text rather
+    /// than linked: a rustdoc link would resolve only under `cfg(test)` and
+    /// break the documentation build.
+    ///
+    /// The chain below is the first guard: each arm names its successor, so
+    /// adding a variant makes the `match` non-exhaustive and the crate stops
+    /// compiling until the new name is slotted into it.
+    ///
+    /// Exhaustiveness alone constrains the *arms*, not reachability from the
+    /// head: a variant added as `NewKind => None` that no arm points at
+    /// compiles while never appearing in the returned list. The paired
+    /// `inventory_predecessor` match is the second guard — it is exhaustive
+    /// for the same reason, and `every_event_kind_is_linked_into_the_inventory`
+    /// checks the two are mutual inverses, so a link written in one direction
+    /// only fails rather than silently shortening the inventory.
+    ///
+    /// The residual limit is recorded rather than papered over: a variant
+    /// orphaned in *both* directions still cannot be detected here, because
+    /// safe Rust offers no way to enumerate an enum's variants without a
+    /// derive, and this crate deliberately takes no `strum`/`EnumIter`
+    /// dependency. Closing that last case is a dependency decision, not a
+    /// code change. A hand-written `vec![..]` is what `docs/style.md` forbids
+    /// and would be strictly worse: it goes stale with no compiler signal at
+    /// all, whereas this cannot change shape without the author editing two
+    /// exhaustive matches.
+    #[must_use]
+    pub fn all() -> Vec<Self> {
+        let mut names = Vec::new();
+        let mut next = Some(Self::PullRequestOpened);
+        while let Some(current) = next {
+            next = match current {
+                Self::PullRequestOpened => Some(Self::PullRequestClosed),
+                Self::PullRequestClosed => Some(Self::PullRequestMerged),
+                Self::PullRequestMerged => Some(Self::HeadChanged),
+                Self::HeadChanged => Some(Self::MergeableStateChanged),
+                Self::MergeableStateChanged => Some(Self::ChecksCompleted),
+                Self::ChecksCompleted => Some(Self::CheckRunCompleted),
+                Self::CheckRunCompleted => Some(Self::BranchWorkflowRunCompleted),
+                Self::BranchWorkflowRunCompleted => Some(Self::ReviewSubmitted),
+                Self::ReviewSubmitted => Some(Self::ThreadOpened),
+                Self::ThreadOpened => Some(Self::ThreadResolved),
+                Self::ThreadResolved => Some(Self::Labeled),
+                Self::Labeled => Some(Self::Unlabeled),
+                Self::Unlabeled => Some(Self::BaseAdvanced),
+                Self::BaseAdvanced => Some(Self::ReactionChanged),
+                Self::ReactionChanged => None,
+            };
+            names.push(current);
+        }
+        names
+    }
+
+    /// The inventory predecessor of `self`, or `None` for the head.
+    ///
+    /// Paired with the successor chain in [`Self::all`] so linkage is checked
+    /// rather than assumed. Exhaustive for the same reason that one is, and
+    /// test-gated because checking the pairing is its only purpose — CI always
+    /// compiles the tests, so a new variant still cannot skip this match.
+    #[cfg(test)]
+    const fn inventory_predecessor(self) -> Option<Self> {
+        match self {
+            Self::PullRequestOpened => None,
+            Self::PullRequestClosed => Some(Self::PullRequestOpened),
+            Self::PullRequestMerged => Some(Self::PullRequestClosed),
+            Self::HeadChanged => Some(Self::PullRequestMerged),
+            Self::MergeableStateChanged => Some(Self::HeadChanged),
+            Self::ChecksCompleted => Some(Self::MergeableStateChanged),
+            Self::CheckRunCompleted => Some(Self::ChecksCompleted),
+            Self::BranchWorkflowRunCompleted => Some(Self::CheckRunCompleted),
+            Self::ReviewSubmitted => Some(Self::BranchWorkflowRunCompleted),
+            Self::ThreadOpened => Some(Self::ReviewSubmitted),
+            Self::ThreadResolved => Some(Self::ThreadOpened),
+            Self::Labeled => Some(Self::ThreadResolved),
+            Self::Unlabeled => Some(Self::Labeled),
+            Self::BaseAdvanced => Some(Self::Unlabeled),
+            Self::ReactionChanged => Some(Self::BaseAdvanced),
+        }
+    }
+
     const fn dispatch_context_shape(self) -> RepoWatchDispatchContextShape {
         match self {
             Self::PullRequestOpened
@@ -1743,6 +1825,99 @@ const fn check_conclusion_name(conclusion: CheckConclusion) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    /// The inventory is pinned as a literal, and every edge of the successor
+    /// chain is checked against its predecessor one assertion at a time.
+    ///
+    /// Straight-line on purpose: each edge stays independently attributable,
+    /// so a broken link names itself instead of surfacing as one loop
+    /// iteration. The literal also pins order, membership, and count at once —
+    /// adding a variant fails here until the claim is revisited, which is the
+    /// point.
+    #[test]
+    fn every_event_kind_is_linked_into_the_inventory() {
+        assert_eq!(
+            RepoWatchEventKindNameV1::all(),
+            vec![
+                RepoWatchEventKindNameV1::PullRequestOpened,
+                RepoWatchEventKindNameV1::PullRequestClosed,
+                RepoWatchEventKindNameV1::PullRequestMerged,
+                RepoWatchEventKindNameV1::HeadChanged,
+                RepoWatchEventKindNameV1::MergeableStateChanged,
+                RepoWatchEventKindNameV1::ChecksCompleted,
+                RepoWatchEventKindNameV1::CheckRunCompleted,
+                RepoWatchEventKindNameV1::BranchWorkflowRunCompleted,
+                RepoWatchEventKindNameV1::ReviewSubmitted,
+                RepoWatchEventKindNameV1::ThreadOpened,
+                RepoWatchEventKindNameV1::ThreadResolved,
+                RepoWatchEventKindNameV1::Labeled,
+                RepoWatchEventKindNameV1::Unlabeled,
+                RepoWatchEventKindNameV1::BaseAdvanced,
+                RepoWatchEventKindNameV1::ReactionChanged,
+            ]
+        );
+
+        assert_eq!(
+            RepoWatchEventKindNameV1::PullRequestOpened.inventory_predecessor(),
+            None
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::PullRequestClosed.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::PullRequestOpened)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::PullRequestMerged.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::PullRequestClosed)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::HeadChanged.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::PullRequestMerged)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::MergeableStateChanged.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::HeadChanged)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::ChecksCompleted.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::MergeableStateChanged)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::CheckRunCompleted.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::ChecksCompleted)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::BranchWorkflowRunCompleted.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::CheckRunCompleted)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::ReviewSubmitted.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::ThreadOpened.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::ReviewSubmitted)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::ThreadResolved.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::ThreadOpened)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::Labeled.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::ThreadResolved)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::Unlabeled.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::Labeled)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::BaseAdvanced.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::Unlabeled)
+        );
+        assert_eq!(
+            RepoWatchEventKindNameV1::ReactionChanged.inventory_predecessor(),
+            Some(RepoWatchEventKindNameV1::BaseAdvanced)
+        );
+    }
     use std::{error::Error, num::NonZeroU64, time::Duration};
 
     use uuid::Uuid;

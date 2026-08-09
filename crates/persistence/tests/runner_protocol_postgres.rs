@@ -83,6 +83,7 @@ const RETRY_ATTEMPT: u128 = 0x9601;
 const FOREIGN_RUNNER: u128 = 0x9202;
 const RELATED_IDENTITY_OFFSET: u128 = 0x100;
 const LOCK_WAIT_PROBE: Duration = Duration::from_millis(100);
+const LOCK_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
 const LEGACY_PLACEMENT_REFUSAL: &str =
@@ -3893,19 +3894,27 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
     .fetch_one(&mut *blocker)
     .await?;
     let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
-    let mut replacement =
-        Box::pin(replacement_store.register(&expected_enrollment, narrowed_advertisement()));
+    let mut replacement = tokio::spawn(async move {
+        replacement_store
+            .register(&expected_enrollment, narrowed_advertisement())
+            .await
+    });
     tokio::time::timeout(LOCK_WAIT_PROBE, &mut replacement)
         .await
         .expect_err("registration replacement must wait for enrollment authority");
-    let mut lease_store = Box::pin(store.store_lease(&lease));
+    let mut lease_store = tokio::spawn(async move { store.store_lease(&lease).await });
     tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
         .await
         .expect_err("lease admission must wait behind registration replacement");
     blocker.commit().await?;
-    replacement.await?;
-    let rejected = lease_store
+    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, replacement)
         .await
+        .expect("registration replacement must finish after enrollment authority releases")
+        .expect("registration replacement task must remain joinable")?;
+    let rejected = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, lease_store)
+        .await
+        .expect("lease admission must finish after registration replacement")
+        .expect("lease admission task must remain joinable")
         .expect_err("withdrawn current availability cannot authorize the later lease");
 
     assert_store_check_violation(rejected);
@@ -6722,6 +6731,223 @@ async fn s32_inv029_inv044_runner_recovery_stop_preserves_tool_ambiguity()
     );
     assert_eq!(closure.0, "tool_closed_by_turn_end");
     assert_eq!(closure.1, request.into_uuid());
+    drop(pool);
+    Ok(())
+}
+
+async fn prepare_unclaimed_retryable_runner_recovery(
+    pool: &PgPool,
+) -> Result<
+    (
+        SessionId,
+        TurnId,
+        ToolAttemptId,
+        ContextFrontierId,
+        ToolRequestId,
+    ),
+    Box<dyn Error>,
+> {
+    let (session, turn, turn_attempt) = insert_running_turn(pool).await?;
+    insert_external_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), side_effecting_catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        session,
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::Exact(
+                RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                    .expect("the exact fixture directory is valid"),
+            ),
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::ExternalEffect),
+            offer_request(),
+        )
+        .expect("the external-effect fixture pins the placement");
+    store.store_pin(&pin, &registration).await?;
+    record_no_execution_lease_loss(pool, &pin.lease).await?;
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    let producing_call = ModelCallId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+    ));
+    let request = ToolRequestId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.request));
+    let boundary = ContextFrontierId::from_uuid(uuid(0xa170));
+    attach_continuing_tool_round_projection(
+        pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        request,
+        boundary,
+    )
+    .await?;
+    let mut recovery = pool.begin().await?;
+    append_runner_lost_without_advancing_head(
+        &mut recovery,
+        session,
+        Some("connection"),
+        None,
+        Some(interrupted_attempt),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL, active_tool_round_call_id = $1,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3,
+                runner_recovery_tool_attempt_id = $4
+          WHERE turn_id = $5 AND session_id = $6",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(expected_enrollment.runner().into_uuid())
+    .bind(Decimal::from(pin.placement.revision().get()))
+    .bind(interrupted_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    recovery.commit().await?;
+    Ok((session, turn, interrupted_attempt, boundary, request))
+}
+
+/// INV-029 / INV-044: stopping a retryable no-execution runner wait retires
+/// its dispatch authority before cancelling and releasing the active slot.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv029_inv044_stop_retires_retryable_runner_attempt() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, interrupted_attempt, boundary, request) =
+        prepare_unclaimed_retryable_runner_recovery(&pool).await?;
+    let command = DurableCommandId::from_uuid(uuid(0xa171));
+    let result_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xa172));
+    let terminal_frontier = ContextFrontierId::from_uuid(uuid(0xa173));
+    let interrupt = SubmitInput::new(
+        command,
+        session,
+        UserContent::try_text(String::from("stop retryable runner attempt"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            interrupt,
+            AcceptedInputId::from_uuid(uuid(0xa174)),
+            Some(TurnId::from_uuid(uuid(0xa175))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa176)),
+                terminal_frontier,
+            ),
+            |_| TurnId::from_uuid(uuid(0xa177)),
+            |_| (vec![result_entry], terminal_frontier),
+        )
+        .await?;
+    let reload = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa178)),
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa179)),
+                ContextFrontierId::from_uuid(uuid(0xa17a)),
+                TurnAttemptId::from_uuid(uuid(0xa17b)),
+            ),
+        )
+        .await?;
+    let lifecycle: (String, Uuid) = sqlx::query_as(
+        "SELECT terminal_disposition_kind, terminal_attempt_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let stopped_attempt: (String, String, String) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, error_kind
+           FROM tool_attempt
+          WHERE attempt_id = $1",
+    )
+    .bind(interrupted_attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let result: (String, Uuid, Uuid) = sqlx::query_as(
+        "SELECT entry.payload_kind, entry.tool_result_attempt_id,
+                effect.source_frontier_id
+           FROM semantic_transcript_entry AS entry
+           JOIN turn_runner_recovery_interrupt_effect AS effect
+             ON effect.session_id = entry.source_session_id
+            AND effect.command_id = $1
+          WHERE entry.source_session_id = $2
+            AND entry.semantic_entry_id = $3",
+    )
+    .bind(command.into_uuid())
+    .bind(session.into_uuid())
+    .bind(result_entry.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let closure_request: Uuid =
+        sqlx::query_scalar("SELECT request_id FROM tool_attempt WHERE attempt_id = $1")
+            .bind(interrupted_attempt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(lifecycle.0, "cancelled");
+    assert_eq!(stopped_attempt.0, "terminal");
+    assert_eq!(stopped_attempt.1, "known_failed");
+    assert_eq!(stopped_attempt.2, "crash_lost");
+    assert_eq!(result.0, "tool_execution_result");
+    assert_eq!(result.1, interrupted_attempt.into_uuid());
+    assert_eq!(result.2, boundary.into_uuid());
+    assert_eq!(closure_request, request.into_uuid());
+    assert!(
+        reload.is_some(),
+        "the cancelled retryable runner wait must reload before its queued successor starts"
+    );
     drop(pool);
     Ok(())
 }

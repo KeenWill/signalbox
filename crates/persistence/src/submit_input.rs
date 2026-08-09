@@ -89,9 +89,9 @@ use crate::{
     tool_loop::{
         load_active_batch_from_connection, load_continuation_round_evidence,
         load_optional_foreground_delegation_outcome, load_recovery_batch_by_attempt,
-        load_runner_recovery_batch_without_attempt, load_runner_recovery_source_snapshot,
-        load_steering_continuation_round_evidence, load_terminal_result_attempts,
-        load_terminal_result_denials, persist_ended_attempt,
+        load_runner_recovery_batch_without_attempt, load_runner_recovery_cancellation_batch,
+        load_runner_recovery_source_snapshot, load_steering_continuation_round_evidence,
+        load_terminal_result_attempts, load_terminal_result_denials, persist_ended_attempt,
     },
 };
 
@@ -1175,53 +1175,109 @@ where
                     _ => None,
                 };
                 let outcome = if let Some(recovery_attempt) = interrupted_tool_attempt {
-                    let batch = load_recovery_batch_by_attempt(
+                    let preserves_ambiguity = terminalize_retryable_runner_recovery_attempt(
                         connection,
                         interrupt.session(),
                         interrupt.proof().predecessor(),
                         recovery_attempt,
                     )
-                    .await
-                    .map_err(map_tool_loop_error)?;
-                    let wait =
-                        batch
-                            .awaiting_recovery()
-                            .ok_or(SubmitInputCorruption::Inconsistent(
-                                "runner tool recovery wait evidence",
-                            ))?;
-                    let tool_attempt = batch
-                        .requests()
-                        .iter()
-                        .find_map(|request| match batch.attempt(request.id()) {
-                            Some(signalbox_domain::ReconstitutedToolAttempt::Ended(attempt))
-                                if attempt.attempt() == recovery_attempt =>
-                            {
-                                Some(attempt.clone())
-                            }
-                            _ => None,
-                        })
-                        .ok_or(SubmitInputCorruption::Inconsistent(
-                            "runner ambiguous tool attempt evidence",
-                        ))?;
+                    .await?;
+                    let batch = if preserves_ambiguity {
+                        load_recovery_batch_by_attempt(
+                            connection,
+                            interrupt.session(),
+                            interrupt.proof().predecessor(),
+                            recovery_attempt,
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?
+                    } else {
+                        load_runner_recovery_cancellation_batch(
+                            connection,
+                            interrupt.session(),
+                            interrupt.proof().predecessor(),
+                            yielded_attempt,
+                            Some(recovery_attempt),
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?
+                        .ok_or(SubmitInputCorruption::Missing(
+                            "runner retryable tool recovery batch",
+                        ))?
+                    };
                     let request_ids = batch
                         .requests()
                         .iter()
                         .map(signalbox_domain::ToolRequest::id)
                         .collect::<Vec<_>>();
                     let (result_entries, result_frontier) = next_tool_cancellation(&request_ids);
-                    let result_projection = batch
-                        .prepare_reconciliation_projection(result_entries, result_frontier)
+                    if !preserves_ambiguity {
+                        let result_projection = batch
+                            .prepare_cancellation_projection(result_entries, result_frontier)
+                            .map_err(|_| {
+                                SubmitInputCorruption::Inconsistent(
+                                    "runner retryable recovery batch cannot close",
+                                )
+                            })?;
+                        let identities = attach_interrupt_reclassification_candidates_for_active(
+                            cancellation_identities,
+                            &active_turn,
+                            &mut next_reclassified_turn,
+                        )
                         .map_err(|_| {
                             SubmitInputCorruption::Inconsistent(
-                                "runner recovery batch cannot preserve ambiguity",
+                                "runner retryable recovery interrupt candidates",
                             )
                         })?;
-                    let identities = attach_recovery_interrupt_reclassification_candidates(
-                        signalbox_domain::AmbiguousModelCallTurnIdentities::new(result_frontier),
-                        &active_turn,
-                        &mut next_reclassified_turn,
-                    )?;
-                    ModelCallInterruptOutcome::ToolReconciliationRequired(
+                        ModelCallInterruptOutcome::Cancelled(
+                            scheduling
+                                .apply_interrupt_to_retryable_runner_tool_recovery(
+                                    batch,
+                                    result_projection,
+                                    interrupt,
+                                    identities,
+                                )
+                                .map_err(|_| {
+                                    SubmitInputCorruption::Inconsistent(
+                                        "applied interrupt does not match retryable runner wait",
+                                    )
+                                })?,
+                        )
+                    } else {
+                        let wait = batch.awaiting_recovery().ok_or(
+                            SubmitInputCorruption::Inconsistent(
+                                "runner tool recovery wait evidence",
+                            ),
+                        )?;
+                        let tool_attempt = batch
+                            .requests()
+                            .iter()
+                            .find_map(|request| match batch.attempt(request.id()) {
+                                Some(signalbox_domain::ReconstitutedToolAttempt::Ended(
+                                    attempt,
+                                )) if attempt.attempt() == recovery_attempt => {
+                                    Some(attempt.clone())
+                                }
+                                _ => None,
+                            })
+                            .ok_or(SubmitInputCorruption::Inconsistent(
+                                "runner ambiguous tool attempt evidence",
+                            ))?;
+                        let result_projection = batch
+                            .prepare_reconciliation_projection(result_entries, result_frontier)
+                            .map_err(|_| {
+                                SubmitInputCorruption::Inconsistent(
+                                    "runner recovery batch cannot preserve ambiguity",
+                                )
+                            })?;
+                        let identities = attach_recovery_interrupt_reclassification_candidates(
+                            signalbox_domain::AmbiguousModelCallTurnIdentities::new(
+                                result_frontier,
+                            ),
+                            &active_turn,
+                            &mut next_reclassified_turn,
+                        )?;
+                        ModelCallInterruptOutcome::ToolReconciliationRequired(
                         scheduling
                             .apply_interrupt_to_runner_tool_recovery(
                                 wait,
@@ -1237,6 +1293,7 @@ where
                                 )
                             })?,
                     )
+                    }
                 } else {
                     let result_projection = match load_runner_recovery_batch_without_attempt(
                         connection,
@@ -1327,71 +1384,128 @@ where
                     _ => None,
                 };
                 let outcome = if let Some(recovery_attempt) = interrupted_tool_attempt {
-                    let batch = load_recovery_batch_by_attempt(
+                    let preserves_ambiguity = terminalize_retryable_runner_recovery_attempt(
                         connection,
                         interrupt.session(),
                         interrupt.proof().predecessor(),
                         recovery_attempt,
                     )
-                    .await
-                    .map_err(map_tool_loop_error)?;
-                    let wait =
-                        batch
-                            .awaiting_recovery()
-                            .ok_or(SubmitInputCorruption::Inconsistent(
-                                "delegated runner tool recovery wait",
-                            ))?;
-                    let tool_attempt = batch
-                        .requests()
-                        .iter()
-                        .find_map(|request| match batch.attempt(request.id()) {
-                            Some(signalbox_domain::ReconstitutedToolAttempt::Ended(attempt))
-                                if attempt.attempt() == recovery_attempt =>
-                            {
-                                Some(attempt.clone())
-                            }
-                            _ => None,
-                        })
-                        .ok_or(SubmitInputCorruption::Inconsistent(
-                            "delegated runner ambiguous tool attempt",
-                        ))?;
+                    .await?;
+                    let batch = if preserves_ambiguity {
+                        load_recovery_batch_by_attempt(
+                            connection,
+                            interrupt.session(),
+                            interrupt.proof().predecessor(),
+                            recovery_attempt,
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?
+                    } else {
+                        load_runner_recovery_cancellation_batch(
+                            connection,
+                            interrupt.session(),
+                            interrupt.proof().predecessor(),
+                            yielded_attempt,
+                            Some(recovery_attempt),
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?
+                        .ok_or(SubmitInputCorruption::Missing(
+                            "delegated runner retryable recovery batch",
+                        ))?
+                    };
                     let request_ids = batch
                         .requests()
                         .iter()
                         .map(signalbox_domain::ToolRequest::id)
                         .collect::<Vec<_>>();
                     let (result_entries, result_frontier) = next_tool_cancellation(&request_ids);
-                    let result_projection = batch
-                        .prepare_reconciliation_projection(result_entries, result_frontier)
-                        .map_err(|_| {
-                            SubmitInputCorruption::Inconsistent(
-                                "delegated runner recovery batch cannot preserve ambiguity",
-                            )
-                        })?;
-                    let identities =
-                        attach_recovery_interrupt_reclassification_candidates_for_activated(
-                            signalbox_domain::AmbiguousModelCallTurnIdentities::new(
-                                result_frontier,
-                            ),
-                            &active_turn,
-                            &mut next_reclassified_turn,
-                        )?;
-                    ModelCallInterruptOutcome::ToolReconciliationRequired(
-                        active_turn
-                            .apply_interrupt_to_runner_tool_recovery(
-                                wait,
-                                tool_attempt,
-                                yielded_attempt,
-                                result_projection,
-                                interrupt,
-                                identities,
+                    if !preserves_ambiguity {
+                        let result_projection = batch
+                            .prepare_cancellation_projection(result_entries, result_frontier)
+                            .map_err(|_| {
+                                SubmitInputCorruption::Inconsistent(
+                                    "delegated retryable runner batch cannot close",
+                                )
+                            })?;
+                        let identities =
+                            attach_interrupt_reclassification_candidates_for_activated(
+                                cancellation_identities,
+                                &active_turn,
+                                &mut next_reclassified_turn,
                             )
                             .map_err(|_| {
                                 SubmitInputCorruption::Inconsistent(
-                                    "delegated interrupt does not match runner tool recovery",
+                                    "delegated retryable runner interrupt candidates",
                                 )
-                            })?,
-                    )
+                            })?;
+                        ModelCallInterruptOutcome::Cancelled(
+                            active_turn
+                                .apply_interrupt_to_retryable_runner_tool_recovery(
+                                    starting_snapshot,
+                                    batch,
+                                    result_projection,
+                                    interrupt,
+                                    identities,
+                                )
+                                .map_err(|_| {
+                                    SubmitInputCorruption::Inconsistent(
+                                        "delegated interrupt does not match retryable runner wait",
+                                    )
+                                })?,
+                        )
+                    } else {
+                        let wait = batch.awaiting_recovery().ok_or(
+                            SubmitInputCorruption::Inconsistent(
+                                "delegated runner tool recovery wait",
+                            ),
+                        )?;
+                        let tool_attempt = batch
+                            .requests()
+                            .iter()
+                            .find_map(|request| match batch.attempt(request.id()) {
+                                Some(signalbox_domain::ReconstitutedToolAttempt::Ended(
+                                    attempt,
+                                )) if attempt.attempt() == recovery_attempt => {
+                                    Some(attempt.clone())
+                                }
+                                _ => None,
+                            })
+                            .ok_or(SubmitInputCorruption::Inconsistent(
+                                "delegated runner ambiguous tool attempt",
+                            ))?;
+                        let result_projection = batch
+                            .prepare_reconciliation_projection(result_entries, result_frontier)
+                            .map_err(|_| {
+                                SubmitInputCorruption::Inconsistent(
+                                    "delegated runner recovery batch cannot preserve ambiguity",
+                                )
+                            })?;
+                        let identities =
+                            attach_recovery_interrupt_reclassification_candidates_for_activated(
+                                signalbox_domain::AmbiguousModelCallTurnIdentities::new(
+                                    result_frontier,
+                                ),
+                                &active_turn,
+                                &mut next_reclassified_turn,
+                            )?;
+                        ModelCallInterruptOutcome::ToolReconciliationRequired(
+                            active_turn
+                                .apply_interrupt_to_runner_tool_recovery(
+                                    wait,
+                                    tool_attempt,
+                                    yielded_attempt,
+                                    result_projection,
+                                    interrupt,
+                                    identities,
+                                )
+                                .map_err(|_| {
+                                    SubmitInputCorruption::Inconsistent(
+                                        "delegated interrupt does not match runner tool recovery",
+                                    )
+                                })?,
+                        )
+                    }
                 } else {
                     let result_projection = match load_runner_recovery_batch_without_attempt(
                         connection,
@@ -1506,6 +1620,78 @@ where
     Ok(TransactionDecision::Commit(
         SubmitInputHandlingOutcome::Recorded(recorded),
     ))
+}
+
+async fn terminalize_retryable_runner_recovery_attempt(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    attempt: ToolAttemptId,
+) -> Result<bool, SubmitInputRepositoryError> {
+    let row = sqlx::query(crate::lock_inventory::SUBMIT_INPUT_RUNNER_RECOVERY_ATTEMPT)
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(turn))
+        .bind(attempt.into_uuid())
+        .fetch_optional(&mut *connection)
+        .await?
+        .ok_or(SubmitInputCorruption::Missing(
+            "runner recovery interrupted attempt authority",
+        ))?;
+    let attempt_state: String = required(&row, "state_kind")?;
+    let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
+    if attempt_state == "terminal" && terminal_disposition.as_deref() == Some("ambiguous") {
+        return Ok(true);
+    }
+    let lease_effect: String = required(&row, "lease_effect_class")?;
+    let lease_state: String = required(&row, "lease_state_kind")?;
+    if attempt_state != "in_flight"
+        || !matches!(
+            (lease_state.as_str(), lease_effect.as_str()),
+            ("lost_unclaimed", "pure" | "idempotent" | "side_effecting")
+                | (
+                    "lost_execution_possible" | "lost_claimed",
+                    "pure" | "idempotent"
+                )
+        )
+    {
+        return Err(SubmitInputCorruption::Inconsistent(
+            "runner recovery interrupted attempt stop state",
+        )
+        .into());
+    }
+    let preserves_ambiguity = lease_state != "lost_unclaimed" && lease_effect == "idempotent";
+    let terminal_disposition = if preserves_ambiguity {
+        "ambiguous"
+    } else {
+        "known_failed"
+    };
+    let error_kind = if preserves_ambiguity {
+        None
+    } else {
+        Some("crash_lost")
+    };
+    let changed = sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'terminal', terminal_disposition_kind = $1,
+                error_kind = $2
+          WHERE attempt_id = $3 AND session_id = $4 AND turn_id = $5
+            AND state_kind = 'in_flight'",
+    )
+    .bind(terminal_disposition)
+    .bind(error_kind)
+    .bind(attempt.into_uuid())
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(SubmitInputCorruption::Inconsistent(
+            "runner recovery interrupted attempt retirement",
+        )
+        .into());
+    }
+    Ok(preserves_ambiguity)
 }
 
 async fn persist_runner_recovery_interrupt_effect(
@@ -3055,11 +3241,13 @@ pub(crate) async fn load_scheduling_projection(
                                 )
                             }
                             (Some("without_stop"), Some("yielded_to_durable_wait")) => {
+                                let interrupted_tool_attempt =
+                                    row.try_get("runner_recovery_interrupted_tool_attempt_id")?;
                                 let interrupt = require_applied_runner_recovery_interrupt(
                                     &row,
                                     lifecycle_turn,
                                     stored_attempt_id,
-                                    None,
+                                    interrupted_tool_attempt,
                                     &recorded_commands,
                                 )?;
                                 (
