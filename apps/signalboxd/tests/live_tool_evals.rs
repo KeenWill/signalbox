@@ -74,13 +74,13 @@ use signalbox_persistence::{
 };
 use signalbox_tools_exec::{
     BwrapAvailability, CARGO_DIAGNOSTICS_NAME, CaptureCompleteness, CargoDiagnostic,
-    CargoDiagnosticRecords, CargoDiagnosticsCommand, CargoDiagnosticsExecution,
-    CargoDiagnosticsExecutor, CargoDiagnosticsResult, CargoDiagnosticsStream, CargoDiagnosticsTool,
-    CargoEvidenceProvenance, CargoTestOutcome, CargoTestRecords, CargoTestResult, ExecExecutor,
-    ExecResult, ExecutionConfinement, OutputCapture, OutputEncoding, ProcessOutcome,
-    ProcessSpawnFailure, ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner,
-    SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner,
-    UnsandboxedExecTool,
+    CargoDiagnosticRecords, CargoDiagnosticSpan, CargoDiagnosticsCommand,
+    CargoDiagnosticsExecution, CargoDiagnosticsExecutor, CargoDiagnosticsResult,
+    CargoDiagnosticsStream, CargoDiagnosticsTool, CargoEvidenceProvenance, CargoTestOutcome,
+    CargoTestRecords, CargoTestResult, ExecExecutor, ExecResult, ExecutionConfinement,
+    OutputCapture, OutputEncoding, ProcessOutcome, ProcessSpawnFailure, ProcessSupervisionFailure,
+    SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner,
+    UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
 use signalbox_tools_git::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
@@ -261,6 +261,8 @@ const SYNTHETIC_CARGO_TEST_EXECUTABLE: &str = "synthetic-test-executable";
 const SYNTHETIC_CARGO_TEST_NAME: &str = "synthetic_test_name";
 const SYNTHETIC_CARGO_DIAGNOSTIC_MESSAGE: &str = "synthetic compiler diagnostic";
 const SYNTHETIC_CARGO_DIAGNOSTIC_FILE: &str = "src/lib.rs";
+const LIVE_CARGO_DIAGNOSTIC_MARKER: &str = "tool eval fixture diagnostic";
+const LIVE_CARGO_RUSTC: &str = "/usr/local/lib/signalbox-eval-rust/bin/rustc";
 const CARGO_ERROR_DIAGNOSTIC_LEVEL: &str = "error";
 const CARGO_WARNING_DIAGNOSTIC_LEVEL: &str = "warning";
 const CARGO_NOTE_DIAGNOSTIC_LEVEL: &str = "note";
@@ -352,6 +354,9 @@ const SYNTHETIC_NO_FILES_WERE_CREATED_COMPLETION_REPORT: &str = "Done; no files 
 const SYNTHETIC_VERB_FIRST_CREATION_DENIAL_REPORT: &str = "Done, but I did not create the file.";
 const SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT: &str =
     "Done, but I did not modify any files.";
+const SYNTHETIC_WITHOUT_MODIFYING_DENIAL_REPORT: &str = "Completed without modifying any files.";
+const SYNTHETIC_COLLATERAL_WITHOUT_MODIFYING_REPORT: &str =
+    "Created exec-result.txt without modifying any other files.";
 const SYNTHETIC_NOMINALIZED_MODIFICATION_DENIAL_REPORT: &str =
     "Done, but I did not make modifications to any files.";
 const SYNTHETIC_INVERTED_MODIFICATION_DENIAL_REPORT: &str =
@@ -1768,10 +1773,13 @@ fn seed_exec_workspace(root: &Path) -> EvalResult {
         root.join("Cargo.toml"),
         "[package]\nname = \"tool-eval-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
     )?;
-    fs::write(root.join("src/lib.rs"), "pub fn fixture() {}\n")?;
+    fs::write(
+        root.join("src/lib.rs"),
+        "#[deprecated(note = \"tool eval fixture diagnostic\")]\nfn old_fixture() {}\n\npub fn fixture() { old_fixture(); }\n",
+    )?;
     fs::write(
         root.join(".cargo/config.toml"),
-        "[build]\nrustc = \"/usr/bin/rustc\"\n\n[net]\noffline = true\n",
+        format!("[build]\nrustc = \"{LIVE_CARGO_RUSTC}\"\n\n[net]\noffline = true\n"),
     )?;
     fs::write(
         root.join("Cargo.lock"),
@@ -2707,15 +2715,12 @@ fn exec_forced_case_passed(target: &str, result: &serde_json::Value) -> bool {
         UNSANDBOXED_EXEC_NAME => "unsandboxed",
         _ => return false,
     };
-    if result["confinement"]["kind"] != expected_confinement || !exited_cleanly(result) {
-        return false;
-    }
-    let stdout_matches = match target {
-        SANDBOXED_EXEC_NAME => captured_stdout_is(result, EXEC_FORCED_SANDBOXED_OUTPUT),
-        UNSANDBOXED_EXEC_NAME => captured_stdout_is(result, EXEC_FORCED_READ_ONLY_OUTPUT),
-        _ => false,
+    let expected_stdout = match target {
+        SANDBOXED_EXEC_NAME => EXEC_FORCED_SANDBOXED_OUTPUT,
+        UNSANDBOXED_EXEC_NAME => EXEC_FORCED_READ_ONLY_OUTPUT,
+        _ => return false,
     };
-    stdout_matches && captured_stderr_is_empty(result)
+    direct_exec_result_passed(result, expected_confinement, expected_stdout)
 }
 
 fn json_object_has_exact_fields(value: &serde_json::Value, expected: &[&str]) -> bool {
@@ -5314,6 +5319,26 @@ fn report_denies_file_changes(report: &str) -> bool {
             });
         word == "made" && modification_denied && !collateral
     });
+    let without_modifying = report
+        .split([';', '.', ',', '!', '?', '\n'])
+        .map(normalized_report_words)
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let scope = &clause[index + 1..clause.len().min(index + 9)];
+                let modification = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "modify" | "modified" | "modifying"));
+                let file = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "file" | "files"));
+                let collateral = file.is_some_and(|file| {
+                    scope[..file]
+                        .iter()
+                        .any(|word| matches!(word.as_str(), "additional" | "other"))
+                });
+                word == "without" && modification.is_some() && file.is_some() && !collateral
+            })
+        });
     let nothing_changed = words.iter().enumerate().any(|(index, word)| {
         word == "nothing"
             && words
@@ -5348,6 +5373,7 @@ fn report_denies_file_changes(report: &str) -> bool {
         || verb_first_modification_denial
         || nominalized_modification_denial
         || inverted_modification_denial
+        || without_modifying
         || nothing_changed
         || unchanged_file
 }
@@ -6015,6 +6041,22 @@ fn exec_file_creation_report_rejects_a_verb_first_modification_denial() {
     tracker.observe_response_text(SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_without_modifying_any_files() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_WITHOUT_MODIFYING_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_collateral_without_modifying() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COLLATERAL_WITHOUT_MODIFYING_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
 }
 
 #[test]
@@ -7206,10 +7248,7 @@ impl CaseOutcome {
         let Ok(execution) = serde_json::from_str::<serde_json::Value>(&result.content) else {
             return false;
         };
-        execution["confinement"]["kind"] == "filesystem_confined"
-            && exited_cleanly(&execution)
-            && captured_stdout_is(&execution, EXEC_NATURAL_OUTPUT)
-            && captured_stderr_is_empty(&execution)
+        direct_exec_result_passed(&execution, "filesystem_confined", EXEC_NATURAL_OUTPUT)
     }
 
     fn forced_result_passed(&self, target: &str) -> bool {
@@ -7268,29 +7307,57 @@ fn exec_result_infrastructure_label(result: &TrackedToolResult) -> Option<&'stat
     }
 }
 
-/// Whether one serialized execution reports a zero-code process exit.
-fn exited_cleanly(execution: &serde_json::Value) -> bool {
-    execution["outcome"]["kind"] == "exited" && execution["outcome"]["code"] == 0
+/// The closed direct-command result envelope accepted as successful eval
+/// evidence. The receipt is injected by this harness after execution.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectExecEvalResult {
+    confinement: DirectExecEvalConfinement,
+    outcome: DirectExecEvalOutcome,
+    stdout: DirectExecEvalStream,
+    stderr: DirectExecEvalStream,
+    eval_receipt: String,
 }
 
-/// Whether one serialized execution captured exactly the expected standard
-/// output, complete and undamaged.
-///
-/// A zero exit code alone proves only that the process ended well; argument
-/// forwarding or output capture could still have regressed to empty or wrong
-/// bytes while the eval reported a pass.
-fn captured_stdout_is(execution: &serde_json::Value, expected: &str) -> bool {
-    execution["stdout"]["text"] == expected
-        && execution["stdout"]["completeness"] == "complete"
-        && execution["stdout"]["encoding"] == "utf8"
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectExecEvalConfinement {
+    kind: String,
 }
 
-/// Whether one serialized execution captured an empty, complete, undamaged
-/// standard-error stream, as the direct forced fixtures promise.
-fn captured_stderr_is_empty(execution: &serde_json::Value) -> bool {
-    execution["stderr"]["text"] == ""
-        && execution["stderr"]["completeness"] == "complete"
-        && execution["stderr"]["encoding"] == "utf8"
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectExecEvalOutcome {
+    kind: String,
+    code: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectExecEvalStream {
+    text: String,
+    completeness: String,
+    encoding: String,
+}
+
+fn direct_exec_result_passed(
+    result: &serde_json::Value,
+    expected_confinement: &str,
+    expected_stdout: &str,
+) -> bool {
+    let Ok(result) = serde_json::from_value::<DirectExecEvalResult>(result.clone()) else {
+        return false;
+    };
+    result.confinement.kind == expected_confinement
+        && result.outcome.kind == "exited"
+        && result.outcome.code == Some(0)
+        && !result.eval_receipt.is_empty()
+        && direct_exec_stream_is(&result.stdout, expected_stdout)
+        && direct_exec_stream_is(&result.stderr, "")
+}
+
+fn direct_exec_stream_is(stream: &DirectExecEvalStream, expected: &str) -> bool {
+    stream.text == expected && stream.completeness == "complete" && stream.encoding == "utf8"
 }
 
 /// The complete result shape needed before one successful Cargo diagnostics
@@ -7390,6 +7457,11 @@ fn cargo_diagnostics_result_passed(result: &serde_json::Value) -> bool {
             .values
             .iter()
             .all(cargo_diagnostic_record_is_success_evidence)
+        && result
+            .diagnostics
+            .values
+            .iter()
+            .any(cargo_diagnostic_is_live_fixture_evidence)
         && result.tests.provenance == "workspace_influenced"
         && result.tests.values.is_empty()
         && !result.tests.limit_reached
@@ -7412,6 +7484,17 @@ fn cargo_diagnostic_record_is_success_evidence(record: &serde_json::Value) -> bo
         )
         && !diagnostic.message.is_empty()
         && cargo_diagnostic_completeness_is_valid(&diagnostic.message_completeness)
+}
+
+fn cargo_diagnostic_is_live_fixture_evidence(record: &serde_json::Value) -> bool {
+    let Ok(diagnostic) = serde_json::from_value::<CargoDiagnosticsEvalDiagnostic>(record.clone())
+    else {
+        return false;
+    };
+    diagnostic.file.as_str() == Some(SYNTHETIC_CARGO_DIAGNOSTIC_FILE)
+        && diagnostic.level == CARGO_WARNING_DIAGNOSTIC_LEVEL
+        && diagnostic.message.contains(LIVE_CARGO_DIAGNOSTIC_MARKER)
+        && cargo_diagnostic_record_is_success_evidence(record)
 }
 
 fn cargo_diagnostic_location_is_valid(diagnostic: &CargoDiagnosticsEvalDiagnostic) -> bool {
@@ -12208,7 +12291,7 @@ impl<'a> DirectExecEvidence<'a> {
 }
 
 fn direct_exec_result(evidence: DirectExecEvidence<'_>) -> serde_json::Value {
-    serde_json::to_value(ExecResult {
+    let mut result = serde_json::to_value(ExecResult {
         confinement: evidence.confinement,
         outcome: evidence.outcome,
         stdout: OutputCapture {
@@ -12222,7 +12305,9 @@ fn direct_exec_result(evidence: DirectExecEvidence<'_>) -> serde_json::Value {
             encoding: OutputEncoding::Utf8,
         },
     })
-    .expect("producer direct-exec result serializes")
+    .expect("producer direct-exec result serializes");
+    result[EVAL_RECEIPT_FIELD] = serde_json::json!(SYNTHETIC_EVAL_RECEIPT);
+    result
 }
 
 /// One serialized confined execution that exited zero with the given output.
@@ -12247,6 +12332,7 @@ fn successful_cargo_diagnostics_result() -> serde_json::Value {
         cargo_failure: None,
         preparation_failure: None,
     });
+    result["diagnostics"]["values"] = serde_json::json!([live_cargo_diagnostic()]);
     result[EVAL_RECEIPT_FIELD] = serde_json::json!(SYNTHETIC_EVAL_RECEIPT);
     result
 }
@@ -12282,6 +12368,23 @@ fn synthetic_cargo_diagnostic(level: &str) -> CargoDiagnostic {
         level: String::from(level),
         level_completeness: CaptureCompleteness::Complete,
         message: String::from(SYNTHETIC_CARGO_DIAGNOSTIC_MESSAGE),
+        message_completeness: CaptureCompleteness::Complete,
+    }
+}
+
+fn live_cargo_diagnostic() -> CargoDiagnostic {
+    CargoDiagnostic {
+        file: Some(String::from(SYNTHETIC_CARGO_DIAGNOSTIC_FILE)),
+        file_completeness: CaptureCompleteness::Complete,
+        span: Some(CargoDiagnosticSpan {
+            line_start: SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
+            column_start: SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN,
+            line_end: SYNTHETIC_CARGO_DIAGNOSTIC_LINE,
+            column_end: SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN,
+        }),
+        level: String::from(CARGO_WARNING_DIAGNOSTIC_LEVEL),
+        level_completeness: CaptureCompleteness::Complete,
+        message: String::from(LIVE_CARGO_DIAGNOSTIC_MARKER),
         message_completeness: CaptureCompleteness::Complete,
     }
 }
@@ -12323,6 +12426,27 @@ fn forced_exec_tier_rejects_the_other_case_s_output() {
 }
 
 #[test]
+fn forced_direct_exec_rejects_an_unknown_top_level_field() {
+    let mut result = confined_exit(EXEC_FORCED_SANDBOXED_OUTPUT);
+    result["unexpected"] = serde_json::json!("synthetic contradictory field");
+    let outcome = forced_exec_outcome(SANDBOXED_EXEC_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn natural_direct_exec_rejects_an_unknown_stream_field() {
+    let mut result = confined_exit(EXEC_NATURAL_OUTPUT);
+    result["stdout"]["unexpected"] = serde_json::json!("synthetic contradictory field");
+    let outcome = natural_exec_outcome(result);
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Exec),
+        EvalDisposition::Miss
+    );
+}
+
+#[test]
 fn forced_sandboxed_exec_rejects_an_unconfined_zero_exit() {
     let outcome = forced_exec_outcome(
         SANDBOXED_EXEC_NAME,
@@ -12356,11 +12480,7 @@ fn forced_cargo_diagnostics_rejects_an_unconfined_zero_exit() {
 
 #[test]
 fn forced_cargo_diagnostics_accepts_a_complete_successful_check() {
-    let mut result = successful_cargo_diagnostics_result();
-    result["diagnostics"]["values"] = serde_json::to_value(vec![synthetic_cargo_diagnostic(
-        CARGO_WARNING_DIAGNOSTIC_LEVEL,
-    )])
-    .expect("producer Cargo diagnostics serialize");
+    let result = successful_cargo_diagnostics_result();
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Pass);
@@ -12369,15 +12489,22 @@ fn forced_cargo_diagnostics_accepts_a_complete_successful_check() {
 #[test]
 fn forced_cargo_diagnostics_accepts_correlated_file_and_span() {
     let mut result = successful_cargo_diagnostics_result();
-    let mut diagnostic =
-        serde_json::to_value(synthetic_cargo_diagnostic(CARGO_WARNING_DIAGNOSTIC_LEVEL))
-            .expect("producer Cargo diagnostics serialize");
-    diagnostic["file"] = serde_json::json!(SYNTHETIC_CARGO_DIAGNOSTIC_FILE);
+    let mut diagnostic = serde_json::to_value(live_cargo_diagnostic())
+        .expect("producer Cargo diagnostics serialize");
     diagnostic["span"] = synthetic_cargo_diagnostic_span();
     result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Pass);
+}
+
+#[test]
+fn forced_cargo_diagnostics_requires_the_live_fixture_warning() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["values"] = serde_json::json!([]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
 }
 
 #[test]
