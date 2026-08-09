@@ -206,7 +206,6 @@ jobs:
           sudo install --directory /usr/local/lib/signalbox-eval-bin
           sudo install --mode=0755 apps/signalboxd/tests/tool-eval-cargo \
             /usr/local/lib/signalbox-eval-bin/cargo
-          echo "/usr/local/lib/signalbox-eval-bin" >> "${GITHUB_PATH}"
       - name: Enable unprivileged user namespaces for the exec family
         if: ${{ matrix.family == 'exec' }}
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -242,6 +241,9 @@ jobs:
           set -euo pipefail
           test -n "${OPENAI_API_KEY}" \
             || { echo "the openai-smoke environment provides no API key"; exit 1; }
+          if [[ "${SIGNALBOX_TOOL_EVAL_FAMILY}" == "exec" ]]; then
+            export PATH="/usr/local/lib/signalbox-eval-bin:${PATH}"
+          fi
           result="${RUNNER_TEMP}/tool-eval-test-output"
           set +e
           "${TOOL_EVAL_EXECUTABLE}" \
