@@ -173,7 +173,7 @@ const WORKSPACE_SEARCH_CONTENT: &str =
 const WORKSPACE_FORCED_READ_MAX_BYTES: usize = 6;
 const WORKSPACE_DRIFTED_SEED: &str = "alpha\nbeta fixturE\nalpha\n";
 #[cfg(unix)]
-const OWNER_EXECUTE_MODE_BIT: u32 = 0o100;
+const USER_EXECUTE_MODE_BIT: u32 = 0o100;
 const SYNTHETIC_WRONG_STAGED_PATH_COUNT: usize = 0;
 const SYNTHETIC_WRONG_COMMIT_ID: &str = "synthetic-wrong-commit-id";
 const WORKSPACE_LIST_PATH: &str = "nested-list";
@@ -5035,7 +5035,7 @@ fn forced_workspace_edit_verifier_rejects_a_mode_change() -> EvalResult {
     let path = suite.workspace.path().join(WORKSPACE_SEED_PATH);
     fs::write(&path, &expected)?;
     let mut permissions = fs::metadata(&path)?.permissions();
-    permissions.set_mode(permissions.mode() ^ OWNER_EXECUTE_MODE_BIT);
+    permissions.set_mode(permissions.mode() ^ USER_EXECUTE_MODE_BIT);
     fs::set_permissions(&path, permissions)?;
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
