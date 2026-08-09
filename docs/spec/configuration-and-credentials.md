@@ -1497,28 +1497,20 @@ deployment-side rules that code cannot enforce are stated in
   reference is a configured profile name this build never spells.
 
 - **File-based supply, reread per preparation.** Each `FileCredentialAccess`
-  instance binds one consumer-scoped map of references to deployment paths. In
-  this build every such map is a singleton: each model provider gets one entry
-  built from its conditional environment path and fixed reference, and web
-  search and code-host operations each get one under their fixed integration
-  constant.
-
-- **Committed unimplemented functionality — catalog-backed model credential
-  maps.** No present composition gives a model adapter the complete catalog of
-  that adapter's `file` profiles; the singleton construction above is what
-  ships. The child that removes the conditional channels builds that complete
-  map instead, and the consumer-scoping rule below is written for both shapes: A
-  model-profile name equal to an integration constant therefore remains a
-  distinct reference in a different consumer's map; no lookup or insertion
-  crosses those boundaries. The selected instance reads the file for every model
-  call, web search, code-host operation, or pull-request tool operation
-  preparation that resolves one; nothing is cached. Why: atomic file replacement
-  rotates any credential without restarting signalboxd, and an in-flight
-  operation keeps the value it authenticated with. Resolution stays
-  reference-scoped: a reference absent from the map fails typed `Unmapped`; a
-  missing file is `Unavailable`; an unreadable file is `Unreadable` — all
-  reference-only errors, so a failure names an account without disclosing which
-  path served it.
+  instance binds one consumer-scoped map of references to deployment paths: a
+  model adapter receives the complete catalog of that adapter's `file` profiles,
+  while web search and code-host operations each receive a singleton map under
+  their fixed integration constant. A model-profile name equal to an integration
+  constant therefore remains a distinct reference in a different consumer's map;
+  no lookup or insertion crosses those boundaries. The selected instance reads
+  the file for every model call, web search, code-host operation, or
+  pull-request tool operation preparation that resolves one; nothing is cached.
+  Why: atomic file replacement rotates any credential without restarting
+  signalboxd, and an in-flight operation keeps the value it authenticated with.
+  Resolution stays reference-scoped: a reference absent from the map fails typed
+  `Unmapped`; a missing file is `Unavailable`; an unreadable file is
+  `Unreadable` — all reference-only errors, so a failure names an account
+  without disclosing which path served it.
 
 - **External and daemon-owned CLI logins.** An `ambient` profile leaves login
   resolution to the CLI under the adapter's existing child-environment contract.

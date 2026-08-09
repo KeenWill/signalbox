@@ -258,12 +258,27 @@ fn parse_oauth_delivery(profile: &Table) -> Result<(), HubModelConfigurationErro
         let scope = scope
             .as_str()
             .ok_or(HubModelConfigurationError::InvalidCredentialDelivery)?;
-        if scope.is_empty() || scope.len() > 256 || scope.contains('\0') || !declared.insert(scope)
+        if scope.is_empty()
+            || scope.len() > 256
+            || !scope.bytes().all(is_oauth_scope_token_byte)
+            || !declared.insert(scope)
         {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
     }
     Ok(())
+}
+
+/// Reports whether one byte is an RFC 6749 `scope-token` character.
+///
+/// The grammar is `%x21 / %x23-5B / %x5D-7E`, which admits ordinary ASCII
+/// graphics while excluding the space, the double quote, the backslash, every
+/// control byte including NUL, and every non-ASCII byte. OAuth transmits
+/// `scope` as a space-delimited sequence, so an element containing a space
+/// would become two scopes on the wire while the exact-duplicate rule and the
+/// persisted provisioning tuple treat it as one value.
+const fn is_oauth_scope_token_byte(byte: u8) -> bool {
+    matches!(byte, 0x21 | 0x23..=0x5B | 0x5D..=0x7E)
 }
 
 fn validate_https_url(value: &str) -> Result<(), HubModelConfigurationError> {

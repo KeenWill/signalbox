@@ -741,15 +741,22 @@ impl HubModelConfiguration {
                     continue;
                 }
             };
-            if adapter_profile
-                .as_ref()
-                .is_some_and(|profile| profile != &credential_profile)
+            // Codex still carries one credential reference into its runtime,
+            // so two families preferring different profiles cannot both be
+            // served. Claude now receives the complete adapter-scoped catalog
+            // and resolves each operation's pinned reference, so differing
+            // preferences are admitted; the retained value is only the
+            // runtime's default for an operation that pins nothing.
+            if adapter == ModelAdapter::CodexCli
+                && adapter_profile
+                    .as_ref()
+                    .is_some_and(|profile| profile != &credential_profile)
             {
                 return Err(
                     HubModelConfigurationError::ConflictingAdapterCredentialProfiles { adapter },
                 );
             }
-            *adapter_profile = Some(Arc::clone(&credential_profile));
+            adapter_profile.get_or_insert_with(|| Arc::clone(&credential_profile));
             let entry = AdapterMapping {
                 adapter,
                 credential_pool,
@@ -5837,6 +5844,32 @@ scopes = ["model:invoke"]"#,
             HubModelConfiguration::parse(&oauth).err(),
             Some(HubModelConfigurationError::InvalidCredentialDelivery)
         );
+    }
+
+    #[test]
+    fn configuration_rejects_oauth_scopes_outside_the_scope_token_set() {
+        // Single-quoted TOML literals pass these bytes through verbatim. A
+        // space would become two scopes on the wire; the quote, backslash, and
+        // non-ASCII bytes are outside RFC 6749 `scope-token` entirely. Control
+        // bytes are excluded too, but TOML's own lexer rejects them first.
+        for scope in ["read write", "read\"quoted", "read\\slash", "r\u{e9}ad"] {
+            let oauth = CONFIGURATION.replace(
+                "delivery = \"ambient\"",
+                &format!(
+                    "delivery = \"oauth\"\n\
+                     client_id = \"synthetic-client\"\n\
+                     token_url = \"https://example.test/token\"\n\
+                     device_authorization_url = \"https://example.test/device\"\n\
+                     scopes = ['{scope}']"
+                ),
+            );
+
+            assert_eq!(
+                HubModelConfiguration::parse(&oauth).err(),
+                Some(HubModelConfigurationError::InvalidCredentialDelivery),
+                "scope {scope:?} is outside the admitted byte set"
+            );
+        }
     }
 
     #[test]
