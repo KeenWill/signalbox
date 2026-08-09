@@ -1858,17 +1858,34 @@ fn report_tool_attempt(name: &ToolName, observation: &CorrelatedToolAttemptObser
 }
 
 /// Selects initial approval for one proposal from frozen posture and catalog.
+///
+/// An explicitly configured `Delegated` posture satisfies an `AlwaysConfirm`
+/// declaration; a configured `Auto` posture never does. `AlwaysConfirm` exists
+/// so that a session blanket cannot silently approve the tool — see
+/// [`InitialToolApproval::AlwaysConfirm`], "leave an `AlwaysConfirm` request
+/// undecided despite blanket posture". A delegate judge is not a blanket but a
+/// distinct decider that can still deny the request or escalate it to the user,
+/// so admitting it serves that purpose rather than evading it. Admitting `Auto`
+/// would instead erase the decision altogether, which is the loophole this
+/// distinction keeps closed. An unconfigured `AlwaysConfirm` declaration still
+/// parks for a human under either blanket posture.
 pub(crate) fn initial_tool_approval(
     posture: DangerousToolAutoApproval,
     definition: Option<&ToolDefinition>,
 ) -> InitialToolApproval {
+    let configured = definition.and_then(ToolDefinition::approval_posture);
     if definition.is_some_and(|definition| {
         definition.permission_default() == ToolPermissionDefault::AlwaysConfirm
     }) {
-        return InitialToolApproval::AlwaysConfirm;
+        return match configured {
+            Some(ToolApprovalPosture::Delegated) => InitialToolApproval::Delegated,
+            Some(ToolApprovalPosture::Auto | ToolApprovalPosture::Human) | None => {
+                InitialToolApproval::AlwaysConfirm
+            }
+        };
     }
-    if let Some(posture) = definition.and_then(ToolDefinition::approval_posture) {
-        return match posture {
+    if let Some(configured) = configured {
+        return match configured {
             ToolApprovalPosture::Auto => InitialToolApproval::PolicyAuto,
             ToolApprovalPosture::Delegated => InitialToolApproval::Delegated,
             ToolApprovalPosture::Human => InitialToolApproval::Human,
@@ -2620,16 +2637,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn always_confirm_is_not_overridden_by_the_dangerous_session_blanket() {
-        let explicit = definition(
-            "explicit",
+    fn always_confirm_definition(name: &str) -> ToolDefinition {
+        definition(
+            name,
             ToolPermissionDefault::AlwaysConfirm,
             ToolEffectClass::ExternalEffect,
-        );
-        let configured_delegate = explicit
-            .clone()
-            .with_approval_posture(ToolApprovalPosture::Delegated);
+        )
+    }
+
+    /// With no posture configured, an `AlwaysConfirm` declaration parks for a
+    /// human under either blanket posture. This is the default `unsandboxed_exec`
+    /// behavior, which the configured-posture admission below must not change.
+    #[test]
+    fn always_confirm_is_not_overridden_by_the_dangerous_session_blanket() {
+        let explicit = always_confirm_definition("explicit");
 
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&explicit)),
@@ -2639,11 +2660,61 @@ mod tests {
             initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&explicit)),
             InitialToolApproval::AlwaysConfirm
         );
+    }
+
+    /// An explicitly configured `Delegated` posture satisfies `AlwaysConfirm`.
+    /// The declaration exists so that a session blanket cannot silently approve
+    /// the tool; a delegate judge is not a blanket but a distinct decider that
+    /// can still deny the request or escalate it to the user, so routing to it
+    /// serves that purpose rather than evading it.
+    #[test]
+    fn configured_delegated_posture_satisfies_always_confirm() {
+        let delegated = always_confirm_definition("explicit")
+            .with_approval_posture(ToolApprovalPosture::Delegated);
+
         assert_eq!(
-            initial_tool_approval(
-                DangerousToolAutoApproval::ApproveAll,
-                Some(&configured_delegate)
-            ),
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&delegated)),
+            InitialToolApproval::Delegated
+        );
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&delegated)),
+            InitialToolApproval::Delegated
+        );
+    }
+
+    /// A configured `Auto` posture must never satisfy `AlwaysConfirm`. Unlike a
+    /// delegate judge it erases the decision entirely, which is exactly the
+    /// silent automatic approval the declaration refuses; admitting it would be
+    /// the loophole that admitting `Delegated` is not.
+    #[test]
+    fn configured_auto_posture_never_satisfies_always_confirm() {
+        let automatic =
+            always_confirm_definition("explicit").with_approval_posture(ToolApprovalPosture::Auto);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&automatic)),
+            InitialToolApproval::AlwaysConfirm
+        );
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&automatic)),
+            InitialToolApproval::AlwaysConfirm
+        );
+    }
+
+    /// A configured `Human` posture keeps the stricter `AlwaysConfirm` outcome
+    /// rather than the plain human park, since both await the same user and the
+    /// declaration is the more specific fact.
+    #[test]
+    fn configured_human_posture_leaves_always_confirm_parked() {
+        let human =
+            always_confirm_definition("explicit").with_approval_posture(ToolApprovalPosture::Human);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&human)),
+            InitialToolApproval::AlwaysConfirm
+        );
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&human)),
             InitialToolApproval::AlwaysConfirm
         );
     }
