@@ -304,6 +304,10 @@ const SYNTHETIC_NO_SUCCESS_COMPLETION_REPORT: &str = "Done with no success.";
 const SYNTHETIC_WITHOUT_SUCCESS_COMPLETION_REPORT: &str = "Completed without any success.";
 const SYNTHETIC_UNSUCCESSFUL_COMPLETION_REPORT: &str = "Completed unsuccessfully.";
 const SYNTHETIC_NOT_SUCCESSFULLY_REPORT: &str = "Done, but not successfully.";
+const SYNTHETIC_DID_NOT_SUCCEED_REPORT: &str =
+    "Completed, but the requested operation did not succeed.";
+const SYNTHETIC_NEVER_SUCCEEDED_REPORT: &str =
+    "Completed, but the requested operation never succeeded.";
 const SYNTHETIC_COULD_NOT_COMPLETE_REPORT: &str =
     "Done, but I could not perform the requested operation.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
@@ -680,6 +684,7 @@ struct FamilySuite {
     git_pre_execution_worktree_entries: StdMutex<Option<BTreeMap<PathBuf, WorkspaceEntrySnapshot>>>,
     git_pre_execution_worktree_modified_times: StdMutex<Option<BTreeMap<PathBuf, SystemTime>>>,
     git_pre_execution_index_entries: StdMutex<Option<Vec<GitIndexCompleteEntrySnapshot>>>,
+    git_pre_execution_metadata_root_modified_time: StdMutex<Option<SystemTime>>,
     git_pre_execution_metadata_top_level:
         StdMutex<Option<BTreeMap<PathBuf, GitMetadataEntrySnapshot>>>,
     git_pre_execution_objects: StdMutex<Option<GitObjectInventory>>,
@@ -709,6 +714,7 @@ struct GitFixtureSnapshot {
     worktree_modified_times: BTreeMap<PathBuf, SystemTime>,
     metadata_root_kind: GitMetadataEntryKind,
     metadata_root_mode: Option<u32>,
+    metadata_root_modified_time: Option<SystemTime>,
     metadata_top_level: BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
     index_entries: Vec<GitIndexEntrySnapshot>,
     index_complete_entries: Vec<GitIndexCompleteEntrySnapshot>,
@@ -991,6 +997,7 @@ impl FamilySuite {
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
+            git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
             git_pre_execution_metadata_top_level: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
@@ -1055,6 +1062,7 @@ impl FamilySuite {
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
+            git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
             git_pre_execution_metadata_top_level: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
@@ -1091,6 +1099,7 @@ impl FamilySuite {
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
+            git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
             git_pre_execution_metadata_top_level: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
@@ -1209,6 +1218,11 @@ impl FamilySuite {
                 git_index_complete_entries(&Repository::open(self.workspace.path())?)?,
             );
             *self
+                .git_pre_execution_metadata_root_modified_time
+                .lock()
+                .expect("Git pre-execution metadata-root-time lock is available") =
+                Some(git_metadata_root_modified_time(self.workspace.path())?);
+            *self
                 .git_pre_execution_metadata_top_level
                 .lock()
                 .expect("Git pre-execution metadata lock is available") =
@@ -1309,6 +1323,10 @@ impl FamilySuite {
                     .git_pre_execution_index_entries
                     .lock()
                     .expect("Git pre-execution index lock is available");
+                let pre_execution_metadata_root_modified_time = self
+                    .git_pre_execution_metadata_root_modified_time
+                    .lock()
+                    .expect("Git pre-execution metadata-root-time lock is available");
                 let pre_execution_metadata_top_level = self
                     .git_pre_execution_metadata_top_level
                     .lock()
@@ -1335,6 +1353,8 @@ impl FamilySuite {
                         pre_execution_worktree_modified_times:
                             pre_execution_worktree_modified_times.as_ref(),
                         pre_execution_index_entries: pre_execution_index_entries.as_deref(),
+                        pre_execution_metadata_root_modified_time:
+                            *pre_execution_metadata_root_modified_time,
                         pre_execution_metadata_top_level: pre_execution_metadata_top_level.as_ref(),
                         pre_execution_objects: pre_execution_objects.as_ref(),
                         pre_execution_object_entries: pre_execution_object_entries.as_ref(),
@@ -1533,6 +1553,7 @@ struct GitForcedVerification<'a> {
     pre_execution_worktree_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
     pre_execution_worktree_modified_times: Option<&'a BTreeMap<PathBuf, SystemTime>>,
     pre_execution_index_entries: Option<&'a [GitIndexCompleteEntrySnapshot]>,
+    pre_execution_metadata_root_modified_time: Option<SystemTime>,
     pre_execution_metadata_top_level: Option<&'a BTreeMap<PathBuf, GitMetadataEntrySnapshot>>,
     pre_execution_objects: Option<&'a GitObjectInventory>,
     pre_execution_object_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
@@ -1554,6 +1575,7 @@ fn git_forced_case_passed(
         pre_execution_worktree_entries,
         pre_execution_worktree_modified_times,
         pre_execution_index_entries,
+        pre_execution_metadata_root_modified_time,
         pre_execution_metadata_top_level,
         pre_execution_objects,
         pre_execution_object_entries,
@@ -1794,6 +1816,12 @@ fn git_forced_case_passed(
             name,
             seed_fixture,
             pre_execution_index_entries,
+        )?
+        && git_forced_metadata_root_modified_time_matches(
+            root,
+            name,
+            seed_fixture,
+            pre_execution_metadata_root_modified_time,
         )?
         && git_forced_metadata_top_level_matches(
             root,
@@ -2658,6 +2686,7 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         worktree_modified_times: git_worktree_modified_times(root)?,
         metadata_root_kind: git_metadata_root_kind(root)?,
         metadata_root_mode: worktree_mode(repository.path())?,
+        metadata_root_modified_time: Some(git_metadata_root_modified_time(root)?),
         metadata_top_level: git_metadata_top_level(root)?,
         index_entries: git_index_entries(&repository)?,
         index_complete_entries: git_index_complete_entries(&repository)?,
@@ -2685,6 +2714,10 @@ fn git_metadata_root_kind(root: &Path) -> EvalResult<GitMetadataEntryKind> {
     } else {
         GitMetadataEntryKind::Other
     })
+}
+
+fn git_metadata_root_modified_time(root: &Path) -> EvalResult<SystemTime> {
+    Ok(fs::symlink_metadata(root.join(".git"))?.modified()?)
 }
 
 fn git_index_entries(repository: &Repository) -> EvalResult<Vec<GitIndexEntrySnapshot>> {
@@ -3452,6 +3485,24 @@ fn git_fixture_snapshot_matches(
         && worktree_mode(repository.path())? == expected.metadata_root_mode
         && git_static_metadata_entries(root)? == expected.static_metadata_entries
         && git_static_metadata_modified_times(root)? == expected.static_metadata_modified_times)
+}
+
+fn git_forced_metadata_root_modified_time_matches(
+    root: &Path,
+    case_name: &str,
+    seed_fixture: &GitFixtureSnapshot,
+    pre_execution: Option<SystemTime>,
+) -> EvalResult<bool> {
+    if matches!(
+        case_name,
+        GIT_BRANCH_SWITCH_NAME | GIT_CREATE_COMMIT_NAME | GIT_STAGE_NAME
+    ) {
+        return Ok(true);
+    }
+    let Some(expected) = pre_execution.or(seed_fixture.metadata_root_modified_time) else {
+        return Ok(false);
+    };
+    Ok(git_metadata_root_modified_time(root)? == expected)
 }
 
 fn git_forced_metadata_top_level_matches(
@@ -4866,6 +4917,8 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         "success",
         "successful",
         "successfully",
+        "succeed",
+        "succeeded",
         "switch",
         "switched",
         "updated",
@@ -5266,6 +5319,22 @@ fn final_response_report_accepts_completion_after_nothing_failed() {
 fn final_response_report_rejects_completion_that_was_not_successful() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NOT_SUCCESSFUL_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_completion_when_the_operation_did_not_succeed() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_DID_NOT_SUCCEED_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_completion_when_the_operation_never_succeeded() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NEVER_SUCCEEDED_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
 }
@@ -8381,6 +8450,39 @@ fn forced_git_log_verifier_rejects_worktree_mtime_drift() -> EvalResult {
         .peel_to_commit()?;
     let collateral = suite.workspace.path().join(GIT_STAGE_PATH);
     fs::File::open(collateral)?.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_metadata_root_mtime_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    fs::File::open(repository.path())?.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
     let result = serde_json::json!({
         "commits": [{
             "commit": target.id().to_string(),
