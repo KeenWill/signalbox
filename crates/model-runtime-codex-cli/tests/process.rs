@@ -4,6 +4,7 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -236,6 +237,84 @@ fn collect_loss_cause(cause: &LossCause, material: &mut Vec<String>) {
     }
 }
 
+/// Which of a correlation's parallel delta streams a fragment extends. Part of
+/// the reassembly key: two facts may share a correlation and an index yet
+/// belong to streams no consumer ever concatenates together.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum EmittedStream {
+    Text,
+    Thinking,
+    ToolArguments,
+}
+
+/// Reassembles each delta stream the adapter emitted, in emission order,
+/// grouped by the stream a fragment extends — correlation, kind, and index.
+///
+/// [`boundary_material`] joins the facts it visits with newlines, which is what
+/// a *field*-level claim needs but not what a stream-level one does: the
+/// redactor may emit a safe prefix and its continuation as two fragments of one
+/// delta stream, and a credential spanning that split is recoverable by any
+/// consumer that concatenates the stream while appearing in no single fragment
+/// and in no newline-joined dump. A claim about what the caller can read is
+/// therefore checked against the reconstruction the caller assembles.
+///
+/// Exhaustive over `ObservationFact` so a new text-bearing fact cannot be added
+/// without deciding whether it joins a stream. Facts that carry one complete
+/// value rather than a fragment (a decoded tool proposal, the thread id) are
+/// not fragments of anything and stay covered by [`boundary_material`].
+fn emitted_streams(observations: &[Observation<String>]) -> Vec<String> {
+    let mut streams: BTreeMap<(&str, EmittedStream, u32), String> = BTreeMap::new();
+    for observation in observations {
+        let correlation = observation.correlation.as_str();
+        let (kind, index, fragment) = match &observation.fact {
+            ObservationFact::TextDelta { index, text } => (EmittedStream::Text, *index, text),
+            ObservationFact::ThinkingDelta { index, text } => {
+                (EmittedStream::Thinking, *index, text)
+            }
+            ObservationFact::ToolArgumentsDelta { index, fragment } => {
+                (EmittedStream::ToolArguments, *index, fragment)
+            }
+            ObservationFact::SendCommenced
+            | ObservationFact::ExchangeEstablished(_)
+            | ObservationFact::ProviderModelReported(_)
+            | ObservationFact::ToolCallProposed(_)
+            | ObservationFact::UsageReported(_)
+            | ObservationFact::FinishReported(_) => continue,
+        };
+        streams
+            .entry((correlation, kind, index))
+            .or_default()
+            .push_str(fragment);
+    }
+    streams.into_values().collect()
+}
+
+/// Asserts `secret` is unrecoverable from everything that crossed the adapter
+/// boundary: every field [`boundary_material`] visits, and every delta stream
+/// reassembled as the caller would read it. `label` names the fixture, so a
+/// leak in one case of a multi-scenario test is reported as itself.
+///
+/// Both checks, because they fail differently. Every fixture this helper guards
+/// is suppressed whole today and emits one fragment, so the field-level dump
+/// alone would catch each of them; the reassembly is what keeps that from being
+/// the assertion's ceiling. A regression that released the safe prefix and held
+/// only the tail would put the credential in no single fragment and in no
+/// newline-joined dump, and the case guarding the leak would go on passing.
+#[track_caller]
+fn assert_no_emitted_stream_carries(label: &str, result: &ExecutionResult, secret: &str) {
+    let material = boundary_material(result);
+    assert!(
+        !material.contains(secret),
+        "{label}: the credential must not cross the boundary, found it in: {material}"
+    );
+    for stream in emitted_streams(&result.observations) {
+        assert!(
+            !stream.contains(secret),
+            "{label}: the credential must not be recoverable from a reassembled stream: {stream}"
+        );
+    }
+}
+
 #[test]
 fn boundary_material_reads_terminal_and_observation_text() {
     let result = ExecutionResult {
@@ -263,6 +342,53 @@ fn boundary_material_reads_terminal_and_observation_text() {
 
     assert!(material.contains(BOUNDARY_FIXTURE_TERMINAL_TEXT));
     assert!(material.contains(BOUNDARY_FIXTURE_OBSERVATION_TEXT));
+}
+
+fn text_delta_fixture(correlation: &str, index: u32, text: &str) -> Observation<String> {
+    Observation {
+        correlation: correlation.to_string(),
+        fact: ObservationFact::TextDelta {
+            index,
+            text: text.to_string(),
+        },
+    }
+}
+
+/// The reassembly every stream-level absence check depends on: a value the
+/// redactor emitted as two fragments of one stream is one reconstruction, so a
+/// credential spanning the split cannot hide in the gap between them.
+#[test]
+fn emitted_streams_rejoin_the_fragments_of_one_stream() {
+    let observations = vec![
+        text_delta_fixture("reassembly-fixture", 0, "synthetic-reassembly-"),
+        text_delta_fixture("reassembly-fixture", 0, "secret"),
+    ];
+
+    assert_eq!(
+        emitted_streams(&observations),
+        vec!["synthetic-reassembly-secret".to_string()]
+    );
+}
+
+/// Grouping is per stream: fragments that spell a value only across streams no
+/// consumer concatenates — a different part index, a different correlation —
+/// are separate reconstructions, so the check does not report a leak the caller
+/// cannot read.
+#[test]
+fn emitted_streams_keep_separate_streams_apart() {
+    let observations = vec![
+        text_delta_fixture("reassembly-fixture", 0, "synthetic-reassembly-"),
+        text_delta_fixture("reassembly-fixture", 1, "secret"),
+        text_delta_fixture("other-correlation", 0, "secret"),
+    ];
+    let streams = emitted_streams(&observations);
+
+    assert_eq!(streams.len(), 3);
+    assert!(
+        !streams
+            .iter()
+            .any(|stream| stream.contains("synthetic-reassembly-secret"))
+    );
 }
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
@@ -872,6 +998,80 @@ async fn inv_035_message_id_prefixing_final_text_is_redacted() {
     assert!(!diagnostic.contains("api_"));
     assert!(!diagnostic.contains("api_key="));
     assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: an item identity the adapter only validates as nonempty and then
+/// drops is provider-controlled text like every other dropped field. An `id`
+/// or an unmatched item `type` ending in a credential-marker prefix (`api_`)
+/// seeds the dropped lookbehind, so the value opening the text that follows is
+/// suppressed instead of crossing the boundary in retained evidence.
+///
+/// One case per arm that drops the identity: a bare lifecycle event (both
+/// fields), an unsupported item (whose `type` matched no literal of the
+/// adapter's), and the modeled reasoning and error items (whose `type` did,
+/// leaving only the unretained `id`).
+#[tokio::test]
+async fn inv_035_dropped_item_identity_marker_suppresses_the_continuation() {
+    for scenario in [
+        "lifecycle_item_id_marker",
+        "lifecycle_item_type_marker",
+        "unsupported_item_type_marker",
+        "reasoning_item_id_marker",
+        "error_item_id_marker",
+    ] {
+        for delivery in [DeliveryMode::Streamed, DeliveryMode::Buffered] {
+            let result = execute_scenario(
+                scenario,
+                delivery,
+                OperationShape::Text,
+                CancellationSignal::never(),
+            )
+            .await;
+
+            assert_no_emitted_stream_carries(
+                scenario,
+                &result,
+                fixtures::SENSITIVE_SPLIT_AUTHORIZATION,
+            );
+            assert_eq!(result.spawns, 1);
+        }
+    }
+}
+
+/// The control on the case above: routine item identity is not a credential.
+/// An ordinary id and a real Codex item type (`todo_list`, whose trailing bytes
+/// the lookbehind does hold conservatively — they could still grow into a
+/// credential name) fold like every other dropped field, and the answer that
+/// follows still reaches the caller byte-verbatim. Folding the identity widens
+/// what can arm the scrubber; it does not make routine metadata suppress the
+/// response.
+#[tokio::test]
+async fn benign_item_identity_leaves_the_answer_verbatim() {
+    for delivery in [DeliveryMode::Streamed, DeliveryMode::Buffered] {
+        let result = execute_scenario(
+            "benign_item_identity_before_answer",
+            delivery,
+            OperationShape::Text,
+            CancellationSignal::never(),
+        )
+        .await;
+        let completed = completed(&result.evidence);
+
+        assert_eq!(
+            completed.content,
+            vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+        );
+        assert!(!boundary_material(&result).contains("[redacted]"));
+        if delivery == DeliveryMode::Streamed {
+            // Read as the caller reads it: the held-then-released trailing
+            // bytes may arrive as more than one fragment of the text stream.
+            assert!(
+                emitted_streams(&result.observations)
+                    .contains(&fixtures::BUFFERED_ANSWER.to_string())
+            );
+        }
+        assert_eq!(result.spawns, 1);
+    }
 }
 
 /// INV-035: an unsupported (unmodeled) streamed item whose text ends in a
