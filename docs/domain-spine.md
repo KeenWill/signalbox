@@ -8053,6 +8053,9 @@ pub enum RunnerDomainError {
 pub struct RunnerCapabilityClass(/* private */);
 pub struct CredentialProfileName(/* private */);
 pub struct RunnerWorkingDirectory(/* private */);
+impl RunnerWorkingDirectory {
+    pub const MAX_BYTES: usize;
+}
 pub struct WorkspaceRepositoryKey(/* private */);
 pub struct CanonicalCloneUrlDigest(/* private */);
 pub struct WorkspaceRevision(/* private */);

@@ -6,7 +6,7 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::{error::Error, time::Duration};
+use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
@@ -49,8 +49,8 @@ use signalbox_persistence::{
         append_runner_state_transition_for_test,
     },
     runner_protocol::{
-        RunnerConnectionTransition, RunnerProtocolCorruption, RunnerProtocolStore,
-        RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
+        RunnerConnectionEpoch, RunnerConnectionTransition, RunnerProtocolCorruption,
+        RunnerProtocolStore, RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
     },
     session_credentials::{SessionCredentialPin, SessionModelCredential},
     start_eligible_turn::StartEligibleTurnRepository,
@@ -1111,8 +1111,10 @@ async fn connection_outbox_source(
     Ok(RunnerStateTransitionOutboxTestSource::connection(
         placement_event_ordinal,
         enrollment,
-        u64::try_from(connection_epoch.mantissa())?,
-        u64::try_from(event_ordinal.mantissa())?,
+        RunnerConnectionEpoch::try_from_u64(u64::try_from(connection_epoch.mantissa())?)
+            .expect("the persisted connection epoch is positive"),
+        NonZeroU64::new(u64::try_from(event_ordinal.mantissa())?)
+            .expect("the persisted connection event ordinal is positive"),
     ))
 }
 
@@ -10813,6 +10815,113 @@ async fn s32_inv032_inv044_runner_connected_outbox_round_trips() -> Result<(), B
     Ok(())
 }
 
+/// INV-032 / INV-044: connection-state publication must name the enrollment's
+/// latest durable connection event at insertion time.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_outbox_rejects_superseded_connection_source()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "pinned").await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await?;
+    let source = connection_outbox_source(
+        &pool,
+        placement_event_ordinal,
+        expected_enrollment.enrollment(),
+        "heartbeat_missed",
+    )
+    .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatRecovered,
+        )
+        .await?;
+    let rejected = append_runner_state_transition_for_test(
+        &pool,
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Suspect,
+            source,
+        ),
+    )
+    .await
+    .expect_err("a superseded connection event cannot publish current suspicion");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: connection-state publication is bound to the session's
+/// current placement rather than a historical placement for the same runner.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_outbox_rejects_historical_connection_placement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "pinned").await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await?;
+    let source = connection_outbox_source(
+        &pool,
+        placement_event_ordinal,
+        expected_enrollment.enrollment(),
+        "heartbeat_missed",
+    )
+    .await?;
+    append_runner_registration_loss_projection(&pool, session).await?;
+    let mut replacement = pool.begin().await?;
+    append_same_runner_replacement_projection(&mut replacement, session, None).await?;
+    replacement.commit().await?;
+    let rejected = append_runner_state_transition_for_test(
+        &pool,
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            None,
+            DispatchedRunnerState::Suspect,
+            source,
+        ),
+    )
+    .await
+    .expect_err("a historical placement cannot publish current connection state");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-032 / INV-044: exact-identity loss before pin dispatches the retained
 /// requested sandbox and user-selected directory.
 #[tokio::test]
@@ -11093,6 +11202,66 @@ async fn s32_inv032_inv044_runner_directory_relocation_rejects_replaced_state()
     .expect_err("a directory relocation cannot publish an ordinary replacement state");
 
     assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: dispatch repeats relocation exclusivity checks so
+/// post-admission state corruption cannot publish an ordinary replacement.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_outbox_dispatch_rejects_corrupted_relocation_state()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    append_runner_registration_loss_projection(&pool, session).await?;
+    let replacement_directory = replacement_runner_directory();
+    let mut replacement = pool.begin().await?;
+    append_same_runner_replacement_projection(
+        &mut replacement,
+        session,
+        Some(&replacement_directory),
+    )
+    .await?;
+    replacement.commit().await?;
+    let (placement_event_ordinal, placement_revision) =
+        placement_outbox_facts(&pool, session, "runner_replaced").await?;
+    append_runner_state_transition_for_test(
+        &pool,
+        RunnerStateTransitionOutboxTestEvent::new(
+            session,
+            pin.lease.runner(),
+            placement_revision,
+            pin.placement.request().sandbox,
+            Some(replacement_directory),
+            DispatchedRunnerState::WorkingDirectoryChanged,
+            RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
+        ),
+    )
+    .await?;
+    sqlx::query("ALTER TABLE runner_state_transition_outbox_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_state_transition_outbox_event
+            SET state_kind = 'replaced'
+          WHERE event_sequence = 1",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_state_transition_outbox_event ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let rejected = OutboxDispatcher::new(pool.clone())
+        .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+        .await
+        .expect_err("a corrupted relocation state cannot be offered");
+
+    assert!(matches!(
+        rejected,
+        OutboxDispatchError::Corruption(OutboxCorruption::InvalidRunnerEvent)
+    ));
     drop(pool);
     Ok(())
 }

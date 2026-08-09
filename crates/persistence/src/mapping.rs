@@ -24,7 +24,7 @@ use signalbox_domain::{
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
-use crate::approval_judge::FailedApprovalJudgeDisposition;
+use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
 
 /// Closed delegated-session relationship policy discriminators in PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1023,6 +1023,35 @@ pub(crate) fn runner_placement_loss_source_from_str(
     }
 }
 
+/// Encodes a follower-visible runner state as its closed PostgreSQL spelling.
+pub(crate) const fn dispatched_runner_state_to_str(state: DispatchedRunnerState) -> &'static str {
+    match state {
+        DispatchedRunnerState::Pinned => "pinned",
+        DispatchedRunnerState::Suspect => "suspect",
+        DispatchedRunnerState::Connected => "connected",
+        DispatchedRunnerState::RunnerLostBeforePin => "runner_lost_before_pin",
+        DispatchedRunnerState::RunnerLost => "runner_lost",
+        DispatchedRunnerState::Replaced => "replaced",
+        DispatchedRunnerState::WorkingDirectoryChanged => "working_directory_changed",
+        DispatchedRunnerState::Abandoned => "abandoned",
+    }
+}
+
+/// Decodes a follower-visible runner state from its closed PostgreSQL spelling.
+pub(crate) fn dispatched_runner_state_from_str(value: &str) -> Option<DispatchedRunnerState> {
+    match value {
+        "pinned" => Some(DispatchedRunnerState::Pinned),
+        "suspect" => Some(DispatchedRunnerState::Suspect),
+        "connected" => Some(DispatchedRunnerState::Connected),
+        "runner_lost_before_pin" => Some(DispatchedRunnerState::RunnerLostBeforePin),
+        "runner_lost" => Some(DispatchedRunnerState::RunnerLost),
+        "replaced" => Some(DispatchedRunnerState::Replaced),
+        "working_directory_changed" => Some(DispatchedRunnerState::WorkingDirectoryChanged),
+        "abandoned" => Some(DispatchedRunnerState::Abandoned),
+        _ => None,
+    }
+}
+
 /// Encodes a frozen per-tool approval posture as its closed PostgreSQL spelling.
 pub(crate) const fn tool_approval_posture_to_str(value: ToolApprovalPosture) -> &'static str {
     match value {
@@ -1715,6 +1744,8 @@ mod tests {
     };
     use sqlx::types::Uuid;
 
+    use crate::outbox::DispatchedRunnerState;
+
     use super::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         DelegationPolicyStorageKind, DelegationRejectionStorageKind, DurableCommandIdMappingError,
@@ -1732,12 +1763,13 @@ mod tests {
         delegation_policy_kind_from_str, delegation_policy_kind_to_str,
         delegation_rejection_kind_from_str, delegation_rejection_kind_to_str,
         delegation_transition_failure_from_str, delegation_transition_failure_to_str,
-        delegation_wait_mode_from_str, delegation_wait_mode_to_str, durable_command_id_from_uuid,
-        durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
-        input_position_from_numeric, input_position_to_numeric, model_change_adjustments_from_json,
-        model_change_adjustments_to_json, model_settings_from_json,
-        model_settings_overlay_from_json, model_settings_to_json, plan_event_kind_from_str,
-        plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
+        delegation_wait_mode_from_str, delegation_wait_mode_to_str,
+        dispatched_runner_state_from_str, dispatched_runner_state_to_str,
+        durable_command_id_from_uuid, durable_command_id_to_uuid, durable_command_kind_from_str,
+        durable_command_kind_to_str, input_position_from_numeric, input_position_to_numeric,
+        model_change_adjustments_from_json, model_change_adjustments_to_json,
+        model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
+        plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
         repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
         repo_watch_checks_outcome_to_str, repo_watch_event_kind_from_str,
         repo_watch_event_kind_to_str, repo_watch_mergeable_state_from_str,
@@ -2588,6 +2620,59 @@ mod tests {
             Some(RunnerPlacementLossSource::Registration),
         );
         assert_eq!(runner_placement_loss_source_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn dispatched_runner_state_mapping_is_closed() {
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::Pinned,
+            )),
+            Some(DispatchedRunnerState::Pinned),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::Suspect,
+            )),
+            Some(DispatchedRunnerState::Suspect),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::Connected,
+            )),
+            Some(DispatchedRunnerState::Connected),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::RunnerLostBeforePin,
+            )),
+            Some(DispatchedRunnerState::RunnerLostBeforePin),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::RunnerLost,
+            )),
+            Some(DispatchedRunnerState::RunnerLost),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::Replaced,
+            )),
+            Some(DispatchedRunnerState::Replaced),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::WorkingDirectoryChanged,
+            )),
+            Some(DispatchedRunnerState::WorkingDirectoryChanged),
+        );
+        assert_eq!(
+            dispatched_runner_state_from_str(dispatched_runner_state_to_str(
+                DispatchedRunnerState::Abandoned,
+            )),
+            Some(DispatchedRunnerState::Abandoned),
+        );
+        assert_eq!(dispatched_runner_state_from_str("unknown"), None);
     }
 
     #[test]

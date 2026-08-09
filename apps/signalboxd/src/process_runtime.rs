@@ -170,6 +170,7 @@ use signalbox_process_protocol::{
     ReviewPassTerminalOutcome, ReviewRunLifecycle, ReviewRunSnapshot,
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
+    RunnerPlacementRevision as WireRunnerPlacementRevision,
     RunnerSandboxProfile as WireRunnerSandboxProfile,
     RunnerStateTransitionState as WireRunnerStateTransitionState, ServerFrame, ServerMessage,
     ServiceTier as WireServiceTier, SessionEvent, SessionMetadata as WireSessionMetadata,
@@ -13491,7 +13492,8 @@ impl ProcessUpdateEvent {
                 state,
             } => SessionEvent::RunnerStateTransition {
                 runner_id: wire_uuid(runner.into_uuid()),
-                placement_revision: CanonicalU64::new(placement_revision.get()),
+                placement_revision: WireRunnerPlacementRevision::try_new(placement_revision.get())
+                    .ok_or(ProcessConnectionError::EncodeInvariant)?,
                 sandbox_profile: match sandbox {
                     signalbox_domain::RunnerSandboxProfile::Ambient => {
                         WireRunnerSandboxProfile::Ambient
@@ -13957,6 +13959,7 @@ mod tests {
         FrameEncodeError, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
         ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor, ProtocolVersion,
         RejectionDetail, ReviewFindingInput, ReviewSeverity,
+        RunnerPlacementRevision as WireRunnerPlacementRevision,
         RunnerSandboxProfile as WireRunnerSandboxProfile,
         RunnerStateTransitionState as WireRunnerStateTransitionState, ServerFrame, ServerMessage,
         SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
@@ -17300,6 +17303,7 @@ mod tests {
             RunnerGeneration::try_from_u64(9).expect("the fixture revision is positive");
         let working_directory = RunnerWorkingDirectory::try_new("workspace/project".to_owned())
             .expect("the fixture directory is bounded exact text");
+        let expected_working_directory = working_directory.as_str().to_owned();
         let update =
             ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::RunnerStateTransition {
                 runner,
@@ -17314,9 +17318,10 @@ mod tests {
             update.wire().expect("the fixture event is representable"),
             SessionEvent::RunnerStateTransition {
                 runner_id: CanonicalUuid::from_uuid(runner.into_uuid()),
-                placement_revision: CanonicalU64::new(placement_revision.get()),
+                placement_revision: WireRunnerPlacementRevision::try_new(placement_revision.get(),)
+                    .expect("the fixture placement revision is positive"),
                 sandbox_profile: WireRunnerSandboxProfile::WorkspaceRestricted,
-                working_directory: Some("workspace/project".to_owned()),
+                working_directory: Some(expected_working_directory),
                 state: WireRunnerStateTransitionState::WorkingDirectoryChanged,
             }
         );
