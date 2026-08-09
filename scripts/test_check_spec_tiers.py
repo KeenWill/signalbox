@@ -254,6 +254,66 @@ class SpecTierCheckerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_tier_heading_below_level_three_fails(self) -> None:
+        """A tier label binds at one depth, whatever it is nested under.
+
+        Nested deeper, the heading was swallowed into the enclosing section's
+        body and read as that section's tier — so deferred prose could be
+        classified committed purely by position.
+        """
+        result = check_config(
+            "# Configuration\n\n"
+            "## Deliveries\n\n"
+            "Opening prose.\n\n"
+            "### Committed unimplemented functionality — pools\n\n"
+            "No present composition parses a pool.\n\n"
+            "#### Deferred — headroom\n\n"
+            "Routed to open questions.\n"
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("declares a tier at depth 4", result.stdout)
+
+    def test_untiered_heading_below_level_three_passes(self) -> None:
+        """Depth is constrained for tier labels only, not topic headings."""
+        result = check_config(
+            "# Configuration\n\n"
+            "## Deliveries\n\n"
+            "Opening prose.\n\n"
+            "### Committed unimplemented functionality — pools\n\n"
+            "No present composition parses a pool.\n\n"
+            "#### The file delivery\n\n"
+            "Its grammar.\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_future_marker_in_a_list_item_fails(self) -> None:
+        """A contract stated as a list item still opens its sentence.
+
+        The marker required column zero or a preceding sentence end, so `- No
+        present composition ...` was invisible — and these pages state a great
+        deal in lists.
+        """
+        result = check_config(
+            "# Configuration\n\n"
+            "## Deliveries\n\n"
+            "- No present composition parses a pool.\n"
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("assigns behavior to a future change", result.stdout)
+
+    def test_mid_sentence_absence_in_a_list_item_passes(self) -> None:
+        """Stripping the marker must not make the rule cry wolf in lists."""
+        result = check_config(
+            "# Configuration\n\n"
+            "## Deliveries\n\n"
+            "- A historical call with no present usage axis keeps its value.\n"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_missing_enrolled_page_fails(self) -> None:
         result = run_checker({CONFIG_PAGE: "# Configuration\n"})
 

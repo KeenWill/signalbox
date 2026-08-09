@@ -1687,13 +1687,13 @@ without renumbering the rest.
 
 The five admitted actions are:
 
-| Action               | Effect when its trigger fires for a member                                                                                                                 |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `stay`               | The member keeps the session. A failure terminalizes as it would with no pool.                                                                             |
-| `switch_next_turn`   | A failure terminalizes as it would with no pool; low headroom does not fail or replace the current turn. The next turn's preparation excludes this member. |
-| `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md#availability-successor-calls)).      |
-| `avoid_new_sessions` | Sessions with a prior completed call through the member keep it; preparation for a session without one on this pool excludes it.                           |
-| `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an operator clears it.                                               |
+| Action               | Effect when its trigger fires for a member                                                                                                                                                                                                                                                                            |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stay`               | The member keeps the session. A failure terminalizes as it would with no pool.                                                                                                                                                                                                                                        |
+| `switch_next_turn`   | A failure terminalizes as it would with no pool; low headroom does not fail or replace the current turn. The next turn's preparation excludes this member.                                                                                                                                                            |
+| `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md#availability-successor-calls)).                                                                                                                                                                 |
+| `avoid_new_sessions` | Sessions with a prior completed call through the member keep it; preparation for a session without one on this pool excludes it.                                                                                                                                                                                      |
+| `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an explicit operator command clears it — or, where an adapter offers one, until a zero-cost probe that calls no model reports availability. Never by a timer and never by a restart; the clearing rule is stated in full below. |
 
 ### Committed unimplemented functionality — pool selection and trigger effects
 

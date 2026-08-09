@@ -150,6 +150,11 @@ TIER_FREE_SECTIONS = frozenset({"Open edges"})
 # hit.
 IMPLEMENTED_CELL = re.compile(r"\|\s*\*{0,2}implemented\b", re.IGNORECASE)
 
+# Leading list bullets, ordered-list numbering, and block-quote markers. These
+# are scaffolding, not prose: a sentence stated as a list item still opens the
+# sentence, so the markers come off before any sentence-initial rule runs.
+LIST_OR_QUOTE_PREFIX = re.compile(r"^\s*(?:>+\s*)?(?:[-*+]|\d+[.)])?\s*")
+
 FENCE = re.compile(r"^\s*(```|~~~)")
 
 
@@ -206,7 +211,16 @@ class Section:
         self.body: list[tuple[int, str]] = []
 
     def text(self) -> str:
-        return "\n".join(line for _, line in self.body).lower()
+        """The section's prose, with list and quote scaffolding removed.
+
+        A contract stated as a list item begins after `- `, so an absence
+        claim opening that item does not begin the line. Leaving the marker in
+        place made every sentence-initial rule blind to list form, and these
+        pages state a great deal in lists.
+        """
+        return "\n".join(
+            LIST_OR_QUOTE_PREFIX.sub("", line) for _, line in self.body
+        ).lower()
 
 
 def parse_sections(lines: list[tuple[int, str]]) -> list[list[Section]]:
@@ -259,14 +273,27 @@ def check_page(path: Path, failures: list[str]) -> None:
                 f"behind without moving"
             )
 
+    # A tier label binds at exactly one depth, and this scan covers every
+    # depth rather than only the ones the section grouping keeps. A
+    # `#### Deferred — ...` nested under an implemented `###` would otherwise
+    # be swallowed into that section's body and read as implemented purely
+    # because it was nested, which is the drift the heading rule exists to
+    # remove.
+    for number, line in lines:
+        parsed = heading_of(line)
+        if parsed is None:
+            continue
+        level, title = parsed
+        if tier_of(title) != TIER_IMPLEMENTED and level != 3:
+            failures.append(
+                f"{path}:{number}: heading {title!r} declares a tier at depth "
+                f"{level}. Tier sections are `###` and only `###`, so that every "
+                f"one of them is the same, narrowly addressable depth and none is "
+                f"classified by what it happens to be nested under"
+            )
+
     for group in parse_sections(lines):
         opening = group[0]
-        if opening.level <= 2 and opening.tier != TIER_IMPLEMENTED:
-            failures.append(
-                f"{path}:{opening.line}: `##` heading {opening.title!r} declares a "
-                f"tier. Tier sections are `###` so that every one of them is the "
-                f"same, narrowly addressable depth"
-            )
 
         highest = TIER_IMPLEMENTED
         highest_title = opening.title

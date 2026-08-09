@@ -631,11 +631,14 @@ Locks per transaction, in acquisition order:
   repository operation stores pool state, capacity reservations, or availability
   waits, so the credential-pool locks described in the rest of this bullet are
   the protocol its implementing child must follow, not a guarantee this build
-  provides. Credential-pool call preparation additionally locks the action head
-  of every member of the pinned policy it may select `FOR SHARE`, in
-  profile-reference byte order, immediately after the scheduler lock and before
-  it reads any exclusion state. It then locks every potentially selected bounded
-  profile's shared capacity row `FOR UPDATE`, in the same order, before reading
+  provides. This bullet states the acquisition order itself; which of these
+  locks each selection ending takes is the locks column of
+  [the credential-availability machine](credential-availability.md#the-credential-availability-machine).
+  Credential-pool call preparation additionally locks the action head of every
+  member of the pinned policy it may select `FOR SHARE`, in profile-reference
+  byte order, immediately after the scheduler lock and before it reads any
+  exclusion state. It then locks every potentially selected bounded profile's
+  shared capacity row `FOR UPDATE`, in the same order, before reading
   reservation counts. When `round_robin` decides among the first admitted
   priority's members, preparation next locks that immutable-policy-and-priority
   cursor row `FOR UPDATE` before reading the cursor, choosing a member, or

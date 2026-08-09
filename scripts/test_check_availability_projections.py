@@ -132,14 +132,14 @@ class TableTotalityTests(unittest.TestCase):
         result = check(blank_cell=(1, 2), placeholder="")
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("is empty for ending", result.stdout)
+        self.assertIn("renders empty for ending", result.stdout)
 
     def test_placeholder_cell_fails(self) -> None:
         """An em dash reads as filled and says nothing, which is the defect."""
         result = check(blank_cell=(3, 5), placeholder="—")
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("is empty for ending", result.stdout)
+        self.assertIn("renders empty for ending", result.stdout)
 
     def test_renamed_column_fails(self) -> None:
         columns = ("Outcome", "Turn phase") + COLUMNS[2:]
@@ -180,12 +180,19 @@ class TableTotalityTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
-    def test_a_genuine_extra_column_still_fails(self) -> None:
-        """The escape fix must not stop a real extra cell being caught."""
+    def test_a_stray_unescaped_pipe_still_fails(self) -> None:
+        """The escape fix must not stop a real stray pipe being caught.
+
+        GFM truncates a row wider than its header rather than rejecting it, so
+        the rendered table still has eight columns and the surplus cell's
+        content is silently discarded — worse than an extra column, and absent
+        from the parsed tokens, which is why the width comparison is taken
+        from the source.
+        """
         result = check(cell_text={(1, 2): "one | two"})
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("cells, not 8", result.stdout)
+        self.assertIn("silently discarded", result.stdout)
 
     def test_an_escaped_pipe_does_not_hide_an_empty_cell(self) -> None:
         result = check(
@@ -195,7 +202,32 @@ class TableTotalityTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("is empty for ending", result.stdout)
+        self.assertIn("renders empty for ending", result.stdout)
+
+    def test_renamed_outcome_fails(self) -> None:
+        """A rename must be caught, not only a reordering.
+
+        Comparing by containment let `not selected` satisfy `selected`, so the
+        checker reported a valid seven-ending partition while the declared
+        outcome was absent.
+        """
+        result = check(rows=("not selected",) + ROWS[1:])
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("compared by", result.stdout)
+
+    def test_cell_holding_only_an_html_comment_fails(self) -> None:
+        """The guarantee is over the rendering, not the source bytes."""
+        result = check(blank_cell=(2, 4), placeholder="<!-- TODO -->")
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("renders empty for ending", result.stdout)
+
+    def test_cell_holding_only_emphasis_fails(self) -> None:
+        result = check(blank_cell=(3, 5), placeholder="** **")
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("renders empty for ending", result.stdout)
 
     def test_missing_table_fails(self) -> None:
         result = run_checker(
@@ -314,6 +346,37 @@ class SoleOwnershipTests(unittest.TestCase):
                     "# Persistence\n\n"
                     "A `fail` pool consults `on_pool_exhausted`, as "
                     "`credential-availability.md` says.\n"
+                )
+            }
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_collapsed_reference_link_passes(self) -> None:
+        """`[label][]` is a navigable link and must satisfy the rule."""
+        result = check(
+            {
+                "docs/spec/persistence-protocol.md": (
+                    "# Persistence\n\n"
+                    "A `fail` pool consults `on_pool_exhausted` per "
+                    "[the machine][].\n\n"
+                    "[the machine]: credential-availability.md\n"
+                )
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_definition_inside_a_fence_does_not_satisfy(self) -> None:
+        """An example is not a definition, so the shortcut stays unresolved."""
+        result = check(
+            {
+                "docs/spec/persistence-protocol.md": (
+                    "# Persistence\n\n"
+                    "A `fail` pool consults `on_pool_exhausted` per [machine].\n\n"
+                    "```markdown\n"
+                    "[machine]: credential-availability.md\n"
+                    "```\n"
                 )
             }
         )
