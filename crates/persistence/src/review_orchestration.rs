@@ -26,7 +26,7 @@ use signalbox_domain::{
     ReviewPassId, ReviewPassRef, ReviewPolicy, ReviewPolicyVersion, ReviewRunEvidence, ReviewRunId,
     ReviewRunRef, ReviewTargetId, ReviewText,
 };
-use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
+use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     command_registry::REVIEW_ORCHESTRATION_KIND,
@@ -479,21 +479,19 @@ impl PostgresReviewOrchestrationStore {
     /// rollback releasing the locks it had already taken would queue behind
     /// that statement.
     ///
-    /// The remainder is measured once the connection is in hand, because
-    /// acquiring one is itself a wait against a saturated pool — long enough to
-    /// spend the budget the guard is about to be configured with. Measuring
-    /// before that wait installs a bound the caller has already outlived.
+    /// The remainder is not measured and then used: `statement_timeout` runs
+    /// from the moment its own statement begins, so any step landing between a
+    /// measurement and the acquisition pushes the server-side expiry past the
+    /// caller's deadline by that step's cost. Connection checkout and the
+    /// advisory-lock round trip were each such a step in turn. The bound is
+    /// therefore issued in the same statement as the acquisition it bounds,
+    /// leaving no gap for a later step to occupy.
     async fn try_admit_snapshot(
         &self,
         deadline: Instant,
     ) -> Result<Option<Transaction<'_, Postgres>>, ReviewOrchestrationStoreError> {
         let mut transaction = self.pool.begin().await?;
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            transaction.rollback().await?;
-            return Err(ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut);
-        }
-        bound_snapshot_guard(&mut transaction, remaining).await?;
+        bound_guard_idle_phase(&mut transaction).await?;
         let admitted: bool = sqlx::query_scalar(
             "SELECT pg_try_advisory_xact_lock(
                 hashtext('signalbox:review-orchestration'),
@@ -505,7 +503,12 @@ impl PostgresReviewOrchestrationStore {
             transaction.rollback().await?;
             return Ok(None);
         }
-        match sqlx::query(REVIEW_SNAPSHOT_LOCKS)
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            transaction.rollback().await?;
+            return Err(ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut);
+        }
+        match sqlx::raw_sql(AssertSqlSafe(bounded_lock_acquisition(remaining)))
             .execute(&mut *transaction)
             .await
         {
@@ -2014,36 +2017,42 @@ fn encode_disposition(
     }
 }
 
-/// Installs the guard transaction's own acquisition and lock-hold bounds.
+/// Renders the shared-lock acquisition with its own deadline in one statement.
 ///
-/// `statement_timeout` bounds the whole `LOCK TABLE` statement at
-/// `acquisition_bound`, which is what the caller has left of its own admission
-/// budget rather than a fresh one. It is a statement bound rather than a
-/// `lock_timeout` because the inventory takes 34 locks in one statement and
-/// PostgreSQL applies `lock_timeout` to each acquisition separately: waits that
-/// each stay under a per-lock deadline still accumulate, and the statement goes
-/// on holding every lock it has already taken while it waits for the next. Only
-/// a statement-wide deadline bounds what writers are actually blocked behind.
+/// `statement_timeout` bounds the whole `LOCK TABLE` statement rather than each
+/// lock within it. A `lock_timeout` would not: the inventory takes 34 locks in
+/// one statement and PostgreSQL applies that setting to each acquisition
+/// separately, so waits each staying under a per-lock deadline still
+/// accumulate, and the statement goes on holding every lock it has taken while
+/// it waits for the next.
 ///
-/// `idle_in_transaction_session_timeout` bounds the phase the guard spends idle
-/// while the loaders run on other connections — the database's own backstop,
-/// releasing the shared locks even when the daemon never reaches its rollback.
-///
-/// Both are set through `set_config`'s local form so the bounds stay bind
-/// parameters derived from the constants rather than a rendered statement that
-/// could drift from them.
-async fn bound_snapshot_guard(
-    transaction: &mut Transaction<'_, Postgres>,
-    acquisition_bound: Duration,
-) -> Result<(), ReviewOrchestrationStoreError> {
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true),
-                set_config('idle_in_transaction_session_timeout', $2, true)",
+/// The setting is issued with the acquisition instead of ahead of it because
+/// the timer starts when its statement starts. Installing the bound earlier
+/// means anything in between — a connection checkout, a round trip — is spent
+/// before the clock starts and pushes the server-side expiry that much past the
+/// caller's deadline. Rendering both together leaves no such gap to occupy, at
+/// the cost of one interpolated value: a millisecond count this module computed
+/// from a [`Duration`], never anything a caller supplied.
+fn bounded_lock_acquisition(bound: Duration) -> String {
+    format!(
+        "SET LOCAL statement_timeout = '{}';\n{REVIEW_SNAPSHOT_LOCKS}",
+        milliseconds(bound)
     )
-    .bind(milliseconds(acquisition_bound))
-    .bind(milliseconds(SNAPSHOT_GUARD_IDLE_TIMEOUT))
-    .execute(&mut **transaction)
-    .await?;
+}
+
+/// Bounds the phase the guard spends idle while the loaders run on other
+/// connections — the database's own backstop, releasing the shared locks even
+/// when the daemon never reaches its rollback.
+///
+/// This one is a fixed bound with no deadline to race, so it stays a bind
+/// parameter derived from the constant.
+async fn bound_guard_idle_phase(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), ReviewOrchestrationStoreError> {
+    sqlx::query("SELECT set_config('idle_in_transaction_session_timeout', $1, true)")
+        .bind(milliseconds(SNAPSHOT_GUARD_IDLE_TIMEOUT))
+        .execute(&mut **transaction)
+        .await?;
     Ok(())
 }
 
@@ -2686,7 +2695,7 @@ const fn corruption(detail: &'static str) -> ReviewOrchestrationStoreError {
 mod tests {
     use super::{
         Duration, REVIEW_SNAPSHOT_LOCKS, ReviewOrchestrationStoreError, SNAPSHOT_ADMISSION_TIMEOUT,
-        SNAPSHOT_GUARD_IDLE_TIMEOUT, SNAPSHOT_LOCK_PHASE_TIMEOUT,
+        SNAPSHOT_GUARD_IDLE_TIMEOUT, SNAPSHOT_LOCK_PHASE_TIMEOUT, bounded_lock_acquisition,
         bounded_snapshot_admission_with_timeout, bounded_snapshot_lock_phase_with_timeout,
         milliseconds,
     };
@@ -2745,6 +2754,26 @@ mod tests {
     fn a_sub_millisecond_bound_never_renders_as_the_disabled_zero() {
         assert_eq!(milliseconds(Duration::from_micros(1)), "1ms");
         assert_eq!(milliseconds(Duration::ZERO), "1ms");
+    }
+
+    /// The deadline and the acquisition it bounds travel as one statement.
+    ///
+    /// `statement_timeout` starts counting when its own statement starts, so
+    /// anything separating the two is spent before the clock starts and pushes
+    /// the server-side expiry past the caller's deadline. Splitting them again
+    /// is what this asserts against.
+    #[test]
+    fn the_lock_acquisition_carries_its_own_deadline() {
+        let acquisition = bounded_lock_acquisition(Duration::from_millis(1_234));
+
+        assert!(
+            acquisition.starts_with("SET LOCAL statement_timeout = '1234ms';"),
+            "the acquisition must install its own deadline first: {acquisition}"
+        );
+        assert!(
+            acquisition.ends_with(REVIEW_SNAPSHOT_LOCKS),
+            "the deadline must be followed by the inventory it bounds: {acquisition}"
+        );
     }
 
     #[test]
