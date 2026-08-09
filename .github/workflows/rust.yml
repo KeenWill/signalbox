@@ -44,6 +44,24 @@ jobs:
         run: python3 scripts/check_migration_versions.py
       - name: Check user vocabulary
         run: python3 scripts/check_user_vocabulary.py
+      # Two documentation gates that keep one restructuring from drifting back.
+      # An ungated documentation convention in this repository has been observed
+      # to drift within days, and both of these guard a shape that a reviewer
+      # otherwise has to rediscover one page-pair per round. The tier check is
+      # enrolled per page rather than corpus-wide: eleven pages still carry
+      # bold-prose tier labels, and enrolling one means restructuring it first.
+      - name: Check specification tiers
+        run: python3 scripts/check_spec_tiers.py
+      - name: Check credential-availability projections
+        run: python3 scripts/check_availability_projections.py
+      # Gates normally: the tree satisfies this today, so the step can only
+      # fail on a regression. Clippy enforces the panic denies but cannot see
+      # a member that opts out of inheriting them, which is the hole this
+      # closes. Reads `cargo metadata --no-deps` for the member set, which
+      # resolves no dependency graph and compiles nothing, so it belongs above
+      # the cache step with the other non-compiling checks.
+      - name: Check panic-gate coverage
+        run: python3 scripts/check_panic_gate.py
       # Report-only. The tree still violates the conventions this checker
       # decides, so the step publishes per-rule counts and can never fail the
       # workflow or gate a merge. Promoting a rule to blocking is a deliberate
@@ -74,8 +92,14 @@ jobs:
           exit "$status"
       - name: Test user vocabulary checker
         run: python3 scripts/test_check_user_vocabulary.py
+      - name: Test specification-tier checker
+        run: python3 scripts/test_check_spec_tiers.py
+      - name: Test credential-availability projection checker
+        run: python3 scripts/test_check_availability_projections.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
+      - name: Test panic-gate checker
+        run: python3 scripts/test_check_panic_gate.py
       # The checker's own tests gate normally: report-only describes what the
       # checker says about the tree, not whether the checker works.
       - name: Test style-rule checker
@@ -86,6 +110,16 @@ jobs:
         run: python3 scripts/test_postgres_integration_suites.py
       - name: Test the built-executable resolver
         run: python3 tooling/test_resolve_cargo_bin.py
+      # Runs here rather than in coverage.yml or swift.yml because it reads
+      # both of them: it extracts the jq programs those workflows embed and
+      # checks each against the Python summarizer that reads the same
+      # documents. Landing it in either workflow would leave the other's
+      # predicates tested only when that workflow happened to trigger, and
+      # neither triggers on a change to the summarizers alone. The runner image
+      # provides jq, which is also what lets those two workflows invoke it with
+      # no install step of their own.
+      - name: Test the coverage workflow predicates
+        run: python3 tooling/test_coverage_workflow_predicates.py
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check Markdown formatting
@@ -263,7 +297,7 @@ jobs:
           cache-on-failure: true
           key: postgres-integration
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -346,7 +380,20 @@ jobs:
       (${{ matrix.suite }} ${{ matrix.partition }}/${{ matrix.partitions }})
     needs: postgres-integration-build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Measured against the shards rather than guessed. Over 29-30 samples each,
+    # the three persistence shards take 7.35 / 7.43 / 7.33 minutes at the median
+    # and 7.72 at the p90 — balanced to within 1.4%, with the slowest of the
+    # three rotating run to run. There is no hot shard to rebalance away, so the
+    # only lever on headroom is this cap.
+    #
+    # Ten minutes did not leave room for the slow path. A shard whose tests
+    # actually fail runs about two minutes longer than a clean one (9.68m
+    # observed against a 7.4m median), so the cap sat within noise of exactly
+    # the runs whose results matter most — and a job the cap kills is reported
+    # as `cancelled`, which reads as an infrastructure problem and hides the
+    # test failure underneath it. Fifteen minutes is about twice the median,
+    # leaves the p90 at half the cap, and still bounds a genuinely hung job.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.postgres-integration-build.outputs.matrix) }}
@@ -359,7 +406,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive

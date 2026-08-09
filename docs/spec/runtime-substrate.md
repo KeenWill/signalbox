@@ -244,6 +244,53 @@ strings appear only as retained detail inside already-classified variants:
   terminal marker, stream protocol violation) and the partial facts observed
   before the loss.
 
+**Committed unimplemented functionality — provider non-acceptance evidence.** No
+present `TerminalEvidence` variant or `ProviderErrorEvidence` field proves that
+a provider rejected a request before accepting it, and no current adapter can
+authorize an availability successor. This proof is what separates the
+`successor` and `terminal` endings of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine);
+this page owns the evidence algebra that carries it. The implementing child must
+add a sealed typed proof alongside `ProviderError` for the exact
+quota-exhausted, rate-limited, and overloaded provider responses whose protocol
+semantics establish non-acceptance. Each adapter owns its exhaustive native
+mapping; the provider bridge preserves the proof without deriving it from
+`ProviderErrorKind`, status retryability, or native prose. Classification alone
+remains insufficient, and absence of the proof keeps the known failure terminal.
+This constraint adds no proof to the implemented evidence vocabulary above.
+
+The admitting condition is fixed here rather than left to that child, because
+the two readings differ in whether another provider call happens. A proof is
+admitted only when the adapter decoded its own documented error envelope and the
+decoded native token names one of the three causes in that adapter's exhaustive
+mapping — `rate_limit_error` or `overloaded_error` for Anthropic, and
+`rate_limit_exceeded`, `rate_limit_error`, or `insufficient_quota` for OpenAI.
+Every status-derived fallback carries no proof: a response whose body is absent,
+undecodable, or names a token the mapping does not cover keeps its
+status-classified kind and stays an ordinary terminal known failure. A native
+token that contradicts its status carries none either, and the existing
+credential-rejection precedence over a contradictory body is unchanged.
+
+The proof is further restricted to an error *response* — an error-status
+exchange whose body is that documented envelope, decoded before any stream
+began. An SSE error record never carries it, whatever native token it holds.
+Mid-stream and post-finish error records remain definitive `ProviderError`
+evidence exactly as specified below, but by the time one arrives the provider
+has demonstrably accepted the request and begun processing it: `message_start`,
+content, reported usage, or a finish token is already observed. Non-acceptance
+is precisely what such an exchange disproves, so attaching the proof there would
+authorize a second paid call for work the provider already did. An availability
+failure that arrives mid-stream therefore terminalizes the turn as any other
+known failure does, with no successor. Neither CLI adapter can supply the proof
+at all: each classifies from the rendered failure message by substring, which is
+exactly the native prose this contract already refuses as a derivation, and
+neither surfaces a structured native code its mapping could name. Admitting one
+under a CLI would need that CLI to expose a stable machine-readable
+discriminator first. The asymmetry is deliberate. An under-decoded rejection
+loses a substitution the deployment had configured, which costs one turn; a
+status-only or prose-derived inference that the provider did not act would
+authorize a second paid call on evidence the provider never gave.
+
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss
 in both direct HTTP adapters, never silently completed. A finish reason observed
@@ -688,16 +735,20 @@ redaction before any provider-controlled output leaves the crate. This future
 override does not weaken ambient mode's existing exclusion test.
 
 **Committed unimplemented functionality — Codex OAuth redaction.** OAuth
-delivery gives the adapter a daemon-minted access token in a scratch credential
-home rather than through the child environment. Before that token is written or
-the child starts, its implementing slice must seed the same exact-value
-redaction boundary with the raw token and JSON string representations whose
-escapes decode to that same token. Possible token prefixes are retained across
-stdout and stderr chunks, and all child-controlled text passes through that
-scrub before JSON decoding, truncation, debug rendering, observations, or
-durable evidence. Ambient-mode shape redaction remains defense in depth; it
-cannot replace exact-value redaction when preparation knows the token. Failure
-to install the scrub is a typed pre-spawn delivery failure.
+delivery gives the adapter a daemon-minted access token, the identity token
+issued with it, and the account metadata in a scratch credential home rather
+than through the child environment. Before anything is written or the child
+starts, its implementing slice must seed the same exact-value redaction boundary
+with *every* token placed in that home — not the access token alone — using each
+raw token and the JSON string representations whose escapes decode to that same
+token. The identity token is bearer material for the same account and the CLI
+reflects it, so seeding one and not the other leaks the other. Possible token
+prefixes are retained across stdout and stderr chunks, and all child-controlled
+text passes through that scrub before JSON decoding, truncation, debug
+rendering, observations, or durable evidence. Ambient-mode shape redaction
+remains defense in depth; it cannot replace exact-value redaction when
+preparation knows the token. Failure to install the scrub is a typed pre-spawn
+delivery failure.
 
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.

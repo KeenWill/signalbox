@@ -40,6 +40,10 @@ records, and wire messages remain distinct representations. The path-scoped
 session-placement wire and terminal-client surface were verified through PR #400
 (`agent/scoped-visibility-wiring`).
 
+The session-metadata last-writer actor inventory, its native and terminal-client
+projections, and the totality of the daemon projection that produces it are
+verified against this PR (`fix/review-read-snapshot-permit`).
+
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
 implemented in this tree. The version field remains required on every frame and
@@ -303,6 +307,93 @@ the client observed; an idle slot or a changed turn is a typed rejection rather
 than a retarget. Unknown delivery tags or members, explicit JSON null in place
 of a delivery object, and every other correlation of delivery with the nullable
 defaults member are malformed.
+
+### Credential-exclusion administration
+
+**Committed unimplemented functionality.** No present process request, server
+message, application command, or repository operation supplies this
+administrative surface; the implemented request inventory above remains closed
+and rejects it. The implementing stack must add an authorized
+`list_credential_exclusions { page_size, after }` read and one
+`clear_credential_exclusion` mutation carrying a user-global `command_id` and
+one closed `target` object:
+
+- `profile_quarantine { profile, record_generation }` names one non-OAuth
+  profile-wide quarantine;
+- `membership_exclusion { pool_policy_id, profile, record_generation }` names
+  one `avoid_new_sessions` exclusion; and
+- `session_displacement { session_id, pool_policy_id, profile, record_generation }`
+  names one `switch_next_turn` displacement; and
+- `chain_exclusion { session_id, turn_id, pool_policy_id, profile, predecessor_model_call_id }`
+  names the exact qualifying predecessor observation that excluded one member
+  from an availability-successor chain.
+
+The read lists every active non-OAuth exclusion the caller is authorized to
+administer as its exact closed target object, so the generation or predecessor
+correlation required by the clear mutation is observable even while another pool
+member remains usable. `page_size` is a canonical decimal string from 1 through
+100\. `after` is either null or one complete target object and is an exclusive
+keyset cursor. Results sort first by the closed target tags in the order above,
+then by each tagged target field's owned canonical order — UTF-8 bytes for
+configured names, UUID bytes for durable identities, and unsigned numeric order
+for generations. `credential_exclusion_page { exclusions, next_after }` returns
+no more than the requested count and uses null `next_after` only at the end.
+Clearing or creating an exclusion between page requests may change a traversal,
+so an operator needing one fresh inventory restarts from null. The read exposes
+only non-secret references and correlations.
+
+Both operations are authorized exactly as every other request on this transport
+is: reaching the owner-private socket is the authority. The process protocol has
+no authentication or authorization exchange, and socket filesystem access is the
+deployment boundary, so a connected client may enumerate and clear credential
+exclusions. Saying so explicitly is the point — an implementer must not read
+these operations as gated by an authority no contract defines, and a deployment
+must not read them as safer than the socket. No response code is reserved for a
+future authorization failure: client identity, authentication, authorization,
+and revocation are undecided
+([open questions](../open-questions.md#identity-credentials-and-resource-governance)),
+and preallocating one error's semantics would constrain that decision toward a
+trust boundary nobody has chosen. The slice that introduces an authorizing
+principal introduces its own denial response and its own existence-hiding rule
+with it.
+
+Every identity is a nonempty bounded configuration or durable identity already
+owned by the credential contract. `pool_policy_id` is the canonical lowercase,
+hyphenated UUID string of the daemon-minted immutable `PoolPolicyId`;
+persistence stores that UUID as the policy header's surrogate identity, and
+every request, receipt, snapshot, and event uses the same spelling. Each
+`record_generation` is a positive canonical decimal string. The mutation
+atomically marks only that exact active generation or predecessor correlation
+cleared. For a fresh command, the existence of a newer active generation *at the
+target's own exact scope* returns `stale_generation` before the named older
+generation is considered for `already_cleared`; an operator can therefore never
+mistake clearing historical evidence for clearing the current exclusion at that
+scope. The comparison is confined to that scope — the profile for
+`profile_quarantine`, the pool policy and profile for `membership_exclusion`,
+and the session, pool policy, and profile for `session_displacement` — because a
+newer generation elsewhere describes a different exclusion the operator did not
+name. Without that confinement a still-active target the listing API returned
+could not be cleared until every unrelated newer exclusion was cleared first,
+and a profile taking continuous triggers in another pool could block the
+requested repair indefinitely. A chain target whose named predecessor correlates
+with no retained record for that profile and scope, or whose retained record
+does not exactly match the named correlation, is `unknown_credential_exclusion`
+— as is any other target with no such record. An exact retained record that an
+earlier command already marked inactive is not unknown: it follows the
+`already_cleared` path below, so the idempotent repair returns one answer rather
+than depending on which command ran first. Equal `command_id` replay still
+returns its stored receipt before this current-state precedence is evaluated.
+OAuth quarantine rejects this mutation because only re-provisioning can clear
+it.
+
+Success returns `credential_exclusion_cleared { target, outcome }`, where
+`outcome` is `cleared` for the winning transition or `already_cleared` when a
+fresh command names that same inactive generation or predecessor correlation.
+The inactive record is retained so the latter result is durable. Equal
+`command_id` replay returns its original logical receipt before inspecting
+current state; structurally different reuse is the ordinary durable-command
+conflict. These rules give an indefinite `park` wait a concrete writer without
+making a model call or inventing adapter liveness evidence.
 
 The session-placement object is exactly `pathless {}`, `scoped { path }`, or
 `root_global_read { path, intent: "acknowledged" }`. A path is one through 64
@@ -1077,10 +1168,14 @@ and the value-bearing forms retain the unsupported value.
 unwritten snapshot has the empty non-archived metadata object and a null
 `last_writer`; an applied replacement always has a non-null last writer. A
 last-writer object has `updated_at_unix_micros` (canonical nonnegative decimal
-microseconds since the Unix epoch) and the closed actor object `user`. No
-non-user metadata writer is constructible through this boundary; additional
-actor variants require the later slice that introduces their constructing
-authority. Actor is provenance, not wire authentication or authorization.
+microseconds since the Unix epoch) and one closed actor object: `user`,
+`model { turn_id }`, `recovery`, or `tool { tool_request_id }`. That inventory
+is exactly the durable actor inventory, because the projection is total over
+what storage admits: `replace_session_metadata` on this boundary always writes
+the user actor, but the tool-facing replacement constructor writes a tool actor
+for the session-status tool, and a writer with no wire form would fail an
+otherwise valid read as an encode invariant rather than degrade a field. Actor
+is provenance, not wire authentication or authorization.
 
 `session_defaults_replaced` is the successful defaults write receipt. It echoes
 the complete installed defaults and names the exact successor epoch. An equal
@@ -1181,7 +1276,20 @@ execution names a request whose state is `awaiting_approval`, `denied`,
 `approved`, `prepared`, `closed`, or `attempt_ended`. `approved` means the
 proposal-ordered request has approval but no physical attempt yet. Durable equal
 replay is checked first against the exact stored operation and returns its
-original receipt without requiring a still-live execution attempt.
+original receipt without requiring a still-live execution attempt. The
+credential-administration operations this page adds extend that same closed
+inventory, as `rejected` details rather than new top-level codes: a
+`clear_credential_exclusion` rejection admits
+`unknown_credential_exclusion { target }`, carrying the exact closed target
+object the request named, and
+`stale_generation { target, current_record_generation }`, carrying that same
+target and the newer active generation at the target's own scope as a positive
+canonical decimal string. A `read_credential_pool_policy` rejection admits
+`unknown_pool_policy { session_id, turn_id, pool_policy_id }`. Each is a
+rejection detail because each names a refused precondition on an otherwise
+well-formed request, which is exactly what that closed set is for; none is a
+transport or framing fault, so none earns a top-level code.
+
 `spawn_session` additionally admits
 `delegation_spawn_conflict { tool_request_id }` for a non-equal replay and
 `delegated_child_identity_collision { child_session_id }` when the generated
@@ -1407,9 +1515,19 @@ runtime evidence because a valid snapshot has already begun. A follow request
 closes the spool immediately after transmitting the snapshot, before waiting for
 live events.
 
-Session-list, transcript-read, and follow-snapshot construction share bounded
-admission that reserves application-pool capacity for non-snapshot work. The
-exact reservation is owned by this contract.
+Every read that holds a pooled connection across more than one statement shares
+one bounded admission that reserves application-pool capacity for non-snapshot
+work. That is session-list, session-metadata-list, session-metadata-read,
+transcript-read, follow-snapshot, goal-read, imported-conversation-read, and
+conversation-list construction; the review target, run, finding, and
+finding-list reads, each of which spans a repeatable-read transaction; and the
+coherent review-orchestration snapshot, which draws two units rather than one.
+The session-metadata read is admitted on the same ground as the rest and not for
+its result size: it opens a transaction, fixes a repeatable-read snapshot,
+selects, and commits. The session-defaults read is the single-statement case; it
+returns its connection immediately and takes no admission. The exact reservation
+is owned by this contract, and every request states its admission class before
+dispatch, so no read verb reaches the pool by omission.
 
 Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 
@@ -2119,20 +2237,21 @@ usage errors before socket I/O, so every metadata-filter bound this page states
 reaches the user as a named diagnostic rather than a generic local encode
 failure. Each result is one line carrying the summary's session identity,
 archive state, defaults version, model selection, dangerous-tool posture,
-last-writer actor and timestamp, sorted comma-joined tags, and title. An
-unwritten metadata snapshot prints `last_writer=none`,
-`updated_at_unix_micros=none`, and empty tag and title values, which a present
-tag or title never is. A tag may itself contain the space that ends its field,
-the comma that separates it from a sibling, or the backslash that introduces an
-escape, so all three are escaped inside a tag exactly as a control code point
-is; every backslash in the tag field therefore opens an escape the client wrote,
-and the field decodes back to the exact tag set. The title is the line's last
-field, keeps its spaces, and is rendered to be read rather than decoded. When
-the page end names a continuation cursor, the client prints
-`next_after_session_id=<uuid>` to standard error after the results; a page is
-therefore never silently truncated, and that value is the next invocation's
-`--after`. The client also validates that a page never exceeds its requested
-limit.
+last-writer actor and timestamp, sorted comma-joined tags, and title. The actor
+prints as its wire kind — `user`, `model`, `recovery`, or `tool` — without the
+reference the kind carries, which the line has no field for. An unwritten
+metadata snapshot prints `last_writer=none`, `updated_at_unix_micros=none`, and
+empty tag and title values, which a present tag or title never is. A tag may
+itself contain the space that ends its field, the comma that separates it from a
+sibling, or the backslash that introduces an escape, so all three are escaped
+inside a tag exactly as a control code point is; every backslash in the tag
+field therefore opens an escape the client wrote, and the field decodes back to
+the exact tag set. The title is the line's last field, keeps its spaces, and is
+rendered to be read rather than decoded. When the page end names a continuation
+cursor, the client prints `next_after_session_id=<uuid>` to standard error after
+the results; a page is therefore never silently truncated, and that value is the
+next invocation's `--after`. The client also validates that a page never exceeds
+its requested limit.
 
 `conversations` is the separate verb for `list_conversations` and follows the
 same one-request, one-page discipline as `search`. `--title` is the exact
@@ -2477,6 +2596,86 @@ without adding a delimiter.
 
 The existing `signalbox-debug` binary is unchanged and remains a development
 harness, not a protocol client.
+
+### Credential-pool preparation failure
+
+**Committed unimplemented functionality.** No present event or transcript state
+admits this shape. This section is the wire-projection column of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine)
+for its `pre-call fail` ending; that table states which endings project to a
+terminal state and which to an active one. The implementing wire slice must add
+`failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
+as a distinct `transcript_turn.state` variant and
+`turn_credential_pool_exhausted { turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id, pool_policy_id, policy_members, members }`
+as its live event. It must also add
+`read_credential_pool_policy { session_id, turn_id, pool_policy_id }`. That read
+is admitted only when the caller may read the named session and its named turn
+references that exact immutable policy; mismatch is `unknown_pool_policy`. Its
+`credential_pool_policy { pool_policy_id, policy_members }` response loads and
+reconstitutes the policy header and ordered membership rows directly, rather
+than copying either failure projection. The two failure `members` arrays have
+identical nonempty content in frozen policy order. Both shapes additionally
+carry `policy_members`, the immutable policy's complete nonempty ordered array
+of profile references. It has the same length as `members`, and each evidence
+item's `profile` must equal the same-ordinal `policy_members` value. Each
+evidence item carries `profile`, required-nullable `reset_at_unix_ms`, and one
+closed `exclusion` object:
+
+- `profile_quarantine { record_generation }`;
+- `membership_exclusion { record_generation }`;
+- `session_displacement { record_generation }`; or
+- `chain_exclusion { predecessor_model_call_id }`.
+
+One member can satisfy several of these at once. The producer selects exactly
+one by the fixed precedence in which they are listed above, which is
+widest-scope-first: a profile-wide `profile_quarantine` outranks a
+`membership_exclusion` covering one membership across every session, which
+outranks a `session_displacement` covering one session, which outranks a
+`chain_exclusion` covering one successor chain within one turn. Two producers
+therefore cannot describe one exhaustion differently. `reset_at_unix_ms` is
+present only when every exclusion active for that member at the failure commit
+reported a reset, and is then the latest of them; any exclusion with no reset
+makes it null. A wake can consequently never be scheduled while an indefinite
+condition still bars the member. The narrower correlations the selected item
+omits are not lost: each remains an active durable record that
+[credential-exclusion administration](#credential-exclusion-administration)
+lists and clears by its own exact target.
+
+Generations and reset instants are positive canonical decimal strings;
+`pool_policy_id` uses the `PoolPolicyId` UUID spelling above, and every other
+identity uses its already-owned bounded wire spelling. The snapshot and event
+carry no credential bytes, path, provider prose, or current-configuration
+lookup. The client validates the nonempty `policy_members` inventory and its
+one-to-one order and identity equality with `members`, then requires the
+session-correlated policy read to return that same complete ordered inventory,
+before exposing the terminal state. A producer that omits or reorders evidence
+therefore cannot make its second event-local copy authoritative. Reconnect and
+live follow project the same typed cause rather than a generic failed turn.
+Configuration admission limits each profile and pool name to 256 UTF-8 bytes and
+each pool to 1,024 members, reserving enough of the 8 MiB frame for the complete
+duplicated failure evidence under worst-case JSON escaping; this projection is
+never paginated or truncated. Until the coordinated daemon-and-client slice
+lands, version one rejects both new variants and the policy read, and no present
+producer may terminalize a turn for this pre-call cause.
+
+**Committed unimplemented functionality — credential-availability projection.**
+No present request, event, transcript message, or closed turn-state object
+exposes an availability-successor chain or credential-availability wait — the
+`successor`, `contended-wait`, and `exhausted-wait` endings of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+whose wire-projection column this section owns. The predecessor, authorizing
+cause, selected profile, and wait evidence are themselves committed future
+storage — no present migration, repository operation, or reconstitution path
+supplies them — so a wire slice cannot project them until that storage child
+lands, and must then add a version-one shape together with its daemon and client
+consumers. That future slice must project a wait as an active state retaining
+the same turn and session slot, and must expose a completed successor chain
+without requiring a client to infer it from usage-row order. The
+runtime-and-storage child that first makes either wait reachable must include
+this coordinated wire slice; admitting `park` in static configuration alone does
+not make the state reachable. Until then, transcript snapshots continue to
+expose the existing per-call usage rows and final turn state only; no current
+client-visible claim is made for the committed storage evidence.
 
 ## Open edges
 

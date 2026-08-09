@@ -347,6 +347,18 @@ author_email = "signalbox@example.invalid"
 
 # Exact-name overrides are optional. Any composed tool omitted here retains its
 # existing permission default and session-blanket behavior.
+#
+# The execution tools are omitted deliberately and keep their compiled defaults:
+# unsandboxed_exec is AlwaysConfirm, sandboxed_exec is Confirm, and
+# cargo_diagnostics is Auto because its arguments select no program. Note that
+# the fixed Cargo passes still compile and run the workspace's own build
+# scripts, macros, and test binaries, so an automatic diagnostics call executes
+# workspace-supplied code inside the sandbox; set cargo_diagnostics = "human"
+# below for a deployment that will not accept that unattended.
+#
+# A session template that enables dangerous_tool_auto_approval turns the
+# sandboxed_exec confirmation into a session blanket; add
+# sandboxed_exec = "human" below to keep it parked for a person regardless.
 [tool_approval_postures]
 web_fetch = "human"
 web_search = "human"

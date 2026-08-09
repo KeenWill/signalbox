@@ -23,22 +23,24 @@ use signalbox_application::{
     ImportedConversationIdGenerator, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
     InProcessToolDispatchGate, ModelCallCredentialReference, ModelCallExecutionOutcome,
     ModelCallExecutionService, ModelCallInputTokenCount, ModelCallInputTokenCounter, NoToolCatalog,
-    OperatorFailureClass, PreparedModelOperation, SchedulerLoop, SchedulerLoopExit,
+    OperatorFailureClass, PreparedModelOperation, ReplaceSessionMetadataOutcome,
+    ReplaceSessionMetadataRequest, ReplaceSessionMetadataService, SchedulerLoop, SchedulerLoopExit,
     ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, UuidV7ModelCallExecutionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    ActiveTurnPhase, AssistantResponsePart, AssistantText, ContextCompactionId,
+    ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, ContextCompactionId,
     ContextCompactionTokenUsage, ContextFrontierId, DirectModelSelection, DurableCommandId,
     FailedModelCallTurnIdentities, ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship, ImportedTranscriptEntryId, InitialToolApproval, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments, ProviderModelIdentity,
-    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, ToolCallProposal, ToolName, ToolRequestId,
-    ToolResponsePartIdentity, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
+    ReplaceSessionMetadataResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SessionMetadataContent, ToolCallProposal, ToolName, ToolRequestId, ToolResponsePartIdentity,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
 };
 use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeModelCallProvider};
 use signalbox_model_runtime::{
@@ -59,6 +61,7 @@ use signalbox_persistence::{
     local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     scheduler::PostgresEligibilitySweep,
+    session_metadata::SessionMetadataRepository,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
 };
@@ -2522,6 +2525,128 @@ async fn s01_inv033_reads_initial_metadata_projection() -> Result<(), Box<dyn Er
     assert_eq!(*session_id, first_session);
     assert_eq!(metadata, &SessionMetadata::empty());
 
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-033: a durable snapshot whose last writer is tool execution projects onto
+/// both metadata read surfaces. The tool-facing replacement constructor is
+/// production-registered, so this row shape exists in ordinary operation; a
+/// missing wire projection would fail the read as an encode invariant, which is
+/// fatal to the daemon and repeats on every later read of the same row.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv033_reads_back_tool_written_metadata() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session = create_alias_session(&mut connection).await?;
+    let tool_request = ToolRequestId::from_uuid(Uuid::now_v7());
+
+    let replacement = SessionMetadataContent::try_new(
+        Some(String::from("Status from the tool")),
+        vec![String::from("automated")],
+        Vec::new(),
+        false,
+    )
+    .map_err(|error| io::Error::other(format!("metadata fixture is invalid: {error:?}")))?;
+    let write = ReplaceSessionMetadataRequest::try_new_for_tool(
+        DurableCommandId::from_uuid(Uuid::now_v7()),
+        SessionId::from_uuid(session.into_uuid()),
+        tool_request,
+        replacement,
+    )?;
+    let mut writer =
+        ReplaceSessionMetadataService::new(SessionMetadataRepository::new(runtime.pool.clone()));
+    let ReplaceSessionMetadataOutcome::Recorded(ReplaceSessionMetadataResult::Applied(applied)) =
+        writer.execute(write).await?
+    else {
+        panic!("fixture expected the tool replacement to apply");
+    };
+    assert_eq!(
+        applied.snapshot().last_writer().map(|last| last.actor()),
+        Some(Actor::Tool {
+            request: tool_request,
+        })
+    );
+
+    connection
+        .request(
+            11,
+            ClientRequest::ReadSessionMetadata {
+                session_id: session,
+            },
+        )
+        .await?;
+    let read = response_within(&mut connection).await?;
+    let ServerMessage::SessionMetadata {
+        last_writer: Some(last_writer),
+        ..
+    } = read.message()
+    else {
+        panic!(
+            "fixture expected tool-written metadata, got {:?}",
+            read.message()
+        );
+    };
+    assert_eq!(
+        last_writer.actor(),
+        MetadataActor::Tool {
+            tool_request_id: CanonicalUuid::from_uuid(tool_request.into_uuid()),
+        }
+    );
+
+    connection
+        .request(
+            12,
+            ClientRequest::ListSessionMetadata {
+                required_tags: Vec::new(),
+                title_contains: None,
+                include_archived: false,
+                page_size: CanonicalU64::new(50),
+                after_session_id: None,
+            },
+        )
+        .await?;
+    let page_start = response_within(&mut connection).await?;
+    assert!(matches!(
+        page_start.message(),
+        ServerMessage::SessionMetadataPageStart {}
+    ));
+    let summary = response_within(&mut connection).await?;
+    let ServerMessage::SessionMetadataSummary {
+        last_writer: Some(listed_writer),
+        ..
+    } = summary.message()
+    else {
+        panic!(
+            "fixture expected the tool-written summary, got {:?}",
+            summary.message()
+        );
+    };
+    assert_eq!(listed_writer.actor(), last_writer.actor());
+    let page_end = response_within(&mut connection).await?;
+    assert!(matches!(
+        page_end.message(),
+        ServerMessage::SessionMetadataPageEnd { .. }
+    ));
+
+    // The daemon survives both reads: a later request on a fresh connection is
+    // still served, which a fatal encode invariant would have prevented.
+    let mut later = Connection::connect(runtime.socket()).await?;
+    later
+        .request(
+            13,
+            ClientRequest::ReadSessionMetadata {
+                session_id: session,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut later).await?.message(),
+        ServerMessage::SessionMetadata { .. }
+    ));
+
+    drop(later);
     drop(connection);
     runtime.stop().await
 }
