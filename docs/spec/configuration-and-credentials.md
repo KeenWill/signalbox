@@ -1011,29 +1011,29 @@ Two `codex_home` profiles may not resolve to the same identity even when their
 lexically normalized paths differ. The daemon repeats that no-symlink walk
 before every invocation and requires the same identity; replacement or aliasing
 is a typed pre-send credential-configuration failure and starts no child. That
-walk runs in off-transaction capability preparation, after the reservation and
-the call's `Prepared` record have committed — not before them. Why that order:
-the member and its reservation are chosen atomically under the capacity locks,
-so doing the walk first would decide against exclusion and capacity facts that
-the selecting transaction may then contradict, while doing it inside that
-transaction would hold a database transaction across filesystem I/O, which
+walk runs in off-transaction capability preparation, after the call's `Prepared`
+record has committed and before the child is spawned — never inside the
+selecting transaction, because that would hold a database transaction across
+filesystem I/O, which
 [staged execution](model-call-execution.md#staged-execution) forbids. A mismatch
-therefore fails the call in preparation and releases its reservation through the
-ordinary guarded pre-send closure, exactly as a spawn failure does. It exists so
-a deployment can point the daemon at a login an operator already established
-interactively, provisioning nothing. Concurrent invocations against one such
-profile are admitted by default, matching how the CLI is ordinarily used. The
-store has no cross-process file locking, but the CLI re-reads it immediately
-before refreshing and adopts a token another process wrote rather than
-refreshing again, so the residual race is two processes crossing the refresh
-threshold within one token-exchange round trip — narrow, because a process
-refreshes about once per access-token lifetime. When it does fire the
-authorization is invalidated and the profile quarantines; recovery is the
-ordinary re-provisioning an operator already performs, and the pool fails over
-meanwhile. A deployment preferring not to carry that risk sets the optional
-bound, which is unbounded when absent. The knob exists because the tradeoff is a
-deployment's to make and code cannot observe which side of it a given operator
-is on.
+fails the call in preparation and starts no child. The child that adds capacity
+reservations places the walk after the reservation too, and releases it through
+the ordinary guarded pre-send closure exactly as a spawn failure does; on this
+build there is no reservation to release, so the walk's only ordering constraint
+is the transaction boundary above. It exists so a deployment can point the
+daemon at a login an operator already established interactively, provisioning
+nothing. Concurrent invocations against one such profile are admitted by
+default, matching how the CLI is ordinarily used. The store has no cross-process
+file locking, but the CLI re-reads it immediately before refreshing and adopts a
+token another process wrote rather than refreshing again, so the residual race
+is two processes crossing the refresh threshold within one token-exchange round
+trip — narrow, because a process refreshes about once per access-token lifetime.
+When it does fire the authorization is invalidated and the profile quarantines;
+recovery is the ordinary re-provisioning an operator already performs, and the
+pool fails over meanwhile. A deployment preferring not to carry that risk sets
+the optional bound, which is unbounded when absent. The knob exists because the
+tradeoff is a deployment's to make and code cannot observe which side of it a
+given operator is on.
 
 Two `codex_home` profiles must name independently provisioned logins, and that
 is an operator-established precondition rather than something the daemon
@@ -1336,25 +1336,41 @@ policy: either one quarantines the profile unconditionally as specified above.
 
 `switch_now` is further admitted only where the pool's adapter can supply the
 typed non-acceptance proof for that exact trigger's cause. Every pool's members
-already agree on one adapter, and
-[runtime-substrate](runtime-substrate.md#terminal-evidence) admits that proof
-only from a decoded native error envelope naming a cause in that adapter's own
-exhaustive mapping — so the check is per adapter *and* per trigger, not once per
-adapter. In this build that admits exactly `on_rate_limited` and `on_overloaded`
-for an `anthropic` pool, and `on_rate_limited` and `on_quota_exhausted` for an
-`openai` pool. `on_quota_exhausted` under `anthropic` and `on_overloaded` under
-`openai` are typed startup failures because those adapters' mappings carry no
-native token for those causes and can reach them only by status-derived
-fallback, which carries no proof. Neither `claude_cli` nor `codex_cli` exposes a
-native envelope at all — both classify from rendered failure prose — so
-`switch_now` on a CLI-adapter pool is rejected for all three triggers. Why
-reject rather than accept and ignore: a configured `switch_now` that can never
-fire reads as failover the deployment does not have, and every such response
-would terminalize exactly as `stay` does while the document claims otherwise.
-This is the same fail-closed admission rule that rejects
-`headroom_reserve_percent` and `least_used` below, for the same reason. The keys
-stay in the grammar so that an adapter gaining a native token for a cause admits
-that pair with no configuration change.
+already agree on one adapter, so the check is per adapter *and* per trigger, not
+once per adapter.
+
+Two conditions make a response carry that proof, and both are stated here rather
+than by reference, because a successor authorized without either is a second
+paid call for a request the provider may already have performed. First, the
+adapter must have decoded its own documented error envelope and the decoded
+native token must name that cause in the adapter's exhaustive mapping; a
+status-derived fallback carries no proof. Second — and this is what the token
+alone does not establish — the response must be a *pre-stream error response*:
+an error-status exchange whose body is that envelope, decoded before any stream
+began. **An SSE error record never carries the proof, whatever native token it
+holds.** Both in-repository stream decoders classify a mid-stream `error` record
+through the same native-token mapping they use for an error response, so the
+token is identical; what differs is that by the time such a record arrives,
+`message_start`, content, reported usage, or a finish token has already been
+observed, and the provider has demonstrably accepted and begun processing the
+request. Non-acceptance is exactly what that disproves. A mid-stream or
+post-finish availability failure therefore stays an ordinary terminal known
+failure and authorizes no successor. In this build that admits exactly
+`on_rate_limited` and `on_overloaded` for an `anthropic` pool, and
+`on_rate_limited` and `on_quota_exhausted` for an `openai` pool.
+`on_quota_exhausted` under `anthropic` and `on_overloaded` under `openai` are
+typed startup failures because those adapters' mappings carry no native token
+for those causes and can reach them only by status-derived fallback, which
+carries no proof. Neither `claude_cli` nor `codex_cli` exposes a native envelope
+at all — both classify from rendered failure prose — so `switch_now` on a
+CLI-adapter pool is rejected for all three triggers. Why reject rather than
+accept and ignore: a configured `switch_now` that can never fire reads as
+failover the deployment does not have, and every such response would terminalize
+exactly as `stay` does while the document claims otherwise. This is the same
+fail-closed admission rule that rejects `headroom_reserve_percent` and
+`least_used` below, for the same reason. The keys stay in the grammar so that an
+adapter gaining a native token for a cause admits that pair with no
+configuration change.
 
 **Committed unimplemented functionality — pool-based preparation.** No present
 preparation path resolves a pool or selects a member. Configuration parsing
