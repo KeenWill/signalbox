@@ -1617,6 +1617,7 @@ mod tests {
     }
 
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct ListedBridgeResult {
         tools: Vec<ListedBridgeTool>,
     }
@@ -1676,6 +1677,7 @@ mod tests {
     const SYNTHETIC_BRIDGE_TOOL_SCHEMA: &str =
         r#"{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}"#;
     const SYNTHETIC_UNMODELED_BRIDGE_TOOL_TITLE: &str = "Synthetic unmodeled title";
+    const SYNTHETIC_MCP_NEXT_CURSOR: &str = "synthetic-next-page";
     const SYNTHETIC_MCP_SERVER_NAME: &str = "synthetic";
     const SYNTHETIC_MCP_IGNORED_ARGUMENT: &str = "ready path";
 
@@ -4296,6 +4298,21 @@ done
                     .expect("the synthetic bridge schema is valid JSON"),
                     "title": SYNTHETIC_UNMODELED_BRIDGE_TOOL_TITLE,
                 }]
+            }
+        })
+        .to_string();
+
+        assert!(serde_json::from_str::<ListedBridgeResponse>(&response).is_err());
+    }
+
+    #[test]
+    fn raw_list_response_rejects_pagination_metadata() {
+        let response = serde_json::json!({
+            "jsonrpc": MCP_JSON_RPC_VERSION,
+            "id": MCP_LIST_TOOLS_REQUEST_ID,
+            "result": {
+                "tools": [],
+                "nextCursor": SYNTHETIC_MCP_NEXT_CURSOR,
             }
         })
         .to_string();
