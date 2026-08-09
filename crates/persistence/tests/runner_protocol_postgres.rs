@@ -27,10 +27,10 @@ use signalbox_domain::{
     RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SubmitInput, SubmitInputRejectedResult, SubmitInputResult,
-    ToolAdmissibleLoci, ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    SessionRunnerPlacementRequest, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
@@ -53,7 +53,7 @@ use signalbox_persistence::{
     },
     session_credentials::{SessionCredentialPin, SessionModelCredential},
     start_eligible_turn::StartEligibleTurnRepository,
-    submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository},
+    submit_input::SubmitInputRepository,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -850,6 +850,14 @@ async fn insert_session_for(pool: &PgPool, session: Uuid) -> Result<(), sqlx::Er
     sqlx::query("ALTER TABLE session ENABLE TRIGGER ALL")
         .execute(pool)
         .await?;
+    sqlx::query(
+        "INSERT INTO session_scheduler (session_id)
+         VALUES ($1)
+         ON CONFLICT (session_id) DO NOTHING",
+    )
+    .bind(session)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1284,29 +1292,26 @@ async fn append_runner_lost_projection(
     transaction.commit().await
 }
 
-async fn append_runner_lost_with_interrupted_attempt_projection(
+async fn mark_interrupted_attempt_ambiguous(
     pool: &PgPool,
-    session: SessionId,
     interrupted_tool_attempt: ToolAttemptId,
 ) -> Result<(), sqlx::Error> {
-    let mut transaction = pool.begin().await?;
-    append_runner_lost_without_advancing_head(
-        &mut transaction,
-        session,
-        Some("connection"),
-        None,
-        Some(interrupted_tool_attempt),
-    )
-    .await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
     sqlx::query(
-        "UPDATE runner_current_session_placement
-            SET event_ordinal = event_ordinal + 1
-          WHERE session_id = $1",
+        "UPDATE tool_attempt
+            SET effect_class = 'external_effect', state_kind = 'terminal',
+                terminal_disposition_kind = 'ambiguous', error_kind = NULL
+          WHERE attempt_id = $1",
     )
-    .bind(session.into_uuid())
-    .execute(&mut *transaction)
+    .bind(interrupted_tool_attempt.into_uuid())
+    .execute(pool)
     .await?;
-    transaction.commit().await
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 async fn insert_runner_recovery_turn(
@@ -1320,6 +1325,7 @@ async fn insert_runner_recovery_turn(
 ) -> Result<(), sqlx::Error> {
     let starting_frontier =
         ContextFrontierId::from_uuid(uuid(turn.into_uuid().as_u128() + RELATED_IDENTITY_OFFSET));
+    let yielded_attempt = uuid(turn.into_uuid().as_u128() + RELATED_IDENTITY_OFFSET);
     sqlx::query(
         "INSERT INTO context_frontier
             (owning_session_id, context_frontier_id, member_count)
@@ -1331,6 +1337,9 @@ async fn insert_runner_recovery_turn(
     .await?;
     let mut transaction = pool.begin().await?;
     sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("ALTER TABLE turn_attempt DISABLE TRIGGER ALL")
         .execute(&mut *transaction)
         .await?;
     sqlx::query(
@@ -1361,6 +1370,21 @@ async fn insert_runner_recovery_turn(
     .execute(&mut *transaction)
     .await;
     inserted?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'ended', 'without_stop',
+                 'yielded_to_durable_wait')",
+    )
+    .bind(yielded_attempt)
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("ALTER TABLE turn_attempt ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
     transaction.commit().await?;
     sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
         .execute(pool)
@@ -1368,62 +1392,639 @@ async fn insert_runner_recovery_turn(
     Ok(())
 }
 
-async fn insert_runner_recovery_interrupt_rejection(
+struct InterruptedLossRecoveryFacts {
+    session: SessionId,
+    turn: TurnId,
+    runner: RunnerId,
+    placement_revision: RunnerGeneration,
+    placement_interrupted_tool_attempt: ToolAttemptId,
+    recovery_interrupted_tool_attempt: Option<ToolAttemptId>,
+    active_tool_round_call: ModelCallId,
+}
+
+async fn insert_runner_recovery_turn_with_interrupted_loss(
     pool: &PgPool,
-    command: DurableCommandId,
-    source_command: DurableCommandId,
-    active_turn: TurnId,
+    facts: InterruptedLossRecoveryFacts,
 ) -> Result<(), sqlx::Error> {
+    let starting_frontier = ContextFrontierId::from_uuid(uuid(
+        facts.turn.into_uuid().as_u128() + RELATED_IDENTITY_OFFSET,
+    ));
+    let yielded_attempt = uuid(facts.turn.into_uuid().as_u128() + RELATED_IDENTITY_OFFSET);
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(facts.session.into_uuid())
+    .bind(starting_frontier.into_uuid())
+    .execute(pool)
+    .await?;
     let mut transaction = pool.begin().await?;
+    append_runner_lost_without_advancing_head(
+        &mut transaction,
+        facts.session,
+        Some("connection"),
+        None,
+        Some(facts.placement_interrupted_tool_attempt),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = $1",
+    )
+    .bind(facts.session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("ALTER TABLE turn_attempt DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+         ENABLE TRIGGER turn_lifecycle_runner_recovery_is_complete",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_kind, origin_accepted_input_id,
+             acceptance_position, state_kind, start_lineage_kind,
+             starting_frontier_id, active_phase_kind,
+             active_tool_round_call_id, runner_recovery_runner_id,
+             runner_recovery_placement_revision,
+             runner_recovery_tool_attempt_id)
+         VALUES ($1, $2, 'delegation', NULL, 1, 'active',
+                 'first_in_session', $3, 'awaiting_runner_recovery',
+                 $4, $5, $6, $7)",
+    )
+    .bind(facts.turn.into_uuid())
+    .bind(facts.session.into_uuid())
+    .bind(starting_frontier.into_uuid())
+    .bind(facts.active_tool_round_call.into_uuid())
+    .bind(facts.runner.into_uuid())
+    .bind(Decimal::from(facts.placement_revision.get()))
+    .bind(
+        facts
+            .recovery_interrupted_tool_attempt
+            .map(ToolAttemptId::into_uuid),
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'ended', 'without_stop',
+                 'yielded_to_durable_wait')",
+    )
+    .bind(yielded_attempt)
+    .bind(facts.turn.into_uuid())
+    .bind(facts.session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("ALTER TABLE turn_attempt ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn insert_running_turn(
+    pool: &PgPool,
+) -> Result<(SessionId, TurnId, TurnAttemptId), Box<dyn Error>> {
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let attempt = TurnAttemptId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.turn + RELATED_IDENTITY_OFFSET,
+    ));
+    let selection = DirectModelSelection::from_uuid(uuid(0xa101));
+    let credentials = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+        "fixture-model-family",
+        "fixture-credential-reference",
+    )])
+    .expect("the fixture credential pin is valid");
+    let creation = CreateSession::new(
+        DurableCommandId::from_uuid(uuid(0xa102)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+    )
+    .prepare(session)
+    .expect("the fixture session creation is preparable");
+    CreateSessionRepository::new(pool.clone(), credentials)
+        .handle(creation)
+        .await?;
+    let starting_input = SubmitInput::new(
+        DurableCommandId::from_uuid(uuid(0xa103)),
+        session,
+        UserContent::try_text(String::from("runner recovery fixture"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            starting_input,
+            AcceptedInputId::from_uuid(uuid(0xa104)),
+            Some(turn),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa105)),
+                ContextFrontierId::from_uuid(uuid(0xa106)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xa107)),
+            |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xa108))),
+        )
+        .await?;
+    StartEligibleTurnRepository::new(pool.clone())
+        .handle(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa109)),
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa10a)),
+                ContextFrontierId::from_uuid(uuid(0xa10b)),
+                attempt,
+            ),
+        )
+        .await?;
+    Ok((session, turn, attempt))
+}
+
+async fn attach_continuing_tool_round_projection(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    turn_attempt: TurnAttemptId,
+    producing_call: ModelCallId,
+    request: ToolRequestId,
+    boundary: ContextFrontierId,
+) -> Result<(), sqlx::Error> {
+    let (starting_frontier, source_member_count): (Uuid, Decimal) = sqlx::query_as(
+        "SELECT lifecycle.starting_frontier_id, frontier.member_count
+               FROM turn_lifecycle AS lifecycle
+               JOIN context_frontier AS frontier
+                 ON frontier.owning_session_id = lifecycle.session_id
+                AND frontier.context_frontier_id = lifecycle.starting_frontier_id
+              WHERE lifecycle.session_id = $1 AND lifecycle.turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    let provider = uuid(0xa159);
+    let assistant_entry = uuid(producing_call.into_uuid().as_u128() + 2);
+    sqlx::raw_sql(
+        "ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;
+         ALTER TABLE model_call DISABLE TRIGGER ALL;
+         ALTER TABLE tool_round DISABLE TRIGGER ALL;
+         ALTER TABLE tool_request DISABLE TRIGGER ALL;
+         ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta DISABLE TRIGGER ALL;",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET pinned_provider_model_identity_id = $1
+          WHERE session_id = $2 AND turn_id = $3",
+    )
+    .bind(provider)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO model_call
+            (model_call_id, turn_id, session_id, turn_attempt_id,
+             selection_kind, direct_model_selection_id,
+             resolved_provider_model_identity_id, context_frontier_id,
+             credential_reference, state_kind, terminal_disposition_kind)
+         VALUES ($1, $2, $3, $4, 'direct', $5, $6, $7,
+                 'synthetic-runner-recovery-test', 'terminal', 'completed')",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn_attempt.into_uuid())
+    .bind(uuid(0xa101))
+    .bind(provider)
+    .bind(starting_frontier)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, $3, $4 + 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(boundary.into_uuid())
+    .bind(starting_frontier)
+    .bind(source_member_count)
+    .execute(pool)
+    .await?;
+    let inserted = sqlx::query(
+        "INSERT INTO tool_round
+            (producing_model_call_id, session_id, turn_id, boundary_kind,
+             boundary_frontier_id, response_part_count, request_count)
+         VALUES ($1, $2, $3, 'continuing', $4, 1, 1)",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(boundary.into_uuid())
+    .execute(pool)
+    .await;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ($1, $2, $3, $4, 0, 'inspect', 'json', '{}')
+         ON CONFLICT (request_id) DO NOTHING",
+    )
+    .bind(request.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(producing_call.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, denial_reason,
+             owner_command_id)
+         VALUES ($1, 'approve', 'policy_auto', NULL, NULL)",
+    )
+    .bind(request.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             producing_model_call_id, assistant_tool_request_id,
+             assistant_response_part_ordinal)
+         VALUES ($1, $2, 'assistant_tool_use', $3, $4, 0)",
+    )
+    .bind(session.into_uuid())
+    .bind(assistant_entry)
+    .bind(producing_call.into_uuid())
+    .bind(request.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, $3 + 1, $1, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(boundary.into_uuid())
+    .bind(source_member_count)
+    .bind(assistant_entry)
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL;
+         ALTER TABLE model_call ENABLE TRIGGER ALL;
+         ALTER TABLE tool_round ENABLE TRIGGER ALL;
+         ALTER TABLE tool_request ENABLE TRIGGER ALL;
+         ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL;
+         ALTER TABLE context_frontier ENABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta ENABLE TRIGGER ALL;",
+    )
+    .execute(pool)
+    .await?;
+    inserted?;
+    Ok(())
+}
+
+async fn append_denied_request_to_continuing_tool_round_projection(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    producing_call: ModelCallId,
+    request: ToolRequestId,
+    boundary: ContextFrontierId,
+) -> Result<(), sqlx::Error> {
+    let member_count: Decimal = sqlx::query_scalar(
+        "SELECT member_count
+           FROM context_frontier
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(boundary.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    let assistant_entry = uuid(request.into_uuid().as_u128() + RELATED_IDENTITY_OFFSET);
+    sqlx::raw_sql(
+        "ALTER TABLE tool_round DISABLE TRIGGER ALL;
+         ALTER TABLE tool_request DISABLE TRIGGER ALL;
+         ALTER TABLE decide_tool_request_command DISABLE TRIGGER ALL;
+         ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta DISABLE TRIGGER ALL;",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE tool_round
+            SET response_part_count = 2, request_count = 2
+          WHERE producing_model_call_id = $1",
+    )
+    .bind(producing_call.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ($1, $2, $3, $4, 1, 'inspect', 'json', '{}')",
+    )
+    .bind(request.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(producing_call.into_uuid())
+    .execute(pool)
+    .await?;
+    let command = uuid(request.into_uuid().as_u128() + (RELATED_IDENTITY_OFFSET * 2));
+    let mut decision = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         SELECT $1, command_kind, storage_version, transaction_timestamp()
-           FROM durable_command
-          WHERE command_id = $2",
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
     )
-    .bind(command.into_uuid())
-    .bind(source_command.into_uuid())
+    .bind(command)
+    .execute(&mut *decision)
+    .await?;
+    sqlx::query(
+        "INSERT INTO decide_tool_request_command
+            (command_id, command_kind, storage_version, request_id,
+             decision_kind, denial_reason, result_kind, rejection_kind,
+             result_earliest_undecided_request_id)
+         VALUES ($1, 'decide_tool_request', 1, $2, 'deny', NULL,
+                 'applied', NULL, NULL)",
+    )
+    .bind(command)
+    .bind(request.into_uuid())
+    .execute(&mut *decision)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, denial_reason,
+             owner_command_id)
+         VALUES ($1, 'deny', 'owner_command', NULL, $2)",
+    )
+    .bind(request.into_uuid())
+    .bind(command)
+    .execute(&mut *decision)
+    .await?;
+    decision.commit().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             producing_model_call_id, assistant_tool_request_id,
+             assistant_response_part_ordinal)
+         VALUES ($1, $2, 'assistant_tool_use', $3, $4, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(assistant_entry)
+    .bind(producing_call.into_uuid())
+    .bind(request.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE context_frontier
+            SET member_count = member_count + 1
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(boundary.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, $3 + 1, $1, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(boundary.into_uuid())
+    .bind(member_count)
+    .bind(assistant_entry)
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE tool_round ENABLE TRIGGER ALL;
+         ALTER TABLE tool_request ENABLE TRIGGER ALL;
+         ALTER TABLE decide_tool_request_command ENABLE TRIGGER ALL;
+         ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL;
+         ALTER TABLE context_frontier ENABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta ENABLE TRIGGER ALL;",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn convert_running_turn_to_delegated_runner_recovery(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    attempt: TurnAttemptId,
+    runner: RunnerId,
+    placement_revision: RunnerGeneration,
+) -> Result<ContextFrontierId, sqlx::Error> {
+    let spawning_request = uuid(0xa130);
+    let parent_session = uuid(FOREIGN_SESSION);
+    let parent_turn = uuid(0xa132);
+    let task_entry = uuid(0xa133);
+    let starting_frontier = ContextFrontierId::from_uuid(uuid(0xa134));
+    let selection = uuid(0xa101);
+    insert_session_for(pool, parent_session).await?;
+    let accepted_starting_frontier: Uuid = sqlx::query_scalar(
+        "SELECT starting_frontier_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_initial_task DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;
+         ALTER TABLE queued_input_origin DISABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta DISABLE TRIGGER ALL;",
+    )
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
-        "INSERT INTO submit_input_command
-            (command_id, command_kind, storage_version, session_id,
-             actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind, descendant_scope,
-             expected_active_turn_id, expected_defaults_version,
-             model_override_kind, replacement_model_kind,
-             replacement_direct_model_selection_id, replacement_model_alias_id,
-             result_kind, rejection_kind, result_session_id,
-             result_accepted_input_id, result_turn_id,
-             result_actual_active_turn_id, result_expected_active_turn_id,
-             result_expected_defaults_version, result_current_defaults_version,
-             result_unknown_alias_id, result_selected_defaults_version,
-             result_last_position, result_existing_interrupt_command_id)
-         SELECT
-             $1, command_kind, storage_version, session_id,
-             actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, 'interrupt', 'parent_alone',
-             $3, expected_defaults_version,
-             model_override_kind, replacement_model_kind,
-             replacement_direct_model_selection_id, replacement_model_alias_id,
-             'rejected',
-             'interrupt_unavailable_while_awaiting_runner_recovery',
-             result_session_id,
-             NULL, NULL,
-             $3, NULL,
-             NULL, NULL,
-             NULL, NULL,
-             NULL, NULL
-           FROM submit_input_command
-          WHERE command_id = $2",
+        "DELETE FROM context_frontier_delta
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
     )
-    .bind(command.into_uuid())
-    .bind(source_command.into_uuid())
-    .bind(active_turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(accepted_starting_frontier)
     .execute(&mut *transaction)
     .await?;
-    transaction.commit().await
+    sqlx::query(
+        "DELETE FROM context_frontier
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(accepted_starting_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "DELETE FROM semantic_transcript_entry
+          WHERE source_session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ($1, 1, 'spawned', 'tool_request', $2, $3, $1)",
+    )
+    .bind(spawning_request)
+    .bind(parent_session)
+    .bind(parent_turn)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind,
+             on_parent_stopped, on_parent_cancelled)
+         VALUES ($1, $2, $3, $4, 'background', NULL, NULL)",
+    )
+    .bind(spawning_request)
+    .bind(parent_session)
+    .bind(parent_turn)
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegated_task_spawning_tool_request_id)
+         VALUES ($1, $2, 'delegated_task', $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(task_entry)
+    .bind(spawning_request)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(starting_frontier.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(starting_frontier.into_uuid())
+    .bind(task_entry)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET origin_kind = 'delegation', origin_accepted_input_id = NULL,
+                starting_frontier_id = $1,
+                active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3
+          WHERE turn_id = $4 AND session_id = $5",
+    )
+    .bind(starting_frontier.into_uuid())
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement_revision.get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "DELETE FROM queued_input_origin
+          WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_initial_task
+            (spawning_tool_request_id, child_session_id, turn_id,
+             semantic_entry_id, admission_position, defaults_version,
+             requested_model_kind, requested_direct_model_selection_id,
+             frozen_model_kind, frozen_direct_model_selection_id, task_content)
+         VALUES ($1, $2, $3, $4, 1, 1,
+                 'direct', $5, 'direct', $5, $6)",
+    )
+    .bind(spawning_request)
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(task_entry)
+    .bind(selection)
+    .bind("delegated runner recovery fixture")
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE queued_input_origin ENABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_initial_task ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation ENABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta ENABLE TRIGGER ALL;
+         ALTER TABLE context_frontier ENABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(starting_frontier)
 }
 
 async fn append_runner_registration_loss_projection(
@@ -1448,6 +2049,99 @@ async fn append_runner_registration_loss_projection(
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await
+}
+
+async fn append_same_runner_replacement_projection(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, selector_capability_class,
+             directory_selection_kind, requested_working_directory,
+             requested_credential_profile_name, workspace_requirement_kind,
+             requested_repository_key, requested_sandbox_profile,
+             permission_override_count, state_kind, lost_runner_id,
+             loss_source_kind, pinned_runner_id,
+             pinned_working_directory, pinned_credential_profile_name,
+             registration_enrollment_id, registration_revision,
+             pinned_tool_count, workspace_repository_key,
+             workspace_working_directory, workspace_manifest_id,
+             workspace_placement_revision,
+             workspace_clone_url_digest, workspace_credential_profile_name,
+             workspace_sandbox_profile, workspace_relative_path,
+             workspace_recovery_kind, workspace_branch_name, workspace_revision,
+             credential_grant_runner_id,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision)
+         SELECT session_id, event_ordinal + 1, placement_revision + 1,
+                'runner_replaced', selector_kind, selector_runner_id,
+                selector_capability_class, directory_selection_kind,
+                requested_working_directory,
+                requested_credential_profile_name,
+                workspace_requirement_kind, requested_repository_key,
+                requested_sandbox_profile, permission_override_count,
+                'pinned', NULL, NULL, pinned_runner_id,
+                pinned_working_directory, pinned_credential_profile_name,
+                registration_enrollment_id, registration_revision,
+                pinned_tool_count, workspace_repository_key,
+                workspace_working_directory, workspace_manifest_id,
+                workspace_placement_revision,
+                workspace_clone_url_digest, workspace_credential_profile_name,
+                workspace_sandbox_profile, workspace_relative_path,
+                workspace_recovery_kind, workspace_branch_name,
+                workspace_revision, credential_grant_runner_id,
+                credential_grant_lineage_origin_ordinal,
+                credential_grant_revision + 1
+           FROM runner_session_placement_record
+          WHERE session_id = $1
+            AND event_ordinal = (
+                SELECT event_ordinal
+                  FROM runner_current_session_placement
+                 WHERE session_id = $1
+            )",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_tool
+         SELECT session_id, event_ordinal + 1, tool_name, runner_required
+           FROM runner_session_placement_tool
+          WHERE session_id = $1
+            AND event_ordinal = (
+                SELECT event_ordinal
+                  FROM runner_current_session_placement
+                 WHERE session_id = $1
+            )",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_permission_override
+         SELECT session_id, event_ordinal + 1, tool_name, permission_kind
+           FROM runner_session_placement_permission_override
+          WHERE session_id = $1
+            AND event_ordinal = (
+                SELECT event_ordinal
+                  FROM runner_current_session_placement
+                 WHERE session_id = $1
+            )",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn append_runner_lost_before_pin_projection(
@@ -1521,12 +2215,11 @@ async fn append_runner_lost_before_pin_projection(
     transaction.commit().await
 }
 
-async fn append_pre_pin_replacement_projection(
-    pool: &PgPool,
+async fn append_pre_pin_replacement_without_advancing_head(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session: SessionId,
     successor: RunnerId,
 ) -> Result<(), sqlx::Error> {
-    let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO runner_session_placement_record
             (session_id, event_ordinal, placement_revision, event_kind,
@@ -1566,7 +2259,7 @@ async fn append_pre_pin_replacement_projection(
     )
     .bind(session.into_uuid())
     .bind(successor.into_uuid())
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?;
     sqlx::query(
         "INSERT INTO runner_session_placement_permission_override
@@ -1580,8 +2273,18 @@ async fn append_pre_pin_replacement_projection(
             )",
     )
     .bind(session.into_uuid())
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?;
+    Ok(())
+}
+
+async fn append_pre_pin_replacement_projection(
+    pool: &PgPool,
+    session: SessionId,
+    successor: RunnerId,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    append_pre_pin_replacement_without_advancing_head(&mut transaction, session, successor).await?;
     sqlx::query(
         "UPDATE runner_current_session_placement
             SET event_ordinal = event_ordinal + 1
@@ -3846,6 +4549,88 @@ async fn s32_inv044_checked_runner_replacement_requires_a_live_successor_connect
     Ok(())
 }
 
+/// INV-044: the relational replacement shape preserves the checked future
+/// same-runner recovery reserved exclusively for registration-triggered loss.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_registration_loss_admits_same_runner_replacement_shape()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the credentialless registration pins the placement");
+    store.store_pin(&pin, &registration).await?;
+    append_runner_registration_loss_projection(&pool, pin.placement.session()).await?;
+    let mut replacement = pool.begin().await?;
+    append_same_runner_replacement_projection(&mut replacement, pin.placement.session()).await?;
+    replacement.commit().await?;
+    let loaded_replacement = store
+        .load_placement(pin.placement.session())
+        .await?
+        .expect("the committed same-runner replacement remains loadable");
+
+    assert_eq!(
+        loaded_replacement.placement().state(),
+        pin.placement.state()
+    );
+    assert_eq!(
+        loaded_replacement.placement().request(),
+        pin.placement.request()
+    );
+    assert_eq!(loaded_replacement.registration(), Some(&registration));
+    assert_eq!(loaded_replacement.grant(), None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: connection loss retains the different-runner replacement rule.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_connection_loss_rejects_same_runner_replacement_shape()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    append_runner_lost_projection(&pool, pin.placement.session()).await?;
+    let mut malformed = pool.begin().await?;
+    let rejected =
+        append_same_runner_replacement_projection(&mut malformed, pin.placement.session())
+            .await
+            .expect_err("only registration loss may retain the runner identity");
+
+    assert_check_violation(rejected);
+    drop(malformed);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s30_inv044_first_placement_record_is_created_unpinned() -> Result<(), Box<dyn Error>> {
@@ -4694,6 +5479,1555 @@ async fn s32_inv044_generic_store_rejects_pinned_loss_without_transactional_auth
     Ok(())
 }
 
+/// INV-009 / INV-044: the ordinary all-trigger lifecycle transition admits an
+/// active running turn at the exact pre-pin runner-loss boundary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_running_turn_enters_runner_recovery_with_all_triggers()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let mut recovery = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $1,
+                runner_recovery_placement_revision = $2
+          WHERE turn_id = $3 AND session_id = $4",
+    )
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    recovery.commit().await?;
+    let loaded = store
+        .load_runner_recovery_wait(session)
+        .await?
+        .expect("the all-trigger transition stores its runner recovery wait");
+
+    assert_eq!(loaded.turn(), turn);
+    assert_eq!(loaded.runner(), runner);
+    assert_eq!(loaded.placement_revision(), placement.revision());
+    assert_eq!(loaded.interrupted_tool_attempt(), None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: runner recovery is available only after the exact live
+/// turn attempt has yielded to its durable loss boundary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rejects_non_yielded_turn_boundary()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'known_failure'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    let rejected = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $1,
+                runner_recovery_placement_revision = $2
+          WHERE turn_id = $3 AND session_id = $4",
+    )
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await
+    .expect_err("a non-yielded attempt cannot become a runner recovery wait");
+
+    assert_check_violation(rejected);
+    malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a retained continuing tool round must have been
+/// produced by the unique yielded chain-tip turn attempt.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rejects_stale_tool_round_boundary()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(0xa16a));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        ToolRequestId::from_uuid(uuid(0xa16b)),
+        ContextFrontierId::from_uuid(uuid(0xa16c)),
+    )
+    .await?;
+    let chain_tip = TurnAttemptId::from_uuid(uuid(0xa16d));
+    sqlx::raw_sql(
+        "ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    let mut corrupted_source = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *corrupted_source)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, $4, 'ended', 'without_stop',
+                 'yielded_to_durable_wait')",
+    )
+    .bind(chain_tip.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn_attempt.into_uuid())
+    .execute(&mut *corrupted_source)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET current_attempt_id = $1
+          WHERE turn_id = $2 AND session_id = $3",
+    )
+    .bind(chain_tip.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *corrupted_source)
+    .await?;
+    corrupted_source.commit().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt ENABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL, active_tool_round_call_id = $1,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3
+          WHERE turn_id = $4 AND session_id = $5",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    let rejected = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *malformed)
+        .await
+        .expect_err("runner recovery cannot retain an older attempt's tool round");
+
+    assert_check_violation(rejected);
+    malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a nullable runner-recovery wait cannot hide a live
+/// physical attempt in its retained tool round.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_nullable_runner_wait_rejects_unrecorded_physical_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+    ));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        ToolRequestId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.request)),
+        ContextFrontierId::from_uuid(uuid(0xa16e)),
+    )
+    .await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL, active_tool_round_call_id = $1,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3
+          WHERE turn_id = $4 AND session_id = $5",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    let rejected = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *malformed)
+        .await
+        .expect_err("nullable runner recovery cannot omit a live physical attempt");
+
+    assert_check_violation(rejected);
+    malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a nullable runner-recovery wait cannot retain a
+/// prepared physical attempt that stop handling would classify as current.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_nullable_runner_wait_rejects_prepared_physical_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+    ));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        ToolRequestId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.request)),
+        ContextFrontierId::from_uuid(uuid(0xa16f)),
+    )
+    .await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'prepared'
+          WHERE attempt_id = $1",
+    )
+    .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL, active_tool_round_call_id = $1,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3
+          WHERE turn_id = $4 AND session_id = $5",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    let rejected = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *malformed)
+        .await
+        .expect_err("nullable runner recovery cannot retain a prepared attempt");
+
+    assert_check_violation(rejected);
+    malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a retired claimed-retry predecessor is historical
+/// inventory and does not make a resolved current round ambiguous.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_nullable_runner_wait_ignores_retired_claimed_retry_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+    ));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        ToolRequestId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.request)),
+        ContextFrontierId::from_uuid(uuid(0xa170)),
+    )
+    .await?;
+    insert_external_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), idempotent_catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        session,
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: permission_overrides(RunnerToolPermissionOverride::Auto),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/idempotent".to_owned())
+                .expect("the idempotent fixture directory is valid"),
+            None,
+            authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::ExternalEffect),
+            offer_request(),
+        )
+        .expect("the idempotent registration pins its external-effect attempt");
+    store.store_pin(&pin, &registration).await?;
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the exact idempotent lease fence claims");
+    store.store_lease(&claimed).await?;
+    let loss = claimed
+        .lose()
+        .expect("claimed idempotent work admits a checked retry");
+    store_fixture_retryable_loss(&store, &pool, &loss).await?;
+    let replacement =
+        authorize_fixture_claimed_retry(&store, &loss, ToolEffectClass::ExternalEffect).await?;
+    let (_batch, retired, retry_authorization) = replacement.into_parts();
+    let retry = pin
+        .placement
+        .offer_retry(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            loss,
+            retry_authorization,
+        )
+        .expect("claimed idempotent work re-leases at the successor generation");
+    store_fixture_claimed_retry_replacement(&store, &pool, &retired, &retry).await?;
+    terminalize_physical_attempt(&pool, RETRY_PHYSICAL_ATTEMPT).await?;
+    let mut runner_loss = pool.begin().await?;
+    append_runner_lost_without_advancing_head(
+        &mut runner_loss,
+        session,
+        Some("connection"),
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *runner_loss)
+    .await?;
+    runner_loss.commit().await?;
+    let mut recovery = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL, active_tool_round_call_id = $1,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3,
+                runner_recovery_tool_attempt_id = NULL
+          WHERE turn_id = $4 AND session_id = $5",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(expected_enrollment.runner().into_uuid())
+    .bind(Decimal::from(pin.placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *recovery)
+        .await?;
+    recovery.commit().await?;
+    let loaded = store
+        .load_runner_recovery_wait(session)
+        .await?
+        .expect("the nullable wait ignores the retired predecessor");
+
+    assert_eq!(loaded.interrupted_tool_attempt(), None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-029 / INV-044: an accepted-input interrupt terminalizes a runner-loss
+/// wait and leaves the placement's runner-effect evidence untouched.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv029_inv044_stop_terminalizes_runner_recovery_wait() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let mut recovery = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $1,
+                runner_recovery_placement_revision = $2
+          WHERE turn_id = $3 AND session_id = $4",
+    )
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    recovery.commit().await?;
+    let interrupt = SubmitInput::new(
+        DurableCommandId::from_uuid(uuid(0xa120)),
+        session,
+        UserContent::try_text(String::from("stop runner recovery"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            interrupt,
+            AcceptedInputId::from_uuid(uuid(0xa121)),
+            Some(TurnId::from_uuid(uuid(0xa122))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa123)),
+                ContextFrontierId::from_uuid(uuid(0xa124)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xa125)),
+            |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xa126))),
+        )
+        .await?;
+    let terminal: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind,
+                runner_recovery_runner_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let retained_loss: String = sqlx::query_scalar(
+        "SELECT record.state_kind
+           FROM runner_current_session_placement AS head
+           JOIN runner_session_placement_record AS record
+             ON record.session_id = head.session_id
+            AND record.event_ordinal = head.event_ordinal
+          WHERE head.session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let persisted_effect: (Uuid, Uuid, Decimal, Uuid) = sqlx::query_as(
+        "SELECT turn_id, runner_id, placement_revision,
+                yielded_turn_attempt_id
+           FROM turn_runner_recovery_interrupt_effect
+          WHERE command_id = $1",
+    )
+    .bind(uuid(0xa120))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        terminal,
+        (
+            String::from("terminal"),
+            Some(String::from("cancelled")),
+            None
+        )
+    );
+    assert_eq!(retained_loss, "runner_lost_before_pin");
+    assert_eq!(
+        persisted_effect,
+        (
+            turn.into_uuid(),
+            runner.into_uuid(),
+            Decimal::from(placement.revision().get()),
+            turn_attempt.into_uuid(),
+        )
+    );
+    assert_eq!(store.load_runner_recovery_wait(session).await?, None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-029 / INV-044: stopping a recovery wait with an active tool round uses
+/// the round's yielded frontier instead of the ordinary active-batch decoder.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv029_inv044_runner_recovery_stop_uses_tool_round_boundary()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(0xa150));
+    let request = ToolRequestId::from_uuid(uuid(0xa15b));
+    let boundary = ContextFrontierId::from_uuid(uuid(0xa151));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        request,
+        boundary,
+    )
+    .await?;
+    let denied_request = ToolRequestId::from_uuid(uuid(0xa15c));
+    append_denied_request_to_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        producing_call,
+        denied_request,
+        boundary,
+    )
+    .await?;
+    let mut recovery = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL, active_tool_round_call_id = $1,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3
+          WHERE turn_id = $4 AND session_id = $5",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    recovery.commit().await?;
+    let command = DurableCommandId::from_uuid(uuid(0xa152));
+    let tool_closure = SemanticTranscriptEntryId::from_uuid(uuid(0xa15a));
+    let denied_result = SemanticTranscriptEntryId::from_uuid(uuid(0xa15e));
+    let interrupt = SubmitInput::new(
+        command,
+        session,
+        UserContent::try_text(String::from("stop tool-round runner recovery"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            interrupt,
+            AcceptedInputId::from_uuid(uuid(0xa153)),
+            Some(TurnId::from_uuid(uuid(0xa154))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa155)),
+                ContextFrontierId::from_uuid(uuid(0xa156)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xa157)),
+            |_| {
+                (
+                    vec![tool_closure, denied_result],
+                    ContextFrontierId::from_uuid(uuid(0xa158)),
+                )
+            },
+        )
+        .await?;
+    let persisted_source: Uuid = sqlx::query_scalar(
+        "SELECT source_frontier_id
+           FROM turn_runner_recovery_interrupt_effect
+          WHERE command_id = $1",
+    )
+    .bind(command.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let closure: (String, Uuid) = sqlx::query_as(
+        "SELECT payload_kind, tool_result_request_id
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1 AND semantic_entry_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(tool_closure.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let denied: (String, Uuid) = sqlx::query_as(
+        "SELECT payload_kind, tool_result_request_id
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1 AND semantic_entry_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(denied_result.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(persisted_source, boundary.into_uuid());
+    assert_eq!(closure.0, "tool_closed_by_turn_end");
+    assert_eq!(closure.1, request.into_uuid());
+    assert_eq!(denied.0, "tool_denied");
+    assert_eq!(denied.1, denied_request.into_uuid());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-029 / INV-044: stopping a runner wait preserves an interrupted
+/// external-effect attempt as reconciliation-required at the round boundary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv029_inv044_runner_recovery_stop_preserves_tool_ambiguity()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    insert_external_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), idempotent_catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        session,
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::Exact(
+                RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                    .expect("the exact fixture directory is valid"),
+            ),
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::ExternalEffect),
+            offer_request(),
+        )
+        .expect("the external-effect fixture pins the placement");
+    store.store_pin(&pin, &registration).await?;
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+    ));
+    let request = ToolRequestId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.request));
+    let boundary = ContextFrontierId::from_uuid(uuid(0xa160));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        request,
+        boundary,
+    )
+    .await?;
+    let mut recovery = pool.begin().await?;
+    append_runner_lost_without_advancing_head(
+        &mut recovery,
+        session,
+        Some("connection"),
+        None,
+        Some(interrupted_attempt),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL, active_tool_round_call_id = $1,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3,
+                runner_recovery_tool_attempt_id = $4
+          WHERE turn_id = $5 AND session_id = $6",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(expected_enrollment.runner().into_uuid())
+    .bind(Decimal::from(pin.placement.revision().get()))
+    .bind(interrupted_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    recovery.commit().await?;
+    let command = DurableCommandId::from_uuid(uuid(0xa161));
+    let terminal_frontier = ContextFrontierId::from_uuid(uuid(0xa162));
+    let tool_closure = SemanticTranscriptEntryId::from_uuid(uuid(0xa163));
+    let interrupt = SubmitInput::new(
+        command,
+        session,
+        UserContent::try_text(String::from("stop interrupted runner attempt"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            interrupt,
+            AcceptedInputId::from_uuid(uuid(0xa164)),
+            Some(TurnId::from_uuid(uuid(0xa165))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa166)),
+                ContextFrontierId::from_uuid(uuid(0xa167)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xa168)),
+            |_| (vec![tool_closure], terminal_frontier),
+        )
+        .await?;
+    let persisted: (String, Uuid, Uuid) = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind,
+                lifecycle.terminal_tool_attempt_id,
+                effect.source_frontier_id
+           FROM turn_lifecycle AS lifecycle
+           JOIN turn_runner_recovery_interrupt_effect AS effect
+             ON effect.turn_id = lifecycle.turn_id
+            AND effect.session_id = lifecycle.session_id
+          WHERE effect.command_id = $1",
+    )
+    .bind(command.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let closure: (String, Uuid) = sqlx::query_as(
+        "SELECT payload_kind, tool_result_request_id
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1 AND semantic_entry_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(tool_closure.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(persisted.0, "reconciliation_required");
+    assert_eq!(persisted.1, interrupted_attempt.into_uuid());
+    assert_eq!(persisted.2, boundary.into_uuid());
+    assert_eq!(closure.0, "tool_closed_by_turn_end");
+    assert_eq!(closure.1, request.into_uuid());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-029 / INV-044: an interrupt terminalizes a delegated runner-loss wait
+/// through its delegation projection and retains the exact loss evidence.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv029_inv044_stop_terminalizes_delegated_runner_recovery_wait()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let starting_frontier = convert_running_turn_to_delegated_runner_recovery(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        runner,
+        placement.revision(),
+    )
+    .await?;
+    let command = DurableCommandId::from_uuid(uuid(0xa135));
+    let interrupt = SubmitInput::new(
+        command,
+        session,
+        UserContent::try_text(String::from("stop delegated runner recovery"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            interrupt,
+            AcceptedInputId::from_uuid(uuid(0xa136)),
+            Some(TurnId::from_uuid(uuid(0xa137))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa138)),
+                ContextFrontierId::from_uuid(uuid(0xa139)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xa13a)),
+            |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xa13b))),
+        )
+        .await?;
+    let terminal: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind,
+                runner_recovery_runner_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let retained_loss: String = sqlx::query_scalar(
+        "SELECT record.state_kind
+           FROM runner_current_session_placement AS head
+           JOIN runner_session_placement_record AS record
+             ON record.session_id = head.session_id
+            AND record.event_ordinal = head.event_ordinal
+          WHERE head.session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let persisted_effect: (Uuid, Uuid, Decimal, Uuid, Uuid) = sqlx::query_as(
+        "SELECT turn_id, runner_id, placement_revision,
+                yielded_turn_attempt_id, source_frontier_id
+           FROM turn_runner_recovery_interrupt_effect
+          WHERE command_id = $1",
+    )
+    .bind(command.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        terminal,
+        (
+            String::from("terminal"),
+            Some(String::from("cancelled")),
+            None
+        )
+    );
+    assert_eq!(retained_loss, "runner_lost_before_pin");
+    assert_eq!(
+        persisted_effect,
+        (
+            turn.into_uuid(),
+            runner.into_uuid(),
+            Decimal::from(placement.revision().get()),
+            turn_attempt.into_uuid(),
+            starting_frontier.into_uuid(),
+        )
+    );
+    assert_eq!(store.load_runner_recovery_wait(session).await?, None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: placement advance and runner-recovery parking rendezvous
+/// on the scheduler row, so the stale placement transaction cannot commit.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_serializes_with_placement_advance()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    store.register(&successor, advertisement()).await?;
+    store.open_connection(successor.enrollment()).await?;
+    let mut replacement = pool.begin().await?;
+    append_pre_pin_replacement_without_advancing_head(
+        &mut replacement,
+        session,
+        successor.runner(),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *replacement)
+    .await?;
+    let mut recovery = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $1,
+                runner_recovery_placement_revision = $2
+          WHERE turn_id = $3 AND session_id = $4",
+    )
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *recovery)
+        .await?;
+    let mut replacement_commit = tokio::spawn(async move { replacement.commit().await });
+    let blocked = tokio::time::timeout(Duration::from_millis(100), &mut replacement_commit).await;
+
+    assert!(
+        blocked.is_err(),
+        "placement commit must wait on the scheduler lock: {blocked:?}"
+    );
+    recovery.commit().await?;
+    let rejected = replacement_commit
+        .await
+        .expect("the replacement commit task remains joinable")
+        .expect_err("the stale placement advance cannot commit after runner recovery");
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a queued turn cannot fabricate a runner-recovery slot.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_queued_turn_cannot_enter_runner_recovery() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let frontier = ContextFrontierId::from_uuid(uuid(0xa141));
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&pool)
+    .await?;
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_kind, origin_accepted_input_id,
+             acceptance_position, state_kind)
+         VALUES ($1, $2, 'delegation', NULL, 1, 'queued')",
+    )
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    let rejected = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'active', start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                active_phase_kind = 'awaiting_runner_recovery',
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3
+          WHERE turn_id = $4 AND session_id = $5",
+    )
+    .bind(frontier.into_uuid())
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await
+    .expect_err("queued work cannot fabricate a runner recovery wait");
+
+    assert_check_violation(rejected);
+    malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-033: a delegated recovery wait may release its runtime slot
+/// without mutating the retained physical lifecycle.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv033_delegated_runner_recovery_releases_runtime_slot_and_wait()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    insert_runner_recovery_turn(
+        &pool,
+        session,
+        turn,
+        runner,
+        placement.revision(),
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let mut released = pool.begin().await?;
+    let updated = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET delegation_runtime_terminal = true
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *released)
+    .await?;
+
+    assert_eq!(updated.rows_affected(), 1);
+    released.commit().await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let loaded_wait = store.load_runner_recovery_wait(session).await?;
+    append_pre_pin_replacement_projection(
+        &pool,
+        session,
+        RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER)),
+    )
+    .await?;
+    let current_event: String = sqlx::query_scalar(
+        "SELECT record.event_kind
+           FROM runner_current_session_placement AS head
+           JOIN runner_session_placement_record AS record
+             ON record.session_id = head.session_id
+            AND record.event_ordinal = head.event_ordinal
+          WHERE head.session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(loaded_wait, None);
+    assert_eq!(current_event, "pre_pin_replaced");
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: an interrupted physical attempt must be leased to the
+/// exact runner and placement revision named by the loss wait.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rejects_cross_wired_lease_runner()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    sqlx::query("ALTER TABLE runner_lease_generation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_lease_generation
+            SET runner_id = $1
+          WHERE attempt_id = $2",
+    )
+    .bind(uuid(REPLACEMENT_RUNNER))
+    .bind(interrupted_attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_lease_generation ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await
+    .expect_err("runner recovery cannot claim another runner's leased attempt");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: the placement-loss fact itself cannot name an unrelated
+/// same-session attempt that has no lease on the lost runner and revision.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_loss_record_rejects_unleased_same_session_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, _, _, pin) = stored_pin_fixture(&pool).await?;
+    insert_physical_attempt(&pool, PROFILELESS_PHYSICAL_ATTEMPT).await?;
+    let unrelated_attempt = ToolAttemptId::from_uuid(uuid(PROFILELESS_PHYSICAL_ATTEMPT.attempt));
+    mark_interrupted_attempt_ambiguous(&pool, unrelated_attempt).await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session: pin.placement.session(),
+            turn: TurnId::from_uuid(uuid(PROFILELESS_PHYSICAL_ATTEMPT.turn)),
+            runner: pin.lease.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: unrelated_attempt,
+            recovery_interrupted_tool_attempt: Some(unrelated_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                PROFILELESS_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await
+    .expect_err("runner loss cannot retain an unleased same-session attempt");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: runner recovery may retain only an ambiguous physical
+/// attempt; a known terminal result cannot be reclassified as runner loss.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rejects_non_ambiguous_tool_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed',
+                error_kind = 'execution_failed'
+          WHERE attempt_id = $1",
+    )
+    .bind(interrupted_attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await
+    .expect_err("runner recovery cannot retain a known terminal tool attempt");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: an older ambiguous attempt under the same placement
+/// revision cannot impersonate the operation interrupted at a later loss.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_loss_attempt_matches_exact_active_round()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin, later_lease) =
+        stored_later_lease_fixture(&pool).await?;
+    store.store_lease(&later_lease).await?;
+    let stale_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    mark_interrupted_attempt_ambiguous(&pool, stale_attempt).await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session: pin.placement.session(),
+            turn: TurnId::from_uuid(uuid(LATER_LEASE_PHYSICAL_ATTEMPT.turn)),
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: stale_attempt,
+            recovery_interrupted_tool_attempt: Some(stale_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                LATER_LEASE_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await
+    .expect_err("runner loss cannot retain an older round's ambiguous attempt");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a claimed-retry predecessor is no longer the physical
+/// attempt interrupted by loss after its replacement becomes current.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_loss_rejects_retired_claimed_retry_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_external_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), idempotent_catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: permission_overrides(RunnerToolPermissionOverride::Auto),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/idempotent".to_owned())
+                .expect("the idempotent fixture directory is valid"),
+            None,
+            authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::ExternalEffect),
+            offer_request(),
+        )
+        .expect("the idempotent registration pins its external-effect attempt");
+    store.store_pin(&pin, &registration).await?;
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the exact idempotent lease fence claims");
+    store.store_lease(&claimed).await?;
+    let loss = claimed
+        .lose()
+        .expect("claimed idempotent work admits a checked retry");
+    store_fixture_retryable_loss(&store, &pool, &loss).await?;
+    let replacement =
+        authorize_fixture_claimed_retry(&store, &loss, ToolEffectClass::ExternalEffect).await?;
+    let (_batch, retired, retry_authorization) = replacement.into_parts();
+    let retry = pin
+        .placement
+        .offer_retry(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            loss,
+            retry_authorization,
+        )
+        .expect("claimed idempotent work re-leases at the successor generation");
+    store_fixture_claimed_retry_replacement(&store, &pool, &retired, &retry).await?;
+    let retired_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session: pin.placement.session(),
+            turn: TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: retired_attempt,
+            recovery_interrupted_tool_attempt: Some(retired_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await
+    .expect_err("runner loss cannot retain a retired claimed-retry predecessor");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a non-null runner-recovery wait names the only current
+/// live or ambiguous physical attempt in its retained tool round.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rejects_additional_round_ambiguity()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    let producing_call = ModelCallId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+    ));
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ($1, $2, $3, $4, 1, 'inspect', 'json', '{}')",
+    )
+    .bind(uuid(PROFILELESS_PHYSICAL_ATTEMPT.request))
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(producing_call.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_attempt
+            (attempt_id, request_id, session_id, turn_id,
+             issuing_turn_attempt_id, effect_class, dispatch_generation,
+             state_kind, terminal_disposition_kind)
+         VALUES ($1, $2, $3, $4, $5, 'external_effect', 1,
+                 'terminal', 'ambiguous')",
+    )
+    .bind(uuid(PROFILELESS_PHYSICAL_ATTEMPT.attempt))
+    .bind(uuid(PROFILELESS_PHYSICAL_ATTEMPT.request))
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.turn + RELATED_IDENTITY_OFFSET,
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: producing_call,
+        },
+    )
+    .await
+    .expect_err("runner recovery cannot retain a second ambiguous round attempt");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-009 / INV-044: a runner-loss wait reads back only from the exact
 /// current lost placement and retains the interrupted physical attempt.
 #[tokio::test]
@@ -4705,18 +7039,20 @@ async fn s32_inv009_inv044_pinned_runner_recovery_wait_round_trips_exact_loss()
     let session = pin.placement.session();
     let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
-    append_runner_lost_with_interrupted_attempt_projection(&pool, session, interrupted_attempt)
-        .await?;
-    insert_runner_recovery_turn(
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    insert_runner_recovery_turn_with_interrupted_loss(
         &pool,
-        session,
-        turn,
-        expected_enrollment.runner(),
-        pin.placement.revision(),
-        Some(interrupted_attempt),
-        Some(ModelCallId::from_uuid(uuid(
-            INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
-        ))),
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
     )
     .await?;
     let loaded_placement = store
@@ -4777,168 +7113,6 @@ async fn s32_inv009_inv044_pre_pin_runner_recovery_wait_round_trips_without_atte
     assert_eq!(loaded.runner(), runner);
     assert_eq!(loaded.placement_revision(), placement.revision());
     assert_eq!(loaded.interrupted_tool_attempt(), None);
-    drop(pool);
-    Ok(())
-}
-
-/// S07 / INV-009 / INV-012 / INV-044: the ordinary final-state checker admits
-/// the exact runner-loss wait with no live attempt, and an interrupt records
-/// and reloads the distinct non-consuming rejection while that wait remains.
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn s07_inv009_inv012_inv044_runner_recovery_interrupt_rejection_round_trips()
--> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
-    let session = SessionId::from_uuid(uuid(SESSION));
-    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
-    let turn_attempt = TurnAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn + 1));
-    let runner = RunnerId::from_uuid(uuid(RUNNER));
-    let selection = DirectModelSelection::from_uuid(uuid(0xa101));
-    let credentials = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
-        "fixture-model-family",
-        "fixture-credential-reference",
-    )])
-    .expect("the fixture credential pin is valid");
-    let creation = CreateSession::new(
-        DurableCommandId::from_uuid(uuid(0xa102)),
-        SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        ),
-        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
-    )
-    .prepare(session)
-    .expect("the fixture session creation is preparable");
-    CreateSessionRepository::new(pool.clone(), credentials)
-        .handle(creation)
-        .await?;
-    let submit = SubmitInputRepository::new(pool.clone());
-    let starting_input = SubmitInput::new(
-        DurableCommandId::from_uuid(uuid(0xa103)),
-        session,
-        UserContent::try_text(String::from("runner recovery fixture"))
-            .expect("the fixture input is valid"),
-        DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: PerInputConfigurationChoices::new(
-                SessionConfigurationDefaultsVersion::try_from_u64(1)
-                    .expect("the fixture defaults version is positive"),
-                ModelSelectionOverride::UseSessionDefault,
-            ),
-        },
-    );
-    submit
-        .handle_with_candidates(
-            starting_input,
-            AcceptedInputId::from_uuid(uuid(0xa104)),
-            Some(turn),
-            CancelledModelCallTurnIdentities::new(
-                SemanticTranscriptEntryId::from_uuid(uuid(0xa105)),
-                ContextFrontierId::from_uuid(uuid(0xa106)),
-            ),
-            |_| TurnId::from_uuid(uuid(0xa107)),
-            |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xa108))),
-        )
-        .await?;
-    StartEligibleTurnRepository::new(pool.clone())
-        .handle(
-            session,
-            AcceptedInputTurnActivationIdentities::new(
-                SemanticTranscriptEntryId::from_uuid(uuid(0xa109)),
-                SemanticTranscriptEntryId::from_uuid(uuid(0xa10a)),
-                ContextFrontierId::from_uuid(uuid(0xa10b)),
-                turn_attempt,
-            ),
-        )
-        .await?;
-    let forged = insert_runner_recovery_interrupt_rejection(
-        &pool,
-        DurableCommandId::from_uuid(uuid(0xa113)),
-        DurableCommandId::from_uuid(uuid(0xa103)),
-        turn,
-    )
-    .await
-    .expect_err("a runner-recovery rejection cannot name a running turn");
-    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
-    RunnerProtocolStore::new(pool.clone(), catalog())
-        .store_placement(&placement, None, None)
-        .await?;
-    append_runner_lost_before_pin_projection(&pool, session).await?;
-    let mut recovery = pool.begin().await?;
-    sqlx::query(
-        "UPDATE turn_attempt
-            SET state_kind = 'ended', end_variant = 'without_stop',
-                end_disposition = 'yielded_to_durable_wait'
-          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
-    )
-    .bind(turn_attempt.into_uuid())
-    .bind(turn.into_uuid())
-    .bind(session.into_uuid())
-    .execute(&mut *recovery)
-    .await?;
-    sqlx::query(
-        "UPDATE turn_lifecycle
-            SET active_phase_kind = 'awaiting_runner_recovery',
-                current_attempt_id = NULL,
-                runner_recovery_runner_id = $1,
-                runner_recovery_placement_revision = $2
-          WHERE turn_id = $3 AND session_id = $4",
-    )
-    .bind(runner.into_uuid())
-    .bind(Decimal::from(placement.revision().get()))
-    .bind(turn.into_uuid())
-    .bind(session.into_uuid())
-    .execute(&mut *recovery)
-    .await?;
-    recovery.commit().await?;
-    let interrupt_command = DurableCommandId::from_uuid(uuid(0xa10c));
-    let interrupt = SubmitInput::new(
-        interrupt_command,
-        session,
-        UserContent::try_text(String::from("stop during runner recovery"))
-            .expect("the fixture interrupt is valid"),
-        DeliveryRequest::Interrupt {
-            expected_active_turn: turn,
-            descendant_scope: DescendantTerminationScope::ParentAlone,
-            configuration: PerInputConfigurationChoices::new(
-                SessionConfigurationDefaultsVersion::try_from_u64(1)
-                    .expect("the fixture defaults version is positive"),
-                ModelSelectionOverride::UseSessionDefault,
-            ),
-        },
-    );
-    let expected = SubmitInputResult::Rejected(
-        SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingRunnerRecovery {
-            session,
-            active_turn: turn,
-        },
-    );
-    let recorded = submit
-        .handle_with_candidates(
-            interrupt,
-            AcceptedInputId::from_uuid(uuid(0xa10d)),
-            Some(TurnId::from_uuid(uuid(0xa10e))),
-            CancelledModelCallTurnIdentities::new(
-                SemanticTranscriptEntryId::from_uuid(uuid(0xa10f)),
-                ContextFrontierId::from_uuid(uuid(0xa110)),
-            ),
-            |_| TurnId::from_uuid(uuid(0xa111)),
-            |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xa112))),
-        )
-        .await?;
-    let replayed = submit
-        .load(interrupt_command)
-        .await?
-        .expect("the runner-recovery rejection is durable");
-
-    assert_eq!(
-        recorded,
-        SubmitInputHandlingOutcome::Recorded(expected.clone())
-    );
-    assert_eq!(replayed.result(), &expected);
-    assert_eq!(
-        forged.as_database_error().and_then(|error| error.code()),
-        Some("23503".into())
-    );
     drop(pool);
     Ok(())
 }
@@ -5017,16 +7191,20 @@ async fn s32_inv009_inv044_runner_recovery_wait_requires_loss_recorded_attempt()
     let (_, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
     let session = pin.placement.session();
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
-    append_runner_lost_with_interrupted_attempt_projection(&pool, session, interrupted_attempt)
-        .await?;
-    let rejected = insert_runner_recovery_turn(
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss(
         &pool,
-        session,
-        TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
-        expected_enrollment.runner(),
-        pin.placement.revision(),
-        None,
-        None,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn: TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: None,
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
     )
     .await
     .expect_err("runner recovery must retain the loss-recorded tool attempt");

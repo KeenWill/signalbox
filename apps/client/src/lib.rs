@@ -335,7 +335,6 @@ fn delegation_rejection_matches(
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
         | RejectionDetail::InterruptAlreadyApplied { .. }
         | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
-        | RejectionDetail::InterruptUnavailableWhileAwaitingRunnerRecovery { .. }
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }

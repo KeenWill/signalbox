@@ -2435,6 +2435,58 @@ impl AcceptedInputSchedulingProjection {
         )
     }
 
+    /// Cancels a turn parked on runner loss without claiming that any retained
+    /// runner effect failed. The supplied source is the latest already-durable
+    /// semantic boundary; runner-loss evidence remains on the placement.
+    pub fn apply_interrupt_to_runner_recovery(
+        self,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: Option<crate::PreparedToolResultProjection>,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::CancelledModelCallTurnIdentities,
+    ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        let starting_snapshot = self
+            .snapshots
+            .get(&active_turn.start().frontier().snapshot())
+            .cloned()
+            .ok_or(crate::ModelCallClosureError::FrontierDerivationFailed)?;
+        ActivatedTurn::from(active_turn).apply_interrupt_to_runner_recovery(
+            starting_snapshot,
+            source_snapshot,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
+    /// Closes a runner-loss wait that retained one ambiguous physical tool
+    /// attempt, preserving that ambiguity as reconciliation-required.
+    pub fn apply_interrupt_to_runner_tool_recovery(
+        self,
+        wait: crate::AwaitingToolRecovery,
+        tool_attempt: crate::EndedToolAttempt,
+        yielded_attempt: TurnAttemptId,
+        result_projection: crate::PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredToolTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        crate::model_execution::apply_interrupt_to_runner_tool_recovery_wait(
+            active_turn.into(),
+            wait,
+            tool_attempt,
+            yielded_attempt,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
     /// Closes one executing tool batch under a newly applied interrupt.
     ///
     /// The checked scheduling projection supplies the current active phase;
@@ -3016,6 +3068,47 @@ impl ActivatedTurn {
             Self::Accepted(turn) => turn.consumed_steering(),
             Self::Delegated(turn) => turn.consumed_steering(),
         }
+    }
+
+    /// Cancels this turn while it is parked on exact runner-loss evidence.
+    pub fn apply_interrupt_to_runner_recovery(
+        self,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: Option<crate::PreparedToolResultProjection>,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::CancelledModelCallTurnIdentities,
+    ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_interrupt_to_runner_recovery_wait(
+            self,
+            starting_snapshot,
+            source_snapshot,
+            result_projection,
+            interrupt,
+            identities,
+        )
+    }
+
+    /// Closes a delegated runner-loss wait that retained one ambiguous
+    /// physical tool attempt without erasing that ambiguity.
+    pub fn apply_interrupt_to_runner_tool_recovery(
+        self,
+        wait: crate::AwaitingToolRecovery,
+        tool_attempt: crate::EndedToolAttempt,
+        yielded_attempt: TurnAttemptId,
+        result_projection: crate::PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredToolTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_interrupt_to_runner_tool_recovery_wait(
+            self,
+            wait,
+            tool_attempt,
+            yielded_attempt,
+            result_projection,
+            interrupt,
+            identities,
+        )
     }
 
     #[cfg(test)]

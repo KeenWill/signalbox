@@ -4193,6 +4193,133 @@ pub(crate) fn apply_interrupt_to_recovery_wait(
     })
 }
 
+pub(crate) fn apply_interrupt_to_runner_recovery_wait(
+    active_turn: ActivatedTurn,
+    starting_snapshot: ResolvedContextFrontierSnapshot,
+    source_snapshot: ResolvedContextFrontierSnapshot,
+    result_projection: Option<PreparedToolResultProjection>,
+    interrupt: AppliedInterruptCommandResult,
+    identities: CancelledModelCallTurnIdentities,
+) -> Result<CancelledModelCallTurn, ModelCallClosureError> {
+    let proof = interrupt.proof();
+    if !matches!(
+        active_turn.phase(),
+        ActiveTurnPhase::AwaitingRunnerRecovery {
+            optional_tool_attempt: None,
+            ..
+        }
+    ) || interrupt.session() != active_turn.session()
+        || proof.predecessor() != active_turn.turn()
+        || interrupt.successor() == active_turn.turn()
+        || interrupt.successor_order().priority()
+            != (crate::AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: active_turn.turn(),
+            })
+        || starting_snapshot.frontier() != active_turn.start().frontier()
+        || source_snapshot.frontier().owning_session() != active_turn.session()
+        || !starting_snapshot.is_semantic_prefix_of(&source_snapshot)
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let tool_result_entries = match result_projection {
+        Some(projection)
+            if projection.turn() == active_turn.turn()
+                && projection.source_frontier() == source_snapshot.frontier().snapshot()
+                && projection.snapshot().frontier().owning_session() == active_turn.session()
+                && source_snapshot.is_semantic_prefix_of(projection.snapshot()) =>
+        {
+            projection.into_parts().0
+        }
+        None => Vec::new().into_boxed_slice(),
+        Some(_) => return Err(ModelCallClosureError::InterruptCorrelationMismatch),
+    };
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    let mut cancelled = close_cancelled_turn(
+        ModelCallTurnScope {
+            session: active_turn.session(),
+            turn: active_turn.turn(),
+        },
+        None,
+        None,
+        CancellationFrontierSource::new(source_snapshot, &tool_result_entries),
+        proof,
+        identities,
+        reclassified_pending_steering,
+    )?;
+    cancelled.tool_result_entries = tool_result_entries;
+    Ok(cancelled)
+}
+
+pub(crate) fn apply_interrupt_to_runner_tool_recovery_wait(
+    active_turn: ActivatedTurn,
+    wait: AwaitingToolRecovery,
+    tool_attempt: EndedToolAttempt,
+    yielded_attempt: crate::TurnAttemptId,
+    result_projection: PreparedToolResultProjection,
+    interrupt: AppliedInterruptCommandResult,
+    identities: AmbiguousModelCallTurnIdentities,
+) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError> {
+    let proof = interrupt.proof();
+    let ActiveTurnPhase::AwaitingRunnerRecovery {
+        optional_tool_attempt: Some(interrupted_tool_attempt),
+        ..
+    } = active_turn.phase()
+    else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    let attempt = EndedTurnAttempt::reconstitute_yielded(yielded_attempt);
+    if interrupt.session() != active_turn.session()
+        || proof.predecessor() != active_turn.turn()
+        || interrupt.successor() == active_turn.turn()
+        || interrupt.successor_order().priority()
+            != (crate::AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: active_turn.turn(),
+            })
+        || *interrupted_tool_attempt != wait.attempt()
+        || wait.session() != active_turn.session()
+        || wait.turn() != active_turn.turn()
+        || wait.producing_call() != result_projection.producing_call()
+        || wait.issuing_attempt() != yielded_attempt
+        || wait.attempt() != tool_attempt.attempt()
+        || result_projection.turn() != active_turn.turn()
+        || wait.yielded_frontier() != result_projection.source_frontier()
+        || result_projection.snapshot().frontier().owning_session() != active_turn.session()
+        || result_projection.snapshot().frontier().snapshot() != identities.terminal_frontier
+        || !result_projection.entries().iter().any(|entry| {
+            entry.payload()
+                == &SemanticTranscriptEntryPayload::ToolClosed {
+                    request: tool_attempt.request(),
+                }
+        })
+        || tool_attempt.session() != active_turn.session()
+        || tool_attempt.turn() != active_turn.turn()
+        || tool_attempt.issuing_attempt() != yielded_attempt
+        || tool_attempt.end() != &crate::ToolAttemptEnd::Ambiguous
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let ambiguous_operations =
+        NonEmptyIssuedOperationRefs::try_from_operations([crate::IssuedOperationRef::ToolAttempt(
+            wait.attempt(),
+        )])
+        .map_err(|_| ModelCallClosureError::InterruptCorrelationMismatch)?;
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    let (tool_result_entries, terminal_snapshot) = result_projection.into_parts();
+    let marker = ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations, proof);
+    Ok(ReconciliationRequiredToolTurn {
+        session: active_turn.session(),
+        turn: active_turn.turn(),
+        tool_attempt,
+        attempt,
+        disposition: TurnDisposition::ReconciliationRequired { marker },
+        tool_result_entries,
+        terminal_snapshot,
+        reclassified_pending_steering,
+    })
+}
+
 pub(crate) fn apply_interrupt_to_tool_recovery_wait(
     active_turn: ActivatedTurn,
     wait: AwaitingToolRecovery,

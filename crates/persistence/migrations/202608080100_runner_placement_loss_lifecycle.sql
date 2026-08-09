@@ -46,7 +46,7 @@ ALTER TABLE runner_session_placement_record
         );
 
 -- Supersedes the state-shape constraint from
--- 202607280401_runner_protocol.sql.
+-- 202607280402_runner_grant_tombstones.sql.
 ALTER TABLE runner_session_placement_record
     DROP CONSTRAINT runner_session_placement_state_shape,
     ADD CONSTRAINT runner_session_placement_state_shape
@@ -444,7 +444,10 @@ BEGIN
         IF prior.state_kind <> 'runner_lost'
            OR NEW.state_kind <> 'pinned'
            OR NEW.placement_revision <> prior.placement_revision + 1
-           OR NEW.pinned_runner_id = prior.lost_runner_id
+           OR (
+                NEW.pinned_runner_id = prior.lost_runner_id
+                AND prior.loss_source_kind <> 'registration'
+           )
            OR (
                 prior.credential_grant_revision IS NULL
                 AND NEW.credential_grant_revision IS NOT NULL

@@ -1456,6 +1456,115 @@ pub(crate) async fn load_active_batch_from_connection(
     .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
+/// Loads the exact frontier from which a runner-recovery interrupt must
+/// continue. A recovery wait retaining a tool round uses that round's yielded
+/// boundary; a wait without one uses the turn's starting frontier.
+pub(crate) async fn load_runner_recovery_source_snapshot(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<Option<ResolvedContextFrontierSnapshot>, ToolLoopRepositoryError> {
+    let row = sqlx::query(
+        "SELECT lifecycle.active_tool_round_call_id,
+                lifecycle.starting_frontier_id,
+                round.boundary_kind,
+                round.boundary_frontier_id
+           FROM turn_lifecycle AS lifecycle
+           LEFT JOIN tool_round AS round
+             ON round.producing_model_call_id =
+                    lifecycle.active_tool_round_call_id
+            AND round.turn_id = lifecycle.turn_id
+            AND round.session_id = lifecycle.session_id
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.turn_id = $2
+            AND lifecycle.state_kind = 'active'
+            AND lifecycle.active_phase_kind = 'awaiting_runner_recovery'
+            AND goal_turn_is_runtime_relevant(lifecycle.session_id,
+                                              lifecycle.turn_id)",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let active_tool_round: Option<Uuid> = row.try_get("active_tool_round_call_id")?;
+    let frontier = if active_tool_round.is_some() {
+        let boundary_kind: String = required(&row, "boundary_kind")?;
+        if boundary_kind != "continuing" {
+            return Err(
+                ToolLoopCorruption::Inconsistent("runner recovery tool round boundary").into(),
+            );
+        }
+        signalbox_domain::ContextFrontierId::from_uuid(required(&row, "boundary_frontier_id")?)
+    } else {
+        signalbox_domain::ContextFrontierId::from_uuid(required(&row, "starting_frontier_id")?)
+    };
+    load_snapshot(connection, session, frontier).await.map(Some)
+}
+
+pub(crate) async fn load_runner_recovery_batch_without_attempt(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    yielded_attempt: signalbox_domain::TurnAttemptId,
+) -> Result<Option<ToolBatch>, ToolLoopRepositoryError> {
+    let producing_call = sqlx::query_scalar::<_, Uuid>(
+        "SELECT active_tool_round_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND state_kind = 'active'
+            AND active_phase_kind = 'awaiting_runner_recovery'
+            AND runner_recovery_tool_attempt_id IS NULL
+            AND active_tool_round_call_id IS NOT NULL",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?
+    .map(signalbox_domain::ModelCallId::from_uuid);
+    let Some(producing_call) = producing_call else {
+        return Ok(None);
+    };
+    let round = sqlx::query(
+        "SELECT boundary_kind, boundary_frontier_id
+           FROM tool_round
+          WHERE producing_model_call_id = $1
+            AND session_id = $2
+            AND turn_id = $3",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ToolLoopCorruption::Missing("runner recovery tool round"))?;
+    if required::<String>(&round, "boundary_kind")? != "continuing" {
+        return Err(ToolLoopCorruption::Inconsistent("runner recovery tool round boundary").into());
+    }
+    let frontier =
+        signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
+    let retired_attempts = load_retired_attempts(connection, producing_call).await?;
+    ToolBatchReconstitutionInput::new(
+        session,
+        turn,
+        producing_call,
+        load_snapshot(connection, session, frontier).await?,
+        load_requests(connection, producing_call, session, turn).await?,
+        load_approvals(connection, producing_call).await?,
+        load_attempts(connection, producing_call).await?,
+        ToolBatchPhaseReconstitutionInput::Executing {
+            turn_attempt: yielded_attempt,
+        },
+    )
+    .with_retired_attempts(retired_attempts)
+    .reconstitute()
+    .map(Some)
+    .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+}
+
 pub(crate) async fn load_recovery_batch_by_attempt(
     connection: &mut PgConnection,
     session: SessionId,

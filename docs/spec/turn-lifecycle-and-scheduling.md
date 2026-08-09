@@ -1,7 +1,7 @@
 # Turn lifecycle and scheduling
 
 The runner-recovery active-phase algebra, checked persistence reconstitution,
-and non-consuming interrupt rejection were verified against this PR
+and preserved interrupt/stop authority were verified against this PR
 (`agent/runner-awaiting-recovery-persistence`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
@@ -496,11 +496,7 @@ The occupied-slot delivery outcomes implemented here are:
   resolves the approval obligation, and the interrupt is neither a denial nor a
   bypass of the decision command
   ([tool-loop](tool-loop.md#approval-policy-and-decision-sources) owns the
-  deny-first caller protocol). An interrupt delivered while the active turn is
-  parked on `AwaitingRunnerRecovery` similarly records
-  `InterruptUnavailableWhileAwaitingRunnerRecovery { active_turn }` without
-  accepting an input or changing the wait: only the checked runner-replacement
-  or abandonment command may consume that administrative recovery state.
+  deny-first caller protocol).
 
 ## Runner-loss session recovery
 

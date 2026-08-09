@@ -421,14 +421,6 @@ impl fmt::Display for RejectionDisplay {
                 "interrupt_unavailable_while_awaiting_approval session={session_id} \
                  active_turn={active_turn_id}; deny the pending tool request first"
             ),
-            RejectionDetail::InterruptUnavailableWhileAwaitingRunnerRecovery {
-                session_id,
-                active_turn_id,
-            } => write!(
-                formatter,
-                "interrupt_unavailable_while_awaiting_runner_recovery session={session_id} \
-                 active_turn={active_turn_id}; replace or abandon the lost runner first"
-            ),
             RejectionDetail::SafePointUnavailableWhileStopping {
                 session_id,
                 active_turn_id,

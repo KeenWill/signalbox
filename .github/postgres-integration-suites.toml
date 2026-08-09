@@ -58,7 +58,7 @@ exclude_binaries = ["runner_protocol_postgres"]
 name = "runner"
 package = "signalbox-persistence"
 features = ["postgres-integration"]
-# The 101 runner-protocol tests have their own single-purpose CI partition.
+# The 118 runner-protocol tests have their own single-purpose CI partition.
 shards = 1
 skip = []
 include_binaries = ["runner_protocol_postgres"]

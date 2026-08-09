@@ -3972,14 +3972,6 @@ pub enum RejectionDetail {
         /// Authoritative active turn.
         active_turn_id: CanonicalUuid,
     },
-    /// The active turn is parked on runner recovery, which only a checked
-    /// replacement or abandonment command may consume.
-    InterruptUnavailableWhileAwaitingRunnerRecovery {
-        /// Target session.
-        session_id: CanonicalUuid,
-        /// Authoritative active turn.
-        active_turn_id: CanonicalUuid,
-    },
     /// A next-safe-point input targeted a turn that is already stopping.
     SafePointUnavailableWhileStopping {
         /// Target session.
@@ -4183,7 +4175,6 @@ impl RejectionDetail {
             | Self::TurnNotAwaitingReconciliation { .. }
             | Self::InterruptAlreadyApplied { .. }
             | Self::InterruptUnavailableWhileAwaitingApproval { .. }
-            | Self::InterruptUnavailableWhileAwaitingRunnerRecovery { .. }
             | Self::SafePointUnavailableWhileStopping { .. }
             | Self::ToolRequestNotFound { .. }
             | Self::ToolRequestAlreadyResolved { .. }
@@ -7207,7 +7198,6 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
         | RejectionDetail::InterruptAlreadyApplied { .. }
         | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
-        | RejectionDetail::InterruptUnavailableWhileAwaitingRunnerRecovery { .. }
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestNotFound { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
@@ -7302,7 +7292,6 @@ fn validate_conversation_import_detail(
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
         | RejectionDetail::InterruptAlreadyApplied { .. }
         | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
-        | RejectionDetail::InterruptUnavailableWhileAwaitingRunnerRecovery { .. }
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestNotFound { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
@@ -12066,20 +12055,6 @@ mod tests {
                 ),
             },
             r#"{"type":"error","code":"rejected","message":"the active turn awaits a tool decision","detail":{"type":"interrupt_unavailable_while_awaiting_approval","session_id":"00000000-0000-0000-0000-000000000006","active_turn_id":"00000000-0000-0000-0000-000000000007"}}"#,
-        )?;
-        assert_server_message_round_trip(
-            request(5)?,
-            ServerMessage::Error {
-                code: ErrorCode::Rejected,
-                message: String::from("the active turn awaits runner recovery"),
-                detail: ErrorDetail::rejected(
-                    RejectionDetail::InterruptUnavailableWhileAwaitingRunnerRecovery {
-                        session_id: uuid(6),
-                        active_turn_id: uuid(7),
-                    },
-                ),
-            },
-            r#"{"type":"error","code":"rejected","message":"the active turn awaits runner recovery","detail":{"type":"interrupt_unavailable_while_awaiting_runner_recovery","session_id":"00000000-0000-0000-0000-000000000006","active_turn_id":"00000000-0000-0000-0000-000000000007"}}"#,
         )
     }
 
