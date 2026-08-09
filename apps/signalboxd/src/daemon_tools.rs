@@ -1469,8 +1469,10 @@ mod tests {
         .expect("production daemon tools compile");
         let (catalog, _executor) = tools.into_parts();
         let actual_definitions = catalog.definitions();
+        let actual_names = definition_names(&actual_definitions);
 
-        assert_eq!(definition_names(&actual_definitions), expected_names);
+        assert_eq!(actual_names, expected_names);
+        assert!(actual_names.contains(&GOAL_DECLARE_NAME));
     }
 
     /// Renders the bridge catalog document from the daemon registry through the
