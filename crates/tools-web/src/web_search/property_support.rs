@@ -9,6 +9,11 @@ use url::Url;
 use super::{diagnostic::*, evidence::*, redaction::*, result::*, test_support::*};
 
 const PROPERTY_CASES: u32 = 512;
+/// A drawn atom that the fixed diagnostic vocabulary already spells is rejected
+/// rather than counted, so the budget stays far below the observed rate while
+/// still aborting the run if the grammar or that vocabulary ever makes
+/// rejection ordinary — a property that rejects most draws tests almost nothing.
+const MAX_COLLIDING_DRAW_REJECTS: u32 = 16;
 const GRAMMAR_CREDENTIAL_ATOM: &str = "fixturegrammar";
 
 #[derive(Clone, Copy, Debug)]
@@ -119,6 +124,7 @@ pub(super) fn provider_text_strategy() -> BoxedStrategy<ProviderTextCase> {
 pub(super) fn property_runner() -> TestRunner {
     TestRunner::new(Config {
         cases: PROPERTY_CASES,
+        max_global_rejects: MAX_COLLIDING_DRAW_REJECTS,
         ..Config::default()
     })
 }
@@ -144,10 +150,7 @@ pub(super) fn assert_structural_url_property() {
 pub(super) fn assert_credential_bearing_url_property() {
     property_runner()
         .run(&credential_bearing_url_strategy(), |case| {
-            let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
-                case.credential.credential.as_bytes().to_vec(),
-            ))
-            .ok_or_else(|| TestCaseError::fail("generated credential must be usable"))?;
+            let scrubber = usable_scrubber(&case.credential)?;
             let result = WebSearchResult::try_new(WebSearchResultFields {
                 title: String::from(FIXTURE_RESULT_TITLE),
                 url: case.source_url,
@@ -168,10 +171,7 @@ pub(super) fn assert_credential_bearing_url_property() {
 pub(super) fn assert_provider_text_property() {
     property_runner()
         .run(&provider_text_strategy(), |case| {
-            let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
-                case.credential.credential.as_bytes().to_vec(),
-            ))
-            .ok_or_else(|| TestCaseError::fail("generated credential must be usable"))?;
+            let scrubber = usable_scrubber(&case.credential)?;
             let result = WebSearchResult::try_new(case.fields)
                 .ok_or_else(|| TestCaseError::fail("generated provider text must be bounded"))?;
             let response =
@@ -182,6 +182,21 @@ pub(super) fn assert_provider_text_property() {
             Ok(())
         })
         .expect("provider-text grammar satisfies the output property");
+}
+
+/// The scrubber refuses a credential the fixed diagnostic vocabulary could spell
+/// on its own, because it cannot then tell that vocabulary from a leak. That
+/// refusal is the deliberate fail-closed guard the scrubber's own unit tests
+/// pin, so a draw that trips it states nothing about redaction: it is an
+/// unsatisfied generator precondition, not a counterexample. Rejecting the draw
+/// lets the runner replace it, keeping the case count intact.
+fn usable_scrubber(credential: &CredentialReflection) -> Result<CredentialScrubber, TestCaseError> {
+    CredentialScrubber::try_new(&CredentialValue::new(
+        credential.credential.as_bytes().to_vec(),
+    ))
+    .ok_or_else(|| {
+        TestCaseError::reject("generated credential collides with fixed diagnostic output")
+    })
 }
 
 fn credential_reflection_strategy() -> BoxedStrategy<CredentialReflection> {

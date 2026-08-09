@@ -4996,13 +4996,9 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         );
     }
 
-    /// The merged process-lifetime catalog exposes every daemon declaration in
-    /// deterministic name order.
-    #[test]
-    fn daemon_catalog_contains_every_injected_tool_family() {
-        let workspace = tempfile::tempdir().expect("workspace root exists");
-        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
-        let (catalog, _executor) = DaemonTools::try_new(
+    /// Composes every injected family against offline boundaries.
+    fn fully_composed_catalog(workspace: &Path) -> DaemonToolCatalog {
+        DaemonTools::try_new(
             || SystemTime::UNIX_EPOCH,
             OfflineTransport,
             MappedDaemonCredentialInputs {
@@ -5016,7 +5012,7 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
             OfflineGitHubTransport,
             GitHubEgressPolicy::github_api_only(),
             LocalWorkspaceFileSystem,
-            workspace.path(),
+            workspace,
             git_identity(),
             TokioProcessRunner::try_new(
                 std::env::current_exe().expect("test executable path is available"),
@@ -5027,7 +5023,17 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
             WebFetchEgressPolicy::deny_all(),
         )
         .expect("static daemon tools compile")
-        .into_parts();
+        .into_parts()
+        .0
+    }
+
+    /// The merged process-lifetime catalog exposes every daemon declaration in
+    /// deterministic name order.
+    #[test]
+    fn daemon_catalog_contains_every_injected_tool_family() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
+        let catalog = fully_composed_catalog(workspace.path());
 
         let definitions = catalog.definitions();
         let names = definition_names(&definitions);
@@ -5434,6 +5440,214 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         expect![[r#"{"code":-32602,"message":"undeclared tool or non-object arguments"}"#]]
             .assert_eq(&called["error"].to_string());
     }
+    /// Root-level JSON Schema keywords an advertised argument schema may
+    /// carry: object declaration, its members, and annotations.
+    ///
+    /// An allowlist rather than a list of known-bad combinators. A root
+    /// applicator leaves the argument shape to its branches, so a validator
+    /// requiring an object-typed root cannot accept it even beside a sibling
+    /// `"type"` — but `oneOf`, `anyOf`, `allOf`, `not`, and `$ref` are not the
+    /// closed set of those. JSON Schema also applies at the root through
+    /// `if`/`then`/`else`, `dependentSchemas`, and `unevaluatedProperties`,
+    /// and later drafts may add more. A blocklist naming today's rejects
+    /// therefore admits tomorrow's in silence, which is the exact failure this
+    /// gate exists to prevent: a root shape nobody enumerated reached a
+    /// provider once already and returned 400 for every exchange offering the
+    /// catalog.
+    ///
+    /// So the gate fails closed. A declaration needing a keyword absent here
+    /// fails this test and joins the list deliberately, with the wire question
+    /// answered once rather than assumed.
+    const PERMITTED_ROOT_KEYWORDS: [&str; 7] = [
+        "$defs",
+        "additionalProperties",
+        "description",
+        "properties",
+        "required",
+        "title",
+        "type",
+    ];
+
+    /// Fails one advertised schema that a function-tool wire would reject.
+    ///
+    /// OpenAI Chat Completions documents `tools[].function.parameters` as
+    /// "The parameters the functions accepts, described as a JSON Schema
+    /// object" (platform.openai.com/docs/api-reference/chat/create), and its
+    /// Structured Outputs guide states the matching root rule directly: a
+    /// schema root must be an `object` and must not be a root `anyOf`
+    /// (platform.openai.com/docs/guides/structured-outputs). Its supported
+    /// composition keyword is `anyOf` alone; `oneOf`, `allOf`, and `not`
+    /// appear nowhere in that subset.
+    ///
+    /// This assertion pins the strictest reading of those two rules — a
+    /// declared `"type": "object"` root carrying nothing outside
+    /// [`PERMITTED_ROOT_KEYWORDS`]. The rejection this test exists to prevent
+    /// was a root `oneOf`, and the root is what both rules constrain directly.
+    ///
+    /// It claims nothing past the root. Strict Structured Outputs demands more
+    /// of a schema than this gate reads — every property named in `required`,
+    /// `additionalProperties: false` throughout — and this catalog does not
+    /// meet that: `current_time` advertises an optional `timezone`, declared
+    /// but unrequired. Enabling a strict function contract would need the
+    /// schema transformation the OpenAI adapter already notes, which this gate
+    /// neither performs nor approximates. Passing here is evidence about the
+    /// root and nothing else.
+    ///
+    /// Accepted cost: a schema may not express a root-level union, and must
+    /// instead discriminate through one tag property, as
+    /// `signalbox_tool_contract::rendered_contract_schema` now renders
+    /// internally tagged argument enums.
+    ///
+    /// Nested combinators are untouched: only the root is constrained, so a
+    /// property may still carry `oneOf`, `anyOf`, or a `$ref` into `$defs`.
+    ///
+    /// The stake is the blast radius, not one tool. Every request carries the
+    /// whole catalog, so one rejected schema returns 400 for every exchange
+    /// that offers it — not merely for calls to the offending tool.
+    #[track_caller]
+    fn assert_object_rooted(name: &str, schema: &str) {
+        let decoded: serde_json::Value = serde_json::from_str(schema)
+            .unwrap_or_else(|error| panic!("{name} schema is JSON: {error}"));
+        let root = decoded
+            .as_object()
+            .unwrap_or_else(|| panic!("{name} schema root is a JSON object"));
+        assert_eq!(
+            root.get("type").and_then(serde_json::Value::as_str),
+            Some("object"),
+            "{name} schema root must declare \"type\": \"object\""
+        );
+        let unsupported = unsupported_root_keywords(root);
+        assert!(
+            unsupported.is_empty(),
+            "{name} schema root must carry no keyword outside the advertised \
+             object contract, found {unsupported:?}"
+        );
+    }
+
+    /// Names the keywords a schema root declares outside the object contract.
+    ///
+    /// Split from the assertion so the allowlist can be exercised directly:
+    /// what the gate rejects is the claim under review, and reading it back
+    /// through a caught panic would prove less about which keywords it names.
+    fn unsupported_root_keywords(root: &serde_json::Map<String, serde_json::Value>) -> Vec<&str> {
+        root.keys()
+            .map(String::as_str)
+            .filter(|keyword| !PERMITTED_ROOT_KEYWORDS.contains(keyword))
+            .collect()
+    }
+
+    /// Fails the first advertised declaration whose schema root a function-tool
+    /// wire would reject, naming it.
+    ///
+    /// The iteration lives here rather than in the test body. The sweep has to
+    /// cover the whole composed catalog — that is what makes a tool family
+    /// added later join without anyone remembering — while a test body stays
+    /// straight-line, so the loop sits behind a `#[track_caller]` helper that
+    /// names the failing declaration at the call site.
+    #[track_caller]
+    fn assert_every_definition_is_object_rooted(definitions: &[ToolDefinition]) {
+        for definition in definitions {
+            assert_object_rooted(
+                definition.name().as_str(),
+                definition.input_schema().as_str(),
+            );
+        }
+    }
+
+    /// INV-055: every schema the daemon advertises satisfies the function-tool
+    /// wire's root constraint, so no single declaration can fail whole
+    /// exchanges.
+    ///
+    /// The sweep runs over the fully composed catalog rather than a listed
+    /// subset: a tool family added later joins it without being remembered.
+    #[test]
+    fn every_advertised_tool_schema_is_object_rooted() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
+        let catalog = fully_composed_catalog(workspace.path());
+
+        let definitions = catalog.definitions();
+
+        assert!(!definitions.is_empty(), "the composed catalog is not empty");
+        assert_every_definition_is_object_rooted(&definitions);
+        // `goal_declare` compiles only against a live pool, so the composed
+        // catalog cannot carry it and its static declaration joins directly.
+        assert_object_rooted(GOAL_DECLARE_NAME, crate::goal_mode::GOAL_DECLARE_SCHEMA);
+    }
+
+    /// The root gate names a conditional applicator, not merely the five
+    /// combinators the observed rejection happened to involve.
+    ///
+    /// `if`/`then`/`else` applies at the root exactly as `oneOf` does: it
+    /// makes the admitted argument shape depend on a branch, which is what a
+    /// function-tool root may not do. A gate written as a blocklist from one
+    /// observed 400 would pass this schema through to the provider and
+    /// recreate the whole-catalog rejection, so the allowlist is what is
+    /// pinned here.
+    #[test]
+    fn the_root_gate_names_a_conditional_applicator_as_unsupported() {
+        let declared = serde_json::json!({
+            "if": {"required": ["base"]},
+            "properties": {},
+            "then": {"required": ["head"]},
+            "type": "object"
+        });
+
+        assert_eq!(
+            unsupported_root_keywords(declared.as_object().expect("the fixture root is an object")),
+            vec!["if", "then"]
+        );
+    }
+
+    /// `git_diff` is the declaration whose root `oneOf` failed every Git
+    /// exchange through the OpenAI adapter. Its rendered shape is pinned so
+    /// the tagged-enum root cannot come back unnoticed.
+    #[test]
+    fn git_diff_advertises_one_object_with_a_discriminating_scope() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
+        let catalog = fully_composed_catalog(workspace.path());
+        let name = ToolName::try_new(String::from(signalbox_tools_git::GIT_DIFF_NAME))
+            .expect("git_diff is a valid tool name");
+
+        let schema: serde_json::Value = serde_json::from_str(
+            catalog
+                .definition(&name)
+                .expect("git_diff is composed")
+                .input_schema()
+                .as_str(),
+        )
+        .expect("git_diff schema is JSON");
+
+        assert_eq!(
+            schema,
+            serde_json::json!({
+                "additionalProperties": false,
+                "properties": {
+                    "base": {
+                        "description": "Older `HEAD`, full `refs/...` name, or full object ID.",
+                        "maxLength": 1030,
+                        "minLength": 1,
+                        "type": "string"
+                    },
+                    "head": {
+                        "description": "Newer `HEAD`, full `refs/...` name, or full object ID.",
+                        "maxLength": 1030,
+                        "minLength": 1,
+                        "type": "string"
+                    },
+                    "scope": {
+                        "description": "`worktree`: Includes both staged and unstaged worktree changes against HEAD. Takes no other property. `revisions`: Compares trees named by exact revision identifiers. Requires `base`, `head`.",
+                        "enum": ["worktree", "revisions"],
+                        "type": "string"
+                    }
+                },
+                "required": ["scope"],
+                "type": "object"
+            })
+        );
+    }
+
     /// Composition preserves each execution declaration's permission default:
     /// the sandboxed command takes `Confirm`, because it accepts an arbitrary
     /// program — a compiled default an explicit posture or a session blanket
