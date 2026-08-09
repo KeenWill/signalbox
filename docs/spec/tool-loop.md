@@ -308,11 +308,14 @@ derived from the configured root by a fixed formula owned by
 [configuration and credentials](configuration-and-credentials.md#daemon-tool-mapping-registry);
 a session supplies no path and cannot select another session's root. The
 executors bound to one root are composed once per session and retained under a
-fixed bound, so two sessions executing concurrently write two trees, hold two
-pinned root descriptors, and take two independent serialization domains for the
-mutation and Git families rather than one process-wide domain. Sessions with no
-derived directory share the configured root's own composition, which is what
-every session bound before the derivation existed.
+bound, so two sessions executing concurrently write two trees, hold two pinned
+root descriptors, and take two independent serialization domains for the
+mutation and Git families rather than one process-wide domain. One session takes
+exactly one such domain at a time: a retained set a request still holds is never
+released, so a second set is never composed beside one already mutating that
+session's tree. Sessions with no derived directory share the configured root's
+own composition, which is what every session bound before the derivation
+existed.
 
 The catalog stays one process-lifetime immutable compiled value across that
 change. Every declaration a workspace-root-bound family advertises — its name,

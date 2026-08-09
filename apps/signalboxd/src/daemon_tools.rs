@@ -1141,6 +1141,12 @@ impl<Executor> SharedToolExecutor<Executor> {
             inner: Arc::new(Mutex::new(executor)),
         }
     }
+
+    /// Whether this handle is the only one, so releasing it releases the
+    /// serialization domain rather than leaving a second one beside it.
+    fn is_sole_handle(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1
+    }
 }
 
 impl<Executor> Clone for SharedToolExecutor<Executor> {
@@ -1198,6 +1204,30 @@ impl SessionWorkspaceFailure {
     }
 }
 
+/// Whether a retained value is still reachable from a request in flight.
+///
+/// Releasing a value a request still holds does not stop that request: it lets
+/// the next request for the same session compose a second value beside it, with
+/// its own serialization domain. Two mutations of one tree would then run
+/// concurrently under two different locks, which is exactly what per-session
+/// serialization exists to prevent.
+trait RetainedInFlight {
+    /// Whether any handle outside the retained set still holds this value.
+    fn is_in_flight(&self) -> bool;
+}
+
+impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> RetainedInFlight
+    for WorkspaceBoundExecutors<FileSystem, ExecRunner>
+{
+    fn is_in_flight(&self) -> bool {
+        // Only the two serializing families carry an identity a second
+        // composition could duplicate. The read and execution families hold no
+        // lock: a read observes a pinned descriptor, and every execution
+        // revalidates the root's identity around its own launch.
+        !self.workspace_mutation.is_sole_handle() || !self.local_git.is_sole_handle()
+    }
+}
+
 /// One retained per-session value and the counter that orders eviction.
 struct RetainedSessionWorkspace<Executors> {
     executors: Executors,
@@ -1225,7 +1255,7 @@ struct SessionWorkspaceState<Executors> {
     retained: RetainedSessionWorkspaces<Executors>,
 }
 
-impl<Executors: Clone> SessionWorkspaceState<Executors> {
+impl<Executors: Clone + RetainedInFlight> SessionWorkspaceState<Executors> {
     const fn new() -> Self {
         Self {
             bindings: BTreeMap::new(),
@@ -1234,7 +1264,7 @@ impl<Executors: Clone> SessionWorkspaceState<Executors> {
     }
 }
 
-impl<Executors: Clone> RetainedSessionWorkspaces<Executors> {
+impl<Executors: Clone + RetainedInFlight> RetainedSessionWorkspaces<Executors> {
     const fn new() -> Self {
         Self {
             retained: BTreeMap::new(),
@@ -1255,12 +1285,18 @@ impl<Executors: Clone> RetainedSessionWorkspaces<Executors> {
         Some(retained.executors.clone())
     }
 
-    /// Retains one composed set, dropping the least recently used entry when
-    /// the bound is already reached, and returns the set now retained.
+    /// Retains one composed set, dropping the least recently used idle entry
+    /// when the bound is already reached, and returns the set now retained.
     ///
     /// A concurrent resolution for the same session may have retained its own
     /// set first; that one wins, so every caller converges on one pinned
     /// instance and the loser's descriptors are released immediately.
+    ///
+    /// An entry a request still holds is not an eviction candidate, so the
+    /// retained set may exceed the bound by the number of sessions executing a
+    /// workspace-bound tool at that moment. That excess is what keeps one
+    /// session's serialization domain single; it is released as soon as those
+    /// requests return, at the next retention.
     fn retain(&mut self, session: SessionId, executors: Executors) -> Executors {
         if let Some(already_retained) = self.get(session) {
             return already_retained;
@@ -1269,6 +1305,7 @@ impl<Executors: Clone> RetainedSessionWorkspaces<Executors> {
             let evicted = self
                 .retained
                 .iter()
+                .filter(|(_, retained)| !retained.executors.is_in_flight())
                 .min_by_key(|(_, retained)| retained.last_used)
                 .map(|(session, _)| *session);
             if let Some(evicted) = evicted {
@@ -2889,12 +2926,55 @@ mod tests {
     /// capacity. Distinct from the two named sessions and from each other.
     const FILLER_SESSION_IDENTITY_BASE: u128 = 0x6000;
 
+    /// Whether a retained fixture stands in for a value a request still holds.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum FixtureRequestState {
+        Idle,
+        InFlight,
+    }
+
+    /// Stands in for a composed executor set so the retained set's bound and
+    /// eviction order can be exercised without opening a repository.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct RetainedFixture {
+        marker: u32,
+        request_state: FixtureRequestState,
+    }
+
+    impl RetainedFixture {
+        const fn idle(marker: u32) -> Self {
+            Self {
+                marker,
+                request_state: FixtureRequestState::Idle,
+            }
+        }
+
+        const fn in_flight(marker: u32) -> Self {
+            Self {
+                marker,
+                request_state: FixtureRequestState::InFlight,
+            }
+        }
+    }
+
+    impl RetainedInFlight for RetainedFixture {
+        fn is_in_flight(&self) -> bool {
+            match self.request_state {
+                FixtureRequestState::Idle => false,
+                FixtureRequestState::InFlight => true,
+            }
+        }
+    }
+
     /// Retains filler sessions until the bound is reached.
     ///
     /// The iteration lives here rather than in a test body, which stays
     /// straight-line: what the test is about is which entry the next retention
     /// evicts, not how the set was filled.
-    fn fill_remaining_capacity(retained: &mut RetainedSessionWorkspaces<u32>, filler: u32) {
+    fn fill_remaining_capacity(
+        retained: &mut RetainedSessionWorkspaces<RetainedFixture>,
+        filler: RetainedFixture,
+    ) {
         for offset in 0..MAX_RETAINED_SESSION_WORKSPACES - 2 {
             let identity = FILLER_SESSION_IDENTITY_BASE + offset as u128;
             retained.retain(session(identity), filler);
@@ -2989,24 +3069,75 @@ mod tests {
     /// used entry rather than growing the descriptor count without limit.
     #[test]
     fn retaining_beyond_the_bound_evicts_the_least_recently_used_session() {
-        const FIRST_RETAINED: u32 = 1;
-        const SECOND_RETAINED: u32 = 2;
-        const OVERFLOWING_RETAINED: u32 = 3;
+        const FIRST_MARKER: u32 = 1;
+        const SECOND_MARKER: u32 = 2;
+        const OVERFLOWING_MARKER: u32 = 3;
+        let first_retained = RetainedFixture::idle(FIRST_MARKER);
+        let second_retained = RetainedFixture::idle(SECOND_MARKER);
+        let overflowing_retained = RetainedFixture::idle(OVERFLOWING_MARKER);
         let mut retained = RetainedSessionWorkspaces::new();
         let first = session(FIRST_SESSION_IDENTITY);
         let second = session(SECOND_SESSION_IDENTITY);
         let overflowing = session(FILLER_SESSION_IDENTITY_BASE - 1);
-        retained.retain(first, FIRST_RETAINED);
-        retained.retain(second, SECOND_RETAINED);
-        fill_remaining_capacity(&mut retained, FIRST_RETAINED);
+        retained.retain(first, first_retained);
+        retained.retain(second, second_retained);
+        fill_remaining_capacity(&mut retained, first_retained);
         // Reading `second` back makes it the most recently used entry, so the
         // entry the overflowing session evicts is unambiguously `first`.
-        assert_eq!(retained.get(second), Some(SECOND_RETAINED));
+        assert_eq!(retained.get(second), Some(second_retained));
 
-        retained.retain(overflowing, OVERFLOWING_RETAINED);
+        retained.retain(overflowing, overflowing_retained);
 
         assert_eq!(retained.get(first), None);
-        assert_eq!(retained.get(second), Some(SECOND_RETAINED));
-        assert_eq!(retained.get(overflowing), Some(OVERFLOWING_RETAINED));
+        assert_eq!(retained.get(second), Some(second_retained));
+        assert_eq!(retained.get(overflowing), Some(overflowing_retained));
+    }
+
+    /// A set a request still holds is never released to make room: releasing it
+    /// would let the next request for that session compose a second
+    /// serialization domain beside the one already mutating its tree.
+    #[test]
+    fn a_set_a_request_still_holds_is_never_evicted() {
+        const IN_FLIGHT_MARKER: u32 = 1;
+        const IDLE_MARKER: u32 = 2;
+        const OVERFLOWING_MARKER: u32 = 3;
+        let in_flight_retained = RetainedFixture::in_flight(IN_FLIGHT_MARKER);
+        let idle_retained = RetainedFixture::idle(IDLE_MARKER);
+        let overflowing_retained = RetainedFixture::idle(OVERFLOWING_MARKER);
+        let mut retained = RetainedSessionWorkspaces::new();
+        let in_flight = session(FIRST_SESSION_IDENTITY);
+        let idle = session(SECOND_SESSION_IDENTITY);
+        let overflowing = session(FILLER_SESSION_IDENTITY_BASE - 1);
+        // The in-flight session is retained first, so least-recently-used order
+        // alone would evict it and the assertion below would fail.
+        retained.retain(in_flight, in_flight_retained);
+        retained.retain(idle, idle_retained);
+        fill_remaining_capacity(&mut retained, idle_retained);
+
+        retained.retain(overflowing, overflowing_retained);
+
+        assert_eq!(retained.get(in_flight), Some(in_flight_retained));
+        assert_eq!(retained.get(idle), None);
+        assert_eq!(retained.get(overflowing), Some(overflowing_retained));
+    }
+
+    /// A composed set is in flight exactly while a handle outside the retained
+    /// set holds it, which is what a cloned dispatch handle is.
+    #[test]
+    fn a_shared_executor_reports_a_second_handle() {
+        let sole = SharedToolExecutor::new(OfflineWriter);
+        let shared = sole.clone();
+
+        assert!(!sole.is_sole_handle());
+        assert!(!shared.is_sole_handle());
+    }
+
+    /// One handle alone is releasable, so an idle session does not pin the
+    /// retained set against every later session.
+    #[test]
+    fn a_shared_executor_reports_one_handle_as_sole() {
+        let sole = SharedToolExecutor::new(OfflineWriter);
+
+        assert!(sole.is_sole_handle());
     }
 }
