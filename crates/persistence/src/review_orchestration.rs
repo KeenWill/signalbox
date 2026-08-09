@@ -4,7 +4,12 @@
 //! run, pass, finding, event, and external-link values are always reconstructed
 //! through [`ReviewWorkflowStore`].
 
-use std::{error::Error, fmt, future::Future, time::Duration};
+use std::{
+    error::Error,
+    fmt,
+    future::Future,
+    time::{Duration, Instant},
+};
 
 use signalbox_application::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
@@ -441,15 +446,17 @@ impl PostgresReviewOrchestrationStore {
     async fn begin_snapshot_guard(
         &self,
     ) -> Result<Transaction<'_, Postgres>, ReviewOrchestrationStoreError> {
-        bounded_snapshot_admission(self.wait_for_snapshot_guard()).await
+        let deadline = Instant::now() + SNAPSHOT_ADMISSION_TIMEOUT;
+        bounded_snapshot_admission(self.wait_for_snapshot_guard(deadline)).await
     }
 
     async fn wait_for_snapshot_guard(
         &self,
+        deadline: Instant,
     ) -> Result<Transaction<'_, Postgres>, ReviewOrchestrationStoreError> {
         let mut backoff = SNAPSHOT_ADMISSION_INITIAL_BACKOFF;
         loop {
-            if let Some(admitted) = self.try_admit_snapshot().await? {
+            if let Some(admitted) = self.try_admit_snapshot(deadline).await? {
                 return Ok(admitted);
             }
             tokio::time::sleep(backoff).await;
@@ -464,11 +471,23 @@ impl PostgresReviewOrchestrationStore {
     /// connection survives into the retry wait. Running out the acquisition
     /// bound is not a retryable loss — the budget it exhausted is the whole
     /// admission budget — so it is reported as the admission expiry it is.
+    ///
+    /// The database is given only what is left of `deadline`, never a fresh
+    /// budget. An attempt that starts late would otherwise carry a server-side
+    /// deadline outlasting the caller's: the caller would report unavailable
+    /// and drop the transaction while `LOCK TABLE` was still running, and the
+    /// rollback releasing the locks it had already taken would queue behind
+    /// that statement.
     async fn try_admit_snapshot(
         &self,
+        deadline: Instant,
     ) -> Result<Option<Transaction<'_, Postgres>>, ReviewOrchestrationStoreError> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut);
+        }
         let mut transaction = self.pool.begin().await?;
-        bound_snapshot_guard(&mut transaction).await?;
+        bound_snapshot_guard(&mut transaction, remaining).await?;
         let admitted: bool = sqlx::query_scalar(
             "SELECT pg_try_advisory_xact_lock(
                 hashtext('signalbox:review-orchestration'),
@@ -1991,8 +2010,9 @@ fn encode_disposition(
 
 /// Installs the guard transaction's own acquisition and lock-hold bounds.
 ///
-/// `statement_timeout` bounds the whole `LOCK TABLE` statement at the same
-/// admission budget the caller enforces. It is a statement bound rather than a
+/// `statement_timeout` bounds the whole `LOCK TABLE` statement at
+/// `acquisition_bound`, which is what the caller has left of its own admission
+/// budget rather than a fresh one. It is a statement bound rather than a
 /// `lock_timeout` because the inventory takes 34 locks in one statement and
 /// PostgreSQL applies `lock_timeout` to each acquisition separately: waits that
 /// each stay under a per-lock deadline still accumulate, and the statement goes
@@ -2008,12 +2028,13 @@ fn encode_disposition(
 /// could drift from them.
 async fn bound_snapshot_guard(
     transaction: &mut Transaction<'_, Postgres>,
+    acquisition_bound: Duration,
 ) -> Result<(), ReviewOrchestrationStoreError> {
     sqlx::query(
         "SELECT set_config('statement_timeout', $1, true),
                 set_config('idle_in_transaction_session_timeout', $2, true)",
     )
-    .bind(milliseconds(SNAPSHOT_ADMISSION_TIMEOUT))
+    .bind(milliseconds(acquisition_bound))
     .bind(milliseconds(SNAPSHOT_GUARD_IDLE_TIMEOUT))
     .execute(&mut **transaction)
     .await?;
@@ -2021,8 +2042,12 @@ async fn bound_snapshot_guard(
 }
 
 /// Renders one bound in the millisecond form PostgreSQL's timeout settings take.
+///
+/// A sub-millisecond remainder floors at one millisecond rather than rounding
+/// to the zero PostgreSQL reads as "no timeout at all", which would turn the
+/// tightest deadline into an unbounded one.
 fn milliseconds(bound: Duration) -> String {
-    format!("{}ms", bound.as_millis())
+    format!("{}ms", bound.as_millis().max(1))
 }
 
 /// Names an expired lock acquisition as the admission expiry it is, so the
@@ -2654,9 +2679,10 @@ const fn corruption(detail: &'static str) -> ReviewOrchestrationStoreError {
 #[cfg(test)]
 mod tests {
     use super::{
-        REVIEW_SNAPSHOT_LOCKS, ReviewOrchestrationStoreError, SNAPSHOT_ADMISSION_TIMEOUT,
+        Duration, REVIEW_SNAPSHOT_LOCKS, ReviewOrchestrationStoreError, SNAPSHOT_ADMISSION_TIMEOUT,
         SNAPSHOT_GUARD_IDLE_TIMEOUT, SNAPSHOT_LOCK_PHASE_TIMEOUT,
         bounded_snapshot_admission_with_timeout, bounded_snapshot_lock_phase_with_timeout,
+        milliseconds,
     };
 
     fn lock_position(table: &str) -> usize {
@@ -2669,10 +2695,9 @@ mod tests {
     async fn snapshot_admission_timeout_is_typed() {
         let pending = std::future::pending::<Result<(), ReviewOrchestrationStoreError>>();
 
-        let error =
-            bounded_snapshot_admission_with_timeout(pending, std::time::Duration::from_millis(1))
-                .await
-                .expect_err("snapshot admission must be time bounded");
+        let error = bounded_snapshot_admission_with_timeout(pending, Duration::from_millis(1))
+            .await
+            .expect_err("snapshot admission must be time bounded");
 
         assert!(matches!(
             error,
@@ -2684,10 +2709,9 @@ mod tests {
     async fn snapshot_lock_phase_timeout_is_typed() {
         let pending = std::future::pending::<Result<(), ReviewOrchestrationStoreError>>();
 
-        let error =
-            bounded_snapshot_lock_phase_with_timeout(pending, std::time::Duration::from_millis(1))
-                .await
-                .expect_err("the locked snapshot phase must be time bounded");
+        let error = bounded_snapshot_lock_phase_with_timeout(pending, Duration::from_millis(1))
+            .await
+            .expect_err("the locked snapshot phase must be time bounded");
 
         assert!(matches!(
             error,
@@ -2707,6 +2731,14 @@ mod tests {
     #[test]
     fn the_guard_idle_bound_outlasts_admission() {
         assert!(SNAPSHOT_ADMISSION_TIMEOUT < SNAPSHOT_GUARD_IDLE_TIMEOUT);
+    }
+
+    /// PostgreSQL reads a zero timeout as no timeout, so the remainder handed
+    /// to it late in the admission budget must never round down to one.
+    #[test]
+    fn a_sub_millisecond_bound_never_renders_as_the_disabled_zero() {
+        assert_eq!(milliseconds(Duration::from_micros(1)), "1ms");
+        assert_eq!(milliseconds(Duration::ZERO), "1ms");
     }
 
     #[test]

@@ -40,6 +40,9 @@ const LAST_LOCKED_TABLE: &str = "LOCK TABLE review_target IN ROW EXCLUSIVE MODE"
 /// Longer than the five-second admission bound, so this writer resolves when
 /// the denied acquisition releases its locks rather than by giving up first.
 const WRITER_LOCK_WAIT: &str = "15s";
+/// Gives the arriving writer its own bounded wait, so a writer that is never
+/// released fails its statement instead of hanging the test.
+const SET_WRITER_LOCK_WAIT: &str = "SELECT set_config('lock_timeout', $1, true)";
 /// Comfortably past the five-second admission bound, so an expiry that the
 /// snapshot reports itself is never mistaken for the harness giving up.
 const ADMISSION_OBSERVATION_CEILING: Duration = Duration::from_secs(30);
@@ -107,27 +110,27 @@ async fn review_orchestration_snapshot_admission_expires_and_the_pool_recovers()
     Ok(())
 }
 
-/// Runs a snapshot against a held `contended` lock and requires a writer that
-/// arrives for the inventory's first table to be admitted while the snapshot is
-/// still denied.
-///
-/// The holder keeps its lock until the snapshot has reported its expiry, so the
-/// writer's admission never depends on which side finished first.
-async fn writer_is_admitted_beside_a_denied_snapshot(
-    contended: &'static str,
-) -> Result<(), Box<dyn Error>> {
+/// A writer queued behind a snapshot's own queued request is released when that
+/// acquisition runs out the admission bound, rather than when the daemon
+/// happens to abandon the request.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_writer_queued_behind_a_denied_snapshot_is_released_on_the_admission_bound()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = PostgresReviewOrchestrationStore::new(pool.clone());
     let mut holder = pool.begin().await?;
-    sqlx::query(contended).execute(&mut *holder).await?;
+    sqlx::query(FIRST_LOCKED_TABLE)
+        .execute(&mut *holder)
+        .await?;
     let snapshot = tokio::spawn(async move { store.load_snapshot(absent_attempt()).await });
     assert!(
         blocked_backends_reached(&pool, 1).await?,
-        "the snapshot blocks on the lock the holder took"
+        "the snapshot queues for the first locked table the holder took"
     );
 
     let mut arriving = pool.begin().await?;
-    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+    sqlx::query(SET_WRITER_LOCK_WAIT)
         .bind(WRITER_LOCK_WAIT)
         .execute(&mut *arriving)
         .await?;
@@ -137,39 +140,70 @@ async fn writer_is_admitted_beside_a_denied_snapshot(
 
     assert!(
         admitted.is_ok(),
-        "a writer must not wait out the snapshot's admission window: {admitted:?}"
+        "a writer queued behind the snapshot must be released when the \
+         acquisition runs out the admission bound: {admitted:?}"
     );
     arriving.rollback().await?;
     let expiry = tokio::time::timeout(ADMISSION_OBSERVATION_CEILING, snapshot)
         .await
         .expect("the snapshot task finishes within the observation ceiling")?;
-    assert!(matches!(
-        expiry,
-        Err(ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut)
-    ));
+    assert!(
+        matches!(
+            expiry,
+            Err(ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut)
+        ),
+        "the holder never released, so the snapshot must report its admission expiry: {expiry:?}"
+    );
     holder.rollback().await?;
     Ok(())
 }
 
-/// A writer queued behind a snapshot's own queued request is released when that
-/// acquisition runs out the admission bound, rather than when the daemon
-/// happens to abandon the request.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn a_writer_queued_behind_a_denied_snapshot_is_released_on_the_admission_bound()
--> Result<(), Box<dyn Error>> {
-    writer_is_admitted_beside_a_denied_snapshot(FIRST_LOCKED_TABLE).await
-}
-
-/// The same holds for a table the blocked snapshot has *already* locked.
+/// A writer contending a table the blocked snapshot has *already* locked is
+/// released on that same bound.
 ///
 /// Blocking the snapshot on the inventory's last table leaves it holding shared
-/// locks on all the earlier ones while it waits, so a writer contending an
-/// earlier table is released only because the bound covers the whole
-/// multi-table statement rather than each acquisition within it.
+/// locks on all the earlier ones while it waits, so this writer is released only
+/// because the bound covers the whole multi-table statement rather than each
+/// acquisition within it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_writer_contending_a_lock_the_blocked_snapshot_already_holds_is_still_released()
 -> Result<(), Box<dyn Error>> {
-    writer_is_admitted_beside_a_denied_snapshot(LAST_LOCKED_TABLE).await
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresReviewOrchestrationStore::new(pool.clone());
+    let mut holder = pool.begin().await?;
+    sqlx::query(LAST_LOCKED_TABLE).execute(&mut *holder).await?;
+    let snapshot = tokio::spawn(async move { store.load_snapshot(absent_attempt()).await });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the snapshot blocks on the last locked table, holding every earlier one"
+    );
+
+    let mut arriving = pool.begin().await?;
+    sqlx::query(SET_WRITER_LOCK_WAIT)
+        .bind(WRITER_LOCK_WAIT)
+        .execute(&mut *arriving)
+        .await?;
+    let admitted = sqlx::query(FIRST_LOCKED_TABLE)
+        .execute(&mut *arriving)
+        .await;
+
+    assert!(
+        admitted.is_ok(),
+        "the shared locks the blocked snapshot already holds must be released \
+         on the acquisition bound: {admitted:?}"
+    );
+    arriving.rollback().await?;
+    let expiry = tokio::time::timeout(ADMISSION_OBSERVATION_CEILING, snapshot)
+        .await
+        .expect("the snapshot task finishes within the observation ceiling")?;
+    assert!(
+        matches!(
+            expiry,
+            Err(ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut)
+        ),
+        "the holder never released, so the snapshot must report its admission expiry: {expiry:?}"
+    );
+    holder.rollback().await?;
+    Ok(())
 }

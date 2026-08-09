@@ -423,10 +423,12 @@ listener. The database-global snapshot admission loser rolls back its
 transaction before an exponential retry wait that begins at 10 ms and is capped
 at 100 ms. Admission is bounded to five seconds, after which the read reports
 unavailable; daemon shutdown cancels the admission wait and releases its
-capacity. The database enforces that same five-second bound on the lock
-acquisition itself, across the whole multi-table statement rather than each lock
-within it, so the locks an unsuccessful acquisition already took are released on
-the deadline instead of when the daemon abandons the request.
+capacity. The database enforces the acquisition against that same five-second
+deadline, across the whole multi-table statement rather than each lock within
+it, so the locks an unsuccessful acquisition already took are released on the
+deadline instead of when the daemon abandons the request. Each attempt is given
+what remains of the admission budget rather than a fresh one, so five seconds
+from the first attempt is the whole ceiling and not a bound each retry restarts.
 
 Holding those locks is bounded too, because the inventory includes the tables
 ordinary turn processing writes. The loaders run for at most fifteen seconds
