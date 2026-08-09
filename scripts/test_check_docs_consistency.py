@@ -570,6 +570,119 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertIn("| INV-001", render_invariant_index(self.root))
 
+    def test_binary_include_uses_the_declared_cargo_target_name(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n\n'
+            "[[test]]\n"
+            'name = "selected_target"\n'
+            'path = "tests/physical_file.rs"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        target = self.root / "tests/physical_file.rs"
+        target.parent.mkdir()
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_declared_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            'include_binaries = ["selected_target"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_exclude_uses_the_declared_cargo_target_name(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n\n'
+            "[[test]]\n"
+            'name = "excluded_target"\n'
+            'path = "tests/physical_file.rs"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        target = self.root / "tests/physical_file.rs"
+        target.parent.mkdir()
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_declared_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            'exclude_binaries = ["excluded_target"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertNotIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_include_uses_the_conventional_directory_target_name(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        target = self.root / "tests/nested_target/main.rs"
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_directory_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            'include_binaries = ["nested_target"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_include_uses_an_overridden_library_target_name(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture-package"\nversion = "0.0.0"\n\n'
+            '[lib]\nname = "selected_library"\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text(
+            "#[test]\n#[ignore]\nfn inv_001_library_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture-package"\n'
+            'include_binaries = ["selected_library"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
+    def test_binary_include_uses_the_implicit_name_for_a_relocated_library(self) -> None:
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture-package"\nversion = "0.0.0"\n\n'
+            '[lib]\npath = "src/custom_library.rs"\n',
+            encoding="utf-8",
+        )
+        target = self.root / "src/custom_library.rs"
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_implicit_library_target_name() {}\n",
+            encoding="utf-8",
+        )
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture-package"\n'
+            'include_binaries = ["fixture_package"]\n'
+            "shards = 1\n",
+        )
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
     def test_ci_ignored_test_skips_exclude_only_named_enforcement(self) -> None:
         selected_invariant = "INV-001"
         skipped_invariant = "INV-002"
