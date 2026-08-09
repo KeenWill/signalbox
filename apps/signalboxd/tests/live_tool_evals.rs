@@ -79,9 +79,9 @@ use signalbox_tools_web::{
 };
 use signalbox_tools_workspace::{
     APPLY_PATCH_NAME, EDIT_FILE_NAME, GLOB_FILES_NAME, LIST_DIRECTORY_NAME,
-    LocalWorkspaceFileSystem, READ_FILE_NAME, ReadFileArguments, SEARCH_FILES_NAME,
-    WRITE_FILE_NAME, WorkspaceMutationExecutor, WorkspaceMutationTools, WorkspaceReadExecutor,
-    WorkspaceReadTools,
+    LocalWorkspaceFileSystem, MAX_WORKSPACE_READ_BYTES, READ_FILE_NAME, ReadFileArguments,
+    SEARCH_FILES_NAME, WRITE_FILE_NAME, WorkspaceMutationExecutor, WorkspaceMutationTools,
+    WorkspaceReadExecutor, WorkspaceReadTools,
 };
 use signalboxd::{ActivatedTurnExecution, PostgresProviderModelExecution};
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -165,7 +165,6 @@ const WORKSPACE_SEARCH_PATH: &str = "search-scope/match.txt";
 const WORKSPACE_SEARCH_CONTENT: &str =
     "search prelude\nbeta search fixture\nbeta search overflow\n";
 const WORKSPACE_FORCED_READ_MAX_BYTES: usize = 6;
-const WORKSPACE_READ_MAX_BYTES: usize = 256 * 1024;
 const WORKSPACE_DRIFTED_SEED: &str = "alpha\nbeta fixturE\nalpha\n";
 const WORKSPACE_LIST_PATH: &str = "nested-list";
 const WORKSPACE_LIST_MAX_RESULTS: usize = 20;
@@ -529,6 +528,7 @@ struct FamilySuite {
     git_seed: Option<Oid>,
     catalog: MergedCatalog,
     executor: SharedFamilyExecutor,
+    workspace_seed_files: BTreeMap<PathBuf, Vec<u8>>,
 }
 
 impl FamilySuite {
@@ -547,6 +547,7 @@ impl FamilySuite {
             git_seed: Some(git_seed),
             catalog: MergedCatalog::try_new([catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Git(executor)),
+            workspace_seed_files: BTreeMap::new(),
         })
     }
 
@@ -584,6 +585,7 @@ impl FamilySuite {
                 "nonmatching fixture\n",
             )?;
         }
+        let workspace_seed_files = workspace_files(workspace.path())?;
         let reads = WorkspaceReadTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
         let mutations =
             WorkspaceMutationTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
@@ -598,6 +600,7 @@ impl FamilySuite {
                 read: read_executor,
                 mutation: mutation_executor,
             }),
+            workspace_seed_files,
         })
     }
 
@@ -623,6 +626,7 @@ impl FamilySuite {
                 fetch: fetch_executor,
                 search: search_executor,
             }),
+            workspace_seed_files: BTreeMap::new(),
         })
     }
 
@@ -783,7 +787,8 @@ impl FamilySuite {
             }
             EvalFamily::Workspace => {
                 let bytes_match = self.workspace_answer_matches()?;
-                Ok(bytes_match && snapshot.workspace_natural_requests_passed())
+                let seed_files_match = self.workspace_seed_files_match()?;
+                Ok(bytes_match && seed_files_match && snapshot.workspace_natural_requests_passed())
             }
             EvalFamily::Web => snapshot.web_natural_requests_passed(),
         }
@@ -796,6 +801,34 @@ impl FamilySuite {
             Err(error) => Err(error.into()),
         }
     }
+
+    fn workspace_seed_files_match(&self) -> EvalResult<bool> {
+        let mut actual = workspace_files(self.workspace.path())?;
+        actual.remove(Path::new(WORKSPACE_ANSWER_PATH));
+        Ok(actual == self.workspace_seed_files)
+    }
+}
+
+fn workspace_files(root: &Path) -> EvalResult<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = BTreeMap::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                let relative = entry
+                    .path()
+                    .strip_prefix(root)
+                    .map_err(|_| io::Error::other("workspace fixture escaped its root"))?
+                    .to_path_buf();
+                files.insert(relative, fs::read(entry.path())?);
+            }
+        }
+    }
+    Ok(files)
 }
 
 fn git_forced_case_passed(
@@ -2435,7 +2468,7 @@ fn workspace_read_covers_seed(arguments: &serde_json::Value) -> bool {
     };
     arguments.path == WORKSPACE_SEED_PATH
         && arguments.max_bytes >= WORKSPACE_SEED.len()
-        && arguments.max_bytes <= WORKSPACE_READ_MAX_BYTES
+        && arguments.max_bytes <= MAX_WORKSPACE_READ_BYTES
 }
 
 fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid> {
@@ -3222,7 +3255,7 @@ fn unforced_workspace_tier_keeps_an_undersized_read_bound_as_a_miss() {
 #[test]
 fn unforced_workspace_tier_keeps_an_oversized_read_bound_as_a_miss() {
     let mut arguments = bounded_workspace_read_arguments();
-    arguments["max_bytes"] = serde_json::json!(WORKSPACE_READ_MAX_BYTES + 1);
+    arguments["max_bytes"] = serde_json::json!(MAX_WORKSPACE_READ_BYTES + 1);
     let snapshot = failed_request_snapshot(READ_FILE_NAME, arguments);
 
     assert!(!snapshot.exact_natural_request_failed(EvalFamily::Workspace));
@@ -4647,6 +4680,46 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
     };
 
     assert!(!snapshot.workspace_natural_requests_passed());
+}
+
+#[test]
+fn workspace_natural_state_rejects_collateral_fixture_mutation() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_ANSWER_PATH),
+        WORKSPACE_ANSWER,
+    )?;
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_SEED_PATH),
+        WORKSPACE_DRIFTED_SEED,
+    )?;
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(READ_FILE_NAME),
+                arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(WRITE_FILE_NAME),
+                arguments_text: serde_json::json!({
+                    "content": WORKSPACE_ANSWER,
+                    "path": WORKSPACE_ANSWER_PATH,
+                })
+                .to_string(),
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!suite.natural_state_passed(&snapshot)?);
+    Ok(())
 }
 
 #[test]
