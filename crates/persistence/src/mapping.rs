@@ -1768,29 +1768,37 @@ mod tests {
     };
 
     #[test]
-    fn tool_attempt_dispositions_round_trip_through_one_storage_mapping() {
+    fn tool_attempt_dispositions_pin_each_storage_spelling() {
         assert_eq!(
-            tool_attempt_disposition_from_str(tool_attempt_disposition_to_str(
-                ToolAttemptDispositionStorageKind::Completed,
-            )),
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Completed),
+            "completed"
+        );
+        assert_eq!(
+            tool_attempt_disposition_from_str("completed"),
             Some(ToolAttemptDispositionStorageKind::Completed)
         );
         assert_eq!(
-            tool_attempt_disposition_from_str(tool_attempt_disposition_to_str(
-                ToolAttemptDispositionStorageKind::KnownFailed,
-            )),
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::KnownFailed),
+            "known_failed"
+        );
+        assert_eq!(
+            tool_attempt_disposition_from_str("known_failed"),
             Some(ToolAttemptDispositionStorageKind::KnownFailed)
         );
         assert_eq!(
-            tool_attempt_disposition_from_str(tool_attempt_disposition_to_str(
-                ToolAttemptDispositionStorageKind::AwaitingChild,
-            )),
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::AwaitingChild),
+            "awaiting_child"
+        );
+        assert_eq!(
+            tool_attempt_disposition_from_str("awaiting_child"),
             Some(ToolAttemptDispositionStorageKind::AwaitingChild)
         );
         assert_eq!(
-            tool_attempt_disposition_from_str(tool_attempt_disposition_to_str(
-                ToolAttemptDispositionStorageKind::Ambiguous,
-            )),
+            tool_attempt_disposition_to_str(ToolAttemptDispositionStorageKind::Ambiguous),
+            "ambiguous"
+        );
+        assert_eq!(
+            tool_attempt_disposition_from_str("ambiguous"),
             Some(ToolAttemptDispositionStorageKind::Ambiguous)
         );
         assert_eq!(
