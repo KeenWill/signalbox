@@ -3729,8 +3729,8 @@ mod tests {
             let catalog = bridge_catalog(&[definition]);
             let catalog_value: serde_json::Value =
                 serde_json::from_slice(&catalog).expect("shallow blocking bridge catalog is JSON");
-            let catalog_path = support.path().join("blocking-tools.json");
-            let ready_path = support.path().join("blocking-ready");
+            let catalog_path = support.path().join(MCP_CATALOG_FILENAME);
+            let ready_path = support.path().join(MCP_READY_FILENAME);
             fs::write(&catalog_path, &catalog).expect("blocking bridge catalog is written");
             let executable = ensure_claude_mcp_bridge_executable();
             let mut command = Command::new(&executable);
@@ -4302,20 +4302,6 @@ mod tests {
     const MCP_PROPOSAL_ACKNOWLEDGEMENT: &str =
         "Signalbox recorded this tool proposal for external execution.";
 
-    fn invalid_tool_call_error() -> serde_json::Value {
-        serde_json::json!({
-            "code": -32602,
-            "message": "undeclared tool or non-object arguments",
-        })
-    }
-
-    fn unsupported_protocol_error() -> serde_json::Value {
-        serde_json::json!({
-            "code": -32602,
-            "message": "unsupported MCP protocol version",
-        })
-    }
-
     struct McpBridgeFixture {
         workspace: tempfile::TempDir,
         _support: tempfile::TempDir,
@@ -4513,7 +4499,8 @@ mod tests {
         let rejected = fixture.request_initialize(MCP_UNSUPPORTED_PROTOCOL_VERSION);
         fixture.finish();
 
-        assert_eq!(rejected["error"], unsupported_protocol_error());
+        expect![[r#"{"code":-32602,"message":"unsupported MCP protocol version"}"#]]
+            .assert_eq(&rejected["error"].to_string());
     }
 
     #[test]
@@ -4606,7 +4593,8 @@ mod tests {
         let called = fixture.call_undeclared_tool();
         fixture.finish();
 
-        assert_eq!(called["error"], invalid_tool_call_error());
+        expect![[r#"{"code":-32602,"message":"undeclared tool or non-object arguments"}"#]]
+            .assert_eq(&called["error"].to_string());
     }
 
     #[test]
@@ -4617,7 +4605,8 @@ mod tests {
         let called = fixture.call_write_file_with_non_object_arguments();
         fixture.finish();
 
-        assert_eq!(called["error"], invalid_tool_call_error());
+        expect![[r#"{"code":-32602,"message":"undeclared tool or non-object arguments"}"#]]
+            .assert_eq(&called["error"].to_string());
     }
     /// Composition preserves each execution declaration's permission default:
     /// the sandboxed command and the diagnostics reader stay automatic, while
