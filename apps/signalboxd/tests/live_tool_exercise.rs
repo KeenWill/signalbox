@@ -48,7 +48,7 @@ use signalbox_tools_conversations::{
     LIST_CONVERSATIONS_NAME, READ_CONVERSATION_NAME, READ_IMPORTED_CONVERSATION_NAME,
     READ_OWN_CONVERSATION_NAME,
 };
-use signalbox_tools_exec::UNSANDBOXED_EXEC_NAME;
+use signalbox_tools_exec::{SANDBOXED_EXEC_NAME, UNSANDBOXED_EXEC_NAME};
 use signalbox_tools_plan::{PLAN_READ_NAME, PLAN_WRITE_NAME};
 use signalbox_tools_web::{BRAVE_SEARCH_CREDENTIAL_REFERENCE, WEB_FETCH_NAME, WEB_SEARCH_NAME};
 use signalboxd::{
@@ -105,6 +105,7 @@ const WEB_URL: &str = "https://example.com/";
 const UNUSED_WEB_SEARCH_CREDENTIAL_FILE: &str = "unused-brave-key";
 const DENIED_WEB_SEARCH_QUERY: &str = "synthetic denied search";
 const DENIED_UNSANDBOXED_PROGRAM: &str = "/bin/false";
+const DENIED_SANDBOXED_PROGRAM: &str = "false";
 const DENIED_WRITE_PATH: &str = "denied.txt";
 const DENIED_PATCH_PATH: &str = "denied-patch.txt";
 
@@ -731,6 +732,10 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<ScriptedToolCall> {
                 "max_entries": 10,
                 "max_bytes": 4096,
             }),
+        ),
+        call(
+            SANDBOXED_EXEC_NAME,
+            json!({"program": DENIED_SANDBOXED_PROGRAM}),
         ),
         call(
             SESSION_STATUS_UPDATE_NAME,

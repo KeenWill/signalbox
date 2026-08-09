@@ -346,7 +346,20 @@ jobs:
       (${{ matrix.suite }} ${{ matrix.partition }}/${{ matrix.partitions }})
     needs: postgres-integration-build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Measured against the shards rather than guessed. Over 29-30 samples each,
+    # the three persistence shards take 7.35 / 7.43 / 7.33 minutes at the median
+    # and 7.72 at the p90 — balanced to within 1.4%, with the slowest of the
+    # three rotating run to run. There is no hot shard to rebalance away, so the
+    # only lever on headroom is this cap.
+    #
+    # Ten minutes did not leave room for the slow path. A shard whose tests
+    # actually fail runs about two minutes longer than a clean one (9.68m
+    # observed against a 7.4m median), so the cap sat within noise of exactly
+    # the runs whose results matter most — and a job the cap kills is reported
+    # as `cancelled`, which reads as an infrastructure problem and hides the
+    # test failure underneath it. Fifteen minutes is about twice the median,
+    # leaves the p90 at half the cap, and still bounds a genuinely hung job.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.postgres-integration-build.outputs.matrix) }}

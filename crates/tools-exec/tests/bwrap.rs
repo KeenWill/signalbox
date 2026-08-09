@@ -57,6 +57,51 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
 
     assert_real_bwrap_result(nested_result, ci)?;
 
+    // The other probes hold whether or not the network namespace is unshared,
+    // so none of them would notice `--unshare-net` disappearing from the
+    // profile. A network namespace of its own is the one containment property
+    // that separates this sandbox from a process that can post the workspace to
+    // an arbitrary host, and its direct observable is the interface table: a
+    // freshly unshared namespace carries the loopback device and nothing else,
+    // whereas sharing the host's namespace exposes every host interface.
+    let network_arguments = ExecArguments {
+        program: String::from("sh"),
+        arguments: vec![
+            String::from("-c"),
+            String::from(
+                "grep -q '^ *lo:' /proc/net/dev && test \"$(grep -c : /proc/net/dev)\" -eq 1",
+            ),
+        ],
+        working_directory: String::from("."),
+        timeout_seconds: 5,
+    };
+
+    let network_result = runner.try_run(network_arguments).await?;
+
+    assert_real_bwrap_result(network_result, ci)?;
+
+    // The interface table proves `lo` exists, not that it works. A fresh
+    // namespace can carry a loopback device that is still down, and a workspace
+    // test binding a local server would then fail with `ENETUNREACH` while the
+    // probe above still passed. Bind a listener and connect to it, so loopback
+    // is asserted usable rather than merely present. A missing `python3` shows
+    // up as a typed spawn failure rather than a silent pass.
+    let loopback_arguments = ExecArguments {
+        program: String::from("python3"),
+        arguments: vec![
+            String::from("-c"),
+            String::from(
+                "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen(1); c=socket.create_connection(s.getsockname()); c.close(); s.close()",
+            ),
+        ],
+        working_directory: String::from("."),
+        timeout_seconds: 5,
+    };
+
+    let loopback_result = runner.try_run(loopback_arguments).await?;
+
+    assert_real_bwrap_result(loopback_result, ci)?;
+
     let missing_arguments = ExecArguments {
         program: String::from("signalbox-exec-definitely-missing-target"),
         arguments: Vec::new(),

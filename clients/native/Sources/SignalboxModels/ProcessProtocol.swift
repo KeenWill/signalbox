@@ -269,17 +269,47 @@ public struct SignalboxMetadataLastWriter: Codable, Equatable, Sendable {
 
 public enum SignalboxMetadataActor: Codable, Equatable, Sendable {
   case user
+  case model(turnID: SignalboxCanonicalUUID)
+  case recovery
+  case tool(toolRequestID: SignalboxCanonicalUUID)
   case unknown(kind: String, payload: [String: SignalboxJSONValue])
 
   public init(from decoder: Decoder) throws {
     let tagged = try SignalboxTaggedPayload(from: decoder)
-    self = tagged.kind == "user" ? .user : .unknown(kind: tagged.kind, payload: tagged.payload)
+    switch tagged.kind {
+    case "user":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
+      self = .user
+    case "model":
+      try tagged.rejectUnadmittedFields(["type", "turn_id"], decoder: decoder)
+      self = .model(turnID: try decoder.decode("turn_id"))
+    case "recovery":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
+      self = .recovery
+    case "tool":
+      try tagged.rejectUnadmittedFields(["type", "tool_request_id"], decoder: decoder)
+      self = .tool(toolRequestID: try decoder.decode("tool_request_id"))
+    default:
+      self = .unknown(kind: tagged.kind, payload: tagged.payload)
+    }
   }
 
   public func encode(to encoder: Encoder) throws {
     switch self {
     case .user:
       try ["type": SignalboxJSONValue.string("user")].encode(to: encoder)
+    case .model(let turnID):
+      try [
+        "type": SignalboxJSONValue.string("model"),
+        "turn_id": .string(turnID.rawValue),
+      ].encode(to: encoder)
+    case .recovery:
+      try ["type": SignalboxJSONValue.string("recovery")].encode(to: encoder)
+    case .tool(let toolRequestID):
+      try [
+        "type": SignalboxJSONValue.string("tool"),
+        "tool_request_id": .string(toolRequestID.rawValue),
+      ].encode(to: encoder)
     case .unknown(let kind, var payload):
       payload["type"] = .string(kind)
       try payload.encode(to: encoder)
