@@ -75,6 +75,20 @@ async fn hook_progress_events_do_not_replace_the_init_handshake() {
 }
 
 #[tokio::test]
+async fn assistant_accepts_the_init_alias_with_a_dated_resolution() {
+    let result = execute_scenario("resolved_model_alias", OperationShape::Text).await;
+    let completion = completed(&result.evidence);
+
+    assert_eq!(completion.finish, CompletionFinish::EndTurn);
+    assert_eq!(
+        completion.content,
+        vec![AssistantPart::Text(fixtures::ANSWER.to_string())]
+    );
+    assert_eq!(completion.usage, expected_usage());
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
 async fn inv_035_harmless_terminal_credential_prefix_remains_byte_exact() {
     let result = execute_scenario("safe_terminal_prefix", OperationShape::Text).await;
 
@@ -482,6 +496,18 @@ async fn malformed_stream_line_is_protocol_boundary_loss() {
 #[tokio::test]
 async fn conflicting_assistant_message_id_is_protocol_boundary_loss() {
     let result = execute_scenario("conflicting_message_id", OperationShape::Text).await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+    assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn conflicting_assistant_model_is_protocol_boundary_loss() {
+    let result = execute_scenario("conflicting_assistant_model", OperationShape::Text).await;
     let loss = boundary_loss(&result.evidence);
 
     assert!(matches!(

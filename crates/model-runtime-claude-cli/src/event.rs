@@ -43,6 +43,7 @@ pub(crate) struct EventDecoder<C> {
     reported_model: Option<ProviderReportedModel>,
     native_session_id: Option<String>,
     native_model: Option<String>,
+    native_assistant_model: Option<String>,
     message_id: Option<ProviderMessageId>,
     native_message_id: Option<String>,
     content: Vec<AssistantPart>,
@@ -90,6 +91,7 @@ impl<C: Clone> EventDecoder<C> {
             reported_model: None,
             native_session_id: None,
             native_model: None,
+            native_assistant_model: None,
             message_id: None,
             native_message_id: None,
             content: Vec::new(),
@@ -282,11 +284,19 @@ impl<C: Clone> EventDecoder<C> {
             self.message_id = Some(ProviderMessageId::new(sanitized));
             self.native_message_id = Some(event.message.id.clone());
         }
-        if self.native_model.as_deref() != Some(event.message.model.as_str()) {
+        let model_matches_init = self.native_model.as_deref().is_some_and(|initialized| {
+            assistant_model_matches_init(initialized, &event.message.model)
+        });
+        let model_matches_prior_assistant = self
+            .native_assistant_model
+            .as_ref()
+            .is_none_or(|observed| observed == &event.message.model);
+        if !model_matches_init || !model_matches_prior_assistant {
             return Err(DecodeFailure::stream_protocol(
                 "Claude assistant model contradicts system init",
             ));
         }
+        self.native_assistant_model = Some(event.message.model.clone());
         if let Some(usage) = event.message.usage {
             self.usage.absorb(message_usage(usage));
         }
@@ -766,6 +776,16 @@ impl<C: Clone> EventDecoder<C> {
             usage: self.usage,
         })
     }
+}
+
+fn assistant_model_matches_init(initialized: &str, assistant: &str) -> bool {
+    if initialized == assistant {
+        return true;
+    }
+    assistant
+        .strip_prefix(initialized)
+        .and_then(|suffix| suffix.strip_prefix('-'))
+        .is_some_and(|date| date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn tool_result_text(value: &Value) -> Option<&str> {

@@ -94,6 +94,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         success("end_turn", Some(fixtures::ANSWER))?;
         return Ok(());
     }
+    if scenario == "resolved_model_alias" {
+        system_init_with_identity(&arguments, fixtures::SESSION_ID, fixtures::MODEL_ALIAS)?;
+        assistant_text_with_identity(
+            fixtures::MESSAGE_ID,
+            fixtures::MODEL_RESOLVED,
+            fixtures::ANSWER,
+        )?;
+        success("end_turn", Some(fixtures::ANSWER))?;
+        return Ok(());
+    }
+    if scenario == "conflicting_assistant_model" {
+        system_init_with_identity(&arguments, fixtures::SESSION_ID, fixtures::MODEL_ALIAS)?;
+        assistant_text_with_identity(
+            fixtures::MESSAGE_ID,
+            fixtures::OTHER_MODEL,
+            fixtures::ANSWER,
+        )?;
+        return Ok(());
+    }
     system_init(&arguments)?;
     match scenario.as_str() {
         "normal_completion" => {
