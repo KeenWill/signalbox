@@ -7459,7 +7459,13 @@ fn reject_forced_executor_failures(outcomes: &[CaseOutcome]) -> EvalResult {
 }
 
 fn reject_natural_executor_failure(outcome: &CaseOutcome, family: EvalFamily) -> EvalResult {
-    if outcome.snapshot.exact_natural_request_failed(family) {
+    if outcome.snapshot.exact_natural_request_failed(family)
+        || (family == EvalFamily::Exec
+            && outcome
+                .tool_results
+                .iter()
+                .any(exec_result_is_infrastructure))
+    {
         return Err(io::Error::other(EXACT_EXECUTOR_FAILURE).into());
     }
     Ok(())
@@ -12759,6 +12765,14 @@ fn unforced_exec_tier_reports_a_supervision_failure_as_infrastructure() {
         outcome.natural_loop_disposition(EvalFamily::Exec),
         EvalDisposition::Infrastructure
     );
+}
+
+#[test]
+fn unforced_exec_structured_infrastructure_fails_the_job() {
+    let outcome =
+        natural_exec_outcome(direct_exec_result(DirectExecEvidence::supervision_failure()));
+
+    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Exec).is_err());
 }
 
 #[test]
