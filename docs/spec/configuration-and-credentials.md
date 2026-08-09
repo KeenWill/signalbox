@@ -1028,12 +1028,19 @@ file locking, but the CLI re-reads it immediately before refreshing and adopts a
 token another process wrote rather than refreshing again, so the residual race
 is two processes crossing the refresh threshold within one token-exchange round
 trip — narrow, because a process refreshes about once per access-token lifetime.
-When it does fire the authorization is invalidated and the profile quarantines;
-recovery is the ordinary re-provisioning an operator already performs, and the
-pool fails over meanwhile. A deployment preferring not to carry that risk sets
-the optional bound, which is unbounded when absent. The knob exists because the
-tradeoff is a deployment's to make and code cannot observe which side of it a
-given operator is on.
+When it does fire the authorization is invalidated, and the provider then
+rejects that profile's credential on every later call until an operator
+re-provisions it. What the pool does about those rejections is its configured
+`on_credential_rejected` action, not an unconditional quarantine: the Codex CLI
+reports one undifferentiated authentication failure, so nothing downstream can
+tell this race from an ordinary rejection, and the trigger contract below states
+that single policy. A deployment that wants this race to take the profile out of
+rotation configures `quarantine` there, which is also what makes the pool fail
+over meanwhile; recovery is the ordinary re-provisioning an operator already
+performs. A deployment preferring not to carry that risk sets the optional
+bound, which is unbounded when absent. The knob exists because the tradeoff is a
+deployment's to make and code cannot observe which side of it a given operator
+is on.
 
 Two `codex_home` profiles must name independently provisioned logins, and that
 is an operator-established precondition rather than something the daemon
@@ -1052,15 +1059,109 @@ because rotation happens inside the store rather than at an external source of
 truth. And a process the daemon did not start — an operator running the CLI by
 hand against the same directory — is outside anything the daemon can coordinate.
 
-**Committed unimplemented functionality — capacity reservations.** No present
-composition reserves capacity for a bounded `codex_home` profile, records an
-invocation reservation, or withholds a call because one is at its bound.
-`max_concurrent_invocations` is validated and retained by the grammar above and
-governs nothing in this build. Its implementing child owns the shared
-per-profile capacity row, the reservation lifecycle and its process-group
-fencing across restart, and the contention behavior that decides between waiting
-for a bounded member and consulting `on_pool_exhausted`. Until that child lands,
-a document may declare the bound and every invocation proceeds unbounded.
+**Committed unimplemented functionality — capacity reservations and
+contention.** No present composition reserves capacity, records an invocation
+reservation, parks a turn on a bounded member, or enforces
+`max_concurrent_invocations` at all; the grammar validates and retains the bound
+and nothing consumes it. The rest of this subsection is the contract its
+implementing child must satisfy, and no present migration, repository operation,
+active turn phase, or runtime supplies any of it. An operator setting the bound
+on this build gets no enforcement.
+
+Where `max_concurrent_invocations` is set and reached, that member is skipped
+during selection exactly as an excluded member is, and selection continues
+through the remaining priorities. A member at its bound therefore never blocks a
+lower-priority member that is free: priority states which account is preferred,
+not which the turn must wait for, and waiting for the preferred account while
+another is idle would trade throughput for a preference the deployment did not
+ask to be enforced that way.
+
+Contention arises only when that traversal selects nothing. If at least one
+member was skipped solely because it was at its bound, the turn waits for any
+such member to free rather than consulting `on_pool_exhausted` — contention is
+not exhaustion. This includes a mixed pool whose other members carry durable
+exclusions. A bounded member has reported no failure and carries no reset time;
+its invocation completion wakes the waiter. Exhaustion means the traversal
+selected nothing and no member was skipped merely for its bound, which is a
+durable condition; contention resolves on its own.
+
+The wait records which case it represents. An exhausted wait carries the
+complete policy-member exclusion snapshot described below. A contended wait
+carries that same frozen policy identity, every durable exclusion that removed a
+member, and the complete nonempty set of otherwise-admissible bounded members
+with their exact invocation-reservation identities. A contended wait also
+carries the earliest unelapsed reset among those durable exclusions as its
+deadline, exactly as an exhausted wait does, and the scheduler makes it eligible
+when that deadline passes. Without it a turn contending on a bounded member
+would stay parked past the moment an excluded member became admissible again —
+visibly so for a chain-local reset, whose passage produces no separate durable
+availability update. A contended wait whose exclusions report no reset has no
+deadline, and its bounded members' completions remain its wake. A member's
+admission first locks the shared capacity rows for every bounded profile the
+preparation may select, in profile-reference byte order. The rows are
+profile-scoped rather than session- or pool-scoped, so concurrent sessions and
+distinct pools serialize against the same bound without a lock-order cycle.
+Under those locks the transaction counts live reservations, chooses the member,
+and acquires its `pending_spawn` reservation together with the call's `Prepared`
+record; a database constraint rejects a live count above the configured bound.
+That bound is read from the profile's current registration and is never frozen
+into a pool policy, because `max_concurrent_invocations` guards a live refresh
+race the operator is adjusting now: a session pinned to an older policy must not
+keep running against a limit the operator has since tightened. A raised bound
+therefore admits more work at the next preparation, and a lowered one restricts
+the next admission without revoking a reservation already committed — a live
+count above a freshly lowered bound drains as those invocations complete rather
+than terminating them. A turn already parked in a contended wait is not left
+behind by a raise: a configuration edit produces neither a reservation release
+nor an availability update, so startup re-evaluates the retained contended waits
+themselves against the current registrations
+([turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot)).
+A wait whose profile is now unbounded becomes eligible outright; one whose
+profile is still bounded becomes eligible when that profile's surviving
+reservation count is below the current bound. Iterating waits rather than
+bounded profiles is what lets a removed bound be seen at all, since the profile
+it names is no longer in any bounded set. Otherwise a raise would admit nothing
+until some unrelated older invocation happened to finish. Spawn failure or
+another pre-send closure releases that pending reservation.
+
+Every `codex_home` invocation acquires a reservation, whether or not the profile
+currently declares a bound. The bound decides only whether preparation takes the
+capacity lock and counts: an unbounded profile inserts its reservation without
+locking or counting, so the unbounded path stays free of contention it does not
+need. What it must not stay free of is supervision evidence. A bound is a live
+setting, so the deployment that runs unbounded today can declare
+`max_concurrent_invocations = 1` tomorrow, and if unbounded invocations left no
+reservation and no process-group identity, a child that survived a daemon crash
+would be invisible to the startup fencing below. Startup would admit a
+replacement while that orphan still held the login store, and the actual
+concurrency would exceed the bound the operator just set — recreating exactly
+the refresh race the bound exists to prevent, in the moment the operator acted
+to prevent it. Recording the reservation unconditionally means the fencing rules
+below apply to every child this daemon ever started, so tightening a bound is
+always evaluated against complete evidence rather than against whichever
+invocations happened to be bounded when they started. Immediately after a
+successful spawn, the daemon replaces `pending_spawn` with
+`spawned { process_group_identity }`, carrying the process group's reuse-safe
+host identity; terminal observation atomically releases that reservation and
+emits the durable availability update that makes the waiter eligible. Startup
+retains a `spawned` reservation owned by the live fenced process, because this
+daemon still owns that child's observation path and will release the reservation
+when the invocation ends. An earlier-process `spawned` reservation has no such
+observer, because the daemon that would have watched its child is gone. Startup
+therefore must resolve every one of them before scheduling — it proves that
+exact process group absent, or terminates that exact group and then proves it
+absent, and only then closes the reservation as lost and makes its waiters
+eligible. Retaining a prior-process reservation and hoping to notice the exit
+later is not admitted, because nothing would ever release it: the terminal
+observation that would have done so died with its daemon, so the bound would be
+permanently consumed by a child no one is watching. The daemon fence generation
+alone is not process-death evidence, and failure to establish absence fails
+startup before scheduling. An earlier-process `pending_spawn` record is
+deliberately ambiguous: the prior daemon may have crashed immediately after the
+child started but before attaching its identity, so startup fails before
+scheduling rather than releasing capacity without proof. No provider request is
+repeated because a contended waiter has not issued one. Partial, foreign, or
+stale reservation evidence likewise fails reconstitution closed.
 
 **`oauth`** is spelled `delivery = "oauth"` with exactly four required fields:
 TOML strings `client_id`, `token_url`, and `device_authorization_url`, plus TOML
@@ -1306,7 +1407,7 @@ The five admitted actions are:
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `stay`               | The member keeps the session. A failure terminalizes as it would with no pool.                                                                             |
 | `switch_next_turn`   | A failure terminalizes as it would with no pool; low headroom does not fail or replace the current turn. The next turn's preparation excludes this member. |
-| `switch_now`         | The turn creates a successor attempt against the next admitted member.                                                                                     |
+| `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md#availability-successor-calls)).      |
 | `avoid_new_sessions` | Sessions with a prior completed call through the member keep it; preparation for a session without one on this pool excludes it.                           |
 | `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an operator clears it.                                               |
 
@@ -1318,11 +1419,76 @@ a classification into a pool trigger, or store a quarantine, membership
 exclusion, or session displacement, so no configured action above has any effect
 in this build. Its implementing child reuses the existing classification
 boundary rather than replacing it. The action vocabulary is admitted by the
-grammar and validated at startup exactly as specified, and nothing else. Its
-implementing child owns how each action's durable record is scoped, correlated
-to the exact observation that caused it, serialized against a concurrent
-observation for the same profile, accumulated when a trigger repeats, and read
-by preparation.
+grammar and validated at startup exactly as specified, and nothing else. The
+rest of this subsection states how each action's durable record is scoped,
+correlated to the exact observation that caused it, serialized against a
+concurrent observation for the same profile, accumulated when a trigger repeats,
+and read by preparation; its implementing child satisfies that contract rather
+than authoring it.
+
+`switch_next_turn` creates a durable pending displacement scoped to the session,
+pool-policy snapshot, member, and exact source turn that observed the trigger.
+It survives restart and is ignored by every later preparation inside that source
+turn, including a tool-round continuation. The first distinct turn in the
+session that prepares against that pool excludes the member; the transaction
+that successfully prepares that turn through another member consumes the
+displacement. If no other member is admissible, the displacement remains pending
+while the pool's exhaustion policy runs; it cannot expire merely because a
+preparation found no successor. An explicit operator clear may remove it.
+
+An `avoid_new_sessions` exclusion is durable and scoped to the membership that
+observed it, not to every pool containing the profile. A reported reset time
+clears it when that time passes. Without a reset time it remains until an
+explicit operator clear or a zero-cost, no-model probe reports availability.
+Restart does not clear it. The session test in the table is evaluated against
+that pool: a completed call through another pool does not make this member
+sticky or exempt from the exclusion.
+
+Every trigger action is a derived effect of its exact classified observation.
+The observation-commit transaction atomically stores the terminal observation
+and any profile quarantine, pending displacement, or reset-aware membership
+exclusion it causes. The action record names that observation's correlation and
+cannot exist without it; the observation cannot commit without the configured
+action record. Delivery-layer quarantine that occurs before a provider request
+instead names its own typed refresh or credential-home failure and commits that
+evidence atomically with quarantine.
+
+Two sessions can observe the same trigger for one profile at the same moment,
+and their session-scheduler locks do not serialize that. Every transaction that
+mints, activates, or clears an exclusion therefore first locks the affected
+profile's durable action head `FOR UPDATE` — after its session scheduler lock,
+before any bounded-profile capacity row or policy cursor row, and in
+profile-reference byte order when it touches more than one — and rereads the
+current generation under that lock. The first commit mints the generation. A
+later commit for an exclusion already active at the same scope records its own
+observation correlation against that existing generation and mints no second
+one, so a repeated trigger is idempotent on the exclusion and can never make a
+uniqueness conflict block the terminal observation that requires it. An operator
+clear takes the same lock, which is what lets a clear and a concurrent
+re-observation agree on which generation is current.
+
+Attaching a correlation also accumulates its reset evidence, because a
+reset-aware exclusion clears itself when its reported reset passes and a
+generation carrying a stale deadline would re-admit a member the provider is
+still refusing. The generation's effective reset is the latest reset any
+correlation attached to it reported, and an observation reporting no reset makes
+the generation indefinite. Indefinite is absorbing: once any correlation
+reported no reset, a later correlation carrying one does not restore a deadline,
+since the observation that reported none is evidence the provider named no
+recovery time. Only an operator clear, an availability probe, or another durable
+availability update ends an indefinite generation.
+
+Preparation is the other side of that race and joins the same protocol. Before
+it reads any member's exclusion state, it locks the action head of every member
+of the policy it may select `FOR SHARE`, at the same ordering position and in
+the same byte order, and holds those locks through the `Prepared` insert. The
+share and exclusive modes conflict, so one of the two transactions waits: a call
+is either prepared before the exclusion commits or prepared against a member it
+has already observed as excluded. This is stated rather than left implied
+because selection otherwise takes no lock the exclusion writer takes — an
+unbounded `first_listed` member acquires neither a capacity row nor a cursor row
+— and a preparation that read a member as admissible could then dispatch a
+provider request on a credential quarantined in the interval.
 
 `switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
 `on_overloaded`, because only those causes carry proof that the request was not
@@ -1330,9 +1496,24 @@ accepted. Selecting it for `on_credential_rejected` or `on_headroom_low` is a
 typed startup failure: a rejected credential is deployment misconfiguration that
 substitution would hide, and low headroom is not a failure at all. The
 `on_credential_rejected` trigger classifies rejection of an issued provider
-request. A `codex_home` refresh race or rejected daemon-owned OAuth refresh
-occurs in the delivery layer before such a request and bypasses pool trigger
-policy: either one quarantines the profile unconditionally as specified above.
+request. A rejected daemon-owned OAuth refresh occurs in the delivery layer
+before any such request, is typed as its own refresh failure by the daemon that
+performed the exchange, and bypasses pool trigger policy: it quarantines the
+profile unconditionally as specified above.
+
+A `codex_home` refresh race is deliberately not given that bypass. The Codex CLI
+reports one undifferentiated authentication failure — the adapter classifies
+from rendered message text and collapses refresh-token phrases, `unauthorized`,
+and invalid keys into the same `CredentialRejected` kind — so nothing can tell a
+lost refresh race from an ordinary rejection of an issued request. Every
+`codex_home` credential rejection therefore follows one policy, the pool's
+configured `on_credential_rejected`, and a deployment that wants a refresh race
+to quarantine configures `quarantine` there. Splitting the branch on evidence
+the adapter cannot produce would force an implementation to either quarantine
+ordinary rejections against `stay` or miss the race entirely. A future typed
+refresh-failure variant from that adapter is what would let the delivery-layer
+bypass apply here too; until it exists, this contract does not pretend the
+distinction is observable.
 
 `switch_now` is further admitted only where the pool's adapter can supply the
 typed non-acceptance proof for that exact trigger's cause. Every pool's members
@@ -1383,17 +1564,86 @@ place it. Until then `tie_break` beyond `first_listed` and every trigger action
 are retained configuration rather than behavior, and an existing session stays
 on the profile it was created with even after a pool's priorities change.
 
-**Committed unimplemented functionality — pool selection state.** No present
-repository interns an immutable pool-policy revision, stores a session's
-family-to-policy snapshot, keeps a round-robin cursor, or parks a turn when a
-pool admits no member. Its implementing child owns policy interning and
-identity, the session credential-history snapshot and its migration from the
-present family-to-reference shape, cursor ownership and advancement, stickiness,
-the locking that orders selection against a concurrent trigger, and what `park`
-and `fail` do when the pool admits nothing. A profile quarantine is durable and
-account-scoped by that same child, so a profile ranked in two pools is excluded
-from both; reading such a record is never on the recovery path for acknowledged
-work, so INV-034 is unaffected.
+Selection happens at model-call preparation, never at session creation. For the
+resolved target's family, preparation reads the session's current immutable
+pool-policy snapshot from its credential history. It first selects the sticky
+member when that member remains admissible. Without an admissible sticky member,
+it traverses members in priority order, skipping any excluded by an action
+above, and breaks a priority tie by the snapshot's rule. `round_robin` owns one
+durable global cursor per immutable pool-policy revision and priority value. The
+repository interns the policy's complete canonical structural value — pool name,
+ordered members, each member's expected adapter and delivery kind, membership
+settings, tie-break, exhaustion rule, and trigger actions — under a uniqueness
+constraint on that value. An unchanged document therefore reuses the same
+immutable surrogate revision across restarts, while any changed field creates a
+new revision; a later exact reversion reuses the old one. Hashes may accelerate
+lookup but never establish equality without comparing the complete value. Every
+session history entry that copied that validated revision refers to the same
+cursor, rather than creating a session-local one. When that rule must choose
+among two or more admitted equal-priority members, the cursor names one member
+ordinal in that priority's relative declaration order. Selection starts there
+and walks that declared order cyclically, skipping each inadmissible member,
+until it finds the first admitted member; it never renumbers or indexes into a
+filtered member list. The transaction that commits the selected call's
+`Prepared` record advances the cursor to the next declared member of that same
+priority after the selected member, wrapping even when that next member is
+currently excluded. Before reading a cursor or choosing by it, preparation locks
+that policy-and-priority cursor row `FOR UPDATE` after its session scheduler,
+the candidate members' action heads, and any candidate bounded-profile capacity
+rows, then rereads the cursor and the admissibility facts protected by those
+locks. The same transaction selects, inserts `Prepared`, and advances the locked
+cursor; no path acquires a capacity row while holding a cursor row. A priority
+with no admitted member cannot select; selection continues according to the
+pool's contention and exhaustion rules. A failed preparation advances nothing;
+restart preserves the cursor. Stickiness and a sole admitted member require no
+tie-break and do not advance it. Stickiness needs no separate durable state:
+preparation prefers the member the session's most recent `Prepared` call on that
+pool pinned, including a call that later failed under `stay`, so a session stays
+on one account until a trigger displaces it. When the pool admits no member,
+`on_pool_exhausted` decides — `park` parks the turn in the durable wait carrying
+the earliest reset the pool's members reported. When no excluded member reports
+a reset, `park` records an indefinite durable wait with no deadline; only an
+operator clear, a zero-cost no-model availability probe, or another durable
+member-availability update wakes it. A restart alone does not. `fail` instead
+fails the turn as a known failure. Quarantine is durable and scoped to the
+profile rather than to the pool that observed it, because a rejected credential
+is a property of the account: a profile ranked in two pools is excluded from
+both. It is cleared only by an explicit operator command, or by a probe that
+costs nothing and calls no model where the adapter offers one — never by a
+timer, since a revoked credential does not heal on a schedule, and never by a
+restart. Why an operator command rather than rediscovery: for a `codex_home` or
+`oauth` profile the repair is an interactive re-authorization the operator
+performs, so the operator knows the moment it is fixed, and rediscovering it
+instead would spend a real model call to learn what they could have said.
+Reading a quarantine record is never on the recovery path for acknowledged work,
+so INV-034 is unaffected.
+
+The exact future operator-clear request, target correlations, replay behavior,
+and receipt are owned by
+[credential-exclusion administration](process-protocol.md#credential-exclusion-administration).
+No present process or application surface implements that request, so every
+explicit-clear path above remains committed unimplemented functionality; the
+parser slice does not claim that an indefinite wait can presently be released.
+
+The durable record is unchanged in kind. A session's credential history event
+carries a complete family-to-pool-policy snapshot where it previously carried a
+family-to-reference snapshot. Each immutable policy includes the pool name,
+ordered members, every member's expected adapter and delivery kind, their
+membership settings, tie-break and exhaustion rules, and all trigger actions;
+preparation never resolves that snapshot through the current document's pool
+table. Before credential resolution, preparation requires the selected member's
+frozen adapter to equal the resolved target's adapter and requires the current
+profile registration to retain both that adapter and delivery kind. Absence or a
+mismatch is a typed pre-send credential-configuration failure, so reusing a
+profile name cannot route another adapter's or delivery's credential through an
+old policy. Each model call pins both the exact profile that authenticated it in
+`model_call.credential_reference` and the selecting immutable `pool_policy_id`
+at the `Prepared` insert. Observation commit reloads that call-pinned policy,
+never the session's later credential-history head, before deriving any action. A
+historical read therefore still resolves that call's billing kind and rates from
+the reference the call itself pinned, whatever selection chose it, and a pool
+edited across a restart can neither broaden an existing session's admitted
+credentials nor relabel a stored call.
 
 Admission is fail-closed. Startup rejects a pool with no members, a duplicate
 member profile, a member naming an undeclared profile, a mapping naming an

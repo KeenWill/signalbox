@@ -858,6 +858,17 @@ including that marker. Turn and attempt lifecycle doctrine is
 commit boundaries are this page's own material, and update-event delivery is
 [persistence-protocol](persistence-protocol.md).
 
+**Committed unimplemented functionality — pre-call pool exhaustion.** The
+credential-pool implementing child adds a third `TurnFailed` producer when an
+active turn exhausts its frozen pool before any model call is prepared and that
+policy selects `on_pool_exhausted = "fail"`. Its single transaction ends the
+current attempt `KnownFailure`, appends the marker after the attempt's starting
+frontier, terminalizes the turn `Failed`, and emits both the ordinary
+`turn_failed` update and the typed `turn_credential_pool_exhausted` event. The
+sealed failure and complete member evidence are owned by
+[model-call execution](model-call-execution.md#availability-successor-calls). No
+present transcript writer can produce this shape.
+
 ## User content
 
 Accepted-input content is the closed one-variant algebra `UserContent`; its only
