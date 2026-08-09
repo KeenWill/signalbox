@@ -14,10 +14,12 @@ SIGNALBOX_NATIVE_SNAPSHOT_SUITE="SignalboxAppTests/LiveScreenSnapshotTests"
 # `simulator_resolve_iphone_ids` returns booted devices first, so the newest
 # model is what a fresh runner picks and whatever the developer happens to have
 # open is what a laptop picks. The goldens recorded on the phone-sized canvases
-# do not care; the ones on the iPad-sized canvases do, because those are wider
-# than a phone screen, so the window's corner mask and the glass materials
-# composite against the device, and recording them against a different model
-# than CI checks them against would report a difference nobody introduced. That
+# do not care; the ones recorded on a canvas wider than a phone screen do — both
+# iPad canvases and the sheet canvas — because the window's corner mask and the
+# glass materials composite against the device, and recording them against a
+# different model than CI checks them against would report a difference nobody
+# introduced. It is a width rule and not an iPad one; naming it for the iPad
+# canvases is what once left the sheet references unclassified. That
 # is a cost of resolving a different simulator and not of the canvas matrix
 # itself: every canvas in a run renders on the one device named here.
 SIGNALBOX_NATIVE_SNAPSHOT_DEVICE_NAME="${SIGNALBOX_NATIVE_SNAPSHOT_DEVICE_NAME:-iPhone 17 Pro}"
@@ -61,7 +63,8 @@ snapshot_xcode_destination() {
 	fi
 
 	echo "No $SIGNALBOX_NATIVE_SNAPSHOT_DEVICE_NAME simulator on iOS $SIGNALBOX_NATIVE_SNAPSHOT_IOS_VERSION, the runtime these goldens are recorded and checked against." >&2
-	echo "Falling back to the newest available iPhone. Every reference recorded on a canvas wider than a phone screen resolves against the device — *.ipad-portrait.png, *.ipad-landscape.png, and *.sheet.png — so all of them may differ on this destination; a phone-canvas reference does not." >&2
+	echo "Falling back to the newest available iPhone. Every reference recorded on a canvas wider than a phone screen — *.ipad-portrait.png, *.ipad-landscape.png, and *.sheet.png — resolves against the device and may differ here." >&2
+	echo "Phone-canvas references were verified byte-identical across iPhone models, but only on iOS $SIGNALBOX_NATIVE_SNAPSHOT_IOS_VERSION. This fallback is reached when the model or the runtime is missing and can change either, and no reference of any canvas has been compared across runtimes, so on a different runtime a phone-canvas difference is unclassified too." >&2
 	resolved="$(simulator_resolve_iphone_ids "$SIMULATOR_DEFAULT_MIN_IOS_VERSION" | head -n 1)"
 	if [[ -z "$resolved" ]]; then
 		echo "No available iPhone simulator for iOS $SIMULATOR_DEFAULT_MIN_IOS_VERSION or newer. Set XCODE_DESTINATION." >&2
