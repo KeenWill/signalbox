@@ -76,10 +76,6 @@ pub enum DelegationUpdateStorageKind {
     SessionMessage,
 }
 
-#[allow(
-    dead_code,
-    reason = "delegation update rows are written by PostgreSQL lifecycle triggers"
-)]
 pub const fn delegation_update_kind_to_str(value: DelegationUpdateStorageKind) -> &'static str {
     match value {
         DelegationUpdateStorageKind::ChildSpawned => "child_spawned",
@@ -115,10 +111,6 @@ pub enum DelegationWakeStorageKind {
     Message,
 }
 
-#[allow(
-    dead_code,
-    reason = "delegation wake rows are written by PostgreSQL lifecycle triggers"
-)]
 pub const fn delegation_wake_subject_to_str(value: DelegationWakeStorageKind) -> &'static str {
     match value {
         DelegationWakeStorageKind::Result => "result",

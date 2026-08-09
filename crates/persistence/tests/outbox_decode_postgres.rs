@@ -91,12 +91,17 @@ const ARBITRARY_CALL_SEED: u128 = 0x0e09;
 const ARBITRARY_ATTEMPT_SEED: u128 = 0x0e0a;
 const ARBITRARY_FRONTIER_SEED: u128 = 0x0e0b;
 const ARBITRARY_ORDINAL: u64 = 1;
+/// Only makes the creation fixture valid; no assertion reads its value.
+const ARBITRARY_MODEL_SELECTION_SEED: u128 = 0x0a01;
 
 /// One relationship identity per planted update kind. They must differ: the
 /// table's partial unique indexes are indexes, not triggers, so they stay
 /// enforced even while referential triggers are disabled.
 const SPAWNED_REQUEST_SEED: u128 = 0x0f01;
 const BOUND_SPAWN_REQUEST_SEED: u128 = 0x0f06;
+const GOAL_LIFECYCLE_REQUEST_SEED: u128 = 0x0f07;
+/// Distinct from the event ordinal so a column read in the wrong place shows.
+const ARBITRARY_GOAL_GENERATION: u64 = 2;
 const WAITING_REQUEST_SEED: u128 = 0x0f02;
 const LIFECYCLE_REQUEST_SEED: u128 = 0x0f03;
 const RESULT_REQUEST_SEED: u128 = 0x0f04;
@@ -134,7 +139,7 @@ fn creation(session_seed: u128, command_seed: u128) -> PreparedCreateSession {
             TranscriptAncestry::None,
         ),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
-            DirectModelSelection::from_uuid(Uuid::from_u128(0x0a01)),
+            DirectModelSelection::from_uuid(Uuid::from_u128(ARBITRARY_MODEL_SELECTION_SEED)),
         )),
     )
     .prepare(session(session_seed))
@@ -1166,6 +1171,44 @@ async fn plant_child_lifecycle_disposition(
     Ok(())
 }
 
+/// Plants a parent-stop lifecycle disposition with goal-command provenance.
+///
+/// The third provenance shape: it names a goal generation instead of a turn,
+/// and `delegation_update_provenance_shape` requires the turn column to be NULL
+/// for it, so a decoder arm reading the wrong column cannot satisfy both.
+async fn plant_child_lifecycle_goal_disposition(
+    pool: &PgPool,
+    facts: RelationshipFacts,
+    goal_generation: u64,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
+            VALUES ('delegation_update', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_update_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             update_kind, spawning_tool_request_id, child_session_id,
+             delegation_event_ordinal, delegation_event_kind, outcome_kind, reason_kind,
+             provenance_kind, provenance_session_id, provenance_goal_generation,
+             provenance_command_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                'child_lifecycle_disposition', $2, $3, 1, 'outcome_recorded',
+                'child_cancelled', 'parent_cancelled_parent_and_descendants',
+                'parent_goal_command', $1, $4, $5
+           FROM header",
+    )
+    .bind(facts.parent)
+    .bind(facts.spawning)
+    .bind(facts.child)
+    .bind(rust_decimal::Decimal::from(goal_generation))
+    .bind(facts.command)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Plants a returned child result with child-turn provenance.
 async fn plant_child_result(
     pool: &PgPool,
@@ -1281,6 +1324,7 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
     let bound = facts.spawned_by(Uuid::from_u128(BOUND_SPAWN_REQUEST_SEED));
     let waiting = facts.spawned_by(Uuid::from_u128(WAITING_REQUEST_SEED));
     let lifecycle = facts.spawned_by(Uuid::from_u128(LIFECYCLE_REQUEST_SEED));
+    let goal_lifecycle = facts.spawned_by(Uuid::from_u128(GOAL_LIFECYCLE_REQUEST_SEED));
     let result = facts.spawned_by(Uuid::from_u128(RESULT_REQUEST_SEED));
     let messaged = facts.spawned_by(Uuid::from_u128(MESSAGE_REQUEST_SEED));
 
@@ -1288,6 +1332,8 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
     plant_child_spawned_bound(&pool, bound).await?;
     plant_child_waiting(&pool, waiting).await?;
     plant_child_lifecycle_disposition(&pool, lifecycle).await?;
+    plant_child_lifecycle_goal_disposition(&pool, goal_lifecycle, ARBITRARY_GOAL_GENERATION)
+        .await?;
     plant_child_result(&pool, result, RESULT_CONTENT).await?;
     plant_session_message(&pool, messaged, MESSAGE_CONTENT).await?;
     // The decoder reads `delivery_sequence` through a join, so the message kind
@@ -1358,6 +1404,23 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
                     session: SessionId::from_uuid(parent),
                     turn: TurnId::from_uuid(lifecycle.turn),
                     command: DurableCommandId::from_uuid(lifecycle.command),
+                },
+            }
+        )
+    );
+    assert_eq!(
+        dispatch_next_kind(&dispatcher).await?,
+        DispatchedOutboxEventKind::DelegationUpdate(
+            DispatchedDelegationUpdate::ChildLifecycleDisposition {
+                spawning_request: ToolRequestId::from_uuid(goal_lifecycle.spawning),
+                child: SessionId::from_uuid(goal_lifecycle.child),
+                event_ordinal: ARBITRARY_ORDINAL,
+                outcome: DispatchedDelegationOutcome::ChildCancelled,
+                reason: DispatchedDelegationReason::ParentCancelledWithDescendants,
+                provenance: DispatchedDelegationProvenance::ParentGoalCommand {
+                    session: SessionId::from_uuid(parent),
+                    goal_generation: ARBITRARY_GOAL_GENERATION,
+                    command: DurableCommandId::from_uuid(goal_lifecycle.command),
                 },
             }
         )
