@@ -1300,6 +1300,8 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     struct OfflineConversationPort;
 
+    const OFFLINE_CONVERSATION_PAGE_HAS_MORE: bool = false;
+
     impl ConversationIntrospectionPort for OfflineConversationPort {
         type Error = OfflineWriterError;
 
@@ -1309,7 +1311,7 @@ mod tests {
         ) -> Result<signalbox_tools_conversations::ConversationListPage, Self::Error> {
             Ok(signalbox_tools_conversations::ConversationListPage::new(
                 Vec::new(),
-                false,
+                OFFLINE_CONVERSATION_PAGE_HAS_MORE,
             ))
         }
 
@@ -1534,7 +1536,7 @@ mod tests {
             RequestedTarget::new(SYNTHETIC_CLAUDE_SELECTION),
             ResolvedTarget::new(SYNTHETIC_CLAUDE_MODEL),
             vec![ConversationMessage::user_text(SYNTHETIC_CLAUDE_PROMPT)],
-            ModelSettings::new(256),
+            ModelSettings::new(SYNTHETIC_CLAUDE_MAX_OUTPUT_TOKENS),
         );
         operation.tools = tools;
         let prepared = match runtime
@@ -1694,6 +1696,12 @@ mod tests {
         known_targets: &'a BTreeSet<OsString>,
     }
 
+    struct AdmittedConfiguredTargetDirInput<'a> {
+        current_executable: &'a Path,
+        configured_target_dir: &'a Path,
+        known_targets: &'a BTreeSet<OsString>,
+    }
+
     struct ConfiguredTargetMatchInput<'a> {
         current_executable: &'a Path,
         candidate: &'a Path,
@@ -1745,6 +1753,7 @@ mod tests {
     const SYNTHETIC_CLAUDE_SELECTION: &str = "synthetic-claude-selection";
     const SYNTHETIC_CLAUDE_MODEL: &str = "synthetic-claude-model";
     const SYNTHETIC_CLAUDE_PROMPT: &str = "Capture the prepared MCP catalog";
+    const SYNTHETIC_CLAUDE_MAX_OUTPUT_TOKENS: u32 = 256;
     const CLAUDE_CATALOG_CAPTURE_EXECUTABLE: &str = "capture-claude-catalog";
     const CLAUDE_CAPTURED_CATALOG_FILENAME: &str = "captured-tools.json";
     const CLAUDE_CAPTURE_OUTPUT_MARKER: &str = "__CAPTURE_OUTPUT__";
@@ -1882,19 +1891,21 @@ done < "$catalog" > __CAPTURE_OUTPUT__
             configured: &configured,
             known_targets,
         });
-        admitted_configured_target_dir(current, &configured, known_targets)
+        admitted_configured_target_dir(AdmittedConfiguredTargetDirInput {
+            current_executable: current,
+            configured_target_dir: &configured,
+            known_targets,
+        })
     }
 
     fn admitted_configured_target_dir(
-        current: &Path,
-        configured: &Path,
-        known_targets: &BTreeSet<OsString>,
+        input: AdmittedConfiguredTargetDirInput<'_>,
     ) -> Option<PathBuf> {
-        let configured = canonicalized_target_dir(configured);
+        let configured = canonicalized_target_dir(input.configured_target_dir);
         configured_target_matches_executable(ConfiguredTargetMatchInput {
-            current_executable: current,
+            current_executable: input.current_executable,
             candidate: &configured,
-            known_targets,
+            known_targets: input.known_targets,
         })
         .then_some(configured)
     }
@@ -2516,8 +2527,11 @@ done < "$catalog" > __CAPTURE_OUTPUT__
         fs::create_dir(&cli_target_dir).expect("CLI target directory exists");
         fs::create_dir(&stale_target_dir).expect("stale target directory exists");
         let executable = cli_target_dir.join("debug/deps/daemon-tools-test");
-        let configured =
-            admitted_configured_target_dir(&executable, &stale_target_dir, &BTreeSet::new());
+        let configured = admitted_configured_target_dir(AdmittedConfiguredTargetDirInput {
+            current_executable: &executable,
+            configured_target_dir: &stale_target_dir,
+            known_targets: &BTreeSet::new(),
+        });
 
         assert_eq!(configured, None);
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
