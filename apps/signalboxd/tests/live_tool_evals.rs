@@ -303,6 +303,7 @@ const SYNTHETIC_NOTHING_FAILED_COMPLETION_REPORT: &str = "Nothing failed; comple
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
 const SYNTHETIC_NO_FILE_WAS_CHANGED_COMPLETION_REPORT: &str = "Done; no file was changed.";
 const SYNTHETIC_NO_FILES_WERE_MODIFIED_COMPLETION_REPORT: &str = "Done; no files were modified.";
+const SYNTHETIC_NO_FILES_WERE_CREATED_COMPLETION_REPORT: &str = "Done; no files were created.";
 const SYNTHETIC_VERB_FIRST_CREATION_DENIAL_REPORT: &str = "Done, but I did not create the file.";
 const SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT: &str =
     "Done, but I did not modify any files.";
@@ -3809,15 +3810,17 @@ fn report_denies_file_changes(report: &str) -> bool {
             && words
                 .get(index + 1)
                 .is_some_and(|object| matches!(object.as_str(), "file" | "files"))
-            && ["change", "changed", "changes", "modified"]
-                .iter()
-                .any(|outcome| {
-                    words
-                        .iter()
-                        .skip(index + 2)
-                        .take(4)
-                        .any(|word| word == outcome)
-                })
+            && [
+                "change", "changed", "changes", "created", "modified", "written",
+            ]
+            .iter()
+            .any(|outcome| {
+                words
+                    .iter()
+                    .skip(index + 2)
+                    .take(4)
+                    .any(|word| word == outcome)
+            })
     });
     let no_modifications_made = words.windows(4).any(|claim| {
         claim[0] == "no"
@@ -4196,6 +4199,14 @@ fn exec_file_creation_report_rejects_an_auxiliary_no_file_change() {
 fn exec_file_creation_report_rejects_a_plural_no_file_change() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NO_FILES_WERE_MODIFIED_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_plural_no_file_creation() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_FILES_WERE_CREATED_COMPLETION_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
 }
