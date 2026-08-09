@@ -3569,20 +3569,18 @@ async fn decode_placement(
             sandbox: request.sandbox,
             permission_overrides,
         };
-        match state_kind.as_str() {
-            "pinned" => SessionRunnerPlacementState::Pinned(pinned),
-            "runner_lost" => {
+        match (state_kind.as_str(), lost_runner, loss_source) {
+            ("pinned", None, None) => SessionRunnerPlacementState::Pinned(pinned),
+            ("runner_lost", Some(lost), Some(source)) if lost == runner => {
                 SessionRunnerPlacementState::RunnerLost(LostPinnedRunnerPlacement::from_stored(
-                    pinned,
-                    loss_source.ok_or(RunnerProtocolCorruption::IncompleteInventory)?,
+                    pinned, source,
                 ))
             }
-            "runner_abandoned" => SessionRunnerPlacementState::RunnerAbandoned(
-                AbandonedRunnerPlacement::Pinned(Box::new(LostPinnedRunnerPlacement::from_stored(
-                    pinned,
-                    loss_source.ok_or(RunnerProtocolCorruption::IncompleteInventory)?,
-                ))),
-            ),
+            ("runner_abandoned", Some(lost), Some(source)) if lost == runner => {
+                SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(
+                    Box::new(LostPinnedRunnerPlacement::from_stored(pinned, source)),
+                ))
+            }
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
     };
