@@ -1787,7 +1787,21 @@ mod tests {
             configured: &configured,
             known_targets,
         });
-        Some(canonicalized_target_dir(&configured))
+        admitted_configured_target_dir(current, &configured, known_targets)
+    }
+
+    fn admitted_configured_target_dir(
+        current: &Path,
+        configured: &Path,
+        known_targets: &BTreeSet<OsString>,
+    ) -> Option<PathBuf> {
+        let configured = canonicalized_target_dir(configured);
+        configured_target_matches_executable(ConfiguredTargetMatchInput {
+            current_executable: current,
+            candidate: &configured,
+            known_targets,
+        })
+        .then_some(configured)
     }
 
     fn resolved_relative_configured_target_dir(
@@ -2400,6 +2414,30 @@ mod tests {
     }
 
     #[test]
+    fn bridge_artifact_selection_prefers_a_cli_root_over_stale_inherited_configuration() {
+        let fixture = tempfile::tempdir().expect("fixture root exists");
+        let cli_target_dir = fixture.path().join("synthetic-cli-target");
+        let stale_target_dir = fixture.path().join("synthetic-stale-target");
+        fs::create_dir(&cli_target_dir).expect("CLI target directory exists");
+        fs::create_dir(&stale_target_dir).expect("stale target directory exists");
+        let executable = cli_target_dir.join("debug/deps/daemon-tools-test");
+        let configured =
+            admitted_configured_target_dir(&executable, &stale_target_dir, &BTreeSet::new());
+
+        assert_eq!(configured, None);
+        assert_bridge_artifact_selection(BridgeArtifactExpectation {
+            executable: &executable,
+            target_dir: &cli_target_dir,
+            configured_target_dir: configured.as_deref(),
+            default_target_dir: Path::new("synthetic-default-target"),
+            debug_profile: CARGO_TEST_PROFILE,
+            expected_profile: CARGO_TEST_PROFILE,
+            expected_target: None,
+            recognized_target: None,
+        });
+    }
+
+    #[test]
     fn bridge_artifact_selection_keeps_a_recognized_name_as_a_cli_host_root() {
         let cli_target_dir = Path::new(SYNTHETIC_CARGO_TARGET);
         let executable = cli_target_dir.join("debug/deps/daemon-tools-test");
@@ -2946,6 +2984,24 @@ mod tests {
         fs::create_dir(&workspace).expect("workspace fixture exists");
         fs::create_dir(&stale).expect("stale fixture exists");
         fs::create_dir(&package).expect("package fixture exists");
+        assert_eq!(
+            verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
+                reported: &stale,
+                actual: &stale,
+                workspace: &workspace,
+                package: &package,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn bridge_compiler_invocation_accepts_a_matching_workspace_report() {
+        let fixture = tempfile::tempdir().expect("fixture root exists");
+        let workspace = fixture.path().join("workspace");
+        let package = workspace.join("package");
+        fs::create_dir(&workspace).expect("workspace fixture exists");
+        fs::create_dir(&package).expect("package fixture exists");
         let expected_workspace = fs::canonicalize(&workspace).expect("workspace canonicalizes");
 
         assert_eq!(
@@ -2956,15 +3012,6 @@ mod tests {
                 package: &package,
             }),
             Some(expected_workspace)
-        );
-        assert_eq!(
-            verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
-                reported: &stale,
-                actual: &stale,
-                workspace: &workspace,
-                package: &package,
-            }),
-            None
         );
     }
 
@@ -3750,7 +3797,10 @@ mod tests {
             "jsonrpc": "2.0",
             "id": request_id.clone(),
             "result": {},
-            "error": {"code": -32603, "message": SYNTHETIC_JSON_RPC_ERROR_MESSAGE},
+            "error": {
+                "code": SYNTHETIC_JSON_RPC_ERROR_CODE,
+                "message": SYNTHETIC_JSON_RPC_ERROR_MESSAGE,
+            },
         });
 
         assert!(!valid_mcp_response_envelope(McpResponseEnvelope {
@@ -3762,7 +3812,7 @@ mod tests {
     #[test]
     fn raw_list_response_rejects_result_and_error_together() {
         let response = format!(
-            r#"{{"jsonrpc":"2.0","id":{MCP_LIST_TOOLS_REQUEST_ID},"result":{{"tools":[]}},"error":{{"code":-32603,"message":"{SYNTHETIC_JSON_RPC_ERROR_MESSAGE}"}}}}"#
+            r#"{{"jsonrpc":"2.0","id":{MCP_LIST_TOOLS_REQUEST_ID},"result":{{"tools":[]}},"error":{{"code":{SYNTHETIC_JSON_RPC_ERROR_CODE},"message":"{SYNTHETIC_JSON_RPC_ERROR_MESSAGE}"}}}}"#
         );
         let response: ListedBridgeResponse =
             serde_json::from_str(&response).expect("synthetic list response is valid JSON");
@@ -4464,6 +4514,7 @@ mod tests {
     const MCP_UNDECLARED_TOOL_REQUEST_ID: u64 = 5;
     const MCP_NON_OBJECT_ARGUMENTS_REQUEST_ID: u64 = 6;
     const MCP_ENVELOPE_REQUEST_ID: u64 = 7;
+    const SYNTHETIC_JSON_RPC_ERROR_CODE: i64 = -32603;
     const SYNTHETIC_JSON_RPC_ERROR_MESSAGE: &str = "synthetic error";
     const MCP_OTHER_REQUEST_ID: u64 = 8;
     const MCP_BLOCKING_LIST_REQUEST_ID: u64 = 9;
