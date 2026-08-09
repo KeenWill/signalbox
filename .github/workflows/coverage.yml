@@ -264,6 +264,26 @@ jobs:
             unavailable "the list of \`main\` runs of this workflow could not be read"
           fi
 
+          # The base commit's own run is asked for by SHA rather than looked for
+          # inside the page above. The list is bounded at 100, and a pull request
+          # open long enough for its base to fall behind that many `main` pushes
+          # would silently lose the attributable base delta — the artifact is
+          # still there and still unexpired, it is simply off the page. A
+          # `head_sha` query answers the exact question directly, so the recent
+          # page no longer has to happen to contain the answer.
+          #
+          # Skipped rather than guessed when the base SHA is unset: an empty
+          # `head_sha` filters nothing, so the first recent run would come back
+          # and be labelled `base`, attributing the delta to a commit that never
+          # measured it.
+          exact='{"workflow_runs":[]}'
+          if [ -n "$BASE_SHA" ]; then
+            if ! exact="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW_FILE/runs?branch=main&event=push&status=success&head_sha=$BASE_SHA&per_page=1")"; then
+              unavailable "the \`main\` run of the base commit could not be read"
+            fi
+          fi
+
           # The run that measured this pull request's own base first when there
           # is one, then the most recent runs, each tagged with which of the
           # two it is. The label travels with the number from here to the
@@ -284,12 +304,12 @@ jobs:
           # the branch is current with `main` the two commits coincide, which is
           # why the older selection looked right whenever anyone checked it.
           candidates="$(printf '%s' "$runs" | jq -r \
-            --arg sha "$BASE_SHA" --argjson cap "$CANDIDATE_LIMIT" '
-              ([.workflow_runs[] | select(.head_sha == $sha)] | first) as $exact
-              | (if $exact == null then 0 else 1 end) as $reserved
-              | [ $exact | select(. != null) | {label: "base", run: .} ]
+            --argjson exact "$exact" --argjson cap "$CANDIDATE_LIMIT" '
+              (($exact.workflow_runs // []) | first) as $base
+              | (if $base == null then 0 else 1 end) as $reserved
+              | [ $base | select(. != null) | {label: "base", run: .} ]
                 + ([.workflow_runs[]
-                    | select($exact == null or .id != $exact.id)
+                    | select($base == null or .id != $base.id)
                     | {label: "latest-main", run: .}][0:$cap - $reserved])
               | .[]
               | [.label, (.run.id | tostring), .run.head_sha, .run.created_at]

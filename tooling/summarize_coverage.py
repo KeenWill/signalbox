@@ -29,6 +29,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 
 # The export nests one summary block per file under a single data element.
@@ -245,6 +246,26 @@ def load_baseline(path: Path, *, label: str, sha: str, date: str) -> tuple["Base
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
         total = total_of([summary for _, summary in read_file_summaries(document)])
+        # Rendering is what these totals are *for*, so a total that cannot be
+        # rendered is one this cannot read. `int()` accepts a 400-digit decimal
+        # string, so the loader used to return a `Baseline` that raised
+        # `OverflowError` later, inside `delta` — outside every guard, ending
+        # the report with a traceback instead of the unavailable-baseline note
+        # this function promises. Forcing the percentages here moves that
+        # failure inside the protected path where it belongs.
+        #
+        # `isfinite` covers the other half. A counter large enough to overflow
+        # `int()` raises above; one that merely loses precision, or arrives as
+        # a float infinity, yields a non-finite percentage instead of raising,
+        # and a report of `inf%` is no more actionable than a traceback. The
+        # workflow's `jq` predicate rejects both before they reach here; this is
+        # the loader keeping its own promise for direct CLI use, which the
+        # documented contract permits.
+        if not all(
+            isfinite(counter.percent)
+            for counter in (total.lines, total.functions, total.regions)
+        ):
+            return None, "the baseline summary has a counter that cannot be rendered"
     except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError) as error:
         return None, f"the baseline summary could not be read ({error.__class__.__name__})"
     # An export with no instrumented line is not a measurement to compare

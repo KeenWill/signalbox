@@ -545,6 +545,49 @@ class BaselineLoadingTests(unittest.TestCase):
         self.assertIsNone(baseline)
         self.assertIn("could not be read", reason)
 
+    def test_a_counter_too_large_to_render_reports_a_reason(self) -> None:
+        """`int()` accepts a 400-digit decimal string, so the loader returned a
+        baseline whose percentage then raised `OverflowError` inside `delta` —
+        outside every guard, ending the report with a traceback instead of the
+        unavailable-baseline note this loader promises.
+
+        The workflow's `jq` predicate rejects such a counter first; the CLI
+        contract permits direct use, which is where this reached.
+        """
+        document = export(coverage_file("/repo/crates/domain/src/a.rs", lines=200, covered=50))
+        document["data"][0]["files"][0]["summary"]["lines"]["count"] = int("9" * 400)
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "summary.json", json.dumps(document))
+
+            baseline, reason = load_baseline(
+                path, label=BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
+            )
+
+        self.assertIsNone(baseline)
+        self.assertIn("could not be read", reason)
+
+    def test_a_report_survives_a_baseline_it_cannot_render(self) -> None:
+        """The end-to-end shape of the promise: the run still exits 0 and says
+        why the delta is missing, rather than terminating on the baseline."""
+        current = export(coverage_file("/repo/crates/domain/src/a.rs", lines=100, covered=60))
+        document = export(coverage_file("/repo/crates/domain/src/a.rs", lines=200, covered=50))
+        document["data"][0]["files"][0]["summary"]["lines"]["count"] = int("9" * 400)
+        with tempfile.TemporaryDirectory() as directory:
+            report = written(directory, "summary.json", json.dumps(current))
+            baseline = written(directory, "baseline.json", json.dumps(document))
+
+            with contextlib.redirect_stdout(io.StringIO()) as rendered:
+                exit_code = main([
+                    str(report), "--title", "T",
+                    "--baseline", str(baseline),
+                    "--baseline-label", BASE,
+                    "--baseline-sha", "abc1234",
+                    "--baseline-date", "2026-08-01T09:00:00Z",
+                ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("No baseline to compare against", rendered.getvalue())
+
     def test_a_missing_baseline_file_reports_a_reason(self) -> None:
         """An extraction that produced nothing leaves no file, and reading
         one that is not there is an expected outcome here."""

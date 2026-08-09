@@ -492,6 +492,23 @@ class BaselineLoadingTests(unittest.TestCase):
         self.assertIsNone(baseline)
         self.assertIn("could not be read", reason)
 
+    def test_a_counter_too_large_to_render_reports_a_reason(self) -> None:
+        """`int()` accepts a 400-digit decimal string, so the loader returned a
+        baseline whose percentage then raised `OverflowError` during rendering
+        — outside every guard, ending the report instead of degrading to the
+        unavailable-baseline note."""
+        document = report(target("App.app", source_file("/repo/App.swift", executable=200, covered=50)))
+        document["targets"][0]["executableLines"] = int("9" * 400)
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "coverage.json", json.dumps(document))
+
+            baseline, reason = summarize_coverage.load_baseline(
+                path, label=summarize_coverage.BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
+            )
+
+        self.assertIsNone(baseline)
+        self.assertIn("could not be read", reason)
+
     def test_a_missing_baseline_file_reports_a_reason(self) -> None:
         """An extraction that produced nothing leaves no file, and reading
         one that is not there is an expected outcome here."""
