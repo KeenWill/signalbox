@@ -135,6 +135,21 @@ FUTURE_OWNERSHIP_MARKERS = (
 # satisfying that convention would fail a rule that forbids naming them.
 TIER_FREE_SECTIONS = frozenset({"Open edges"})
 
+# A table cell that opens by classifying its row as implemented, inside a
+# section whose tier is not implemented. This is the drift the first version of
+# this checker could not see, and it points the opposite way to the one it was
+# built for: rules 1 through 5 catch a page claiming unbuilt behavior as
+# current, while this catches built behavior filed under a heading saying
+# nothing here exists.
+#
+# It earns a rule of its own because a table can carry a tier *column*, and a
+# column and a heading are two mechanisms for one fact. When they disagree the
+# row has two tiers and a reader must pick one, which defeats the positional
+# convention exactly as a bold-prose label did. `\bimplemented` does not match
+# "unimplemented", so an ordinary "Committed unimplemented — ..." cell is not a
+# hit.
+IMPLEMENTED_CELL = re.compile(r"\|\s*\*{0,2}implemented\b", re.IGNORECASE)
+
 FENCE = re.compile(r"^\s*(```|~~~)")
 
 
@@ -278,6 +293,19 @@ def check_page(path: Path, failures: list[str]) -> None:
                     f"it, so the label is decoration rather than a claim a reader "
                     f"can check"
                 )
+            if part.tier != TIER_IMPLEMENTED:
+                found = IMPLEMENTED_CELL.search(part.text())
+                if found is not None:
+                    failures.append(
+                        f"{path}:{part.line}: {TIER_NAMES[part.tier]} section "
+                        f"{part.title!r} contains a table cell classifying its "
+                        f"row as implemented. A tier column and a tier heading "
+                        f"are two mechanisms for one fact; when they disagree "
+                        f"the row has two tiers. State the implemented baseline "
+                        f"in prose outside this section and leave the cell to "
+                        f"the constraint this section owns"
+                    )
+
             if part.tier == TIER_IMPLEMENTED and part.title not in TIER_FREE_SECTIONS:
                 for marker in FUTURE_OWNERSHIP_MARKERS:
                     found = marker.search(body)

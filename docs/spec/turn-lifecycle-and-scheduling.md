@@ -133,14 +133,19 @@ not admit work until an unrelated old invocation happened to finish, since a
 configuration edit produces neither a release nor an availability update.
 Release atomically consumes the wait, creates a fresh `Prepared` successor
 attempt, and returns the same turn to `Running` with a fresh availability chain.
-It carries forward every exclusion that qualified a member out: every durable
-membership exclusion, every profile quarantine, and every predecessor exclusion
-earned by a qualifying failure in this turn. Nothing readmits such a member
-within this turn — not a reset passing, not an operator clear of its exact
-predecessor correlation, and not any other durable availability update
-([model-call execution](model-call-execution.md#availability-successor-calls)).
-Without that, waking a one-member `switch_now` pool on its own reported reset
-would call the same profile again without bound.
+Which exclusions survive that release is owned by
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+and it splits them in two. A predecessor exclusion earned by a qualifying
+failure in this turn is insert-only and turn-local, so nothing readmits that
+member within this turn — not a reset passing, not an operator clear of its
+exact predecessor correlation, and not any other durable availability update
+([model-call execution](model-call-execution.md#availability-successor-calls));
+without that, waking a one-member `switch_now` pool on its own reported reset
+would call the same profile again without bound. Every other exclusion the wait
+recorded — an ordinary reset-aware membership exclusion, an `avoid_new_sessions`
+exclusion, a profile quarantine — is re-read from its current active state
+instead, because a release that re-applied a reset which had already passed
+would re-enter the same wait on the very wake its deadline exists to produce.
 
 Eligibility is permission to retry selection, not a guarantee of a slot. One
 release can make several contended waits eligible while admitting only one, so
