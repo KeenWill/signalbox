@@ -192,13 +192,14 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           SIGNALBOX_TOOL_EVAL_FAMILY: ${{ matrix.family }}
           SIGNALBOX_TOOL_EVAL_SUMMARY: ${{ runner.temp }}/tool-eval-summary.md
+          TOOL_EVAL_EXECUTABLE: ${{ steps.build.outputs.executable }}
         run: |
           set -euo pipefail
           test -n "${OPENAI_API_KEY}" \
             || { echo "the openai-smoke environment provides no API key"; exit 1; }
           result="${RUNNER_TEMP}/tool-eval-test-output"
           set +e
-          "${{ steps.build.outputs.executable }}" \
+          "${TOOL_EVAL_EXECUTABLE}" \
             --ignored --exact live_model_in_the_loop_evaluates_one_daemon_tool_family \
             --nocapture 2>&1 | tee "${result}"
           status=${PIPESTATUS[0]}
@@ -207,7 +208,7 @@ jobs:
             cat "${SIGNALBOX_TOOL_EVAL_SUMMARY}" >> "${GITHUB_STEP_SUMMARY}"
           else
             {
-              echo "## ${{ matrix.family }} daemon tool eval"
+              echo "## ${SIGNALBOX_TOOL_EVAL_FAMILY} daemon tool eval"
               echo
               echo "Harness failure: no model-behavior report was produced."
             } >> "${GITHUB_STEP_SUMMARY}"
