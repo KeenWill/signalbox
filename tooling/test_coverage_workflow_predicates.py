@@ -104,6 +104,9 @@ NATIVE_MARKER = "<!-- signalbox-native-coverage -->"
 MARKER_COMMENT_ID = 11
 SECOND_MARKER_COMMENT_ID = 12
 FOREIGN_COMMENT_ID = 13
+# Comments from people that precede the sticky one on a long-lived pull request.
+EARLIER_COMMENT_ID = 14
+SECOND_EARLIER_COMMENT_ID = 15
 
 # The checkout root the fixture paths are reported relative to. Deliberately not
 # this checkout: the summarizers take the root as an argument, and a synthetic
@@ -177,6 +180,9 @@ COMMAND_POSITION_PREFIXES = " \t\n(;|&"
 JQ_OPTIONS_TAKING_A_NAME_AND_A_VALUE = ("--arg", "--argjson", "--slurpfile", "--rawfile")
 JQ_OPTIONS_TAKING_ONE_VALUE = ("-f", "--from-file", "--indent", "-L")
 JQ_OPTIONS_READING_THE_FILTER_FROM_A_FILE = ("-f", "--from-file")
+# The two-word options whose second word names a file rather than a value. Only
+# these are redirected at a fixture when an invocation is replayed.
+JQ_OPTIONS_TAKING_A_FILE = ("--rawfile", "--slurpfile")
 
 # Terminators that end a shell word, and the subset that ends a whole command.
 WORD_TERMINATORS = " \t;|&\n()<>"
@@ -1010,6 +1016,7 @@ def misdeclared_presence() -> list[str]:
 HEALTHY_FILE = "/repo/crates/domain/src/session.rs"
 SECOND_FILE = "/repo/crates/domain/src/turn.rs"
 PRODUCT_TARGET = "Signalbox.app"
+NATIVE_SOURCE_PATH = "/repo/clients/native/Sources/Signalbox/LiveScreen.swift"
 
 # A healthy baseline: one partly covered file, nothing degenerate about it.
 # Every rejection fixture is this document with one thing changed, so a failure
@@ -1115,14 +1122,19 @@ def empty_first_element_export() -> dict:
     }
 
 
-def native_target(name, *, covered: int, executable: int) -> dict:
+def native_source(path: str, *, covered: int, executable: int) -> dict:
+    """One source file inside an xccov target."""
+    return {"path": path, "coveredLines": covered, "executableLines": executable}
+
+
+def native_target(name, *, covered: int, executable: int, files: tuple[dict, ...] = ()) -> dict:
     """One xccov target whose knobs are its covered and executable line counts."""
     return {
         "name": name,
         "coveredLines": covered,
         "executableLines": executable,
         "lineCoverage": 0.0 if executable == 0 else covered / executable,
-        "files": [],
+        "files": list(files),
     }
 
 
@@ -1200,6 +1212,14 @@ REPORT_FILE = "report.md"
 
 REPORT_BODY = "report"
 NO_REPORT_BODY = "no-report"
+UNREPRODUCIBLE = "unreproducible"
+
+# Words that appear at the head of a command inside a producer group without
+# writing any of the comment. Anything else that does is an emitter this
+# composer does not know, and is refused rather than skipped.
+NON_EMITTING_SHELL_WORDS = frozenset(
+    {"if", "then", "else", "elif", "fi", "[", "test", ":", "true", "cat"}
+)
 
 
 @dataclass(frozen=True)
@@ -1270,47 +1290,66 @@ def marker_emitting_group(script: str, marker: str) -> str | None:
 
 
 def shell_emissions(group: str) -> list[Emission]:
-    """Everything a producer's brace group writes, in order, outside test bodies."""
+    """Everything a producer's brace group writes, in order, outside test bodies.
+
+    Every command is read, not only the ones this composer knows. A command it
+    cannot reproduce is recorded as such rather than stepped over: skipping it
+    would compose a body shorter than the one the workflow writes, and every
+    round trip built on that body would then pass while the payload corrupted
+    text no fixture contained. Silently testing less is the failure this module
+    exists to refuse, so an unknown emitter is surfaced and fails a test.
+    """
     emissions: list[Emission] = []
     index, length = 0, len(group)
     while index < length:
-        character = group[index]
-        if character == "\\":
-            index += 2
-            continue
-        if character == "'":
-            closing = group.find("'", index + 1)
-            if closing < 0:
-                break
-            index = closing + 1
-            continue
-        if character == '"':
-            cursor = index + 1
-            while cursor < length and group[cursor] != '"':
-                cursor += 2 if group[cursor] == "\\" else 1
-            index = cursor + 1
-            continue
-        if character == "#" and (index == 0 or group[index - 1] in " \t\n"):
+        while index < length and group[index] in " \t\n;":
+            index += 1
+        if index >= length:
+            break
+        if group[index] == "#":
             newline = group.find("\n", index)
             index = length if newline < 0 else newline
             continue
 
-        in_command_position = index == 0 or group[index - 1] in COMMAND_POSITION_PREFIXES
-        printf = PRINTF_TOKEN.match(group, index)
-        if printf and in_command_position:
-            words, following = read_command_words(group, printf.end())
-            emissions.append(Emission(kind="text", text=render_printf(words)))
-            index = following
+        words, following = read_command_words(group, index)
+        if not words:
+            index += 1
             continue
-        concatenate = CAT_TOKEN.match(group, index)
-        if concatenate and in_command_position:
-            words, following = read_command_words(group, concatenate.end())
-            if any(REPORT_FILE in word for word in words):
-                emissions.append(Emission(kind=REPORT_BODY, text=""))
-            index = following
-            continue
-        index += 1
+
+        command = words[0]
+        if command == "printf":
+            emissions.append(Emission(kind="text", text=render_printf(words[1:])))
+        elif command == "cat" and any(REPORT_FILE in word for word in words[1:]):
+            emissions.append(Emission(kind=REPORT_BODY, text=""))
+        elif command not in NON_EMITTING_SHELL_WORDS:
+            emissions.append(Emission(kind=UNREPRODUCIBLE, text=" ".join(words)))
+
+        index = following + 1 if following > index else index + 1
     return emissions
+
+
+def unreproducible_producer_commands() -> list[str]:
+    """Commands in a producer this composer cannot reproduce, outside test bodies.
+
+    A producer that emitted part of its comment some other way — an `echo`
+    where a `printf` used to be — would leave the composed body short while the
+    producer count and the report classification stayed the same, so every
+    whole-comment round trip would keep passing over text no fixture holds.
+    """
+    found: list[str] = []
+    for workflow in (COVERAGE_WORKFLOW, SWIFT_WORKFLOW):
+        marker = emitted_marker(workflow)
+        for block in comment_producing_blocks(workflow):
+            group = marker_emitting_group(block.script, marker)
+            if group is None:
+                continue
+            found.extend(
+                f"{workflow.name}/{block.job}: {emission.text!r} writes part of the comment "
+                "in a form this module cannot reproduce, so the composed body would be short"
+                for emission in shell_emissions(group)
+                if emission.kind == UNREPRODUCIBLE
+            )
+    return found
 
 
 def producer_bodies(workflow: Path, report: str) -> dict[str, str]:
@@ -1385,7 +1424,18 @@ def native_full_comment_body() -> str:
         SWIFT_WORKFLOW,
         REPORT_BODY,
         NATIVE_SUMMARIZER.render(
-            native_report(native_target(PRODUCT_TARGET, covered=40, executable=100)),
+            native_report(
+                native_target(
+                    PRODUCT_TARGET,
+                    covered=40,
+                    executable=100,
+                    # An uncovered source file, so the rendered report carries a
+                    # file-table row and a `.swift` path. A payload filter that
+                    # touched only paths would round-trip a file-free report
+                    # untouched and corrupt every real comment.
+                    files=(native_source(NATIVE_SOURCE_PATH, covered=10, executable=60),),
+                )
+            ),
             FIXTURE_REPO_ROOT,
             NATIVE_TOP_UNCOVERED,
             NATIVE_REPORT_TITLE,
@@ -1790,6 +1840,24 @@ def selector_cases(identifier: str) -> list[SelectorCase]:
             expected=(selected,),
         ),
         SelectorCase(
+            name="its own comment behind unrelated ones",
+            page=comments_page(
+                {"id": EARLIER_COMMENT_ID, "body": "an earlier comment from a person"},
+                {"id": SECOND_EARLIER_COMMENT_ID, "body": "another one, also unrelated"},
+                {"id": MARKER_COMMENT_ID, "body": own_body},
+            ),
+            expected=(selected,),
+        ),
+        SelectorCase(
+            name="duplicates behind unrelated comments",
+            page=comments_page(
+                {"id": EARLIER_COMMENT_ID, "body": "an earlier comment from a person"},
+                {"id": MARKER_COMMENT_ID, "body": own_body},
+                {"id": SECOND_MARKER_COMMENT_ID, "body": own_body},
+            ),
+            expected=(selected, str(SECOND_MARKER_COMMENT_ID)),
+        ),
+        SelectorCase(
             name="its own no-report body",
             page=comments_page(
                 {"id": MARKER_COMMENT_ID, "body": no_report_comment_body(own_workflow)}
@@ -1862,7 +1930,10 @@ def selector_failures(identifier: str) -> list[str]:
                 f"publishing step: {result.stderr.strip()}"
             )
             continue
-        emitted = tuple(result.stdout.split())
+        # Lines, not whitespace-separated tokens. The publishing shell keeps
+        # only what precedes the first newline, so two ids on one line is one
+        # value it would use whole as a comment id, updating neither comment.
+        emitted = tuple(line for line in result.stdout.splitlines() if line.strip())
         if emitted != case.expected:
             problems.append(
                 f"{identifier} on {case.name!r} emitted {emitted} but must emit "
@@ -1897,18 +1968,49 @@ def selectors_not_stopped_by_a_bodyless_comment() -> list[str]:
 
 
 def replayed_arguments(extracted: ExtractedProgram, body_path: Path) -> tuple[str, ...]:
-    """The workflow's own jq arguments, pointed at a fixture, outside test bodies.
+    """The workflow's own jq arguments, with only its body file redirected.
 
-    Every option the workflow passes is replayed rather than chosen here, and
-    the one word that names a file is redirected to the fixture. Supplying a
-    working set of arguments instead would test an invocation the workflow does
-    not make: dropping `-n` while keeping `--rawfile` leaves jq reading stdin,
-    which writes no payload and still exits zero.
+    Runs outside test bodies. Every option the workflow passes is replayed
+    rather than chosen here — `-n` is behaviour, not decoration, since without
+    it jq reads stdin and a `--rawfile` invocation writes no payload while still
+    exiting zero.
+
+    Only the file operand of a file-reading option is pointed at the fixture.
+    An option carrying a value rather than a filename keeps its own identity,
+    with shell variables filled in synthetically: rewriting every expansion to
+    the body path would hand `--arg sha "$HEAD_SHA"` the comment file, and a
+    filter that corrupted that value would still round-trip the body unchanged.
     """
-    return tuple(
-        str(body_path) if kind == "shell-expansion" else text
-        for text, kind in extracted.arguments
-    )
+    replayed: list[str] = []
+    arguments = list(extracted.arguments)
+    index = 0
+    while index < len(arguments):
+        text, kind = arguments[index]
+        if text in JQ_OPTIONS_TAKING_A_NAME_AND_A_VALUE and index + 2 < len(arguments):
+            name = arguments[index + 1][0]
+            value_text, value_kind = arguments[index + 2]
+            replayed.extend([text, name])
+            if text in JQ_OPTIONS_TAKING_A_FILE:
+                replayed.append(str(body_path))
+            elif value_kind == "shell-expansion":
+                replayed.append(substitute_shell_variables(value_text))
+            else:
+                replayed.append(value_text)
+            index += 3
+            continue
+        if text in JQ_OPTIONS_TAKING_ONE_VALUE and index + 1 < len(arguments):
+            value_text, value_kind = arguments[index + 1]
+            replayed.append(text)
+            replayed.append(
+                substitute_shell_variables(value_text)
+                if value_kind == "shell-expansion"
+                else value_text
+            )
+            index += 2
+            continue
+        replayed.append(substitute_shell_variables(text) if kind == "shell-expansion" else text)
+        index += 1
+    return tuple(replayed)
 
 
 def payload_round_trip_failures() -> list[str]:
@@ -2290,6 +2392,14 @@ class WorkflowReadingTests(unittest.TestCase):
         self.assertEqual(
             len(comment_producing_blocks(SWIFT_WORKFLOW)), EXPECTED_COMMENT_PRODUCERS
         )
+
+    def test_every_producer_command_can_be_reproduced(self) -> None:
+        """A producer that writes part of its comment some other way — an
+        `echo` where a `printf` used to be — would leave the composed body
+        short, while the producer count and the report classification stayed
+        the same. Every whole-comment round trip would then keep passing over
+        text no fixture holds, which is testing less rather than failing."""
+        self.assertEqual(unreproducible_producer_commands(), [])
 
     def test_every_coverage_comment_producer_emits_the_selected_marker(self) -> None:
         """Each producer checked on its own, not folded into one set.
