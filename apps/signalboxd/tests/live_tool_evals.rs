@@ -533,6 +533,7 @@ struct FamilySuite {
     family: EvalFamily,
     workspace: TempDir,
     git_seed: Option<Oid>,
+    git_seed_refs: BTreeMap<String, Oid>,
     catalog: MergedCatalog,
     executor: SharedFamilyExecutor,
     workspace_seed_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
@@ -550,6 +551,7 @@ impl FamilySuite {
     fn git() -> EvalResult<Self> {
         let workspace = tempfile::tempdir()?;
         let git_seed = seed_git_repository(workspace.path())?;
+        let git_seed_refs = git_local_branch_targets(&Repository::open(workspace.path())?)?;
         let tools = LocalGitTools::try_new(
             LocalWorkspaceFileSystem,
             workspace.path(),
@@ -560,6 +562,7 @@ impl FamilySuite {
             family: EvalFamily::Git,
             workspace,
             git_seed: Some(git_seed),
+            git_seed_refs,
             catalog: MergedCatalog::try_new([catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Git(executor)),
             workspace_seed_entries: BTreeMap::new(),
@@ -610,6 +613,7 @@ impl FamilySuite {
             family: EvalFamily::Workspace,
             workspace,
             git_seed: None,
+            git_seed_refs: BTreeMap::new(),
             catalog: MergedCatalog::try_new([read_catalog, mutation_catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Workspace {
                 read: read_executor,
@@ -636,6 +640,7 @@ impl FamilySuite {
             family: EvalFamily::Web,
             workspace,
             git_seed: None,
+            git_seed_refs: BTreeMap::new(),
             catalog: MergedCatalog::try_new([fetch_catalog, search_catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Web {
                 fetch: fetch_executor,
@@ -782,7 +787,14 @@ impl FamilySuite {
                 let seed = self.git_seed.ok_or_else(|| {
                     io::Error::other("the Git eval suite has no captured seed identity")
                 })?;
-                git_forced_case_passed(self.workspace.path(), seed, case.name, &arguments, &result)
+                git_forced_case_passed(
+                    self.workspace.path(),
+                    seed,
+                    &self.git_seed_refs,
+                    case.name,
+                    &arguments,
+                    &result,
+                )
             }
             EvalFamily::Workspace => workspace_forced_case_passed(
                 self.workspace.path(),
@@ -836,7 +848,8 @@ impl FamilySuite {
     ) -> bool {
         match self.family {
             EvalFamily::Workspace => workspace_natural_read_result_passed(snapshot, tracker),
-            EvalFamily::Git | EvalFamily::Web => true,
+            EvalFamily::Web => tracker.final_response_reports(WEB_FETCH_BODY),
+            EvalFamily::Git => true,
         }
     }
 }
@@ -874,6 +887,7 @@ fn workspace_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntry
 fn git_forced_case_passed(
     root: &Path,
     seed: Oid,
+    seed_refs: &BTreeMap<String, Oid>,
     name: &str,
     arguments: &serde_json::Value,
     result: &serde_json::Value,
@@ -891,6 +905,8 @@ fn git_forced_case_passed(
                 return Ok(false);
             };
             let expected = log_target.id();
+            let mut expected_refs = seed_refs.clone();
+            expected_refs.insert(branch_name.to_owned(), expected);
             let branch = repository.find_branch(branch_name, BranchType::Local)?;
             let start_branch = repository.find_branch("log-target", BranchType::Local)?;
             let base = repository
@@ -906,6 +922,7 @@ fn git_forced_case_passed(
                 && base.id() == seed
                 && fs::read_to_string(root.join(GIT_SEED_PATH))? == GIT_BASE_CONTENT
                 && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
+                && git_local_branch_targets(&repository)? == expected_refs
         }
         GIT_BRANCH_SWITCH_NAME => {
             let Some(branch_name) = arguments["name"].as_str() else {
@@ -944,6 +961,18 @@ fn git_forced_case_passed(
                 && head.parent_id(0)? == seed
                 && head.parent_id(1)? == log_target.id()
                 && git_merge_state_is_clean(&repository)
+                && untracked_git_fixture_matches(
+                    root,
+                    &repository,
+                    GIT_STAGE_PATH,
+                    GIT_STAGE_CONTENT.as_bytes(),
+                )?
+                && untracked_git_fixture_matches(
+                    root,
+                    &repository,
+                    GIT_NATURAL_PATH,
+                    GIT_NATURAL_CONTENT.as_bytes(),
+                )?
         }
         GIT_DIFF_NAME => {
             result["patch"].as_str() == Some(expected_bounded_git_worktree_patch(root)?.as_str())
@@ -1277,7 +1306,6 @@ fn workspace_forced_case_passed(
         LIST_DIRECTORY_NAME => {
             result_entries_equal(&result["entries"], &expected_workspace_listing())
                 && result["truncated"] == true
-                && workspace_entries(root)? == *seed_entries
         }
         GLOB_FILES_NAME => {
             let expected = [(String::from(WORKSPACE_GLOB_PATH), "file")];
@@ -1314,7 +1342,15 @@ fn workspace_forced_case_passed(
         }
         _ => false,
     };
-    Ok(passed)
+    if !passed {
+        return Ok(false);
+    }
+    match name {
+        READ_FILE_NAME | LIST_DIRECTORY_NAME | GLOB_FILES_NAME | SEARCH_FILES_NAME => {
+            Ok(workspace_entries(root)? == *seed_entries)
+        }
+        _ => Ok(true),
+    }
 }
 
 fn result_entries_equal(value: &serde_json::Value, expected: &[(String, &'static str)]) -> bool {
@@ -1417,6 +1453,22 @@ fn seed_git_repository(root: &Path) -> EvalResult<Oid> {
     repository.branch(GIT_BASE_BRANCH, &third, false)?;
     repository.set_head(&format!("refs/heads/{GIT_BASE_BRANCH}"))?;
     Ok(third.id())
+}
+
+fn git_local_branch_targets(repository: &Repository) -> EvalResult<BTreeMap<String, Oid>> {
+    let mut targets = BTreeMap::new();
+    for branch in repository.branches(Some(BranchType::Local))? {
+        let (branch, _) = branch?;
+        let name = branch
+            .name()?
+            .ok_or_else(|| io::Error::other("a local Git branch name is not valid UTF-8"))?;
+        let target = branch
+            .get()
+            .target()
+            .ok_or_else(|| io::Error::other("a local Git branch has no direct target"))?;
+        targets.insert(name.to_owned(), target);
+    }
+    Ok(targets)
 }
 
 fn commit_git_seed_revision<'repository>(
@@ -2026,6 +2078,7 @@ struct OperationTrackerState {
     round_tripped_request_ids: BTreeSet<Uuid>,
     pending_result_receipts: BTreeMap<Uuid, String>,
     result_contents: BTreeMap<Uuid, String>,
+    final_response_text: Option<String>,
 }
 
 impl OperationTracker {
@@ -2067,6 +2120,7 @@ impl OperationTracker {
             .state
             .lock()
             .expect("operation-tracker lock is available");
+        state.final_response_text = Some(text.to_owned());
         let reported = state
             .pending_result_receipts
             .iter()
@@ -2104,6 +2158,15 @@ impl OperationTracker {
             .result_contents
             .get(&request_id)
             .cloned()
+    }
+
+    fn final_response_reports(&self, expected: &str) -> bool {
+        self.state
+            .lock()
+            .expect("operation-tracker lock is available")
+            .final_response_text
+            .as_deref()
+            .is_some_and(|text| text.contains(expected))
     }
 }
 
@@ -2179,6 +2242,23 @@ fn intermediate_text_with_a_tool_call_does_not_count_a_result_round_trip() {
 
     assert_eq!(tracker.result_round_trips(), 0);
     assert!(tracker.round_tripped_request_ids().is_empty());
+}
+
+#[test]
+fn final_response_report_rejects_a_receipt_only_answer() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EVAL_RECEIPT, false);
+
+    assert!(!tracker.final_response_reports(WEB_FETCH_BODY));
+}
+
+#[test]
+fn final_response_report_accepts_the_fetched_fixture() {
+    let tracker = OperationTracker::default();
+    let response = format!("{WEB_FETCH_BODY} {SYNTHETIC_EVAL_RECEIPT}");
+    tracker.observe_response_text(&response, false);
+
+    assert!(tracker.final_response_reports(WEB_FETCH_BODY));
 }
 
 struct EvalDatabase {
@@ -3798,6 +3878,39 @@ fn forced_git_commit_verifier_accepts_the_exact_fixture_tree() -> EvalResult {
 }
 
 #[test]
+fn forced_git_commit_verifier_rejects_a_mutated_untracked_fixture() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_CREATE_COMMIT_NAME)
+        .expect("the Git commit fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let message = arguments["message"]
+        .as_str()
+        .expect("the Git commit fixture has a message");
+    suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
+    commit_staged_paths(suite.workspace.path(), message)?;
+    fs::write(
+        suite.workspace.path().join(GIT_STAGE_PATH),
+        GIT_NATURAL_CONTENT,
+    )?;
+    let head = Repository::open(suite.workspace.path())?
+        .head()?
+        .peel_to_commit()?
+        .id()
+        .to_string();
+    let result = serde_json::json!({
+        "commit": head,
+        "state_cleaned": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_commit_verifier_rejects_a_detached_head_without_branch_advancement() -> EvalResult {
     let suite = FamilySuite::git()?;
     let case = GIT_CASES
@@ -3971,6 +4084,31 @@ fn forced_git_branch_create_verifier_rejects_switching_to_the_created_branch() -
         .peel_to_commit()?;
     repository.branch("created-by-eval", &target, false)?;
     repository.set_head("refs/heads/created-by-eval")?;
+    let result = serde_json::json!({
+        "branch": "created-by-eval",
+        "head": target.id().to_string(),
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_branch_create_verifier_rejects_an_extra_branch() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_BRANCH_CREATE_NAME)
+        .expect("the Git branch-create fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    repository.branch("created-by-eval", &target, false)?;
+    repository.branch("collateral-branch", &target, false)?;
     let result = serde_json::json!({
         "branch": "created-by-eval",
         "head": target.id().to_string(),
@@ -4514,6 +4652,39 @@ fn forced_workspace_search_verifier_accepts_the_bounded_first_match() -> EvalRes
 }
 
 #[test]
+fn forced_workspace_search_verifier_rejects_collateral_mutation() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == SEARCH_FILES_NAME)
+        .expect("the workspace search fixture exists");
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_SEED_PATH),
+        WORKSPACE_DRIFTED_SEED,
+    )?;
+    let match_line = WORKSPACE_SEARCH_CONTENT
+        .lines()
+        .nth(1)
+        .expect("the workspace search fixture has a matching line");
+    let result = serde_json::json!({
+        "matches": [{
+            "path": WORKSPACE_SEARCH_PATH,
+            "line": 2,
+            "column": 1,
+            "text_start_column": 1,
+            "text": match_line,
+            "line_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_workspace_search_verifier_rejects_a_root_match() -> EvalResult {
     let suite = FamilySuite::workspace()?;
     let case = WORKSPACE_CASES
@@ -4582,6 +4753,34 @@ fn forced_workspace_read_verifier_rejects_a_mutated_fixture() -> EvalResult {
         "content": prefix,
         "bytes_read": prefix.len(),
         "total_bytes": WORKSPACE_DRIFTED_SEED.len(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_read_verifier_rejects_collateral_mutation() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == READ_FILE_NAME)
+        .expect("the workspace read fixture exists");
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_GLOB_NONMATCHING_PATH),
+        WORKSPACE_DRIFTED_GLOB_CONTENT,
+    )?;
+    let prefix = WORKSPACE_SEED
+        .get(..WORKSPACE_FORCED_READ_MAX_BYTES)
+        .expect("the workspace fixture covers the forced bound");
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "content": prefix,
+        "bytes_read": prefix.len(),
+        "total_bytes": WORKSPACE_SEED.len(),
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
@@ -4720,6 +4919,28 @@ fn forced_workspace_glob_verifier_accepts_the_bounded_first_match() -> EvalResul
     .to_string();
 
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_glob_verifier_rejects_collateral_mutation() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == GLOB_FILES_NAME)
+        .expect("the workspace glob fixture exists");
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_SEED_PATH),
+        WORKSPACE_DRIFTED_SEED,
+    )?;
+    let result = serde_json::json!({
+        "matches": [{"path": WORKSPACE_GLOB_PATH, "kind": "file"}],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
