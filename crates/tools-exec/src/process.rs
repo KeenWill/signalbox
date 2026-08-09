@@ -1244,8 +1244,8 @@ fn bwrap_request(
     };
     // The leading flags are this profile's whole namespace isolation. A deletion
     // or reordering here fails
-    // `sandboxed_request_isolates_every_namespace_including_the_network`, which
-    // restates the expected prefix independently.
+    // `sandboxed_request_opens_with_the_user_pid_ipc_uts_and_network_unshare_prefix`,
+    // which restates the expected prefix independently.
     let mut bwrap_arguments = [
         "--die-with-parent",
         "--new-session",
@@ -1283,16 +1283,29 @@ fn bwrap_request(
         // `/etc/hosts` and `/etc/nsswitch.conf` are kept: the unshared network
         // namespace still carries a loopback interface, and glibc reads
         // `nsswitch.conf` for `passwd`/`group` lookups that no resolver serves.
-        // `/etc/resolv.conf` and `/etc/ssl` are deliberately absent. They
-        // provisioned outbound DNS and TLS trust, which `--unshare-net` makes
-        // unreachable; binding them anyway would leave the profile reading as
-        // though egress were still expected to work.
+        //
+        // `/etc/ssl` is kept on purpose, and is not dead weight to clean up.
+        // Building a TLS client reads the trust store even when nothing will be
+        // connected to: reqwest depends on `rustls-platform-verifier`, which
+        // loads the native store on Linux, so workspace tests that construct an
+        // HTTPS client would meet an empty root store without it. It grants no
+        // egress, because `--unshare-net` leaves the namespace no route to any
+        // peer; the only reachable listener is one inside this same namespace,
+        // which could supply its own trust material anyway.
+        //
+        // `/etc/resolv.conf` is deliberately absent. Resolving a name needs the
+        // network that `--unshare-net` removes, so it is genuinely inert, and
+        // binding it would leave the profile reading as though egress were
+        // still expected to work.
         "--ro-bind-try",
         "/etc/hosts",
         "/etc/hosts",
         "--ro-bind-try",
         "/etc/nsswitch.conf",
         "/etc/nsswitch.conf",
+        "--ro-bind-try",
+        "/etc/ssl",
+        "/etc/ssl",
     ]
     .into_iter()
     .map(OsString::from)
@@ -3996,8 +4009,11 @@ mod tests {
     /// stated independently of the array under test. It calls `bwrap_request`
     /// directly rather than driving the runner, so it needs no bubblewrap
     /// binary and covers every host including the non-Linux development ones.
+    /// The prefix is the whole of what this pins: `--unshare-cgroup` is not
+    /// passed, so the cgroup namespace is shared and no assertion here says
+    /// otherwise.
     #[test]
-    fn sandboxed_request_isolates_every_namespace_including_the_network() {
+    fn sandboxed_request_opens_with_the_user_pid_ipc_uts_and_network_unshare_prefix() {
         let workspace_root = Path::new(TEST_SANDBOX_WORKSPACE_ROOT);
         let expected_isolation_prefix = [
             OsString::from("--die-with-parent"),
@@ -4021,15 +4037,14 @@ mod tests {
         assert!(request.arguments.starts_with(&expected_isolation_prefix));
     }
 
-    /// `/etc/resolv.conf` and `/etc/ssl` were bound only so that outbound DNS
-    /// and TLS would work inside the sandbox. The unshared network namespace
-    /// leaves them nothing to serve, and binding them anyway would tell a later
-    /// reader that egress is still expected to function here. This pins those
-    /// two paths and nothing broader: `/etc/hosts` and `/etc/nsswitch.conf`
-    /// stay bound on purpose, and the read-only runtime may carry certificate
-    /// material of its own.
+    /// `/etc/resolv.conf` served outbound DNS, which needs the network that
+    /// `--unshare-net` removes, so binding it would tell a later reader that
+    /// egress is still expected to function here. This pins that one path and
+    /// nothing broader: `/etc/hosts` and `/etc/nsswitch.conf` stay bound for
+    /// loopback and NSS lookups, and `/etc/ssl` stays bound because building a
+    /// TLS client reads the trust store even when no connection follows.
     #[test]
-    fn sandboxed_request_omits_the_etc_resolv_conf_and_etc_ssl_binds() {
+    fn sandboxed_request_omits_the_etc_resolv_conf_bind() {
         let workspace_root = Path::new(TEST_SANDBOX_WORKSPACE_ROOT);
 
         let request = bwrap_request(
@@ -4046,7 +4061,6 @@ mod tests {
                 .arguments
                 .contains(&OsString::from("/etc/resolv.conf"))
         );
-        assert!(!request.arguments.contains(&OsString::from("/etc/ssl")));
     }
 
     #[cfg(target_os = "linux")]

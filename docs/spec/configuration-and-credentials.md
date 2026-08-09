@@ -621,21 +621,24 @@ The launch is this. Bubblewrap receives `--die-with-parent`, `--new-session`,
 `--unshare-user`, `--unshare-pid`, `--unshare-ipc`, `--unshare-uts`, and
 `--unshare-net`. It mounts a fresh `/proc`, a fresh `/dev`, and a `tmpfs` at
 `/tmp`; creates `/etc`; and read-only binds `/usr`, `/bin`, `/lib`, `/lib64`,
-`/nix/store`, `/etc/alternatives`, `/etc/hosts`, and `/etc/nsswitch.conf`, each
-where it is present. It binds the configured workspace root read-write at
-`/workspace`, read-only binds the pinned execution supervisor — a host path that
-need not lie under that root — at `/signalbox-exec-dispatch`, and changes
-directory to `/workspace` or to the requested directory beneath it. The child
-environment is cleared and then set to `LANG`, `LC_ALL`, `PATH`, and
-`HOME=/workspace`. Every command is dispatched through the supervisor.
+`/nix/store`, `/etc/alternatives`, `/etc/hosts`, `/etc/nsswitch.conf`, and
+`/etc/ssl`, each where it is present. It does not bind `/etc/resolv.conf`. It
+binds the configured workspace root read-write at `/workspace`, read-only binds
+the pinned execution supervisor — a host path that need not lie under that root
+— at `/signalbox-exec-dispatch`, and changes directory to `/workspace` or to the
+requested directory beneath it. The child environment is cleared and then set to
+`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every command is dispatched
+through the supervisor.
 
 The profile does not provide the following, and no other daemon-local control
 supplies them:
 
-- Socket families other than IP are unfenced, because a network namespace scopes
-  IP. An `AF_UNIX` pathname socket inside the workspace root stays connectable,
-  and one fronting a proxy carries egress with it; `AF_VSOCK` to a host CID
-  remains available wherever the platform provides it.
+- Two transports outside the network namespace's reach stay available. An
+  `AF_UNIX` *pathname* socket inside the workspace root is connectable, because
+  it is reached through the filesystem, and one fronting a proxy carries egress
+  with it; `AF_VSOCK` to a host CID remains available wherever the platform
+  provides it. Abstract `AF_UNIX` sockets are not in this class — that namespace
+  is scoped by the network namespace, so unsharing it does isolate them.
 - A credential inside the workspace root is readable. Credential settings are
   admitted on presence alone and are never checked against that root, so one
   configured inside it is bound along with the workspace, as is any secret the
