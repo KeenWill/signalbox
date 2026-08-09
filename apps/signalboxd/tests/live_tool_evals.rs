@@ -902,9 +902,13 @@ impl FamilySuite {
                 })?;
                 git_forced_case_passed(self.workspace.path(), seed, case.name, &arguments, &result)
             }
-            EvalFamily::Workspace => {
-                workspace_forced_case_passed(self.workspace.path(), case.name, &arguments, &result)
-            }
+            EvalFamily::Workspace => workspace_forced_case_passed(
+                self.workspace.path(),
+                &self.workspace_seed_entries,
+                case.name,
+                &arguments,
+                &result,
+            ),
             EvalFamily::Web => Ok(web_forced_case_passed(case.name, &arguments, &result)),
             EvalFamily::Exec => Ok(exec_forced_case_passed(case.name, &result)),
         }
@@ -1048,9 +1052,11 @@ fn git_forced_case_passed(
                 return Ok(false);
             };
             let branch = repository.find_branch(branch_name, BranchType::Local)?;
+            let base = repository.find_branch(GIT_BASE_BRANCH, BranchType::Local)?;
             let branch_target = branch.get().target();
             result["branch"] == branch_name
                 && branch_target == Some(log_target.id())
+                && base.get().target() == Some(seed)
                 && head.id() == log_target.id()
                 && result["head"] == log_target.id().to_string()
                 && repository.head()?.shorthand().ok() == Some(branch_name)
@@ -1340,6 +1346,7 @@ fn staged_blob_matches_fixture(
 
 fn workspace_forced_case_passed(
     root: &Path,
+    seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     name: &str,
     arguments: &serde_json::Value,
     result: &serde_json::Value,
@@ -1410,6 +1417,7 @@ fn workspace_forced_case_passed(
         LIST_DIRECTORY_NAME => {
             result_entries_equal(&result["entries"], &expected_workspace_listing())
                 && result["truncated"] == true
+                && workspace_entries(root)? == *seed_entries
         }
         GLOB_FILES_NAME => {
             let expected = [(String::from(WORKSPACE_GLOB_PATH), "file")];
@@ -2881,6 +2889,11 @@ impl CaseSnapshot {
                 stage < commit
                     && self.requests[stage].producing_model_call_id
                         != self.requests[commit].producing_model_call_id
+                    && self.requests[stage]
+                        .completed_result_entry_index
+                        .is_some_and(|result_entry_index| {
+                            result_entry_index < self.requests[commit].entry_index
+                        })
             }))
     }
 
@@ -2900,6 +2913,9 @@ impl CaseSnapshot {
                         fetch.name == WEB_FETCH_NAME
                             && fetch.arguments_text == expected_url
                             && search.producing_model_call_id != fetch.producing_model_call_id
+                            && search.completed_result_entry_index.is_some_and(
+                                |result_entry_index| result_entry_index < fetch.entry_index,
+                            )
                     })
             }))
     }
@@ -4801,6 +4817,37 @@ fn forced_git_branch_switch_verifier_rejects_a_head_only_update() -> EvalResult 
 }
 
 #[test]
+fn forced_git_branch_switch_verifier_rejects_rewriting_the_base_branch() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_BRANCH_SWITCH_NAME)
+        .expect("the Git branch-switch fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("switch-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    repository.set_head("refs/heads/switch-target")?;
+    repository.checkout_head(None)?;
+    repository.reference(
+        &format!("refs/heads/{GIT_BASE_BRANCH}"),
+        target.id(),
+        true,
+        GIT_RESTORE_BRANCH_REFLOG_MESSAGE,
+    )?;
+    let result = serde_json::json!({
+        "branch": "switch-target",
+        "head": target.id().to_string(),
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_diff_verifier_accepts_the_seeded_worktree_patch() -> EvalResult {
     let suite = FamilySuite::git()?;
     let case = GIT_CASES
@@ -5394,6 +5441,28 @@ fn forced_workspace_list_verifier_rejects_an_unbounded_result() -> EvalResult {
     let result = serde_json::json!({
         "entries": workspace_listing_json(complete_workspace_listing()),
         "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_list_verifier_rejects_collateral_mutation() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == LIST_DIRECTORY_NAME)
+        .expect("the workspace list fixture exists");
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_SEED_PATH),
+        WORKSPACE_DRIFTED_SEED,
+    )?;
+    let result = serde_json::json!({
+        "entries": workspace_listing_json(expected_workspace_listing()),
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
@@ -6876,6 +6945,41 @@ fn git_natural_state_requires_a_later_model_call_for_the_commit() -> EvalResult 
 }
 
 #[test]
+fn git_natural_state_requires_the_stage_result_before_the_commit_call() -> EvalResult {
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(GIT_STAGE_NAME),
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"paths": [GIT_NATURAL_PATH]}).to_string(),
+                )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_LATE_RESULT_ENTRY_INDEX),
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(GIT_CREATE_COMMIT_NAME),
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
+                )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!snapshot.git_natural_requests_passed()?);
+    Ok(())
+}
+
+#[test]
 fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalResult {
     let snapshot = CaseSnapshot {
         turn_disposition: SnapshotTurnDisposition::Completed,
@@ -6940,6 +7044,41 @@ fn web_natural_state_requires_a_later_model_call_for_the_fetch() -> EvalResult {
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(WEB_FETCH_NAME),
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"url": WEB_URL}).to_string(),
+                )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    };
+
+    assert!(!snapshot.web_natural_requests_passed()?);
+    Ok(())
+}
+
+#[test]
+fn web_natural_state_requires_the_search_result_before_the_fetch_call() -> EvalResult {
+    let snapshot = CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(WEB_SEARCH_NAME),
+                arguments_text: normalized_arguments_text(
+                    &serde_json::json!({"query": WEB_QUERY}).to_string(),
+                )?,
+                entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                completed_result_entry_index: Some(ARBITRARY_LATE_RESULT_ENTRY_INDEX),
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(WEB_FETCH_NAME),
                 arguments_text: normalized_arguments_text(
                     &serde_json::json!({"url": WEB_URL}).to_string(),
