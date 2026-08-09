@@ -1355,6 +1355,98 @@ def one_program_for(identifier: str) -> str:
     return matches[0].program
 
 
+# Which fixture set drives each specification. `exercised` is checked against
+# this rather than trusted: a specification counts as covering a program only
+# when cases behind it appear here, so setting the flag without writing fixtures
+# fails by name instead of making the harness green over nothing. That failure
+# mode is the one this module exists to refuse, and it applies to the module's
+# own bookkeeping as much as to the workflows it reads.
+def fixture_cases_by_specification() -> dict[str, list]:
+    """The fixture cases driving each specification, outside test bodies.
+
+    These are the same collections the tests below iterate, so a specification
+    named here with cases behind it is one the suite actually drives. What this
+    cannot tell on its own is whether a name has been pointed at an unrelated
+    collection; it converts a bare assertion into one that fails when nothing
+    backs it, which is the property being claimed and not more.
+    """
+    return {
+        RUST_COMMENT_PAYLOAD: list(producer_bodies(COVERAGE_WORKFLOW, "").values()),
+        NATIVE_COMMENT_PAYLOAD: list(producer_bodies(SWIFT_WORKFLOW, "").values()),
+        RUST_STICKY_SELECTOR: list(selector_cases(RUST_STICKY_SELECTOR)),
+        NATIVE_STICKY_SELECTOR: list(selector_cases(NATIVE_STICKY_SELECTOR)),
+        RUST_DOCUMENT_PREDICATE: list(RUST_DOCUMENTS),
+        NATIVE_DOCUMENT_PREDICATE: list(NATIVE_DOCUMENTS),
+    }
+
+
+def duplicate_specification_identifiers(
+    specifications: tuple[PredicateSpec, ...] | None = None,
+) -> list[str]:
+    """Identifiers claimed by more than one specification, outside test bodies.
+
+    Everything keyed by identifier assumes it names one specification: the
+    fixture map backs one, and `programs_for()` resolves the first. Two
+    specifications sharing a name therefore let one fixture set vouch for both,
+    so the second's program counts as covered while nothing drives it — the
+    hole this module just closed, reopened by a copied line.
+
+    The registry is an argument so the duplicate branch can be driven from a
+    controlled one. Run only over the real registry, which is unique, this
+    helper would keep reporting nothing if its condition were deleted.
+    """
+    if specifications is None:
+        specifications = PREDICATE_SPECS
+    seen: dict[str, int] = {}
+    for spec in specifications:
+        seen[spec.identifier] = seen.get(spec.identifier, 0) + 1
+    return [
+        f"{identifier} names {count} specifications; one fixture set would vouch for all "
+        "of them while only the first is ever resolved"
+        for identifier, count in seen.items()
+        if count > 1
+    ]
+
+
+def misdeclared_exercised_specs(
+    specifications: tuple[PredicateSpec, ...] | None = None,
+    cases: dict[str, list] | None = None,
+) -> list[str]:
+    """Specifications whose `exercised` flag disagrees with their fixtures.
+
+    Runs outside test bodies, and checks both directions. A flag set without
+    fixtures makes `unexercised_programs()` accept a program nothing drives —
+    the silent pass this module is built to prevent, turned inward. A flag left
+    unset while fixtures exist is the opposite mistake: the exhaustiveness check
+    keeps demanding work that is already done.
+
+    The registry and its fixture map are arguments so both branches can be
+    driven from controlled inputs. Called against the real ones they report
+    nothing, which is the answer that proves least: a helper only ever run over
+    a correct registry would keep passing if either branch were deleted.
+    """
+    if specifications is None:
+        specifications = PREDICATE_SPECS
+    if cases is None:
+        cases = fixture_cases_by_specification()
+    problems: list[str] = []
+    for spec in specifications:
+        backing = cases.get(spec.identifier, [])
+        if spec.exercised and not backing:
+            problems.append(
+                f"{spec.identifier} declares exercised=True but no fixture set drives it. "
+                "Give it cases in fixture_cases_by_specification(), or set exercised=False: "
+                "the exhaustiveness check counts this specification as covering a program, "
+                "and a flag on its own covers nothing"
+            )
+        if not spec.exercised and backing:
+            problems.append(
+                f"{spec.identifier} has {len(backing)} fixture cases but declares "
+                "exercised=False, so the exhaustiveness check still demands work already done"
+            )
+    return problems
+
+
 def unexercised_programs() -> list[str]:
     """Every extracted program no fixture-backed specification covers, outside test bodies.
 
@@ -3087,6 +3179,86 @@ class WorkflowReadingTests(unittest.TestCase):
         every test that depends on it instead of failing. Promotion is a
         one-word edit, and this failure is what demands it."""
         self.assertEqual(misdeclared_presence(), [])
+
+    def test_two_specifications_sharing_an_identifier_are_named(self) -> None:
+        """The duplicate branch, driven from a controlled registry: the real
+        one is unique, so running only over it would keep reporting nothing if
+        the condition were deleted."""
+        shared = PredicateSpec(
+            identifier="shared-between-two",
+            workflow=COVERAGE_WORKFLOW.name,
+            presence=PENDING,
+            exercised=False,
+            role="one of two specifications written with the same name",
+            tokens=("irrelevant",),
+        )
+        copied = PredicateSpec(
+            identifier=shared.identifier,
+            workflow=SWIFT_WORKFLOW.name,
+            presence=PENDING,
+            exercised=False,
+            role="the copied line that reuses it",
+            tokens=("irrelevant",),
+        )
+
+        problems = duplicate_specification_identifiers((shared, copied))
+
+        self.assertEqual(len(problems), 1)
+        self.assertIn(shared.identifier, problems[0])
+
+    def test_no_two_specifications_share_an_identifier(self) -> None:
+        """Everything keyed by identifier assumes it names one specification.
+        Two sharing a name let one fixture set vouch for both, so the second's
+        program counts as covered while nothing drives it — this module's own
+        silent-coverage hole, reopened by a copied line."""
+        self.assertEqual(duplicate_specification_identifiers(), [])
+
+    def test_a_specification_claiming_fixtures_it_lacks_is_named(self) -> None:
+        """The branch that closes the reported hole, driven from a controlled
+        registry rather than from the repository's own, which is correct and so
+        exercises neither branch."""
+        claimed = PredicateSpec(
+            identifier="claims-fixtures-it-lacks",
+            workflow=COVERAGE_WORKFLOW.name,
+            presence=PENDING,
+            exercised=True,
+            role="a specification whose flag is set and whose fixtures are not written",
+            tokens=("irrelevant",),
+        )
+
+        problems = misdeclared_exercised_specs((claimed,), {})
+
+        self.assertEqual(len(problems), 1)
+        self.assertIn(claimed.identifier, problems[0])
+        self.assertIn("exercised=True", problems[0])
+
+    def test_a_specification_hiding_fixtures_it_has_is_named(self) -> None:
+        """The other branch. Fixtures written against a specification still
+        declaring itself uncovered leave the exhaustiveness check demanding
+        work that is already done."""
+        hidden = PredicateSpec(
+            identifier="hides-fixtures-it-has",
+            workflow=COVERAGE_WORKFLOW.name,
+            presence=PENDING,
+            exercised=False,
+            role="a specification with cases behind it and its flag unset",
+            tokens=("irrelevant",),
+        )
+
+        problems = misdeclared_exercised_specs((hidden,), {hidden.identifier: ["a case"]})
+
+        self.assertEqual(len(problems), 1)
+        self.assertIn(hidden.identifier, problems[0])
+        self.assertIn("exercised=False", problems[0])
+
+    def test_every_exercised_specification_is_backed_by_fixtures(self) -> None:
+        """`exercised` decides whether a landed program counts as covered, so
+        an unbacked flag makes this module pass over a predicate nothing drives
+        — the silent pass it exists to refuse, turned on its own bookkeeping.
+
+        Checked both ways: a flag set without fixtures fails, and so does a
+        fixture set whose specification still declares itself uncovered."""
+        self.assertEqual(misdeclared_exercised_specs(), [])
 
     def test_every_extracted_program_is_exercised(self) -> None:
         """The direction that closes the defect class. A jq program that no
