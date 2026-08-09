@@ -89,8 +89,8 @@ one environment variable cannot name the paths of several accounts, and a
 deployment holding two keys for one provider must be able to say so. An operator
 configuring this build still supplies the conditional path.
 
-The two integration credentials, of which there is exactly one each, keep their
-process settings:
+The complete set of process settings, including the two integration credentials
+of which there is exactly one each, is:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -167,10 +167,11 @@ not survive to the log: `run_hub` collapses every catalog-parse and
 adapter-construction variant (and likewise connection and migration errors) into
 a generic `Infrastructure` class carrying only its phase, so an operator cannot
 distinguish an unreadable catalog from an unknown field, bad version, or invalid
-limit (see Open edges). The six deployment paths are accepted without I/O at
-environment parsing time; both catalogs and every template prompt file are read
-during startup. No credential file is read at startup (see credential lifecycle
-below).
+limit (see Open edges). The six unconditional deployment paths, and the
+conditional provider key-file path when a mapping selects that direct HTTP
+adapter, are accepted without I/O at environment parsing time; both catalogs and
+every template prompt file are read during startup. No credential file is read
+at startup (see credential lifecycle below).
 
 The deployed daemon supplies no Anthropic or OpenAI endpoint or timeout knob; it
 constructs each adapter with its defaults. The
@@ -849,14 +850,15 @@ terms. Failure to enforce the backend is a typed pre-send delivery failure and
 starts no child.
 
 The daemon supplies the directory as that process's credential home and never
-opens or interprets its entries. Static parsing records only the lexically
-normalized path. After the configuration-independent recovery scan completes but
-before scheduling is enabled, startup opens the directory itself to establish
-which mutable store the path denotes. A descriptor-relative walk from the
-filesystem root rejects a symlink in any component and requires the final
-component to be a directory, then records its device and inode as the profile's
-credential-home identity; failure blocks scheduling but cannot block recovery of
-acknowledged work.
+reads or interprets its entries; it opens them for metadata alone, which is what
+the custody walk's descriptor-relative `fstat` requires. Static parsing records
+only the lexically normalized path. After the configuration-independent recovery
+scan completes but before scheduling is enabled, startup opens the directory
+itself to establish which mutable store the path denotes. A descriptor-relative
+walk from the filesystem root rejects a symlink in any component and requires
+the final component to be a directory, then records its device and inode as the
+profile's credential-home identity; failure blocks scheduling but cannot block
+recovery of acknowledged work.
 
 Identity alone is not enough. A directory another principal can write is a
 substitution surface that never changes the device and inode a recheck compares,
@@ -931,14 +933,18 @@ and every rule below is part of it rather than a separate check:
    directory in that position is rejected rather than inspected. This step is
    about ownership and permissions; containment is step 6's job.
 6. It then descends the home and checks each object against the third part of
-   the property, exactly as stated. It opens every entry no-follow; requires the
-   object to be owned by the daemon's effective user and not writable by group
-   or other; requires a link count of exactly one unless the object is a
-   directory; and, for a symbolic link, requires that re-resolving it
-   descriptor-relative from the home's own descriptor land inside the verified
-   home. Contents are never inspected — the CLI's working data is the CLI's
-   business, and constraining its shape is what rejected ordinary
-   operator-established homes once already.
+   the property, exactly as stated. It opens every entry no-follow and requires
+   the object to be owned by the daemon's effective user. For a **symbolic
+   link** that is the whole of it, plus the requirement that re-resolving the
+   link descriptor-relative from the home's own descriptor land inside the
+   verified home; a link's own mode and link count are not judged, because a
+   symlink is `lrwxrwxrwx` on Linux and grants nothing — the kernel enforces the
+   permissions of whatever it resolves to, and that target is itself an object
+   under the home and checked as one. For **every other** object the walk
+   additionally requires that it not be writable by group or other, and that its
+   link count be exactly one unless it is a directory. Contents are never
+   inspected — the CLI's working data is the CLI's business, and constraining
+   its shape is what rejected ordinary operator-established homes once already.
 7. It then records the home's device and inode as the profile's credential-home
    identity, and a later pass requires the same identity.
 
@@ -1230,14 +1236,19 @@ concurrent processes could race exactly as they do under `codex_home`. Holding
 none, they share no mutable authorization state, and the daemon refreshes once
 under its row lock on behalf of all of them.
 
-Before the token is written or any child starts, preparation seeds the CLI
-adapter's exact-value redactor with that access token. The redactor covers the
-raw token and JSON string representations whose escapes decode to that same
-token, retains possible token prefixes across stdout and stderr chunk
-boundaries, and runs before parsing, truncation, debug rendering, observations,
-or durable evidence. The ambient shape scrub remains a second defense, never a
-substitute for the daemon-known value. A path that cannot install this redaction
-fails preparation before writing the scratch home or spawning the CLI.
+Before anything is written or any child starts, preparation seeds the CLI
+adapter's exact-value redactor with **every token it is about to place in the
+scratch home** — the access token, the identity token, and any further bearer
+value that shape requires — not the access token alone. The identity token is
+bearer material for the same account and the CLI reflects it, so seeding only
+one of them leaks the other through provider-controlled output. The redactor
+covers each raw token and the JSON string representations whose escapes decode
+to that same token, retains possible token prefixes across stdout and stderr
+chunk boundaries, and runs before parsing, truncation, debug rendering,
+observations, or durable evidence. The ambient shape scrub remains a second
+defense, never a substitute for the daemon-known value. A path that cannot
+install this redaction fails preparation before writing the scratch home or
+spawning the CLI.
 
 A daemon-minted access token can expire while a long invocation is still
 running, and that is not an authorization failure. The daemon minted the token
@@ -1617,18 +1628,20 @@ deployment-side rules that code cannot enforce are stated in
   maps.** No present composition gives a model adapter the complete catalog of
   that adapter's `file` profiles; the singleton construction above is what
   ships. The child that removes the conditional channels builds that complete
-  map instead, and the consumer-scoping rule below is written for both shapes: A
-  model-profile name equal to an integration constant therefore remains a
-  distinct reference in a different consumer's map; no lookup or insertion
-  crosses those boundaries. The selected instance reads the file for every model
-  call, web search, code-host operation, or pull-request tool operation
-  preparation that resolves one; nothing is cached. Why: atomic file replacement
-  rotates any credential without restarting signalboxd, and an in-flight
-  operation keeps the value it authenticated with. Resolution stays
-  reference-scoped: a reference absent from the map fails typed `Unmapped`; a
-  missing file is `Unavailable`; an unreadable file is `Unreadable` — all
-  reference-only errors, so a failure names an account without disclosing which
-  path served it.
+  map instead. The scoping and reread rules in the next bullet hold for both
+  shapes and are current behavior today.
+
+- **Consumer scoping and reread, both shapes.** A model-profile name equal to an
+  integration constant remains a distinct reference in a different consumer's
+  map; no lookup or insertion crosses those boundaries. The selected instance
+  reads the file for every model call, web search, code-host operation, or
+  pull-request tool operation preparation that resolves one; nothing is cached.
+  Why: atomic file replacement rotates any credential without restarting
+  signalboxd, and an in-flight operation keeps the value it authenticated with.
+  Resolution stays reference-scoped: a reference absent from the map fails typed
+  `Unmapped`; a missing file is `Unavailable`; an unreadable file is
+  `Unreadable` — all reference-only errors, so a failure names an account
+  without disclosing which path served it.
 
 - **External and daemon-owned CLI logins.** An `ambient` profile leaves login
   resolution to the CLI under the adapter's existing child-environment contract.
@@ -1746,8 +1759,10 @@ deployment-side rules that code cannot enforce are stated in
   stores a credential value precisely where that credential rotates and the
   daemon alone refreshes it, and nowhere else. No present migration or
   repository stores daemon-owned OAuth material, so the reference-only rule
-  above is the current at-rest boundary without exception. Each model call
-  durably pins its non-secret credential reference at the `Prepared` insert
+  above is the current at-rest boundary without exception.
+
+- **Durable credential references.** Each model call durably pins its non-secret
+  credential reference at the `Prepared` insert
   (`model_call.credential_reference`), immutable thereafter under the
   authorization-facts trigger; the column is total (`NOT NULL` and non-empty),
   because every insert writes it and no database predates the stack. Resuming a

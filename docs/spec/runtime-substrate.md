@@ -684,16 +684,20 @@ redaction before any provider-controlled output leaves the crate. This future
 override does not weaken ambient mode's existing exclusion test.
 
 **Committed unimplemented functionality — Codex OAuth redaction.** OAuth
-delivery gives the adapter a daemon-minted access token in a scratch credential
-home rather than through the child environment. Before that token is written or
-the child starts, its implementing slice must seed the same exact-value
-redaction boundary with the raw token and JSON string representations whose
-escapes decode to that same token. Possible token prefixes are retained across
-stdout and stderr chunks, and all child-controlled text passes through that
-scrub before JSON decoding, truncation, debug rendering, observations, or
-durable evidence. Ambient-mode shape redaction remains defense in depth; it
-cannot replace exact-value redaction when preparation knows the token. Failure
-to install the scrub is a typed pre-spawn delivery failure.
+delivery gives the adapter a daemon-minted access token, the identity token
+issued with it, and the account metadata in a scratch credential home rather
+than through the child environment. Before anything is written or the child
+starts, its implementing slice must seed the same exact-value redaction boundary
+with *every* token placed in that home — not the access token alone — using each
+raw token and the JSON string representations whose escapes decode to that same
+token. The identity token is bearer material for the same account and the CLI
+reflects it, so seeding one and not the other leaks the other. Possible token
+prefixes are retained across stdout and stderr chunks, and all child-controlled
+text passes through that scrub before JSON decoding, truncation, debug
+rendering, observations, or durable evidence. Ambient-mode shape redaction
+remains defense in depth; it cannot replace exact-value redaction when
+preparation knows the token. Failure to install the scrub is a typed pre-spawn
+delivery failure.
 
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.
