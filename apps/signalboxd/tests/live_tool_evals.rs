@@ -163,6 +163,9 @@ const GIT_REGULAR_FILE_MODE: i32 = 0o100644;
 const GIT_REGULAR_INDEX_FILE_MODE: u32 = 0o100644;
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
 const WORKSPACE_SEED: &str = "alpha\nbeta fixture\nalpha\n";
+const WORKSPACE_EDITED_SEED: &str = "beta\nbeta fixture\nbeta\n";
+const EXPECTED_WORKSPACE_EDIT_REPLACEMENTS: usize = 2;
+const EXPECTED_WORKSPACE_EDIT_BYTES: usize = 23;
 const WORKSPACE_GLOB_DIRECTORY: &str = "glob-scope";
 const WORKSPACE_GLOB_PATH: &str = "glob-scope/zz-glob.txt";
 const WORKSPACE_GLOB_CONTENT: &str = "beta glob fixture\n";
@@ -181,7 +184,11 @@ const USER_EXECUTE_MODE_BIT: u32 = 0o100;
 #[cfg(unix)]
 const GROUP_WRITE_MODE_BIT: u32 = 0o020;
 #[cfg(unix)]
-const WORKSPACE_CREATED_FILE_MODE: Option<u32> = Some(0o600);
+const WORKSPACE_PRIVATE_CREATION_MODE: u32 = 0o600;
+#[cfg(unix)]
+const WORKSPACE_INSECURE_CREATION_MODE: u32 = 0o777;
+#[cfg(unix)]
+const WORKSPACE_CREATED_FILE_MODE: Option<u32> = Some(WORKSPACE_PRIVATE_CREATION_MODE);
 #[cfg(not(unix))]
 const WORKSPACE_CREATED_FILE_MODE: Option<u32> = None;
 const SYNTHETIC_WRONG_STAGED_PATH_COUNT: usize = 0;
@@ -858,28 +865,28 @@ impl FamilySuite {
                 )? && snapshot.git_natural_requests_passed()?)
             }
             EvalFamily::Workspace => {
-                let bytes_match = self.workspace_answer_matches()?;
-                let seed_entries_match = self.workspace_seed_entries_match()?;
-                Ok(bytes_match
-                    && seed_entries_match
-                    && snapshot.workspace_natural_requests_passed())
+                let entries_match = self.workspace_natural_entries_match()?;
+                Ok(entries_match && snapshot.workspace_natural_requests_passed())
             }
             EvalFamily::Web => snapshot.web_natural_requests_passed(),
         }
     }
 
-    fn workspace_answer_matches(&self) -> EvalResult<bool> {
-        match fs::read(self.workspace.path().join(WORKSPACE_ANSWER_PATH)) {
-            Ok(bytes) => Ok(bytes == WORKSPACE_ANSWER.as_bytes()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error.into()),
+    fn workspace_natural_entries_match(&self) -> EvalResult<bool> {
+        let answer_path = self.workspace.path().join(WORKSPACE_ANSWER_PATH);
+        match fs::read(&answer_path) {
+            Ok(bytes) if bytes == WORKSPACE_ANSWER.as_bytes() => {}
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
         }
-    }
-
-    fn workspace_seed_entries_match(&self) -> EvalResult<bool> {
         let mut actual = workspace_entries(self.workspace.path())?;
-        actual.remove(Path::new(WORKSPACE_ANSWER_PATH));
-        Ok(actual == self.workspace_seed_entries)
+        let answer = actual.remove(Path::new(WORKSPACE_ANSWER_PATH));
+        let expected_answer = WorkspaceEntrySnapshot::File {
+            content: WORKSPACE_ANSWER.as_bytes().to_vec(),
+            mode: WORKSPACE_CREATED_FILE_MODE,
+        };
+        Ok(answer == Some(expected_answer) && actual == self.workspace_seed_entries)
     }
 
     fn natural_execution_completed(
@@ -5358,7 +5365,10 @@ fn forced_workspace_write_verifier_accepts_the_private_creation_mode() -> EvalRe
         .expect("the workspace write fixture has content");
     let target = suite.workspace.path().join(path);
     fs::write(&target, content)?;
-    fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
+    fs::set_permissions(
+        &target,
+        fs::Permissions::from_mode(WORKSPACE_PRIVATE_CREATION_MODE),
+    )?;
     let result = serde_json::json!({
         "path": path,
         "bytes_written": content.len(),
@@ -5388,7 +5398,10 @@ fn forced_workspace_write_verifier_rejects_an_insecure_creation_mode() -> EvalRe
         .expect("the workspace write fixture has content");
     let target = suite.workspace.path().join(path);
     fs::write(&target, content)?;
-    fs::set_permissions(&target, fs::Permissions::from_mode(0o777))?;
+    fs::set_permissions(
+        &target,
+        fs::Permissions::from_mode(WORKSPACE_INSECURE_CREATION_MODE),
+    )?;
     let result = serde_json::json!({
         "path": path,
         "bytes_written": content.len(),
@@ -5436,7 +5449,10 @@ fn forced_workspace_apply_patch_verifier_rejects_an_insecure_creation_mode() -> 
         .expect("the workspace apply-patch fixture exists");
     let target = suite.workspace.path().join("patched.txt");
     fs::write(&target, "patched by eval\n")?;
-    fs::set_permissions(&target, fs::Permissions::from_mode(0o777))?;
+    fs::set_permissions(
+        &target,
+        fs::Permissions::from_mode(WORKSPACE_INSECURE_CREATION_MODE),
+    )?;
     let result = serde_json::json!({
         "operations_applied": 1,
         "truncated": true,
@@ -5908,18 +5924,14 @@ fn forced_workspace_edit_fixture_exercises_replace_all() -> EvalResult {
         .find(|case| case.name == EDIT_FILE_NAME)
         .expect("the workspace edit fixture exists");
     let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
-    let old = arguments["old_string"]
-        .as_str()
-        .expect("the edit fixture has an old string");
-    let new = arguments["new_string"]
-        .as_str()
-        .expect("the edit fixture has a new string");
-    let expected = WORKSPACE_SEED.replace(old, new);
-    fs::write(suite.workspace.path().join(WORKSPACE_SEED_PATH), &expected)?;
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_SEED_PATH),
+        WORKSPACE_EDITED_SEED,
+    )?;
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
-        "replacements": WORKSPACE_SEED.match_indices(old).count(),
-        "bytes_written": expected.len(),
+        "replacements": EXPECTED_WORKSPACE_EDIT_REPLACEMENTS,
+        "bytes_written": EXPECTED_WORKSPACE_EDIT_BYTES,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
@@ -6316,6 +6328,38 @@ fn workspace_natural_state_rejects_a_collateral_directory() -> EvalResult {
         WORKSPACE_ANSWER,
     )?;
     fs::create_dir(suite.workspace.path().join(WORKSPACE_COLLATERAL_DIRECTORY))?;
+    let snapshot = successful_workspace_natural_snapshot();
+
+    assert!(!suite.natural_state_passed(&snapshot)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_natural_state_accepts_the_private_answer_mode() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let answer = suite.workspace.path().join(WORKSPACE_ANSWER_PATH);
+    fs::write(&answer, WORKSPACE_ANSWER)?;
+    fs::set_permissions(
+        &answer,
+        fs::Permissions::from_mode(WORKSPACE_PRIVATE_CREATION_MODE),
+    )?;
+    let snapshot = successful_workspace_natural_snapshot();
+
+    assert!(suite.natural_state_passed(&snapshot)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_natural_state_rejects_an_insecure_answer_mode() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let answer = suite.workspace.path().join(WORKSPACE_ANSWER_PATH);
+    fs::write(&answer, WORKSPACE_ANSWER)?;
+    fs::set_permissions(
+        &answer,
+        fs::Permissions::from_mode(WORKSPACE_INSECURE_CREATION_MODE),
+    )?;
     let snapshot = successful_workspace_natural_snapshot();
 
     assert!(!suite.natural_state_passed(&snapshot)?);
