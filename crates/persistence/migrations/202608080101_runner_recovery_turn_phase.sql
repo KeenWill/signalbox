@@ -164,6 +164,38 @@ BEGIN
             'runner recovery wait lacks its exact yielded turn boundary'
             USING ERRCODE = '23514';
     END IF;
+    IF lifecycle.runner_recovery_tool_attempt_id IS NULL
+       AND lifecycle.active_tool_round_call_id IS NOT NULL
+       AND NOT EXISTS (
+            SELECT 1
+              FROM model_call AS active_call
+              JOIN turn_attempt AS yielded_attempt
+                ON yielded_attempt.turn_attempt_id =
+                    active_call.turn_attempt_id
+               AND yielded_attempt.turn_id = active_call.turn_id
+               AND yielded_attempt.session_id = active_call.session_id
+             WHERE active_call.model_call_id =
+                    lifecycle.active_tool_round_call_id
+               AND active_call.turn_id = checked_turn_id
+               AND active_call.session_id = checked_session_id
+               AND yielded_attempt.state_kind = 'ended'
+               AND yielded_attempt.end_variant = 'without_stop'
+               AND yielded_attempt.end_disposition =
+                    'yielded_to_durable_wait'
+               AND yielded_attempt.interrupt_command_id IS NULL
+               AND yielded_attempt.interrupt_predecessor_turn_id IS NULL
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM turn_attempt AS continuation
+                     WHERE continuation.continued_from_attempt_id =
+                            yielded_attempt.turn_attempt_id
+               )
+       )
+    THEN
+        RAISE EXCEPTION
+            'runner recovery tool round lacks its exact yielded turn boundary'
+            USING ERRCODE = '23514';
+    END IF;
     IF lifecycle.runner_recovery_tool_attempt_id IS NOT NULL
        AND NOT EXISTS (
             SELECT 1
@@ -699,7 +731,7 @@ DECLARE
     prefix_mismatch_count bigint;
     checked_cancellation_entry uuid;
     cancellation_entry_count bigint;
-    runner_tool_closure_count bigint := 0;
+    runner_tool_result_count bigint := 0;
     contradictory_entry_count bigint;
     call_count bigint;
     outbox_count bigint;
@@ -755,16 +787,12 @@ BEGIN
         END IF;
         base_frontier := runner_recovery_effect.source_frontier_id;
         SELECT count(*)
-          INTO runner_tool_closure_count
+          INTO runner_tool_result_count
           FROM tool_round AS round
           JOIN tool_request AS request
             ON request.producing_model_call_id = round.producing_model_call_id
            AND request.turn_id = round.turn_id
            AND request.session_id = round.session_id
-          JOIN semantic_transcript_entry AS closure
-            ON closure.source_session_id = round.session_id
-           AND closure.payload_kind = 'tool_closed_by_turn_end'
-           AND closure.tool_result_request_id = request.request_id
          WHERE round.turn_id = checked_turn_id
            AND round.session_id = checked_session
            AND round.boundary_kind = 'continuing'
@@ -889,7 +917,7 @@ BEGIN
        OR contradictory_entry_count <> 0
        OR base_member_count IS NULL
        OR terminal_member_count IS DISTINCT FROM
-            base_member_count + runner_tool_closure_count + 1
+            base_member_count + runner_tool_result_count + 1
        OR prefix_mismatch_count <> 0
        OR NOT EXISTS (
             SELECT 1

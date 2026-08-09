@@ -1608,6 +1608,136 @@ async fn attach_continuing_tool_round_projection(
     Ok(())
 }
 
+async fn append_denied_request_to_continuing_tool_round_projection(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    producing_call: ModelCallId,
+    request: ToolRequestId,
+    boundary: ContextFrontierId,
+) -> Result<(), sqlx::Error> {
+    let member_count: Decimal = sqlx::query_scalar(
+        "SELECT member_count
+           FROM context_frontier
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(boundary.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    let assistant_entry = uuid(request.into_uuid().as_u128() + RELATED_IDENTITY_OFFSET);
+    sqlx::raw_sql(
+        "ALTER TABLE tool_round DISABLE TRIGGER ALL;
+         ALTER TABLE tool_request DISABLE TRIGGER ALL;
+         ALTER TABLE decide_tool_request_command DISABLE TRIGGER ALL;
+         ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta DISABLE TRIGGER ALL;",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE tool_round
+            SET response_part_count = 2, request_count = 2
+          WHERE producing_model_call_id = $1",
+    )
+    .bind(producing_call.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ($1, $2, $3, $4, 1, 'inspect', 'json', '{}')",
+    )
+    .bind(request.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(producing_call.into_uuid())
+    .execute(pool)
+    .await?;
+    let command = uuid(request.into_uuid().as_u128() + (RELATED_IDENTITY_OFFSET * 2));
+    let mut decision = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+    )
+    .bind(command)
+    .execute(&mut *decision)
+    .await?;
+    sqlx::query(
+        "INSERT INTO decide_tool_request_command
+            (command_id, command_kind, storage_version, request_id,
+             decision_kind, denial_reason, result_kind, rejection_kind,
+             result_earliest_undecided_request_id)
+         VALUES ($1, 'decide_tool_request', 1, $2, 'deny', NULL,
+                 'applied', NULL, NULL)",
+    )
+    .bind(command)
+    .bind(request.into_uuid())
+    .execute(&mut *decision)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, denial_reason,
+             owner_command_id)
+         VALUES ($1, 'deny', 'owner_command', NULL, $2)",
+    )
+    .bind(request.into_uuid())
+    .bind(command)
+    .execute(&mut *decision)
+    .await?;
+    decision.commit().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             producing_model_call_id, assistant_tool_request_id,
+             assistant_response_part_ordinal)
+         VALUES ($1, $2, 'assistant_tool_use', $3, $4, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(assistant_entry)
+    .bind(producing_call.into_uuid())
+    .bind(request.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE context_frontier
+            SET member_count = member_count + 1
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(boundary.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, $3 + 1, $1, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(boundary.into_uuid())
+    .bind(member_count)
+    .bind(assistant_entry)
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE tool_round ENABLE TRIGGER ALL;
+         ALTER TABLE tool_request ENABLE TRIGGER ALL;
+         ALTER TABLE decide_tool_request_command ENABLE TRIGGER ALL;
+         ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL;
+         ALTER TABLE context_frontier ENABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta ENABLE TRIGGER ALL;",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn convert_running_turn_to_delegated_runner_recovery(
     pool: &PgPool,
     session: SessionId,
@@ -5171,6 +5301,107 @@ async fn s32_inv009_inv044_runner_recovery_rejects_non_yielded_turn_boundary()
     Ok(())
 }
 
+/// INV-009 / INV-044: a retained continuing tool round must have been
+/// produced by the unique yielded chain-tip turn attempt.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_rejects_stale_tool_round_boundary()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(0xa16a));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        ToolRequestId::from_uuid(uuid(0xa16b)),
+        ContextFrontierId::from_uuid(uuid(0xa16c)),
+    )
+    .await?;
+    let chain_tip = TurnAttemptId::from_uuid(uuid(0xa16d));
+    sqlx::raw_sql(
+        "ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    let mut corrupted_source = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *corrupted_source)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, $4, 'ended', 'without_stop',
+                 'yielded_to_durable_wait')",
+    )
+    .bind(chain_tip.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn_attempt.into_uuid())
+    .execute(&mut *corrupted_source)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET current_attempt_id = $1
+          WHERE turn_id = $2 AND session_id = $3",
+    )
+    .bind(chain_tip.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *corrupted_source)
+    .await?;
+    corrupted_source.commit().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt ENABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL, active_tool_round_call_id = $1,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3
+          WHERE turn_id = $4 AND session_id = $5",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    let rejected = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *malformed)
+        .await
+        .expect_err("runner recovery cannot retain an older attempt's tool round");
+
+    assert_check_violation(rejected);
+    malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
 /// INV-029 / INV-044: an accepted-input interrupt terminalizes a runner-loss
 /// wait and leaves the placement's runner-effect evidence untouched.
 #[tokio::test]
@@ -5319,6 +5550,16 @@ async fn s32_inv029_inv044_runner_recovery_stop_uses_tool_round_boundary()
         boundary,
     )
     .await?;
+    let denied_request = ToolRequestId::from_uuid(uuid(0xa15c));
+    append_denied_request_to_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        producing_call,
+        denied_request,
+        boundary,
+    )
+    .await?;
     let mut recovery = pool.begin().await?;
     sqlx::query(
         "UPDATE turn_attempt
@@ -5349,6 +5590,7 @@ async fn s32_inv029_inv044_runner_recovery_stop_uses_tool_round_boundary()
     recovery.commit().await?;
     let command = DurableCommandId::from_uuid(uuid(0xa152));
     let tool_closure = SemanticTranscriptEntryId::from_uuid(uuid(0xa15a));
+    let denied_result = SemanticTranscriptEntryId::from_uuid(uuid(0xa15e));
     let interrupt = SubmitInput::new(
         command,
         session,
@@ -5376,7 +5618,7 @@ async fn s32_inv029_inv044_runner_recovery_stop_uses_tool_round_boundary()
             |_| TurnId::from_uuid(uuid(0xa157)),
             |_| {
                 (
-                    vec![tool_closure],
+                    vec![tool_closure, denied_result],
                     ContextFrontierId::from_uuid(uuid(0xa158)),
                 )
             },
@@ -5399,10 +5641,21 @@ async fn s32_inv029_inv044_runner_recovery_stop_uses_tool_round_boundary()
     .bind(tool_closure.into_uuid())
     .fetch_one(&pool)
     .await?;
+    let denied: (String, Uuid) = sqlx::query_as(
+        "SELECT payload_kind, tool_result_request_id
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1 AND semantic_entry_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(denied_result.into_uuid())
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(persisted_source, boundary.into_uuid());
     assert_eq!(closure.0, "tool_closed_by_turn_end");
     assert_eq!(closure.1, request.into_uuid());
+    assert_eq!(denied.0, "tool_denied");
+    assert_eq!(denied.1, denied_request.into_uuid());
     drop(pool);
     Ok(())
 }
