@@ -5241,6 +5241,38 @@ pub enum ToolBatchState {
     },
 }
 
+/// Sandbox profile selected by one runner placement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerSandboxProfile {
+    /// Supervised execution with the invoking user's ambient filesystem and network access.
+    Ambient,
+    /// Execution restricted to the placement-owned writable root.
+    WorkspaceRestricted,
+}
+
+/// Closed runner state carried by one session update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerStateTransitionState {
+    /// Initial dispatch pinned the selected runner.
+    Pinned,
+    /// The current runner connection missed its first heartbeat.
+    Suspect,
+    /// A heartbeat acknowledgement recovered that same suspect connection.
+    Connected,
+    /// An exact runner selection was lost before initial pinning.
+    RunnerLostBeforePin,
+    /// A pinned runner became unavailable.
+    RunnerLost,
+    /// A checked successor runner replaced the prior placement.
+    Replaced,
+    /// Checked recovery retained the runner but changed the selected directory.
+    WorkingDirectoryChanged,
+    /// The user abandoned a lost runner placement.
+    Abandoned,
+}
+
 /// Action chosen for one bound child when its parent reaches a terminal state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -5506,6 +5538,20 @@ pub enum SessionEvent {
         model_call_id: CanonicalUuid,
         /// Exact committed batch state.
         state: ToolBatchState,
+    },
+    /// A runner placement or its exact connection changed follower-visible state.
+    RunnerStateTransition {
+        /// Exact runner named by the transition.
+        runner_id: CanonicalUuid,
+        /// Positive placement revision whose immutable facts are projected.
+        placement_revision: CanonicalU64,
+        /// Placement-selected sandbox profile.
+        sandbox_profile: RunnerSandboxProfile,
+        /// Caller-selected directory, null when the runner default was selected.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        working_directory: Option<String>,
+        /// Exact closed transition state.
+        state: RunnerStateTransitionState,
     },
     /// One explicit tool approval decision committed with full provenance.
     ToolApprovalDecided {
@@ -6071,6 +6117,19 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
             rationale,
             ..
         } => validate_tool_approval_event_shape(decision, decider, rationale)?,
+        SessionEvent::RunnerStateTransition {
+            placement_revision,
+            working_directory,
+            ..
+        } => {
+            if placement_revision.value() == 0
+                || working_directory.as_ref().is_some_and(|directory| {
+                    directory.is_empty() || directory.len() > 4_096 || directory.contains('\0')
+                })
+            {
+                return Err(FrameValidationError::RunnerShape);
+            }
+        }
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::GoalTurnRetired { .. }
@@ -7325,6 +7384,8 @@ pub enum FrameValidationError {
     ModelSettingsShape,
     /// A dotted placement or its root-global-read acknowledgement is invalid.
     PlacementShape,
+    /// A runner-state event carried invalid placement facts.
+    RunnerShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -7358,6 +7419,7 @@ impl fmt::Display for FrameValidationError {
             Self::DelegationShape => "session-delegation frame shape is inconsistent",
             Self::ModelSettingsShape => "model-settings frame shape is inconsistent",
             Self::PlacementShape => "session-placement frame shape is inconsistent",
+            Self::RunnerShape => "runner-state frame shape is inconsistent",
         })
     }
 }
@@ -7792,7 +7854,8 @@ mod tests {
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
         ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject, ServerFrame,
-        ServerMessage, ServiceTier, SessionEvent, SessionMetadata, SettingOverlay,
+        RunnerSandboxProfile, RunnerStateTransitionState, ServerMessage, ServiceTier, SessionEvent,
+        SessionMetadata, SettingOverlay,
         SystemPromptMember, SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision,
         ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
         TurnModelSettingsSnapshot, TurnState, UsageProvenance, decode_client_line,
@@ -14728,5 +14791,47 @@ mod tests {
             validate_adjustments(&excessive),
             Err(FrameValidationError::ModelSettingsShape)
         );
+    }
+
+    #[test]
+    fn runner_state_transition_round_trips_complete_placement_facts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(2),
+                session_id: uuid(3),
+                event: SessionEvent::RunnerStateTransition {
+                    runner_id: uuid(4),
+                    placement_revision: CanonicalU64::new(5),
+                    sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
+                    working_directory: Some(String::from("workspace/project")),
+                    state: RunnerStateTransitionState::WorkingDirectoryChanged,
+                },
+            },
+            r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000003","event":{"type":"runner_state_transition","runner_id":"00000000-0000-0000-0000-000000000004","placement_revision":"5","sandbox_profile":"workspace_restricted","working_directory":"workspace/project","state":"working_directory_changed"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn runner_state_transition_rejects_zero_placement_revision() {
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(2),
+                session_id: uuid(3),
+                event: SessionEvent::RunnerStateTransition {
+                    runner_id: uuid(4),
+                    placement_revision: CanonicalU64::new(0),
+                    sandbox_profile: RunnerSandboxProfile::Ambient,
+                    working_directory: None,
+                    state: RunnerStateTransitionState::Pinned,
+                },
+            },
+        )
+        .expect_err("runner transitions require a positive placement revision");
+
+        assert_eq!(error, FrameValidationError::RunnerShape);
     }
 }

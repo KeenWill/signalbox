@@ -42,6 +42,11 @@ use signalbox_persistence::{
     MIGRATOR,
     create_session::CreateSessionRepository,
     local_test_connection_options, migrate,
+    outbox::{
+        DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState,
+        OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher,
+        RunnerStateTransitionOutboxTestSource, append_runner_state_transition_for_test,
+    },
     runner_protocol::{
         RunnerConnectionTransition, RunnerProtocolCorruption, RunnerProtocolStore,
         RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
@@ -850,6 +855,20 @@ async fn insert_session_for(pool: &PgPool, session: Uuid) -> Result<(), sqlx::Er
 
 async fn insert_session(pool: &PgPool) -> Result<(), sqlx::Error> {
     insert_session_for(pool, uuid(SESSION)).await
+}
+
+async fn dispatch_next_outbox_event(
+    pool: &PgPool,
+) -> Result<DispatchedOutboxEvent, Box<dyn Error>> {
+    let mut dispatched = None;
+    let outcome = OutboxDispatcher::new(pool.clone())
+        .dispatch_next(|event| {
+            dispatched = Some(event.clone());
+            OutboxDeliveryDecision::Delivered
+        })
+        .await?;
+    assert_eq!(outcome, OutboxDispatchOutcome::Delivered { sequence: 1 });
+    Ok(dispatched.expect("the delivered outcome carries its decoded event"))
 }
 
 async fn insert_physical_attempt(

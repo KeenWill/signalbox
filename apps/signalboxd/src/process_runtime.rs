@@ -109,8 +109,8 @@ use signalbox_persistence::{
         DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
         DispatchedDelegationWaitMode, DispatchedModelCallDisposition, DispatchedModelCallState,
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
-        DispatchedToolBatchState, OutboxDeliveryDecision, OutboxDispatchError,
-        OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedRunnerState, DispatchedToolBatchState, OutboxDeliveryDecision,
+        OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
@@ -170,10 +170,11 @@ use signalbox_process_protocol::{
     ReviewPassTerminalOutcome, ReviewRunLifecycle, ReviewRunSnapshot,
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
-    ServerFrame, ServerMessage, ServiceTier as WireServiceTier, SessionEvent,
-    SessionMetadata as WireSessionMetadata, SessionPlacement as WireSessionPlacement,
-    SettingOverlay as WireSettingOverlay, SystemPromptMember, SystemPromptText,
-    ToolApprovalEventDecider as WireToolApprovalEventDecider,
+    RunnerSandboxProfile as WireRunnerSandboxProfile,
+    RunnerStateTransitionState as WireRunnerStateTransitionState, ServerFrame, ServerMessage,
+    ServiceTier as WireServiceTier, SessionEvent, SessionMetadata as WireSessionMetadata,
+    SessionPlacement as WireSessionPlacement, SettingOverlay as WireSettingOverlay,
+    SystemPromptMember, SystemPromptText, ToolApprovalEventDecider as WireToolApprovalEventDecider,
     ToolApprovalEventDecision as WireToolApprovalEventDecision, ToolBatchState, ToolDecision,
     TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
     TurnModelSettingsSnapshot as WireTurnModelSettingsSnapshot, TurnState, UsageProvenance,
@@ -537,6 +538,7 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
         | DispatchedOutboxEventKind::InputAccepted { .. }
         | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::ToolBatchTransition { .. }
+        | DispatchedOutboxEventKind::RunnerStateTransition { .. }
         | DispatchedOutboxEventKind::ContextCompacted { .. }
         | DispatchedOutboxEventKind::DelegationUpdate(_)
         | DispatchedOutboxEventKind::ToolApprovalDecided { .. }
@@ -2394,6 +2396,7 @@ fn update_signals_child_result(update: &ProcessUpdate, wait: DelegationWait) -> 
             | ProcessUpdateEvent::ModelCallTransition { .. }
             | ProcessUpdateEvent::ToolBatchTransition { .. }
             | ProcessUpdateEvent::ToolApprovalDecided { .. }
+            | ProcessUpdateEvent::RunnerStateTransition { .. }
             | ProcessUpdateEvent::ContextCompacted { .. }
             | ProcessUpdateEvent::TurnCompleted { .. }
             | ProcessUpdateEvent::TurnFailed { .. }
@@ -13031,6 +13034,13 @@ enum ProcessUpdateEvent {
         approval: signalbox_domain::ToolApprovalResolution,
         decider: signalbox_domain::ToolApprovalDecider,
     },
+    RunnerStateTransition {
+        runner: signalbox_domain::RunnerId,
+        placement_revision: signalbox_domain::RunnerGeneration,
+        sandbox: signalbox_domain::RunnerSandboxProfile,
+        working_directory: Option<signalbox_domain::RunnerWorkingDirectory>,
+        state: DispatchedRunnerState,
+    },
     ContextCompacted {
         compaction: signalbox_domain::ContextCompactionId,
         call: signalbox_domain::ModelCallId,
@@ -13131,6 +13141,19 @@ impl ProcessUpdateEvent {
                 turn: *turn,
                 approval: approval.clone(),
                 decider: *decider,
+            },
+            DispatchedOutboxEventKind::RunnerStateTransition {
+                runner,
+                placement_revision,
+                sandbox,
+                working_directory,
+                state,
+            } => Self::RunnerStateTransition {
+                runner: *runner,
+                placement_revision: *placement_revision,
+                sandbox: *sandbox,
+                working_directory: working_directory.clone(),
+                state: *state,
             },
             DispatchedOutboxEventKind::ContextCompacted {
                 compaction,
@@ -13313,6 +13336,41 @@ impl ProcessUpdateEvent {
                     rationale: approval.rationale().map(|value| value.as_str().to_owned()),
                 }
             }
+            Self::RunnerStateTransition {
+                runner,
+                placement_revision,
+                sandbox,
+                working_directory,
+                state,
+            } => SessionEvent::RunnerStateTransition {
+                runner_id: wire_uuid(runner.into_uuid()),
+                placement_revision: CanonicalU64::new(placement_revision.get()),
+                sandbox_profile: match sandbox {
+                    signalbox_domain::RunnerSandboxProfile::Ambient => {
+                        WireRunnerSandboxProfile::Ambient
+                    }
+                    signalbox_domain::RunnerSandboxProfile::WorkspaceRestricted => {
+                        WireRunnerSandboxProfile::WorkspaceRestricted
+                    }
+                },
+                working_directory: working_directory
+                    .as_ref()
+                    .map(|directory| directory.as_str().to_owned()),
+                state: match state {
+                    DispatchedRunnerState::Pinned => WireRunnerStateTransitionState::Pinned,
+                    DispatchedRunnerState::Suspect => WireRunnerStateTransitionState::Suspect,
+                    DispatchedRunnerState::Connected => WireRunnerStateTransitionState::Connected,
+                    DispatchedRunnerState::RunnerLostBeforePin => {
+                        WireRunnerStateTransitionState::RunnerLostBeforePin
+                    }
+                    DispatchedRunnerState::RunnerLost => WireRunnerStateTransitionState::RunnerLost,
+                    DispatchedRunnerState::Replaced => WireRunnerStateTransitionState::Replaced,
+                    DispatchedRunnerState::WorkingDirectoryChanged => {
+                        WireRunnerStateTransitionState::WorkingDirectoryChanged
+                    }
+                    DispatchedRunnerState::Abandoned => WireRunnerStateTransitionState::Abandoned,
+                },
+            },
             Self::ContextCompacted {
                 compaction,
                 call,
