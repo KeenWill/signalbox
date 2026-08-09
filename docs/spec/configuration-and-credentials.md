@@ -1788,14 +1788,17 @@ availability update ends an indefinite generation.
 
 Preparation is the other side of that race and joins the same protocol. Before
 it reads any member's exclusion state, it locks the action head of every member
-of the policy it may select `FOR SHARE`, at the same ordering position and in
-the same byte order, and holds those locks through the `Prepared` insert. The
-share and exclusive modes conflict, so one of the two transactions waits: a call
-is either prepared before the exclusion commits or prepared against a member it
-has already observed as excluded. This is stated rather than left implied
-because selection otherwise takes no lock the exclusion writer takes — an
-unbounded `first_listed` member acquires neither a capacity row nor a cursor row
-— and a preparation that read a member as admissible could then dispatch a
+of the policy it may select, at the ordering position and in the modes
+[persistence protocol](persistence-protocol.md#lock-protocol) fixes, and holds
+those locks through the `Prepared` insert. The modes are not restated here,
+because they are not uniform across members: a preparation writes the exclusion
+state of any member whose pending displacement it consumes, and reads the rest.
+The share and exclusive modes conflict, so one of the two transactions waits: a
+call is either prepared before the exclusion commits or prepared against a
+member it has already observed as excluded. This is stated rather than left
+implied because selection otherwise takes no lock the exclusion writer takes —
+an unbounded `first_listed` member acquires neither a capacity row nor a cursor
+row — and a preparation that read a member as admissible could then dispatch a
 provider request on a credential quarantined in the interval.
 
 `switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
