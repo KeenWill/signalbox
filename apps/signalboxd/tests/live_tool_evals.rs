@@ -305,8 +305,7 @@ const SYNTHETIC_EXECUTOR_FAILURE: &str = "synthetic executor failure";
 const DRIFTED_APPLY_PATCH_ARGUMENTS: &str =
     r#"{"patch":"*** Begin Patch\n*** Add File: other.txt\n+drifted by eval\n*** End Patch"}"#;
 const SYNTHETIC_EVAL_RECEIPT: &str = "01988c5f-89c4-7000-8000-000000000001";
-const EXACT_FORCED_EXECUTOR_FAILURE: &str =
-    "an exact forced tool request reached its executor and failed";
+const EXACT_EXECUTOR_FAILURE: &str = "an exact tool request reached its executor and failed";
 const SYNTHETIC_COMPLETION_REPORT: &str = "Completed the requested operation.";
 const SYNTHETIC_FAILURE_REPORT: &str = "Failed to complete the requested operation.";
 const SYNTHETIC_CROSS_CLAUSE_FAILURE_REPORT: &str =
@@ -466,6 +465,7 @@ async fn run_selected_family_if_enabled() -> EvalResult {
     };
     write_report(&report)?;
     reject_forced_executor_failures(&report.forced)?;
+    reject_natural_executor_failure(&report.natural, family)?;
     Ok(())
 }
 
@@ -812,6 +812,7 @@ struct GitFixtureSnapshot {
     index_complete_entries: Vec<GitIndexCompleteEntrySnapshot>,
     index_extensions: Vec<GitIndexExtensionSnapshot>,
     static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    static_metadata_modified_times: BTreeMap<PathBuf, SystemTime>,
     reflog_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reflog_modified_times: BTreeMap<PathBuf, SystemTime>,
     reference_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
@@ -2907,6 +2908,7 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         index_complete_entries: git_index_complete_entries(&repository)?,
         index_extensions: git_index_extensions(&repository)?,
         static_metadata_entries: git_static_metadata_entries(root)?,
+        static_metadata_modified_times: git_static_metadata_modified_times(root)?,
         reflog_entries: git_reflog_entries(root)?,
         reflog_modified_times: git_reflog_modified_times(root)?,
         reference_entries: git_reference_entries(root)?,
@@ -3643,6 +3645,24 @@ fn git_static_metadata_entries(
     Ok(entries)
 }
 
+fn git_static_metadata_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
+    let repository = Repository::open(root)?;
+    git_static_metadata_entries(root)?
+        .into_iter()
+        .filter_map(|(relative, snapshot)| {
+            matches!(
+                snapshot,
+                WorkspaceEntrySnapshot::Directory { .. } | WorkspaceEntrySnapshot::File { .. }
+            )
+            .then_some(relative)
+        })
+        .map(|relative| {
+            let modified = fs::symlink_metadata(repository.path().join(&relative))?.modified()?;
+            Ok((relative, modified))
+        })
+        .collect()
+}
+
 fn git_fixture_modes_match(
     root: &Path,
     expected: &BTreeMap<PathBuf, Option<u32>>,
@@ -3675,7 +3695,8 @@ fn git_fixture_snapshot_matches(
         && config == expected.config
         && git_metadata_root_kind(root)? == expected.metadata_root_kind
         && worktree_mode(repository.path())? == expected.metadata_root_mode
-        && git_static_metadata_entries(root)? == expected.static_metadata_entries)
+        && git_static_metadata_entries(root)? == expected.static_metadata_entries
+        && git_static_metadata_modified_times(root)? == expected.static_metadata_modified_times)
 }
 
 fn git_forced_metadata_top_level_matches(
@@ -7294,7 +7315,14 @@ fn reject_forced_executor_failures(outcomes: &[CaseOutcome]) -> EvalResult {
         .iter()
         .any(CaseOutcome::exact_forced_executor_failed)
     {
-        return Err(io::Error::other(EXACT_FORCED_EXECUTOR_FAILURE).into());
+        return Err(io::Error::other(EXACT_EXECUTOR_FAILURE).into());
+    }
+    Ok(())
+}
+
+fn reject_natural_executor_failure(outcome: &CaseOutcome, family: EvalFamily) -> EvalResult {
+    if outcome.snapshot.exact_natural_request_failed(family) {
+        return Err(io::Error::other(EXACT_EXECUTOR_FAILURE).into());
     }
     Ok(())
 }
@@ -7650,6 +7678,7 @@ fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
         outcome.natural_loop_disposition(EvalFamily::Git),
         EvalDisposition::Infrastructure
     );
+    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Git).is_err());
 }
 
 #[test]
@@ -9738,6 +9767,40 @@ fn forced_git_log_verifier_rejects_metadata_directory_mtime_drift() -> EvalResul
         .into_reference()
         .peel_to_commit()?;
     fs::File::open(repository.path().join(GIT_HOOKS_DIRECTORY))?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_static_metadata_file_mtime_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    fs::File::open(repository.path().join(GIT_DESCRIPTION_PATH))?
         .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
     let result = serde_json::json!({
         "commits": [{
@@ -13814,6 +13877,14 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         report.family.model(),
     );
     for outcome in &report.forced {
+        for result in &outcome.tool_results {
+            if exec_result_is_infrastructure(result) {
+                eprintln!(
+                    "structured Exec infrastructure evidence: {}",
+                    result.content
+                );
+            }
+        }
         let target = outcome.target.as_deref().unwrap_or("missing target");
         let result = outcome.forced_disposition().label();
         let turn = outcome.snapshot.turn_disposition.label();
@@ -13829,7 +13900,7 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         .natural_loop_disposition(report.family)
         .and(report.natural_state);
     markdown.push_str(&format!(
-        "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | `{}` |\n\nModel outcomes are report-only; a model miss does not fail this workflow. An exact forced executor failure fails after this summary is written.\n",
+        "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | `{}` |\n\nModel outcomes are report-only; a model miss does not fail this workflow. An exact forced or natural executor failure fails after this summary is written.\n",
         natural.label(),
         report.natural.snapshot.called_names(),
         report.natural.round_tripped_result_count(),
