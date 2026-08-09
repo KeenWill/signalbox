@@ -170,6 +170,8 @@ const GIT_HOOKS_DIRECTORY: &str = "hooks";
 const GIT_INFO_DIRECTORY: &str = "info";
 const GIT_LOGS_DIRECTORY: &str = "logs";
 const GIT_REFS_DIRECTORY: &str = "refs";
+const GIT_HEAD_PATH: &str = "HEAD";
+const GIT_INDEX_PATH: &str = "index";
 const GIT_DESCRIPTION_PATH: &str = "description";
 const GIT_PRE_COMMIT_HOOK_PATH: &str = "hooks/pre-commit";
 const GIT_PRE_COMMIT_HOOK_CONTENT: &str = "#!/bin/sh\nexit 1\n";
@@ -338,6 +340,8 @@ const SYNTHETIC_EXISTENTIAL_NO_MODIFICATIONS_DENIAL_REPORT: &str =
     "Done, but there were no modifications.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT: &str = "Read completed; no file was created.";
+const SYNTHETIC_READ_COMPLETION_REPORT: &str = "brief.txt was read successfully.";
+const SYNTHETIC_SWITCH_COMPLETION_REPORT: &str = "The branch was switched successfully.";
 const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
@@ -738,7 +742,10 @@ struct FamilySuite {
     workspace_seed_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     workspace_seed_modified_times: BTreeMap<PathBuf, SystemTime>,
     git_pre_execution_worktree_entries: StdMutex<Option<BTreeMap<PathBuf, WorkspaceEntrySnapshot>>>,
+    git_pre_execution_worktree_modified_times: StdMutex<Option<BTreeMap<PathBuf, SystemTime>>>,
     git_pre_execution_index_entries: StdMutex<Option<Vec<GitIndexCompleteEntrySnapshot>>>,
+    git_pre_execution_metadata_top_level:
+        StdMutex<Option<BTreeMap<PathBuf, GitMetadataEntrySnapshot>>>,
     git_pre_execution_objects: StdMutex<Option<GitObjectInventory>>,
     git_pre_execution_object_entries: StdMutex<Option<BTreeMap<PathBuf, WorkspaceEntrySnapshot>>>,
 }
@@ -762,6 +769,7 @@ struct GitFixtureSnapshot {
     modes: BTreeMap<PathBuf, Option<u32>>,
     config: Vec<u8>,
     worktree_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    worktree_modified_times: BTreeMap<PathBuf, SystemTime>,
     metadata_root_kind: GitMetadataEntryKind,
     metadata_root_mode: Option<u32>,
     metadata_top_level: BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
@@ -792,11 +800,12 @@ enum GitMetadataEntryKind {
     Other,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct GitMetadataEntrySnapshot {
     kind: GitMetadataEntryKind,
     mode: Option<u32>,
     links: Option<u64>,
+    content: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1038,7 +1047,9 @@ impl FamilySuite {
             workspace_seed_entries: BTreeMap::new(),
             workspace_seed_modified_times: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
+            git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
+            git_pre_execution_metadata_top_level: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
         })
@@ -1099,7 +1110,9 @@ impl FamilySuite {
             workspace_seed_entries,
             workspace_seed_modified_times,
             git_pre_execution_worktree_entries: StdMutex::new(None),
+            git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
+            git_pre_execution_metadata_top_level: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
         })
@@ -1132,7 +1145,9 @@ impl FamilySuite {
             workspace_seed_entries: BTreeMap::new(),
             workspace_seed_modified_times: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
+            git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
+            git_pre_execution_metadata_top_level: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
         })
@@ -1171,7 +1186,9 @@ impl FamilySuite {
             workspace_seed_entries: BTreeMap::new(),
             workspace_seed_modified_times: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
+            git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
+            git_pre_execution_metadata_top_level: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
         })
@@ -1285,11 +1302,21 @@ impl FamilySuite {
                 .expect("Git pre-execution inventory lock is available") =
                 Some(git_worktree_entries(self.workspace.path())?);
             *self
+                .git_pre_execution_worktree_modified_times
+                .lock()
+                .expect("Git pre-execution worktree-time lock is available") =
+                Some(git_worktree_modified_times(self.workspace.path())?);
+            *self
                 .git_pre_execution_index_entries
                 .lock()
                 .expect("Git pre-execution index lock is available") = Some(
                 git_index_complete_entries(&Repository::open(self.workspace.path())?)?,
             );
+            *self
+                .git_pre_execution_metadata_top_level
+                .lock()
+                .expect("Git pre-execution metadata lock is available") =
+                Some(git_metadata_top_level(self.workspace.path())?);
             *self
                 .git_pre_execution_objects
                 .lock()
@@ -1377,10 +1404,18 @@ impl FamilySuite {
                     .git_pre_execution_worktree_entries
                     .lock()
                     .expect("Git pre-execution inventory lock is available");
+                let pre_execution_worktree_modified_times = self
+                    .git_pre_execution_worktree_modified_times
+                    .lock()
+                    .expect("Git pre-execution worktree-time lock is available");
                 let pre_execution_index_entries = self
                     .git_pre_execution_index_entries
                     .lock()
                     .expect("Git pre-execution index lock is available");
+                let pre_execution_metadata_top_level = self
+                    .git_pre_execution_metadata_top_level
+                    .lock()
+                    .expect("Git pre-execution metadata lock is available");
                 let pre_execution_objects = self
                     .git_pre_execution_objects
                     .lock()
@@ -1396,7 +1431,10 @@ impl FamilySuite {
                         seed_refs: &self.git_seed_refs,
                         seed_fixture: &self.git_seed_fixture,
                         pre_execution_worktree_entries: pre_execution_worktree_entries.as_ref(),
+                        pre_execution_worktree_modified_times:
+                            pre_execution_worktree_modified_times.as_ref(),
                         pre_execution_index_entries: pre_execution_index_entries.as_deref(),
+                        pre_execution_metadata_top_level: pre_execution_metadata_top_level.as_ref(),
                         pre_execution_objects: pre_execution_objects.as_ref(),
                         pre_execution_object_entries: pre_execution_object_entries.as_ref(),
                         execution_window: self.executor.git_execution_window(case.name),
@@ -1587,7 +1625,18 @@ fn seed_exec_workspace(root: &Path) -> EvalResult {
 }
 
 fn workspace_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
-    workspace_entries(root)?
+    filesystem_modified_times(root, None)
+}
+
+fn git_worktree_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
+    filesystem_modified_times(root, Some(Path::new(".git")))
+}
+
+fn filesystem_modified_times(
+    root: &Path,
+    ignored_root_entry: Option<&Path>,
+) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
+    filesystem_entries(root, ignored_root_entry)?
         .into_keys()
         .map(|relative| {
             let modified = fs::symlink_metadata(root.join(&relative))?.modified()?;
@@ -1602,7 +1651,9 @@ struct GitForcedVerification<'a> {
     seed_refs: &'a GitReferenceInventory,
     seed_fixture: &'a GitFixtureSnapshot,
     pre_execution_worktree_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
+    pre_execution_worktree_modified_times: Option<&'a BTreeMap<PathBuf, SystemTime>>,
     pre_execution_index_entries: Option<&'a [GitIndexCompleteEntrySnapshot]>,
+    pre_execution_metadata_top_level: Option<&'a BTreeMap<PathBuf, GitMetadataEntrySnapshot>>,
     pre_execution_objects: Option<&'a GitObjectInventory>,
     pre_execution_object_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
     execution_window: Option<GitExecutionTimeWindow>,
@@ -1620,7 +1671,9 @@ fn git_forced_case_passed(
         seed_refs,
         seed_fixture,
         pre_execution_worktree_entries,
+        pre_execution_worktree_modified_times,
         pre_execution_index_entries,
+        pre_execution_metadata_top_level,
         pre_execution_objects,
         pre_execution_object_entries,
         execution_window,
@@ -1860,6 +1913,12 @@ fn git_forced_case_passed(
             seed_fixture,
             pre_execution_index_entries,
         )?
+        && git_forced_metadata_top_level_matches(
+            root,
+            name,
+            seed_fixture,
+            pre_execution_metadata_top_level,
+        )?
         && git_forced_objects_match(
             &repository,
             name,
@@ -1876,7 +1935,13 @@ fn git_forced_case_passed(
         )?
         && git_forced_reference_entries_match(root, name, arguments, &head, seed_fixture)?
         && git_forced_reflogs_match(root, name, seed, head.id(), seed_fixture, execution_window)?
-        && git_forced_worktree_matches(root, name, seed_fixture, pre_execution_worktree_entries)?)
+        && git_forced_worktree_matches(root, name, seed_fixture, pre_execution_worktree_entries)?
+        && git_forced_worktree_modified_times_match(
+            root,
+            name,
+            seed_fixture,
+            pre_execution_worktree_modified_times,
+        )?)
 }
 
 fn commit_adds_exact_fixture(
@@ -2321,8 +2386,43 @@ fn workspace_forced_case_passed(
             Ok(workspace_entries(root)? == *seed_entries
                 && workspace_modified_times(root)? == *seed_modified_times)
         }
-        _ => Ok(true),
+        APPLY_PATCH_NAME => workspace_modified_times_match_except(
+            root,
+            seed_modified_times,
+            &[Path::new(""), Path::new("patched.txt")],
+        ),
+        EDIT_FILE_NAME => {
+            let Some(path) = arguments["path"].as_str() else {
+                return Ok(false);
+            };
+            workspace_modified_times_match_except(root, seed_modified_times, &[Path::new(path)])
+        }
+        WRITE_FILE_NAME => {
+            let Some(path) = arguments["path"].as_str() else {
+                return Ok(false);
+            };
+            workspace_modified_times_match_except(
+                root,
+                seed_modified_times,
+                &[Path::new(""), Path::new(path)],
+            )
+        }
+        _ => Ok(false),
     }
+}
+
+fn workspace_modified_times_match_except(
+    root: &Path,
+    expected: &BTreeMap<PathBuf, SystemTime>,
+    allowed_paths: &[&Path],
+) -> EvalResult<bool> {
+    let mut actual = workspace_modified_times(root)?;
+    let mut expected = expected.clone();
+    for path in allowed_paths {
+        actual.remove(*path);
+        expected.remove(*path);
+    }
+    Ok(actual == expected)
 }
 
 fn workspace_mutation_entries_match(
@@ -2628,6 +2728,7 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         modes: git_fixture_modes(root)?,
         config: fs::read(repository.path().join(GIT_CONFIG_PATH))?,
         worktree_entries: git_worktree_entries(root)?,
+        worktree_modified_times: git_worktree_modified_times(root)?,
         metadata_root_kind: git_metadata_root_kind(root)?,
         metadata_root_mode: worktree_mode(repository.path())?,
         metadata_top_level: git_metadata_top_level(root)?,
@@ -3283,14 +3384,22 @@ fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetada
         } else {
             worktree_mode(&entry.path())?
         };
-        let links = if kind == GitMetadataEntryKind::File {
-            worktree_link_count(&entry.path())?
+        let (links, content) = if kind == GitMetadataEntryKind::File {
+            (
+                worktree_link_count(&entry.path())?,
+                Some(fs::read(entry.path())?),
+            )
         } else {
-            None
+            (None, None)
         };
         entries.insert(
             PathBuf::from(entry.file_name()),
-            GitMetadataEntrySnapshot { kind, mode, links },
+            GitMetadataEntrySnapshot {
+                kind,
+                mode,
+                links,
+                content,
+            },
         );
     }
     Ok(entries)
@@ -3351,8 +3460,94 @@ fn git_fixture_snapshot_matches(
         && config == expected.config
         && git_metadata_root_kind(root)? == expected.metadata_root_kind
         && worktree_mode(repository.path())? == expected.metadata_root_mode
-        && git_metadata_top_level(root)? == expected.metadata_top_level
         && git_static_metadata_entries(root)? == expected.static_metadata_entries)
+}
+
+fn git_forced_metadata_top_level_matches(
+    root: &Path,
+    case_name: &str,
+    seed_fixture: &GitFixtureSnapshot,
+    pre_execution: Option<&BTreeMap<PathBuf, GitMetadataEntrySnapshot>>,
+) -> EvalResult<bool> {
+    let actual = git_metadata_top_level(root)?;
+    let mut expected = pre_execution
+        .cloned()
+        .unwrap_or_else(|| seed_fixture.metadata_top_level.clone());
+    match case_name {
+        GIT_BRANCH_SWITCH_NAME => {
+            if !admit_git_metadata_content(&actual, &mut expected, Path::new(GIT_HEAD_PATH))
+                || !admit_git_metadata_content(&actual, &mut expected, Path::new(GIT_INDEX_PATH))
+            {
+                return Ok(false);
+            }
+        }
+        GIT_CREATE_COMMIT_NAME => {
+            expected.remove(Path::new(GIT_MERGE_HEAD_PATH));
+            expected.remove(Path::new(GIT_MERGE_MESSAGE_PATH));
+            expected.remove(Path::new(GIT_MERGE_MODE_PATH));
+        }
+        GIT_STAGE_NAME => {
+            if !admit_git_metadata_content(&actual, &mut expected, Path::new(GIT_INDEX_PATH)) {
+                return Ok(false);
+            }
+        }
+        GIT_BRANCH_CREATE_NAME | GIT_DIFF_NAME | GIT_LOG_NAME | GIT_STATUS_NAME => {}
+        _ => return Ok(false),
+    }
+    Ok(actual == expected)
+}
+
+fn git_natural_metadata_top_level_matches(
+    root: &Path,
+    seed_fixture: &GitFixtureSnapshot,
+) -> EvalResult<bool> {
+    let actual = git_metadata_top_level(root)?;
+    let mut expected = seed_fixture.metadata_top_level.clone();
+    if !admit_git_metadata_content(&actual, &mut expected, Path::new(GIT_INDEX_PATH)) {
+        return Ok(false);
+    }
+    Ok(actual == expected)
+}
+
+fn admit_git_metadata_content(
+    actual: &BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
+    expected: &mut BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
+    path: &Path,
+) -> bool {
+    let Some(actual) = actual.get(path) else {
+        return false;
+    };
+    let Some(expected) = expected.get_mut(path) else {
+        return false;
+    };
+    expected.content.clone_from(&actual.content);
+    true
+}
+
+fn git_forced_worktree_modified_times_match(
+    root: &Path,
+    case_name: &str,
+    seed_fixture: &GitFixtureSnapshot,
+    pre_execution: Option<&BTreeMap<PathBuf, SystemTime>>,
+) -> EvalResult<bool> {
+    let mut actual = git_worktree_modified_times(root)?;
+    let mut expected = pre_execution
+        .cloned()
+        .unwrap_or_else(|| seed_fixture.worktree_modified_times.clone());
+    match case_name {
+        GIT_BRANCH_SWITCH_NAME => {
+            actual.remove(Path::new(GIT_SEED_PATH));
+            expected.remove(Path::new(GIT_SEED_PATH));
+        }
+        GIT_BRANCH_CREATE_NAME
+        | GIT_CREATE_COMMIT_NAME
+        | GIT_DIFF_NAME
+        | GIT_LOG_NAME
+        | GIT_STAGE_NAME
+        | GIT_STATUS_NAME => {}
+        _ => return Ok(false),
+    }
+    Ok(actual == expected)
 }
 
 fn git_forced_worktree_matches(
@@ -3711,6 +3906,9 @@ fn git_natural_state_passed_in_window(
     )?;
     let complete_worktree_inventory_matches =
         git_worktree_entries(root)? == seed_fixture.worktree_entries;
+    let complete_worktree_time_inventory_matches =
+        git_worktree_modified_times(root)? == seed_fixture.worktree_modified_times;
+    let metadata_top_level_matches = git_natural_metadata_top_level_matches(root, seed_fixture)?;
     Ok(head_remains_on_seeded_branch
         && seeded_branch_advanced
         && message_matches
@@ -3730,7 +3928,9 @@ fn git_natural_state_passed_in_window(
         && complete_object_entry_inventory_matches
         && fixture_matches
         && reflogs_match
-        && complete_worktree_inventory_matches)
+        && complete_worktree_inventory_matches
+        && complete_worktree_time_inventory_matches
+        && metadata_top_level_matches)
 }
 
 fn git_natural_objects_match(
@@ -4610,8 +4810,15 @@ fn report_affirms_completion(report: &str, file_creation_required: bool) -> bool
         "completed",
         "created",
         "done",
+        "fetched",
         "finished",
+        "listed",
+        "matched",
+        "read",
         "saved",
+        "searched",
+        "staged",
+        "switched",
         "updated",
         "written",
         "wrote",
@@ -4770,9 +4977,18 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         "finish",
         "finished",
         "found",
+        "list",
+        "listed",
         "match",
         "matched",
+        "read",
         "saved",
+        "search",
+        "searched",
+        "stage",
+        "staged",
+        "switch",
+        "switched",
         "updated",
         "write",
         "written",
@@ -5273,6 +5489,22 @@ fn final_response_report_rejects_a_no_file_written_claim() {
 fn effect_free_final_response_accepts_a_file_creation_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_an_affirmative_read() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_READ_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_an_affirmative_branch_switch() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SWITCH_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
 }
@@ -8679,6 +8911,76 @@ fn forced_git_log_verifier_accepts_the_bounded_target() -> EvalResult {
 }
 
 #[test]
+fn forced_git_log_verifier_rejects_worktree_mtime_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    let collateral = suite.workspace.path().join(GIT_STAGE_PATH);
+    fs::File::open(collateral)?.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_top_level_metadata_byte_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    fs::write(
+        repository.path().join(GIT_HEAD_PATH),
+        format!("ref: refs/heads/{GIT_BASE_BRANCH}"),
+    )?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_log_verifier_rejects_reflog_drift() -> EvalResult {
     let suite = FamilySuite::git()?;
     let case = GIT_CASES
@@ -9694,6 +9996,31 @@ fn forced_workspace_edit_verifier_rejects_collateral_mutation() -> EvalResult {
         "path": WORKSPACE_SEED_PATH,
         "replacements": WORKSPACE_SEED.match_indices(old).count(),
         "bytes_written": expected.len(),
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_edit_verifier_rejects_collateral_mtime_drift() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == EDIT_FILE_NAME)
+        .expect("the workspace edit fixture exists");
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_SEED_PATH),
+        WORKSPACE_EDITED_SEED,
+    )?;
+    let collateral = suite.workspace.path().join(WORKSPACE_GLOB_PATH);
+    fs::File::open(collateral)?.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "replacements": EXPECTED_WORKSPACE_EDIT_REPLACEMENTS,
+        "bytes_written": EXPECTED_WORKSPACE_EDIT_BYTES,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
