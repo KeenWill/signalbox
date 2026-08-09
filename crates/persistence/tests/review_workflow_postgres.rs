@@ -9174,6 +9174,108 @@ async fn incomplete_judgment_result(
     })
 }
 
+/// A snapshot reports one database snapshot, not a seam between several.
+///
+/// The whole projection is reconstructed inside a single read-only
+/// `REPEATABLE READ` transaction, so its facts are all drawn from the instant
+/// the transaction took its snapshot. This forces the interleave that a torn
+/// read needs and shows it cannot happen: the snapshot is stopped after its
+/// first read has fixed its MVCC snapshot, a writer then commits an effect, and
+/// the snapshot is released to run every remaining loader. Those later loaders
+/// must still report the pre-write state.
+///
+/// The stop is a table lock on `review_orchestration_import`, which the stage
+/// ladder reads immediately after the attempt row. It is deliberately not a
+/// timing delay: the writer commits only once `pg_stat_activity` shows the
+/// reader blocked, so the ordering is observed rather than assumed.
+///
+/// Before the read became one transaction, each loader opened its own — so the
+/// effect written here landed between them and the snapshot reported it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_snapshot_excludes_a_write_committed_after_it_began()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres_with_max_connections(6).await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+
+    let mut blocker = pool.begin().await?;
+    sqlx::query("LOCK TABLE review_orchestration_import IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await?;
+
+    let reader = fixture.store.clone();
+    let attempt_id = fixture.attempt_id;
+    let reading = tokio::spawn(async move { reader.load_snapshot(attempt_id).await });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the snapshot must be waiting on the held import lock before the writer commits"
+    );
+
+    let mut writer = PostgresReviewOrchestrationStore::new(pool.clone());
+    assert_eq!(
+        writer
+            .record_applied_judgment_effect(ReviewJudgmentEffectId::new(
+                attempt_id,
+                fixture.finding_ref,
+            ))
+            .await?,
+        ReviewDurableSealOutcome::Recorded,
+        "the concurrent writer must commit while the snapshot is still blocked"
+    );
+
+    blocker.rollback().await?;
+    let facts = tokio::time::timeout(std::time::Duration::from_secs(60), reading)
+        .await???
+        .expect("the sealed attempt has a snapshot");
+
+    assert!(
+        facts.applied_judgment_effects.is_empty(),
+        "the snapshot reported an effect committed after it began: {:?}",
+        facts.applied_judgment_effects
+    );
+    assert_eq!(
+        facts.current_stage,
+        ReviewOrchestrationCurrentStage::AwaitingJudgmentEffects,
+        "the reported stage must agree with the effects the same snapshot reports"
+    );
+
+    // The write is durable; only this snapshot's view of it was fixed earlier.
+    assert_eq!(
+        fixture.store.current_stage(attempt_id).await?,
+        Some(ReviewOrchestrationCurrentStage::AwaitingRepair)
+    );
+    Ok(())
+}
+
+/// The snapshot holds exactly one pooled connection for its whole construction.
+///
+/// A single connection is a single transaction, which is what makes the read
+/// coherent under MVCC rather than under locks. Pinning it against a
+/// one-connection pool states that structurally: a construction that reached
+/// for a second connection — as the lock-guarded form did, holding a guard
+/// transaction while its loaders ran elsewhere — could not finish here at all.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn review_orchestration_snapshot_completes_on_a_single_connection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres_with_max_connections(1).await?;
+    let fixture = prepare_orchestration_fixture(&pool).await?;
+
+    let facts = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        fixture.store.load_snapshot(fixture.attempt_id),
+    )
+    .await
+    .expect("a one-connection pool must satisfy the snapshot")?
+    .expect("the sealed attempt has a snapshot");
+
+    assert_eq!(
+        facts.current_stage,
+        ReviewOrchestrationCurrentStage::AwaitingJudgmentEffects
+    );
+    Ok(())
+}
+
 /// Snapshot cost grows linearly, not quadratically, in an attempt's findings.
 ///
 /// Two independent defects once made it quadratic. The stage ladder
