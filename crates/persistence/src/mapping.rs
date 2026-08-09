@@ -255,10 +255,6 @@ pub(crate) fn delegation_transition_failure_from_str(
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "delegation outcome rows are currently written by PostgreSQL lifecycle triggers"
-)]
 pub(crate) const fn delegation_outcome_kind_to_str(value: DelegationOutcomeKind) -> &'static str {
     match value {
         DelegationOutcomeKind::ResultReturned => "result_returned",
@@ -282,10 +278,6 @@ pub(crate) fn delegation_outcome_kind_from_str(value: &str) -> Option<Delegation
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "delegation outcome rows are currently written by PostgreSQL lifecycle triggers"
-)]
 pub(crate) const fn delegation_outcome_reason_to_str(
     value: DelegationOutcomeReason,
 ) -> Option<&'static str> {
