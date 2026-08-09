@@ -4080,13 +4080,12 @@ pub(crate) async fn load_scheduling_projection(
            FROM queued_input_origin AS queued
            JOIN turn_lifecycle AS terminal
              ON terminal.session_id = $1
-            AND terminal.turn_id = accepted_input_turn_queue_predecessor(
-                    $1, queued.turn_id
-                )
+            AND terminal.turn_id = queued.interrupt_predecessor_turn_id
            JOIN LATERAL turn_origin_effective_model_configuration(
                 terminal.turn_id, terminal.session_id
            ) AS effective ON true
           WHERE queued.session_id = $1
+            AND queued.priority_kind = 'interrupt_immediately_after'
             AND goal_turn_is_runtime_relevant(
                     queued.session_id, queued.turn_id
                 )
