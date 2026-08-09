@@ -813,8 +813,10 @@ impl FamilySuite {
                 let seed = self.git_seed.ok_or_else(|| {
                     io::Error::other("the Git eval suite has no captured seed identity")
                 })?;
-                Ok(git_natural_state_passed(self.workspace.path(), seed)?
-                    && snapshot.git_natural_requests_passed()?)
+                Ok(
+                    git_natural_state_passed(self.workspace.path(), seed, &self.git_seed_refs)?
+                        && snapshot.git_natural_requests_passed()?,
+                )
             }
             EvalFamily::Workspace => {
                 let bytes_match = self.workspace_answer_matches()?;
@@ -1322,6 +1324,12 @@ fn workspace_forced_case_passed(
             result["operations_applied"] == 1
                 && fs::read_to_string(root.join("patched.txt"))? == "patched by eval\n"
                 && fs::read(root.join(WORKSPACE_SEED_PATH))? == WORKSPACE_SEED.as_bytes()
+                && workspace_mutation_entries_match(
+                    root,
+                    seed_entries,
+                    Path::new("patched.txt"),
+                    b"patched by eval\n",
+                )?
         }
         EDIT_FILE_NAME => {
             let Some(path) = arguments["path"].as_str() else {
@@ -1345,6 +1353,12 @@ fn workspace_forced_case_passed(
                 && result["bytes_written"] == expected.len()
                 && fs::read_to_string(root.join(path))? == expected
                 && fs::read(root.join(WORKSPACE_GLOB_PATH))? == WORKSPACE_GLOB_CONTENT.as_bytes()
+                && workspace_mutation_entries_match(
+                    root,
+                    seed_entries,
+                    Path::new(path),
+                    expected.as_bytes(),
+                )?
         }
         WRITE_FILE_NAME => {
             let Some(path) = arguments["path"].as_str() else {
@@ -1358,6 +1372,12 @@ fn workspace_forced_case_passed(
                 && result["created"] == true
                 && fs::read_to_string(root.join(path))? == expected
                 && fs::read(root.join(WORKSPACE_SEED_PATH))? == WORKSPACE_SEED.as_bytes()
+                && workspace_mutation_entries_match(
+                    root,
+                    seed_entries,
+                    Path::new(path),
+                    expected.as_bytes(),
+                )?
         }
         READ_FILE_NAME => {
             let Some(path) = arguments["path"].as_str() else {
@@ -1428,6 +1448,20 @@ fn workspace_forced_case_passed(
         }
         _ => Ok(true),
     }
+}
+
+fn workspace_mutation_entries_match(
+    root: &Path,
+    seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    target: &Path,
+    expected: &[u8],
+) -> EvalResult<bool> {
+    let mut expected_entries = seed_entries.clone();
+    expected_entries.insert(
+        target.to_path_buf(),
+        WorkspaceEntrySnapshot::File(expected.to_vec()),
+    );
+    Ok(workspace_entries(root)? == expected_entries)
 }
 
 fn result_entries_equal(value: &serde_json::Value, expected: &[(String, &'static str)]) -> bool {
@@ -1530,6 +1564,12 @@ fn seed_git_repository(root: &Path) -> EvalResult<Oid> {
     repository.branch(GIT_BASE_BRANCH, &third, false)?;
     repository.set_head(&format!("refs/heads/{GIT_BASE_BRANCH}"))?;
     Ok(third.id())
+}
+
+fn seed_git_repository_with_refs(root: &Path) -> EvalResult<(Oid, BTreeMap<String, Oid>)> {
+    let seed = seed_git_repository(root)?;
+    let refs = git_local_branch_targets(&Repository::open(root)?)?;
+    Ok((seed, refs))
 }
 
 fn git_local_branch_targets(repository: &Repository) -> EvalResult<BTreeMap<String, Oid>> {
@@ -1645,7 +1685,11 @@ fn commit_staged_paths_with_identity(
     Ok(())
 }
 
-fn git_natural_state_passed(root: &Path, seed: Oid) -> EvalResult<bool> {
+fn git_natural_state_passed(
+    root: &Path,
+    seed: Oid,
+    seed_refs: &BTreeMap<String, Oid>,
+) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let head_reference = repository.head()?;
     let head_remains_on_seeded_branch = head_reference.shorthand().ok() == Some(GIT_BASE_BRANCH);
@@ -1694,6 +1738,9 @@ fn git_natural_state_passed(root: &Path, seed: Oid) -> EvalResult<bool> {
             GIT_COMMIT_CONTENT.as_bytes(),
         )?;
     let complete_status_matches = git_natural_status_matches(&repository)?;
+    let mut expected_refs = seed_refs.clone();
+    expected_refs.insert(String::from(GIT_BASE_BRANCH), head.id());
+    let complete_ref_inventory_matches = git_local_branch_targets(&repository)? == expected_refs;
     Ok(head_remains_on_seeded_branch
         && seeded_branch_advanced
         && message_matches
@@ -1703,7 +1750,8 @@ fn git_natural_state_passed(root: &Path, seed: Oid) -> EvalResult<bool> {
         && index_contains_only_expected_paths
         && commit_adds_expected_natural_fixture
         && unrelated_fixtures_unchanged
-        && complete_status_matches)
+        && complete_status_matches
+        && complete_ref_inventory_matches)
 }
 
 fn git_natural_status_matches(repository: &Repository) -> EvalResult<bool> {
@@ -3699,19 +3747,23 @@ fn unforced_git_tier_requires_both_task_tools() {
 #[test]
 fn git_natural_state_rejects_a_commit_with_an_unrelated_fixture() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let seed = seed_git_repository(workspace.path())?;
+    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     stage_path(workspace.path(), GIT_STAGE_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
 
-    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+    )?);
     Ok(())
 }
 
 #[test]
 fn git_natural_state_rejects_a_commit_with_drifted_bytes() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let seed = seed_git_repository(workspace.path())?;
+    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
     fs::write(
         workspace.path().join(GIT_NATURAL_PATH),
         GIT_DRIFTED_NATURAL_CONTENT,
@@ -3719,38 +3771,50 @@ fn git_natural_state_rejects_a_commit_with_drifted_bytes() -> EvalResult {
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
 
-    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+    )?);
     Ok(())
 }
 
 #[test]
 fn git_natural_state_rejects_extra_staging_after_the_target_commit() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let seed = seed_git_repository(workspace.path())?;
+    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
     stage_path(workspace.path(), GIT_STAGE_PATH)?;
 
-    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+    )?);
     Ok(())
 }
 
 #[test]
 fn git_natural_state_rejects_a_deleted_unrelated_fixture() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let seed = seed_git_repository(workspace.path())?;
+    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
     fs::remove_file(workspace.path().join(GIT_STAGE_PATH))?;
 
-    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+    )?);
     Ok(())
 }
 
 #[test]
 fn git_natural_state_rejects_a_collateral_untracked_file() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let seed = seed_git_repository(workspace.path())?;
+    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
     fs::write(
@@ -3758,36 +3822,68 @@ fn git_natural_state_rejects_a_collateral_untracked_file() -> EvalResult {
         GIT_COLLATERAL_CONTENT,
     )?;
 
-    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+    )?);
+    Ok(())
+}
+
+#[test]
+fn git_natural_state_rejects_a_collateral_ref_update() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    let repository = Repository::open(workspace.path())?;
+    let head = repository.head()?.peel_to_commit()?;
+    repository
+        .find_reference("refs/heads/log-target")?
+        .set_target(head.id(), "synthetic collateral ref update")?;
+
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+    )?);
     Ok(())
 }
 
 #[test]
 fn git_natural_state_rejects_an_unrelated_earlier_commit() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let seed = seed_git_repository(workspace.path())?;
+    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
     stage_path(workspace.path(), GIT_STAGE_PATH)?;
     commit_staged_paths(workspace.path(), "unrelated eval commit")?;
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
 
-    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+    )?);
     Ok(())
 }
 
 #[test]
 fn git_natural_state_rejects_a_parentless_seed_commit() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let seed = seed_git_repository(workspace.path())?;
+    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
 
-    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+    )?);
     Ok(())
 }
 
 #[test]
 fn git_natural_state_rejects_a_commit_on_a_switched_branch() -> EvalResult {
     let workspace = tempfile::tempdir()?;
-    let seed = seed_git_repository(workspace.path())?;
+    let (seed, seed_refs) = seed_git_repository_with_refs(workspace.path())?;
     let repository = Repository::open(workspace.path())?;
     let head = repository.head()?.peel_to_commit()?;
     repository.branch("natural-target", &head, false)?;
@@ -3795,7 +3891,11 @@ fn git_natural_state_rejects_a_commit_on_a_switched_branch() -> EvalResult {
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
 
-    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+    )?);
     Ok(())
 }
 
@@ -4731,6 +4831,34 @@ fn forced_workspace_write_verifier_rejects_collateral_mutation() -> EvalResult {
         suite.workspace.path().join(WORKSPACE_SEED_PATH),
         WORKSPACE_DRIFTED_SEED,
     )?;
+    let result = serde_json::json!({
+        "path": path,
+        "bytes_written": content.len(),
+        "created": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_write_verifier_rejects_a_deleted_unrelated_fixture() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == WRITE_FILE_NAME)
+        .expect("the workspace write fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let path = arguments["path"]
+        .as_str()
+        .expect("the workspace write fixture has a path");
+    let content = arguments["content"]
+        .as_str()
+        .expect("the workspace write fixture has content");
+    fs::write(suite.workspace.path().join(path), content)?;
+    fs::remove_file(suite.workspace.path().join(WORKSPACE_GLOB_PATH))?;
     let result = serde_json::json!({
         "path": path,
         "bytes_written": content.len(),
