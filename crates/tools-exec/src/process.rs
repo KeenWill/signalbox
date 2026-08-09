@@ -113,7 +113,7 @@ struct SandboxedExecContract;
 impl ToolContract for SandboxedExecContract {
     type Arguments = ExecArguments;
     const NAME: &'static str = SANDBOXED_EXEC_NAME;
-    const DESCRIPTION: &'static str = "Runs one bounded direct command in a bwrap-confined injected workspace with no network access.";
+    const DESCRIPTION: &'static str = "Runs one bounded direct command in a bwrap-confined injected workspace with no IP-network access.";
 }
 
 struct UnsandboxedExecContract;
@@ -3532,7 +3532,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogs_fix_sandboxed_auto_and_unsandboxed_always_confirm_permissions()
+    fn catalogs_fix_sandboxed_confirm_and_unsandboxed_always_confirm_permissions()
     -> Result<(), Box<dyn Error>> {
         let root = std::env::current_dir()?;
         let sandboxed = SandboxedExecTool::try_new(
