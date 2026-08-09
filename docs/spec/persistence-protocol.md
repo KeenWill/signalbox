@@ -1,5 +1,8 @@
 # Persistence protocol
 
+The runner connection authority head, durable loss epoch, and lease-offer fence
+were verified against this PR (`agent/runner-loss-epoch`).
+
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
 (`agent/runner-event-outbox-persistence`).

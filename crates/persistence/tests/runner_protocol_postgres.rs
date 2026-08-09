@@ -85,6 +85,7 @@ const RELATED_IDENTITY_OFFSET: u128 = 0x100;
 const LOCK_WAIT_PROBE: Duration = Duration::from_millis(100);
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
+const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608080102;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -2676,6 +2677,43 @@ async fn runner_loss_migration_rejects_legacy_rows_without_source() -> Result<()
         "migration refusal must name the unrecoverable loss source"
     );
     assert_eq!(applied_version, Some(PRE_PLACEMENT_LOSS_MIGRATION));
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: upgrading a terminal connection backfills its exact first durable
+/// loss epoch and current loss head.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
+        .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_event
+            (enrollment_id, connection_epoch, event_ordinal,
+             state_kind, cause_kind)
+         VALUES ($1, 1, 1, 'connected', 'established'),
+                ($1, 1, 2, 'lost', 'transport_closed')",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .execute(&pool)
+    .await?;
+    migrate(&pool).await?;
+    let loaded = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the migrated terminal connection has a loss fence");
+
+    assert_eq!(loaded.enrollment(), expected_enrollment.enrollment());
+    assert_eq!(loaded.loss_epoch().get(), 1);
+    assert_eq!(loaded.connection_epoch().get(), 1);
+    assert_eq!(loaded.connection_event_ordinal(), 2);
     drop(pool);
     Ok(())
 }
@@ -9909,6 +9947,290 @@ async fn s30_inv001_reconstitution_rejects_cross_wired_enrollment() -> Result<()
         .expect_err("cross-wired enrollment identity fails independent audit evidence");
 
     assert!(matches!(error, RunnerProtocolStoreError::Domain(_)));
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: each terminal physical connection advances one enrollment-owned
+/// append-only loss epoch with its exact connection source.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_terminal_connections_advance_exact_loss_epochs() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let first_connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            first_connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let first_terminal = store
+        .load_connection(expected_enrollment.enrollment())
+        .await?
+        .expect("the first terminal connection remains durable");
+    let first_loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the first terminal connection advances a loss epoch");
+    let second_connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            second_connection.epoch(),
+            RunnerConnectionTransition::HeartbeatTimeout,
+        )
+        .await?;
+    let second_terminal = store
+        .load_connection(expected_enrollment.enrollment())
+        .await?
+        .expect("the successor terminal connection remains durable");
+    let second_loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the successor terminal connection advances the loss epoch");
+
+    assert_eq!(first_loss.loss_epoch().get(), 1);
+    assert_eq!(first_loss.connection_epoch(), first_terminal.epoch());
+    assert_eq!(
+        first_loss.connection_event_ordinal(),
+        first_terminal.event_ordinal()
+    );
+    assert_eq!(second_loss.loss_epoch().get(), 2);
+    assert_eq!(second_loss.connection_epoch(), second_terminal.epoch());
+    assert_eq!(
+        second_loss.connection_event_ordinal(),
+        second_terminal.event_ordinal()
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: failure to advance the durable loss epoch rolls the terminal
+/// connection event back at the same commit boundary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_loss_epoch_failure_rolls_back_terminal_connection() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    sqlx::query(
+        "CREATE FUNCTION reject_runner_loss_epoch_for_test()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected runner loss epoch refusal'
+                 USING ERRCODE = '23514';
+         END;
+         $$",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER reject_runner_loss_epoch_for_test
+         BEFORE INSERT ON runner_connection_loss_epoch
+         FOR EACH ROW EXECUTE FUNCTION reject_runner_loss_epoch_for_test()",
+    )
+    .execute(&pool)
+    .await?;
+    let rejected = store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await
+        .expect_err("terminal connection and loss epoch share one commit boundary");
+    sqlx::query(
+        "DROP TRIGGER reject_runner_loss_epoch_for_test
+         ON runner_connection_loss_epoch",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("DROP FUNCTION reject_runner_loss_epoch_for_test()")
+        .execute(&pool)
+        .await?;
+    let retained = store
+        .load_connection(expected_enrollment.enrollment())
+        .await?
+        .expect("the established connection remains current");
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?;
+
+    assert_store_check_violation(rejected);
+    assert_eq!(retained, connection);
+    assert_eq!(loss, None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a loss epoch may name only its exact terminal connection source.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_loss_epoch_rejects_connected_source() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let rejected = sqlx::query(
+        "INSERT INTO runner_connection_loss_epoch
+            (enrollment_id, loss_epoch, connection_epoch,
+             connection_event_ordinal)
+         VALUES ($1, 1, $2, $3)",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(Decimal::from(connection.epoch().get()))
+    .bind(Decimal::from(connection.event_ordinal()))
+    .execute(&pool)
+    .await
+    .expect_err("a live connection cannot mint a terminal loss fence");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: a terminal connection fences later lease offers, while
+/// an explicitly opened successor connection restores live offer authority.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_loss_fences_lease_until_successor_connection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let rejected = store
+        .store_lease(&lease)
+        .await
+        .expect_err("a terminal connection cannot authorize a later lease offer");
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store.store_lease(&lease).await?;
+    let loaded = store
+        .load_lease(lease.correlation().lease, lease.correlation().generation)
+        .await?
+        .expect("the successor connection admits the prepared lease");
+
+    assert_store_check_violation(rejected);
+    assert_eq!(loaded, lease);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: once a terminal transition owns enrollment authority,
+/// a concurrent lease offer observes the committed loss fence and is refused.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_connection_loss_wins_concurrent_lease_offer()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let enrollment = expected_enrollment.enrollment();
+    let connection = store.open_connection(enrollment).await?;
+    let mut authority = pool.begin().await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1
+          FOR UPDATE",
+    )
+    .bind(enrollment.into_uuid())
+    .fetch_one(&mut *authority)
+    .await?;
+    let mut loss_store = Box::pin(store.transition_connection(
+        enrollment,
+        connection.epoch(),
+        RunnerConnectionTransition::TransportClosed,
+    ));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut loss_store)
+        .await
+        .expect_err("the terminal transition waits on connection authority");
+    let mut lease_store = Box::pin(store.store_lease(&lease));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
+        .await
+        .expect_err("the lease offer waits behind terminal enrollment authority");
+    authority.commit().await?;
+    loss_store.await?;
+    let rejected = lease_store
+        .await
+        .expect_err("the later lease offer observes the committed loss fence");
+
+    assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: a lease offer that already owns enrollment authority
+/// commits before a racing terminal transition installs the loss fence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_lease_offer_wins_concurrent_connection_loss()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+    let enrollment = expected_enrollment.enrollment();
+    let connection = store.open_connection(enrollment).await?;
+    let mut authority = pool.begin().await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1
+          FOR UPDATE",
+    )
+    .bind(enrollment.into_uuid())
+    .fetch_one(&mut *authority)
+    .await?;
+    let mut lease_store = Box::pin(store.store_lease(&lease));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
+        .await
+        .expect_err("the lease offer waits on connection authority");
+    let mut loss_store = Box::pin(store.transition_connection(
+        enrollment,
+        connection.epoch(),
+        RunnerConnectionTransition::TransportClosed,
+    ));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut loss_store)
+        .await
+        .expect_err("the terminal transition waits behind enrollment authority");
+    authority.commit().await?;
+    lease_store.await?;
+    loss_store.await?;
+    let loaded = store
+        .load_lease(lease.correlation().lease, lease.correlation().generation)
+        .await?
+        .expect("the earlier lease offer remains durable");
+    let loss = store
+        .load_current_connection_loss(enrollment)
+        .await?
+        .expect("the later terminal transition advances the loss fence");
+
+    assert_eq!(loaded, lease);
+    assert_eq!(loss.connection_epoch(), connection.epoch());
     drop(pool);
     Ok(())
 }
