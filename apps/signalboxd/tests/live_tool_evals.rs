@@ -214,6 +214,8 @@ const ARBITRARY_EVAL_SESSION_ID: u128 = 0x9107;
 const ARBITRARY_EVAL_MODEL_CALL_ID: u128 = 0x9108;
 const ARBITRARY_SECOND_EVAL_MODEL_CALL_ID: u128 = 0x9109;
 const ARBITRARY_SECOND_EVAL_REQUEST_ID: u128 = 0x910a;
+const ARBITRARY_THIRD_EVAL_REQUEST_ID: u128 = 0x910d;
+const ARBITRARY_FOURTH_EVAL_REQUEST_ID: u128 = 0x910e;
 const ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX: u64 = 1;
 const ARBITRARY_REQUEST_ENTRY_INDEX: u64 = 2;
 const ARBITRARY_LATE_RESULT_ENTRY_INDEX: u64 = 3;
@@ -3723,8 +3725,8 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
 fn unforced_workspace_tier_rejects_more_than_the_bounded_model_calls() {
     let first = Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID);
     let second = Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID);
-    let third = Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID + 1);
-    let fourth = Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID + 2);
+    let third = Uuid::from_u128(ARBITRARY_THIRD_EVAL_REQUEST_ID);
+    let fourth = Uuid::from_u128(ARBITRARY_FOURTH_EVAL_REQUEST_ID);
     let outcome = CaseOutcome {
         target: None,
         expected_arguments: None,
