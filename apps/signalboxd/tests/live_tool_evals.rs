@@ -131,12 +131,22 @@ const GIT_STAGE_CONTENT: &str = "stage me\n";
 const GIT_WRONG_STAGE_CONTENT: &str = "wrong staged bytes\n";
 const GIT_COMMIT_PATH: &str = "commit-me.txt";
 const GIT_COMMIT_CONTENT: &str = "commit me\n";
+const GIT_DIFF_OVERFLOW_PATH: &str = "zz-diff-overflow.txt";
+const GIT_DIFF_OVERFLOW_BYTE: char = 'x';
+const EXPECTED_GIT_DIFF_MAX_BYTES: usize = 128 * 1024;
+const GIT_DIFF_OVERFLOW_CONTENT_BYTES: usize = EXPECTED_GIT_DIFF_MAX_BYTES + 1;
 const GIT_NATURAL_PATH: &str = "eval.txt";
 const GIT_NATURAL_CONTENT: &str = "natural eval\n";
 const GIT_DRIFTED_NATURAL_CONTENT: &str = "drifted eval\n";
 const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
 const GIT_SWITCH_CONTENT: &str = "seed two\n";
+const GIT_BASE_CONTENT: &str = "seed three\n";
 const GIT_BASE_BRANCH: &str = "eval-base";
+const GIT_MERGE_HEAD_PATH: &str = "MERGE_HEAD";
+const GIT_MERGE_MESSAGE_PATH: &str = "MERGE_MSG";
+const GIT_MERGE_MODE_PATH: &str = "MERGE_MODE";
+const GIT_MERGE_MESSAGE: &str = "synthetic forced merge\n";
+const GIT_MERGE_MODE: &str = "";
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
 const WORKSPACE_SEED: &str = "alpha\nbeta fixture\nalpha\n";
 const WORKSPACE_GLOB_DIRECTORY: &str = "glob-scope";
@@ -670,8 +680,20 @@ impl FamilySuite {
     fn prepare_for(&self, tool: &str) -> EvalResult {
         if self.family == EvalFamily::Git {
             match tool {
-                GIT_CREATE_COMMIT_NAME => stage_path(self.workspace.path(), GIT_COMMIT_PATH)?,
-                GIT_DIFF_NAME => stage_path(self.workspace.path(), GIT_STAGE_PATH)?,
+                GIT_CREATE_COMMIT_NAME => {
+                    stage_path(self.workspace.path(), GIT_COMMIT_PATH)?;
+                    let seed = self.git_seed.ok_or_else(|| {
+                        io::Error::other("the Git eval suite has no captured seed identity")
+                    })?;
+                    install_git_merge_state(self.workspace.path(), seed)?;
+                }
+                GIT_DIFF_NAME => {
+                    stage_path(self.workspace.path(), GIT_STAGE_PATH)?;
+                    fs::write(
+                        self.workspace.path().join(GIT_DIFF_OVERFLOW_PATH),
+                        git_diff_overflow_content(),
+                    )?;
+                }
                 _ => {}
             }
         }
@@ -714,7 +736,10 @@ impl FamilySuite {
         };
         match self.family {
             EvalFamily::Git => {
-                git_forced_case_passed(self.workspace.path(), case.name, &arguments, &result)
+                let seed = self.git_seed.ok_or_else(|| {
+                    io::Error::other("the Git eval suite has no captured seed identity")
+                })?;
+                git_forced_case_passed(self.workspace.path(), seed, case.name, &arguments, &result)
             }
             EvalFamily::Workspace => {
                 workspace_forced_case_passed(self.workspace.path(), case.name, &arguments, &result)
@@ -751,32 +776,38 @@ impl FamilySuite {
 
 fn git_forced_case_passed(
     root: &Path,
+    seed: Oid,
     name: &str,
     arguments: &serde_json::Value,
     result: &serde_json::Value,
 ) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let head = repository.head()?.peel_to_commit()?;
+    let seed_commit = repository.find_commit(seed)?;
+    let log_target = seed_commit.parent(0)?;
     let passed = match name {
         GIT_BRANCH_CREATE_NAME => {
             let Some(branch_name) = arguments["name"].as_str() else {
                 return Ok(false);
             };
-            let Some(start) = arguments["start"].as_str() else {
+            let Some(_start) = arguments["start"].as_str() else {
                 return Ok(false);
             };
-            let expected = repository.revparse_single(start)?.peel_to_commit()?.id();
+            let expected = log_target.id();
             let branch = repository.find_branch(branch_name, BranchType::Local)?;
+            let start_branch = repository.find_branch("log-target", BranchType::Local)?;
             let base = repository
                 .find_branch(GIT_BASE_BRANCH, BranchType::Local)?
                 .into_reference()
                 .peel_to_commit()?;
             result["branch"] == branch_name
                 && branch.get().target() == Some(expected)
+                && start_branch.get().target() == Some(expected)
                 && result["head"] == expected.to_string()
                 && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
-                && head.id() == base.id()
-                && fs::read_to_string(root.join(GIT_SEED_PATH))? == "seed three\n"
+                && head.id() == seed
+                && base.id() == seed
+                && fs::read_to_string(root.join(GIT_SEED_PATH))? == GIT_BASE_CONTENT
                 && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
         }
         GIT_BRANCH_SWITCH_NAME => {
@@ -786,8 +817,9 @@ fn git_forced_case_passed(
             let branch = repository.find_branch(branch_name, BranchType::Local)?;
             let branch_target = branch.get().target();
             result["branch"] == branch_name
-                && branch_target == Some(head.id())
-                && result["head"] == head.id().to_string()
+                && branch_target == Some(log_target.id())
+                && head.id() == log_target.id()
+                && result["head"] == log_target.id().to_string()
                 && repository.head()?.shorthand().ok() == Some(branch_name)
                 && fs::read_to_string(root.join(GIT_SEED_PATH))? == GIT_SWITCH_CONTENT
                 && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
@@ -805,34 +837,45 @@ fn git_forced_case_passed(
                     &head,
                     GIT_COMMIT_PATH,
                     GIT_COMMIT_CONTENT.as_bytes(),
+                    2,
                 )?
+                && head.parent_id(0)? == seed
+                && head.parent_id(1)? == log_target.id()
+                && git_merge_state_is_clean(&repository)
         }
         GIT_DIFF_NAME => {
-            result["patch"].as_str() == Some(expected_git_worktree_patch(root)?.as_str())
-                && result["truncated"] == false
+            result["patch"].as_str() == Some(expected_bounded_git_worktree_patch(root)?.as_str())
+                && result["truncated"] == true
+                && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
+                && head.id() == seed
                 && git_diff_fixture_unchanged(root, &repository)?
         }
         GIT_LOG_NAME => {
-            let Some(revision) = arguments["revision"].as_str() else {
+            let Some(_revision) = arguments["revision"].as_str() else {
                 return Ok(false);
             };
             let Some(max_entries) = arguments["max_entries"].as_u64() else {
                 return Ok(false);
             };
-            let expected = repository.revparse_single(revision)?.peel_to_commit()?;
+            let target_branch = repository.find_branch("log-target", BranchType::Local)?;
             result["commits"].as_array().is_some_and(|commits| {
                 u64::try_from(commits.len()).ok() == Some(max_entries)
                     && commits.first().is_some_and(|commit| {
-                        commit["commit"] == expected.id().to_string()
-                            && commit["author_name"] == expected.author().name().unwrap_or_default()
+                        commit["commit"] == log_target.id().to_string()
+                            && commit["author_name"]
+                                == log_target.author().name().unwrap_or_default()
                             && commit["author_name_truncated"] == false
                             && commit["author_email"]
-                                == expected.author().email().unwrap_or_default()
+                                == log_target.author().email().unwrap_or_default()
                             && commit["author_email_truncated"] == false
-                            && commit["message"] == expected.message().unwrap_or_default()
+                            && commit["message"] == log_target.message().unwrap_or_default()
                             && commit["message_truncated"] == false
                     })
             }) && result["truncated"] == true
+                && target_branch.get().target() == Some(log_target.id())
+                && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
+                && head.id() == seed
+                && git_status_fixture_unchanged(root, &repository)?
         }
         GIT_STAGE_NAME => {
             let Some(paths) = arguments["paths"].as_array() else {
@@ -860,10 +903,11 @@ fn git_forced_case_passed(
                 .flatten()
                 .filter_map(|entry| entry["path"].as_str())
                 .collect::<BTreeSet<_>>();
-            let branch = repository.head()?.shorthand().ok().map(str::to_owned);
-            result["branch"].as_str() == branch.as_deref()
+            result["branch"].as_str() == Some(GIT_BASE_BRANCH)
                 && result["branch_truncated"] == false
-                && result["head"] == head.id().to_string()
+                && result["head"] == seed.to_string()
+                && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
+                && head.id() == seed
                 && entries.is_some_and(|entries| entries.len() == 3)
                 && entries.is_some_and(|entries| {
                     entries.iter().all(|entry| {
@@ -874,6 +918,7 @@ fn git_forced_case_passed(
                 })
                 && paths == BTreeSet::from([GIT_STAGE_PATH, GIT_COMMIT_PATH, GIT_NATURAL_PATH])
                 && result["truncated"] == false
+                && git_status_fixture_unchanged(root, &repository)?
         }
         _ => false,
     };
@@ -885,8 +930,9 @@ fn commit_adds_exact_fixture(
     commit: &git2::Commit<'_>,
     path: &str,
     expected: &[u8],
+    expected_parent_count: usize,
 ) -> EvalResult<bool> {
-    if commit.parent_count() != 1 {
+    if commit.parent_count() != expected_parent_count {
         return Ok(false);
     }
     let parent = commit.parent(0)?;
@@ -914,7 +960,12 @@ fn commit_adds_exact_fixture(
 
 fn expected_git_worktree_patch(root: &Path) -> EvalResult<String> {
     let mut expected = Vec::new();
-    for path in [GIT_COMMIT_PATH, GIT_NATURAL_PATH, GIT_STAGE_PATH] {
+    for path in [
+        GIT_COMMIT_PATH,
+        GIT_NATURAL_PATH,
+        GIT_STAGE_PATH,
+        GIT_DIFF_OVERFLOW_PATH,
+    ] {
         let content = fs::read(root.join(path))?;
         let mut options = DiffOptions::new();
         options.force_text(true);
@@ -944,6 +995,19 @@ fn expected_git_worktree_patch(root: &Path) -> EvalResult<String> {
     String::from_utf8(expected).map_err(Into::into)
 }
 
+fn expected_bounded_git_worktree_patch(root: &Path) -> EvalResult<String> {
+    expected_git_worktree_patch(root)?
+        .get(..EXPECTED_GIT_DIFF_MAX_BYTES)
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::other("the Git diff fixture does not exceed its bound").into())
+}
+
+fn git_diff_overflow_content() -> String {
+    GIT_DIFF_OVERFLOW_BYTE
+        .to_string()
+        .repeat(GIT_DIFF_OVERFLOW_CONTENT_BYTES)
+}
+
 fn git_diff_fixture_unchanged(root: &Path, repository: &Repository) -> EvalResult<bool> {
     Ok(
         repository.status_file(Path::new(GIT_STAGE_PATH))? == Status::INDEX_NEW
@@ -951,8 +1015,29 @@ fn git_diff_fixture_unchanged(root: &Path, repository: &Repository) -> EvalResul
             && repository.status_file(Path::new(GIT_NATURAL_PATH))? == Status::WT_NEW
             && fs::read(root.join(GIT_STAGE_PATH))? == GIT_STAGE_CONTENT.as_bytes()
             && fs::read(root.join(GIT_COMMIT_PATH))? == GIT_COMMIT_CONTENT.as_bytes()
+            && fs::read(root.join(GIT_NATURAL_PATH))? == GIT_NATURAL_CONTENT.as_bytes()
+            && fs::read(root.join(GIT_DIFF_OVERFLOW_PATH))?
+                == git_diff_overflow_content().as_bytes(),
+    )
+}
+
+fn git_status_fixture_unchanged(root: &Path, repository: &Repository) -> EvalResult<bool> {
+    Ok(
+        repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
+            && repository.status_file(Path::new(GIT_STAGE_PATH))? == Status::WT_NEW
+            && repository.status_file(Path::new(GIT_COMMIT_PATH))? == Status::WT_NEW
+            && repository.status_file(Path::new(GIT_NATURAL_PATH))? == Status::WT_NEW
+            && fs::read(root.join(GIT_SEED_PATH))? == GIT_BASE_CONTENT.as_bytes()
+            && fs::read(root.join(GIT_STAGE_PATH))? == GIT_STAGE_CONTENT.as_bytes()
+            && fs::read(root.join(GIT_COMMIT_PATH))? == GIT_COMMIT_CONTENT.as_bytes()
             && fs::read(root.join(GIT_NATURAL_PATH))? == GIT_NATURAL_CONTENT.as_bytes(),
     )
+}
+
+fn git_merge_state_is_clean(repository: &Repository) -> bool {
+    !repository.path().join(GIT_MERGE_HEAD_PATH).exists()
+        && !repository.path().join(GIT_MERGE_MESSAGE_PATH).exists()
+        && !repository.path().join(GIT_MERGE_MODE_PATH).exists()
 }
 
 fn staged_blob_matches_fixture(
@@ -1013,6 +1098,7 @@ fn workspace_forced_case_passed(
                 && result["bytes_written"] == expected.len()
                 && result["created"] == true
                 && fs::read_to_string(root.join(path))? == expected
+                && fs::read(root.join(WORKSPACE_SEED_PATH))? == WORKSPACE_SEED.as_bytes()
         }
         READ_FILE_NAME => {
             let Some(path) = arguments["path"].as_str() else {
@@ -1173,7 +1259,7 @@ fn seed_git_repository(root: &Path) -> EvalResult<Oid> {
     let second = commit_git_seed_revision(&repository, &commit, GIT_SWITCH_CONTENT, "second seed")?;
     repository.branch("log-target", &second, false)?;
     repository.branch("switch-target", &second, false)?;
-    let third = commit_git_seed_revision(&repository, &second, "seed three\n", "third seed")?;
+    let third = commit_git_seed_revision(&repository, &second, GIT_BASE_CONTENT, "third seed")?;
     repository.branch(GIT_BASE_BRANCH, &third, false)?;
     repository.set_head(&format!("refs/heads/{GIT_BASE_BRANCH}"))?;
     Ok(third.id())
@@ -1214,6 +1300,21 @@ fn stage_path(root: &Path, path: &str) -> EvalResult {
     Ok(())
 }
 
+fn install_git_merge_state(root: &Path, seed: Oid) -> EvalResult {
+    let repository = Repository::open(root)?;
+    let merge_parent = repository.find_commit(seed)?.parent_id(0)?;
+    fs::write(
+        repository.path().join(GIT_MERGE_HEAD_PATH),
+        format!("{merge_parent}\n"),
+    )?;
+    fs::write(
+        repository.path().join(GIT_MERGE_MESSAGE_PATH),
+        GIT_MERGE_MESSAGE,
+    )?;
+    fs::write(repository.path().join(GIT_MERGE_MODE_PATH), GIT_MERGE_MODE)?;
+    Ok(())
+}
+
 fn commit_staged_paths(root: &Path, message: &str) -> EvalResult {
     commit_staged_paths_with_identity(root, message, GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL)
 }
@@ -1229,6 +1330,15 @@ fn commit_staged_paths_with_identity(
     let tree_id = index.write_tree()?;
     let tree = repository.find_tree(tree_id)?;
     let parent = repository.head()?.peel_to_commit()?;
+    let merge_parent = fs::read_to_string(repository.path().join(GIT_MERGE_HEAD_PATH))
+        .ok()
+        .map(|value| Oid::from_str(value.trim()))
+        .transpose()?
+        .map(|oid| repository.find_commit(oid))
+        .transpose()?;
+    let parents = merge_parent
+        .as_ref()
+        .map_or_else(|| vec![&parent], |merge_parent| vec![&parent, merge_parent]);
     let signature = Signature::now(author_name, author_email)?;
     repository.commit(
         Some("HEAD"),
@@ -1236,8 +1346,19 @@ fn commit_staged_paths_with_identity(
         &signature,
         message,
         &tree,
-        &[&parent],
+        &parents,
     )?;
+    for state_path in [
+        GIT_MERGE_HEAD_PATH,
+        GIT_MERGE_MESSAGE_PATH,
+        GIT_MERGE_MODE_PATH,
+    ] {
+        match fs::remove_file(repository.path().join(state_path)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     Ok(())
 }
 
@@ -1268,6 +1389,7 @@ fn git_natural_state_passed(root: &Path, seed: Oid) -> EvalResult<bool> {
         &head,
         GIT_NATURAL_PATH,
         GIT_NATURAL_CONTENT.as_bytes(),
+        1,
     )?;
     Ok(message_matches
         && exactly_one_descendant_commit
@@ -3308,7 +3430,7 @@ fn forced_git_commit_verifier_accepts_the_exact_fixture_tree() -> EvalResult {
     let message = arguments["message"]
         .as_str()
         .expect("the Git commit fixture has a message");
-    stage_path(suite.workspace.path(), GIT_COMMIT_PATH)?;
+    suite.prepare_for(GIT_CREATE_COMMIT_NAME)?;
     commit_staged_paths(suite.workspace.path(), message)?;
     let head = Repository::open(suite.workspace.path())?
         .head()?
@@ -3337,7 +3459,12 @@ fn forced_git_commit_verifier_rejects_the_wrong_fixture_tree() -> EvalResult {
     let message = arguments["message"]
         .as_str()
         .expect("the Git commit fixture has a message");
-    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    suite.prepare_for(GIT_CREATE_COMMIT_NAME)?;
+    let repository = Repository::open(suite.workspace.path())?;
+    let mut index = repository.index()?;
+    index.remove_path(Path::new(GIT_COMMIT_PATH))?;
+    index.add_path(Path::new(GIT_STAGE_PATH))?;
+    index.write()?;
     commit_staged_paths(suite.workspace.path(), message)?;
     let head = Repository::open(suite.workspace.path())?
         .head()?
@@ -3366,12 +3493,47 @@ fn forced_git_commit_verifier_rejects_the_wrong_identity() -> EvalResult {
     let message = arguments["message"]
         .as_str()
         .expect("the Git commit fixture has a message");
-    stage_path(suite.workspace.path(), GIT_COMMIT_PATH)?;
+    suite.prepare_for(GIT_CREATE_COMMIT_NAME)?;
     commit_staged_paths_with_identity(
         suite.workspace.path(),
         message,
         SYNTHETIC_OTHER_GIT_AUTHOR_NAME,
         SYNTHETIC_OTHER_GIT_AUTHOR_EMAIL,
+    )?;
+    let head = Repository::open(suite.workspace.path())?
+        .head()?
+        .peel_to_commit()?
+        .id()
+        .to_string();
+    let result = serde_json::json!({
+        "commit": head,
+        "state_cleaned": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_commit_verifier_rejects_retained_merge_state() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_CREATE_COMMIT_NAME)
+        .expect("the Git commit fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let message = arguments["message"]
+        .as_str()
+        .expect("the Git commit fixture has a message");
+    suite.prepare_for(GIT_CREATE_COMMIT_NAME)?;
+    commit_staged_paths(suite.workspace.path(), message)?;
+    install_git_merge_state(
+        suite.workspace.path(),
+        suite
+            .git_seed
+            .expect("the Git eval suite has a captured seed identity"),
     )?;
     let head = Repository::open(suite.workspace.path())?
         .head()?
@@ -3467,11 +3629,11 @@ fn forced_git_diff_verifier_accepts_the_seeded_worktree_patch() -> EvalResult {
         .iter()
         .find(|case| case.name == GIT_DIFF_NAME)
         .expect("the Git diff fixture exists");
-    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    suite.prepare_for(GIT_DIFF_NAME)?;
     let repository = Repository::open(suite.workspace.path())?;
     let result = serde_json::json!({
-        "patch": expected_git_worktree_patch(suite.workspace.path())?,
-        "truncated": false,
+        "patch": expected_bounded_git_worktree_patch(suite.workspace.path())?,
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
@@ -3491,9 +3653,10 @@ fn forced_git_diff_verifier_rejects_an_empty_patch() -> EvalResult {
         .iter()
         .find(|case| case.name == GIT_DIFF_NAME)
         .expect("the Git diff fixture exists");
+    suite.prepare_for(GIT_DIFF_NAME)?;
     let result = serde_json::json!({
         "patch": "",
-        "truncated": false,
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
@@ -3509,16 +3672,35 @@ fn forced_git_diff_verifier_rejects_an_unstaged_fixture() -> EvalResult {
         .iter()
         .find(|case| case.name == GIT_DIFF_NAME)
         .expect("the Git diff fixture exists");
-    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    suite.prepare_for(GIT_DIFF_NAME)?;
     let result = serde_json::json!({
-        "patch": expected_git_worktree_patch(suite.workspace.path())?,
-        "truncated": false,
+        "patch": expected_bounded_git_worktree_patch(suite.workspace.path())?,
+        "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
     let mut index = Repository::open(suite.workspace.path())?.index()?;
     index.remove_path(Path::new(GIT_STAGE_PATH))?;
     index.write()?;
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_diff_verifier_rejects_an_unbounded_patch() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_DIFF_NAME)
+        .expect("the Git diff fixture exists");
+    suite.prepare_for(GIT_DIFF_NAME)?;
+    let result = serde_json::json!({
+        "patch": expected_git_worktree_patch(suite.workspace.path())?,
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
 
     assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
@@ -3575,6 +3757,45 @@ fn forced_git_log_verifier_accepts_the_bounded_target() -> EvalResult {
     .to_string();
 
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_a_moved_target_reference() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+    repository
+        .find_reference("refs/heads/log-target")?
+        .set_target(
+            suite
+                .git_seed
+                .expect("the Git eval suite has a captured seed identity"),
+            "synthetic moved log target",
+        )?;
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
@@ -3644,6 +3865,87 @@ fn forced_git_status_verifier_rejects_incorrect_entry_metadata() -> EvalResult {
             }
         ],
         "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_status_verifier_rejects_a_repository_state_change() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_STATUS_NAME)
+        .expect("the Git status fixture exists");
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    let result = serde_json::json!({
+        "branch": GIT_BASE_BRANCH,
+        "branch_truncated": false,
+        "head": seed.to_string(),
+        "entries": [
+            {
+                "path": GIT_COMMIT_PATH,
+                "previous_path": null,
+                "index": "unchanged",
+                "worktree": "untracked"
+            },
+            {
+                "path": GIT_NATURAL_PATH,
+                "previous_path": null,
+                "index": "unchanged",
+                "worktree": "untracked"
+            },
+            {
+                "path": GIT_STAGE_PATH,
+                "previous_path": null,
+                "index": "unchanged",
+                "worktree": "untracked"
+            }
+        ],
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("switch-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    repository.checkout_tree(target.as_object(), None)?;
+    repository.set_head("refs/heads/switch-target")?;
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_write_verifier_rejects_collateral_mutation() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == WRITE_FILE_NAME)
+        .expect("the workspace write fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let path = arguments["path"]
+        .as_str()
+        .expect("the workspace write fixture has a path");
+    let content = arguments["content"]
+        .as_str()
+        .expect("the workspace write fixture has content");
+    fs::write(suite.workspace.path().join(path), content)?;
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_SEED_PATH),
+        WORKSPACE_DRIFTED_SEED,
+    )?;
+    let result = serde_json::json!({
+        "path": path,
+        "bytes_written": content.len(),
+        "created": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
