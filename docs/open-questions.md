@@ -265,8 +265,16 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   requires an observation surface no adapter currently captures: the Anthropic
   HTTP adapter reads only a request identifier from response headers, and the
   Codex CLI adapter's documented percentage headers are not established as
-  reachable through its process boundary. Which adapters can supply headroom,
-  and what a deployment may configure where none can, remains undecided. Blocks
+  reachable through its process boundary. What a deployment may configure where
+  no adapter supplies headroom is decided and no longer open: startup rejects
+  `headroom_reserve_percent`, `tie_break = "least_used"`, and any
+  `on_headroom_low` action other than `stay`, under the fail-closed admission
+  rule in
+  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection),
+  because a protection that silently never fires reads as one the deployment
+  has. What remains undecided is which adapters can supply headroom at all and
+  the normalized quantity, observation lifetime, and deterministic secondary
+  tie-break a later contract must define before `least_used` is admitted. Blocks
   capacity-aware selection, not availability failover. (S22)
 - **Detailed provider provenance representation.** Model identifier
   normalization is decided: the

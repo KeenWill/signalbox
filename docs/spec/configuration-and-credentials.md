@@ -846,11 +846,15 @@ nothing at all. Rather than enumerate those hazards one at a time, this contract
 states the single property the store must satisfy and one pass that establishes
 it.
 
-**Exclusive custody.** Every object the daemon reaches on the way to a
-credential value — each path component, the home itself, and each entry directly
-within the home — is reached without traversing a symlink, is owned by the
-daemon's effective user, and grants no access to any other principal beyond the
-traversal an ancestor must permit. An ancestor may instead be owned by `root`.
+**Exclusive custody.** No principal but the daemon's effective user may change
+what any path component denotes, and no principal but that user may reach the
+home or read a credential inside it. Concretely, in two parts, because ancestors
+and the home need different things: every path component is reached without
+traversing a symlink and cannot be renamed, replaced, or removed by another
+principal, though ordinary reading and traversal of an ancestor is expected and
+fine; and the home itself, together with every credential-bearing entry in it,
+is owned by the daemon's effective user and grants no other principal any access
+at all. An ancestor may be owned by `root`.
 
 One verification pass, the **custody walk**, establishes exactly that property,
 and every rule below is part of it rather than a separate check:
@@ -863,20 +867,31 @@ and every rule below is part of it rather than a separate check:
    races.
 3. Each ancestor must be a directory owned by the daemon's effective user or by
    `root`, and neither group- nor other-writable *unless* it carries the sticky
-   bit. Sticky is admitted because it permits creating entries while forbidding
-   renaming or removing one you do not own, which is what keeps a shared
-   directory like `/tmp` usable. Ancestors keep whatever traversal bits they
-   need; requiring otherwise would reject `/`.
+   bit. Read and traversal bits are expected and unrestricted: `/` is mode
+   `0755` on every ordinary system, and only write permission changes what a
+   name denotes. Sticky is admitted for the same reason — it permits creating
+   entries while forbidding renaming or removing one you do not own, which is
+   what keeps a shared directory like `/tmp` usable.
 4. The home must be a directory owned by the daemon's effective user with no
    group or other permission bit set at all — not write, not read, not execute,
-   and no sticky exemption. Denying group and other traversal is what stops
-   another principal reaching an entry inside it by name.
-5. Each entry directly within the home must open no-follow as a *regular file*
-   owned by the daemon's effective user with no group or other permission bit
-   set at all. A symlink, FIFO, socket, device, or nested directory is rejected
-   rather than inspected, and no entry is ever followed to a target outside the
-   verified home.
-6. It then records the home's device and inode as the profile's credential-home
+   and no sticky exemption. This is the rule that protects the home's *contents*
+   wholesale: with group and other traversal denied, no other principal can
+   reach anything inside it by name, whatever that thing is.
+5. Each **credential-bearing** entry — `auth.json`, and any other entry the
+   adapter contract names as a place the CLI reads credentials from — must open
+   no-follow as a *regular file* owned by the daemon's effective user with no
+   group or other permission bit set at all. A symlink, FIFO, socket, device, or
+   directory in that position is rejected rather than inspected. The point of
+   this step is not permissions, which step 4 already settled, but escape: a
+   symlink here would resolve to an object outside the verified home, and no
+   entry is ever followed out of it.
+6. Every other entry in the home is the CLI's own working data — `sessions/`,
+   `log/`, `skills/<name>/SKILL.md`, and whatever else that release keeps — and
+   is neither inspected nor constrained. It does not need to be: step 4 already
+   put the whole directory beyond another principal's reach, and requiring
+   otherwise would reject the ordinary operator-established homes this delivery
+   exists to reuse.
+7. It then records the home's device and inode as the profile's credential-home
    identity, and a later pass requires the same identity.
 
 A store failing any step is rejected exactly as a symlinked component is:
@@ -884,12 +899,12 @@ scheduling is blocked and no invocation starts against it.
 
 The facets that property covers, stated so a later report is either already
 answered or is honestly a new one: a symlink in any path component; a symlink or
-other non-regular credential entry; an ancestor, the home, or a credential file
-writable by another principal; the home traversable by another principal; a
-credential file readable by another principal; and a home replaced by a
-different object between passes. A hard link to a credential file from elsewhere
-is covered too, because the check is on the inode the descriptor names rather
-than on the path that reached it.
+other non-regular entry standing where a credential file belongs; an ancestor,
+the home, or a credential file writable by another principal; the home readable
+or traversable by another principal; a credential file readable by another
+principal; and a home replaced by a different object between passes. A hard link
+to a credential file from elsewhere is covered too, because the check is on the
+inode the descriptor names rather than on the path that reached it.
 
 Why ancestors and not just the home: `CODEX_HOME` reaches the child as a path,
 and the child resolves that path itself. A principal who can write any ancestor
@@ -921,13 +936,16 @@ covered facet above, each asserting that scheduling is blocked and no invocation
 starts: a symlinked path component, a symlinked `auth.json`, a non-regular
 `auth.json`, a group-writable ancestor without sticky, a world-writable home, a
 mode-`0644` credential file, a group-readable home, and a home whose identity
-changed between passes.
+changed between passes. It owes one acceptance test too, because a property this
+strict is as easily wrong in the rejecting direction: an ordinary home carrying
+`sessions/`, `log/`, and `skills/<name>/SKILL.md` beside a mode-`0600`
+`auth.json`, under a mode-`0755` `root`-owned ancestor chain, must be admitted.
 
 Every per-invocation recheck repeats the complete walk — every ancestor's
 ownership, mode, and sticky exemption, the home's own ownership and mode, its
-files, and the identity comparison — so a path that becomes writable after
-startup fails the next preparation rather than the next restart. Two
-`codex_home` profiles may not resolve to the same identity even when their
+credential-bearing entries, and the identity comparison — so a path that becomes
+writable after startup fails the next preparation rather than the next restart.
+Two `codex_home` profiles may not resolve to the same identity even when their
 lexically normalized paths differ. The daemon repeats that no-symlink walk
 before every invocation and requires the same identity; replacement or aliasing
 is a typed pre-send credential-configuration failure and starts no child. That
@@ -1011,30 +1029,31 @@ operator-authorized administrative boundary, idempotency and response contract
 before it can make an OAuth profile usable. The current closed process-protocol
 inventory is therefore complete and supplies none of these operations.
 
-Provisioning is explicit and never automatic. An operator-invoked command
-creates a scratch credential home, runs the adapter's own CLI device
-authorization inside it, relays the user code and verification URL, and on
-success harvests the resulting refresh token and non-secret account metadata
-into one transaction before destroying the scratch home. Scratch homes live
-beneath one daemon-owned `0700` root, are themselves `0700`, contain only
-daemon-owned `0600` regular files, and are created and removed through
-descriptor-relative operations that reject symlinks. Normal completion removes
-the home before returning. Before accepting work at every startup, the daemon
-scavenges every entry it can prove is an owned scratch home beneath that root;
-an ownership, type, or containment mismatch fails startup and removes nothing.
-Thus a host or daemon crash can leave only effective-user-restricted residue
-until the next startup, never an indefinitely trusted login store. The
-invocation must explicitly force the provider CLI's file or ephemeral credential
-backend to that scratch home and disable every OS keyring, credential helper,
-ambient home, and external store. Provisioning fails before starting the child
-or relaying an authorization code when the adapter cannot enforce that backend,
-and harvesting reads only the forced store beneath the scratch root. The
-interactive flow therefore stays in the provider's own client without allowing
-that client to persist outside daemon custody. Because each authorization mints
-an independent token family, provisioning neither disturbs nor depends on any
-other login for that account: an operator's existing CLI logins on this or any
-other machine keep working, and deleting the profile's stored authorization ends
-only the daemon's own family.
+Provisioning is explicit and never automatic, and the daemon performs the
+device-authorization exchange itself against the profile's configured
+`device_authorization_url`, `token_url`, `client_id`, and `scopes`. It does not
+drive the provider CLI's own login. That is not a preference: the pinned Codex
+CLI constructs its authorization from issuer, scope, and endpoint values baked
+into the binary, so a login driven through it would mint whatever tuple the CLI
+carries rather than the one the profile declares — and the profile's tuple is
+exactly what the storage contract below persists and later compares before every
+refresh. Driving the CLI would therefore either misbind the harvested token to a
+tuple it was not minted under, or persist a tuple that disagrees with the
+operator's document from the moment it is written. Doing the exchange in the
+daemon keeps one authority for what a stored authorization means, and it is the
+same authority that already sends every refresh POST.
+
+An operator-invoked command therefore requests a device authorization from the
+configured endpoint, relays the returned user code and verification URI to the
+operator, polls the configured token endpoint under the same
+one-POST-per-attempt and no-redirect rules the refresh path uses, and on success
+harvests the refresh token and non-secret account metadata into one transaction.
+No scratch credential home is involved, because no child runs: the CLI enters
+the picture only at dispatch, when it is handed a minted access token. Because
+each authorization mints an independent token family, provisioning neither
+disturbs nor depends on any other login for that account: an operator's existing
+CLI logins on this or any other machine keep working, and deleting the profile's
+stored authorization ends only the daemon's own family.
 
 A stored authorization is bound to the tuple it was minted under. Provisioning
 persists, in the same transaction as the token generation, the exact
@@ -1095,10 +1114,17 @@ shape carries an account identifier beside the token, and a subscription request
 forms a per-account header from it, so a store holding only an access token
 cannot produce a well-formed request. The identity is configuration-grade rather
 than secret, and including it changes nothing about what is withheld — the
-refresh token still never reaches a scratch home. It uses the same restrictive
-root, file modes, descriptor-relative operations, normal cleanup, and pre-work
-startup scavenging as provisioning and explicitly forces the CLI's file or
-ephemeral backend to that home while disabling ambient, keyring, helper, and
+refresh token still never reaches a scratch home. Dispatch is the only path that
+builds one. Scratch homes live beneath a single daemon-owned `0700` root, are
+themselves `0700`, contain only daemon-owned `0600` regular files, and are
+created and removed through descriptor-relative operations that reject symlinks;
+normal completion removes the home before the invocation returns. Before
+accepting work at every startup the daemon scavenges every entry it can prove is
+an owned scratch home beneath that root, and an ownership, type, or containment
+mismatch fails startup and removes nothing — so a host or daemon crash can leave
+only effective-user-restricted residue until the next startup, never an
+indefinitely trusted login store. Dispatch also explicitly forces the CLI's file
+or ephemeral backend to that home while disabling ambient, keyring, helper, and
 external stores. Failure to enforce that selection is a typed pre-send delivery
 failure and starts no CLI child. The access token is otherwise retained only in
 memory. The refresh token is not absent from the design — it is the whole of it
