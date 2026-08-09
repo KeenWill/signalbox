@@ -6929,6 +6929,13 @@ impl CaseOutcome {
         round_tripped_result_count(&self.tool_results)
     }
 
+    fn infrastructure_label(&self) -> &'static str {
+        self.tool_results
+            .iter()
+            .find_map(exec_result_infrastructure_label)
+            .unwrap_or("—")
+    }
+
     fn exact_forced_executor_failed(&self) -> bool {
         let Some(target) = self.target.as_deref() else {
             return false;
@@ -7088,22 +7095,33 @@ fn round_tripped_result_count(results: &[TrackedToolResult]) -> usize {
 /// Whether a serialized direct-command or Cargo result reports a runner failure
 /// before or around execution, rather than evidence about the requested task.
 fn exec_result_is_infrastructure(result: &TrackedToolResult) -> bool {
+    exec_result_infrastructure_label(result).is_some()
+}
+
+fn exec_result_infrastructure_label(result: &TrackedToolResult) -> Option<&'static str> {
     if result.is_error {
-        return false;
+        return None;
     }
     let Ok(result) = serde_json::from_str::<serde_json::Value>(&result.content) else {
-        return false;
+        return None;
     };
     let execution = result.get("execution").unwrap_or(&result);
-    matches!(
-        execution["confinement"]["kind"].as_str(),
-        Some("sandbox_refused" | "sandbox_setup_failed")
-    ) || matches!(
-        execution["outcome"]["kind"].as_str(),
-        Some("spawn_failed" | "supervision_failed")
-    ) || execution
+    if execution
         .get("preparation_failure")
         .is_some_and(|failure| !failure.is_null())
+    {
+        return Some("preparation failure");
+    }
+    match execution["confinement"]["kind"].as_str() {
+        Some("sandbox_refused") => return Some("sandbox refused"),
+        Some("sandbox_setup_failed") => return Some("sandbox setup failed"),
+        _ => {}
+    }
+    match execution["outcome"]["kind"].as_str() {
+        Some("spawn_failed") => Some("spawn failed"),
+        Some("supervision_failed") => Some("supervision failed"),
+        _ => None,
+    }
 }
 
 /// Whether one serialized execution reports a zero-code process exit.
@@ -12576,6 +12594,7 @@ fn forced_sandboxed_exec_tier_reports_setup_failure_as_infrastructure() {
         outcome.forced_disposition(),
         EvalDisposition::Infrastructure
     );
+    assert_eq!(outcome.infrastructure_label(), "sandbox setup failed");
 }
 
 #[test]
@@ -13790,7 +13809,7 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::other("the tool-eval summary path is missing"))?;
     let mut markdown = format!(
-        "## {} daemon tool eval — `{}`\n\n### Forced tier\n\n| Tool | Result | Calls observed | Tool result round-trips | Turn |\n| --- | --- | --- | ---: | --- |\n",
+        "## {} daemon tool eval — `{}`\n\n### Forced tier\n\n| Tool | Result | Infrastructure | Calls observed | Tool result round-trips | Turn |\n| --- | --- | --- | --- | ---: | --- |\n",
         report.family.as_str(),
         report.family.model(),
     );
@@ -13799,7 +13818,8 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         let result = outcome.forced_disposition().label();
         let turn = outcome.snapshot.turn_disposition.label();
         markdown.push_str(&format!(
-            "| `{target}` | {result} | {} | {} | `{turn}` |\n",
+            "| `{target}` | {result} | {} | {} | {} | `{turn}` |\n",
+            outcome.infrastructure_label(),
             outcome.snapshot.called_names(),
             outcome.round_tripped_result_count(),
         ));
