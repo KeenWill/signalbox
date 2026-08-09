@@ -1268,7 +1268,20 @@ execution names a request whose state is `awaiting_approval`, `denied`,
 `approved`, `prepared`, `closed`, or `attempt_ended`. `approved` means the
 proposal-ordered request has approval but no physical attempt yet. Durable equal
 replay is checked first against the exact stored operation and returns its
-original receipt without requiring a still-live execution attempt.
+original receipt without requiring a still-live execution attempt. The
+credential-administration operations this page adds extend that same closed
+inventory, as `rejected` details rather than new top-level codes: a
+`clear_credential_exclusion` rejection admits
+`unknown_credential_exclusion { target }`, carrying the exact closed target
+object the request named, and
+`stale_generation { target, current_record_generation }`, carrying that same
+target and the newer active generation at the target's own scope as a positive
+canonical decimal string. A `read_credential_pool_policy` rejection admits
+`unknown_pool_policy { session_id, turn_id, pool_policy_id }`. Each is a
+rejection detail because each names a refused precondition on an otherwise
+well-formed request, which is exactly what that closed set is for; none is a
+transport or framing fault, so none earns a top-level code.
+
 `spawn_session` additionally admits
 `delegation_spawn_conflict { tool_request_id }` for a non-equal replay and
 `delegated_child_identity_collision { child_session_id }` when the generated

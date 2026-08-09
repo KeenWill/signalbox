@@ -829,12 +829,18 @@ immediately before refreshing and adopts a token another process wrote rather
 than refreshing again, so the residual race is two processes crossing the
 refresh threshold within one token-exchange round trip — narrow, because a
 process refreshes about once per access-token lifetime. When it does fire the
-authorization is invalidated and the profile quarantines; recovery is the
-ordinary re-provisioning an operator already performs, and the pool fails over
-meanwhile. A deployment preferring not to carry that risk sets the optional
-bound, which is unbounded when absent. The knob exists because the tradeoff is a
-deployment's to make and code cannot observe which side of it a given operator
-is on.
+authorization is invalidated, and the provider then rejects that profile's
+credential on every later call until an operator re-provisions it. What the pool
+does about those rejections is its configured `on_credential_rejected` action,
+not an unconditional quarantine: the Codex CLI reports one undifferentiated
+authentication failure, so nothing downstream can tell this race from an
+ordinary rejection, and the trigger contract below states that single policy. A
+deployment that wants this race to take the profile out of rotation configures
+`quarantine` there, which is also what makes the pool fail over meanwhile;
+recovery is the ordinary re-provisioning an operator already performs. A
+deployment preferring not to carry that risk sets the optional bound, which is
+unbounded when absent. The knob exists because the tradeoff is a deployment's to
+make and code cannot observe which side of it a given operator is on.
 
 Two profiles whose validated credential-home identities differ are independent
 token families with nothing shared, so a pool holds as many as a deployment has
@@ -845,6 +851,15 @@ profiles. The operations policy does not apply, because rotation happens inside
 the store rather than at an external source of truth. And a process the daemon
 did not start — an operator running the CLI by hand against the same directory —
 is outside anything the daemon can coordinate.
+
+**Committed unimplemented functionality — capacity reservations and
+contention.** No present composition reserves capacity, records an invocation
+reservation, parks a turn on a bounded member, or enforces
+`max_concurrent_invocations` at all; the grammar validates and retains the bound
+and nothing consumes it. The rest of this subsection is the contract its
+implementing child must satisfy, and no present migration, repository operation,
+active turn phase, or runtime supplies any of it. An operator setting the bound
+on this build gets no enforcement.
 
 Where `max_concurrent_invocations` is set and reached, that member is skipped
 during selection exactly as an excluded member is, and selection continues

@@ -1536,10 +1536,19 @@ from the stored row.
 
 A chain-exclusion row is scoped to the session, turn, immutable pool policy,
 profile, and predecessor model call whose qualifying observation created it. It
-carries active/cleared state and that exact observation correlation rather than
-an independently allocated generation. Clearing marks only that correlation
-inactive, retains it for replay, and wakes a matching indefinite availability
-wait without inventing provider evidence.
+carries that exact observation correlation rather than an independently
+allocated generation, and two separate states: a *turn-local* fact that this
+profile's qualifying failure occurred in this turn, and the *clearable*
+active/cleared state an operator command touches.
+
+The turn-local fact is insert-only and never cleared. It is what the execution
+contract means when it says nothing readmits a failed member within its turn, so
+an operator clear during a parked turn marks the clearable state inactive, wakes
+a matching indefinite availability wait, and still leaves the member excluded
+for the remainder of that turn — the clear takes effect from the next turn. It
+invents no provider evidence either way. Without the split there would be one
+row to both retain and clear, and a clear mid-turn would either readmit the
+failed profile or make the turn unable to record why it stayed excluded.
 
 Pre-call exhaustion uses one turn-correlated failure header with cause exactly
 `credential_pool_exhausted`, the current attempt, and the immutable policy
@@ -1549,11 +1558,15 @@ optional reset. Deferred constraints require the complete policy membership, no
 model call for the attempt, `KnownFailure` attempt end, `Failed` turn, exact
 `TurnFailed` marker and terminal frontier, and one typed preparation-failure
 outbox row in the same commit. Reconstitution rejects a missing, duplicate,
-reordered, or foreign evidence row and any correlation that was not active in
-that failure commit. It accepts a retained correlation later marked inactive by
-an authorized clear; the immutable generation or predecessor observation and its
-active-at-failure fact remain historical evidence. This paragraph constrains the
-future schema; no present storage surface provides it.
+reordered, or foreign evidence row and any correlation with no durable basis at
+that failure commit. A chain exclusion's basis is its turn-local fact, which no
+clear removes, so a member excluded by a predecessor failure supplies complete
+evidence even when an operator cleared its clearable state while the turn was
+parked. Every other exclusion kind uses its active-at-commit record, and
+reconstitution accepts one later marked inactive by an authorized clear; the
+immutable generation or predecessor observation and its active-at-failure fact
+remain historical evidence. This paragraph constrains the future schema; no
+present storage surface provides it.
 
 **Committed unimplemented functionality — availability-successor storage.** No
 present migration, repository operation, or reconstitution path stores an
