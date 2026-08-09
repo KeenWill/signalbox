@@ -57,9 +57,9 @@ Enrollment is explicit and per-page, following the promotion discipline the
 style-rule checker already uses in `.github/workflows/rust.yml`: a rule gates
 where the tree satisfies it, and extending it to another page is a deliberate
 change that restructures that page, never a side effect of editing this file.
-Eleven specification pages still carry bold-prose tier labels; enrolling one
-means giving it headings first. A checker that failed on all of them at once
-would be reverted rather than satisfied.
+Ten specification pages still carry bold-prose tier labels; enrolling one means
+giving it headings first. A checker that failed on all of them at once would be
+reverted rather than satisfied.
 
 Run from the repository root; exits nonzero with a per-failure report naming
 every page and line involved.
