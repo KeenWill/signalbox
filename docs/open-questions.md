@@ -236,48 +236,38 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
 ## Model fallback and provenance
 
-- **Automatic fallback.** Decided and specified: qualifying causes, the
-  successor-call shape, and pool exhaustion are owned by
-  [availability successor calls](spec/model-call-execution.md#availability-successor-calls);
-  the pool grammar, per-membership ranking, and closed action vocabulary by
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
-  What remains open is the client projection: snapshots expose each call's usage
-  and the final turn state, while the predecessor, cause, and successor relation
-  is committed future storage that no present migration or repository operation
-  supplies. Blocks fallback UI, not fallback. (S22)
+- **Whether automatic fallback is supported.** Decided: a classified
+  availability failure may be followed by a distinct successor model call
+  authenticated by another credential profile. The compatibility constraint this
+  places on present change is recorded in
+  [one call, one physical interaction](spec/model-call-execution.md#one-call-one-physical-interaction);
+  no present surface implements it. (S22, S23)
+- **Which failure classes permit fallback.** Decided: only provider quota
+  exhaustion, rate limiting, and overload accompanied by distinct typed evidence
+  that the request was not accepted. The availability classification alone is
+  insufficient. Refusal never qualifies. An ambiguous outcome never qualifies,
+  because a lost acknowledgement cannot prove the provider did not act
+  (INV-025). Credential resolution failure never qualifies: it is deployment
+  misconfiguration, and substitution would hide it. (S22, S23)
+- **Fallback configuration.** Decided in shape: a deployment groups
+  interchangeable credential profiles into a pool, ranks each membership within
+  its own pool rather than globally, and states the per-trigger response,
+  tie-break rule, and pool-exhaustion behavior as closed vocabularies admitted
+  at startup. Exact configuration grammar is an implementation choice for the
+  change that introduces it. What remains open is the per-turn client visibility
+  surface while a successor call is selected. (S20, S22)
 - **Whether an automatic successor may cross adapter kinds.** Decided for the
-  first slice by
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
-  Whether mixed pools are ever admitted, and what would reconcile two adapters'
-  authentication shapes if they were, remains open. (S22)
-- **Provider headroom observation.** Selecting a member by remaining capacity
-  requires an observation no composed adapter makes: the Anthropic HTTP adapter
-  reads only a request identifier from response headers, and the Codex CLI
-  adapter's documented percentage headers are not established as reachable
-  through its process boundary. Startup therefore rejects the capacity-dependent
-  configuration rather than accepting it inert. Which adapters can supply
-  headroom, and whether a free probe exists that does not consume the quota it
-  reports, remains undecided. Blocks capacity-aware selection, not availability
-  failover.
-- **Zero-cost liveness probes.** Quarantine semantics are decided and owned by
-  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection):
-  durable, profile-scoped, cleared by an operator command or by a probe that
-  calls no model. What remains open is whether any adapter can offer such a
-  probe. Absent one, an operator command is the only clearing path. Blocks
-  automatic recovery from a rejected credential, not recovery itself.
-- **Access-token-only Codex CLI conformance evidence.** The committed `oauth`
-  delivery contract is owned by
-  [credential deliveries](spec/configuration-and-credentials.md#credential-deliveries).
-  What remains open is the minimum supported CLI version and exact live
-  conformance check that establish this behavior. The implementing slice cannot
-  land until that evidence exists; a current CLI version declining the store
-  blocks that slice rather than making the committed delivery optional.
-- **Reuse-detection blast radius.** Whether a provider rejecting a reused
-  refresh token invalidates only that token or the whole authorization family is
-  not determinable from either CLI's source. It does not affect the `oauth`
-  delivery, which has exactly one refresher, but it bounds how bad a
-  `codex_home` concurrency violation is: single-token rejection is recoverable,
-  family revocation is account loss.
+  first slice: no. A pool's members share one adapter, so cross-kind
+  substitution is inexpressible rather than merely disabled, and moving a
+  session between adapter kinds stays an explicit defaults replacement. Whether
+  mixed pools are ever admitted remains open. (S22)
+- **Provider headroom observation.** Selecting a profile by remaining capacity
+  requires an observation surface no adapter currently captures: the Anthropic
+  HTTP adapter reads only a request identifier from response headers, and the
+  Codex CLI adapter's documented percentage headers are not established as
+  reachable through its process boundary. Which adapters can supply headroom,
+  and what a deployment may configure where none can, remains undecided. Blocks
+  capacity-aware selection, not availability failover. (S22)
 - **Detailed provider provenance representation.** Model identifier
   normalization is decided: the
   [provider-target identity rule](spec/model-call-execution.md#provider-target-identity)
