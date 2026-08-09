@@ -146,6 +146,7 @@ const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
 const GIT_SWITCH_CONTENT: &str = "seed two\n";
 const GIT_BASE_CONTENT: &str = "seed three\n";
 const GIT_BASE_BRANCH: &str = "eval-base";
+const GIT_RESTORE_BRANCH_REFLOG_MESSAGE: &str = "restore synthetic seeded branch";
 const GIT_MERGE_HEAD_PATH: &str = "MERGE_HEAD";
 const GIT_MERGE_MESSAGE_PATH: &str = "MERGE_MSG";
 const GIT_MERGE_MODE_PATH: &str = "MERGE_MODE";
@@ -174,6 +175,7 @@ const WORKSPACE_SEARCH_MAX_RESULTS: usize = 1;
 const WORKSPACE_NONMATCHING_COUNT: usize = WORKSPACE_LIST_MAX_RESULTS;
 const WORKSPACE_ANSWER_PATH: &str = "answer.txt";
 const WORKSPACE_ANSWER: &str = "model loop observed\n";
+const WORKSPACE_COLLATERAL_DIRECTORY: &str = "collateral-directory";
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
 const WEB_QUERY: &str = "Signalbox tool evaluation";
@@ -342,7 +344,7 @@ async fn run_case(
         snapshot.requests.as_slice(),
         expected_arguments.as_deref(),
     ) {
-        (None, _, _) => true,
+        (None, _, _) => suite.natural_execution_completed(&snapshot, &tracker),
         (Some(case), [request], Some(expected_arguments)) => {
             match tracker.result_content(request.request_id) {
                 Some(content) => forced_execution_completed(
@@ -528,7 +530,15 @@ struct FamilySuite {
     git_seed: Option<Oid>,
     catalog: MergedCatalog,
     executor: SharedFamilyExecutor,
-    workspace_seed_files: BTreeMap<PathBuf, Vec<u8>>,
+    workspace_seed_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WorkspaceEntrySnapshot {
+    Directory,
+    File(Vec<u8>),
+    Symlink,
+    Other,
 }
 
 impl FamilySuite {
@@ -547,7 +557,7 @@ impl FamilySuite {
             git_seed: Some(git_seed),
             catalog: MergedCatalog::try_new([catalog])?,
             executor: SharedFamilyExecutor::new(FamilyExecutor::Git(executor)),
-            workspace_seed_files: BTreeMap::new(),
+            workspace_seed_entries: BTreeMap::new(),
         })
     }
 
@@ -585,7 +595,7 @@ impl FamilySuite {
                 "nonmatching fixture\n",
             )?;
         }
-        let workspace_seed_files = workspace_files(workspace.path())?;
+        let workspace_seed_entries = workspace_entries(workspace.path())?;
         let reads = WorkspaceReadTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
         let mutations =
             WorkspaceMutationTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
@@ -600,7 +610,7 @@ impl FamilySuite {
                 read: read_executor,
                 mutation: mutation_executor,
             }),
-            workspace_seed_files,
+            workspace_seed_entries,
         })
     }
 
@@ -626,7 +636,7 @@ impl FamilySuite {
                 fetch: fetch_executor,
                 search: search_executor,
             }),
-            workspace_seed_files: BTreeMap::new(),
+            workspace_seed_entries: BTreeMap::new(),
         })
     }
 
@@ -787,8 +797,10 @@ impl FamilySuite {
             }
             EvalFamily::Workspace => {
                 let bytes_match = self.workspace_answer_matches()?;
-                let seed_files_match = self.workspace_seed_files_match()?;
-                Ok(bytes_match && seed_files_match && snapshot.workspace_natural_requests_passed())
+                let seed_entries_match = self.workspace_seed_entries_match()?;
+                Ok(bytes_match
+                    && seed_entries_match
+                    && snapshot.workspace_natural_requests_passed())
             }
             EvalFamily::Web => snapshot.web_natural_requests_passed(),
         }
@@ -802,33 +814,52 @@ impl FamilySuite {
         }
     }
 
-    fn workspace_seed_files_match(&self) -> EvalResult<bool> {
-        let mut actual = workspace_files(self.workspace.path())?;
+    fn workspace_seed_entries_match(&self) -> EvalResult<bool> {
+        let mut actual = workspace_entries(self.workspace.path())?;
         actual.remove(Path::new(WORKSPACE_ANSWER_PATH));
-        Ok(actual == self.workspace_seed_files)
+        Ok(actual == self.workspace_seed_entries)
+    }
+
+    fn natural_execution_completed(
+        &self,
+        snapshot: &CaseSnapshot,
+        tracker: &OperationTracker,
+    ) -> bool {
+        match self.family {
+            EvalFamily::Workspace => workspace_natural_read_result_passed(snapshot, tracker),
+            EvalFamily::Git | EvalFamily::Web => true,
+        }
     }
 }
 
-fn workspace_files(root: &Path) -> EvalResult<BTreeMap<PathBuf, Vec<u8>>> {
+fn workspace_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntrySnapshot>> {
     let mut pending = vec![root.to_path_buf()];
-    let mut files = BTreeMap::new();
+    let mut entries = BTreeMap::new();
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
             let file_type = entry.file_type()?;
+            let relative = entry
+                .path()
+                .strip_prefix(root)
+                .map_err(|_| io::Error::other("workspace fixture escaped its root"))?
+                .to_path_buf();
             if file_type.is_dir() {
                 pending.push(entry.path());
+                entries.insert(relative, WorkspaceEntrySnapshot::Directory);
             } else if file_type.is_file() {
-                let relative = entry
-                    .path()
-                    .strip_prefix(root)
-                    .map_err(|_| io::Error::other("workspace fixture escaped its root"))?
-                    .to_path_buf();
-                files.insert(relative, fs::read(entry.path())?);
+                entries.insert(
+                    relative,
+                    WorkspaceEntrySnapshot::File(fs::read(entry.path())?),
+                );
+            } else if file_type.is_symlink() {
+                entries.insert(relative, WorkspaceEntrySnapshot::Symlink);
+            } else {
+                entries.insert(relative, WorkspaceEntrySnapshot::Other);
             }
         }
     }
-    Ok(files)
+    Ok(entries)
 }
 
 fn git_forced_case_passed(
@@ -882,8 +913,11 @@ fn git_forced_case_passed(
                 && repository.status_file(Path::new(GIT_SEED_PATH))? == Status::CURRENT
         }
         GIT_CREATE_COMMIT_NAME => {
+            let base = repository.find_branch(GIT_BASE_BRANCH, BranchType::Local)?;
             result["commit"] == head.id().to_string()
                 && result["state_cleaned"] == true
+                && repository.head()?.shorthand().ok() == Some(GIT_BASE_BRANCH)
+                && base.get().target() == Some(head.id())
                 && head.message().ok() == arguments["message"].as_str()
                 && head.author().name().ok() == Some(GIT_AUTHOR_NAME)
                 && head.author().email().ok() == Some(GIT_AUTHOR_EMAIL)
@@ -1464,7 +1498,11 @@ fn commit_staged_paths_with_identity(
 
 fn git_natural_state_passed(root: &Path, seed: Oid) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
-    let head = repository.head()?.peel_to_commit()?;
+    let head_reference = repository.head()?;
+    let head_remains_on_seeded_branch = head_reference.shorthand().ok() == Some(GIT_BASE_BRANCH);
+    let head = head_reference.peel_to_commit()?;
+    let base = repository.find_branch(GIT_BASE_BRANCH, BranchType::Local)?;
+    let seeded_branch_advanced = base.get().target() == Some(head.id());
     let message_matches = head.message()? == GIT_NATURAL_MESSAGE;
     let Ok(parent) = head.parent(0) else {
         return Ok(false);
@@ -1491,12 +1529,45 @@ fn git_natural_state_passed(root: &Path, seed: Oid) -> EvalResult<bool> {
         GIT_NATURAL_CONTENT.as_bytes(),
         1,
     )?;
-    Ok(message_matches
+    let unrelated_fixtures_unchanged = repository.status_file(Path::new(GIT_SEED_PATH))?
+        == Status::CURRENT
+        && fs::read(root.join(GIT_SEED_PATH))? == GIT_BASE_CONTENT.as_bytes()
+        && untracked_git_fixture_matches(
+            root,
+            &repository,
+            GIT_STAGE_PATH,
+            GIT_STAGE_CONTENT.as_bytes(),
+        )?
+        && untracked_git_fixture_matches(
+            root,
+            &repository,
+            GIT_COMMIT_PATH,
+            GIT_COMMIT_CONTENT.as_bytes(),
+        )?;
+    Ok(head_remains_on_seeded_branch
+        && seeded_branch_advanced
+        && message_matches
         && exactly_one_descendant_commit
         && commit_changes_only_natural_path
         && natural_path_is_clean
         && index_contains_only_expected_paths
-        && commit_adds_expected_natural_fixture)
+        && commit_adds_expected_natural_fixture
+        && unrelated_fixtures_unchanged)
+}
+
+fn untracked_git_fixture_matches(
+    root: &Path,
+    repository: &Repository,
+    path: &str,
+    expected: &[u8],
+) -> EvalResult<bool> {
+    match fs::read(root.join(path)) {
+        Ok(bytes) => {
+            Ok(bytes == expected && repository.status_file(Path::new(path))? == Status::WT_NEW)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2471,6 +2542,32 @@ fn workspace_read_covers_seed(arguments: &serde_json::Value) -> bool {
         && arguments.max_bytes <= MAX_WORKSPACE_READ_BYTES
 }
 
+fn workspace_natural_read_result_passed(
+    snapshot: &CaseSnapshot,
+    tracker: &OperationTracker,
+) -> bool {
+    let Some(request) = snapshot.requests.iter().find(|request| {
+        request.name == READ_FILE_NAME
+            && request.attempt_succeeded
+            && request
+                .arguments()
+                .is_some_and(|arguments| workspace_read_covers_seed(&arguments))
+    }) else {
+        return false;
+    };
+    let Some(content) = tracker.result_content(request.request_id) else {
+        return false;
+    };
+    let Ok(result) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    result["path"] == WORKSPACE_SEED_PATH
+        && result["content"] == WORKSPACE_SEED
+        && result["bytes_read"] == WORKSPACE_SEED.len()
+        && result["total_bytes"] == WORKSPACE_SEED.len()
+        && result["truncated"] == false
+}
+
 fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid> {
     entries
         .iter()
@@ -3378,6 +3475,18 @@ fn git_natural_state_rejects_extra_staging_after_the_target_commit() -> EvalResu
 }
 
 #[test]
+fn git_natural_state_rejects_a_deleted_unrelated_fixture() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let seed = seed_git_repository(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    fs::remove_file(workspace.path().join(GIT_STAGE_PATH))?;
+
+    assert!(!git_natural_state_passed(workspace.path(), seed)?);
+    Ok(())
+}
+
+#[test]
 fn git_natural_state_rejects_an_unrelated_earlier_commit() -> EvalResult {
     let workspace = tempfile::tempdir()?;
     let seed = seed_git_repository(workspace.path())?;
@@ -3400,7 +3509,7 @@ fn git_natural_state_rejects_a_parentless_seed_commit() -> EvalResult {
 }
 
 #[test]
-fn git_natural_state_keeps_the_captured_seed_after_a_branch_switch() -> EvalResult {
+fn git_natural_state_rejects_a_commit_on_a_switched_branch() -> EvalResult {
     let workspace = tempfile::tempdir()?;
     let seed = seed_git_repository(workspace.path())?;
     let repository = Repository::open(workspace.path())?;
@@ -3410,7 +3519,7 @@ fn git_natural_state_keeps_the_captured_seed_after_a_branch_switch() -> EvalResu
     stage_path(workspace.path(), GIT_NATURAL_PATH)?;
     commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
 
-    assert!(git_natural_state_passed(workspace.path(), seed)?);
+    assert!(!git_natural_state_passed(workspace.path(), seed)?);
     Ok(())
 }
 
@@ -3545,6 +3654,42 @@ fn forced_git_commit_verifier_accepts_the_exact_fixture_tree() -> EvalResult {
     .to_string();
 
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_commit_verifier_rejects_a_detached_head_without_branch_advancement() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_CREATE_COMMIT_NAME)
+        .expect("the Git commit fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let message = arguments["message"]
+        .as_str()
+        .expect("the Git commit fixture has a message");
+    suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
+    commit_staged_paths(suite.workspace.path(), message)?;
+    let repository = Repository::open(suite.workspace.path())?;
+    let head = repository.head()?.peel_to_commit()?.id();
+    let seed = suite
+        .git_seed
+        .expect("the Git eval suite has a captured seed identity");
+    repository.reference(
+        &format!("refs/heads/{GIT_BASE_BRANCH}"),
+        seed,
+        true,
+        GIT_RESTORE_BRANCH_REFLOG_MESSAGE,
+    )?;
+    repository.set_head_detached(head)?;
+    let result = serde_json::json!({
+        "commit": head.to_string(),
+        "state_cleaned": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
@@ -4546,6 +4691,48 @@ fn natural_tool_sequence_bounds_tool_enabled_exchanges() {
     assert_eq!(sequence.next(), ForcedToolOperation::Continuation);
 }
 
+fn successful_workspace_natural_snapshot() -> CaseSnapshot {
+    CaseSnapshot {
+        turn_disposition: SnapshotTurnDisposition::Completed,
+        requests: vec![
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                name: String::from(READ_FILE_NAME),
+                arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
+                attempt_succeeded: true,
+            },
+            RequestSnapshot {
+                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                name: String::from(WRITE_FILE_NAME),
+                arguments_text: serde_json::json!({
+                    "content": WORKSPACE_ANSWER,
+                    "path": WORKSPACE_ANSWER_PATH,
+                })
+                .to_string(),
+                attempt_succeeded: true,
+            },
+        ],
+        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+    }
+}
+
+fn record_workspace_read_result(tracker: &OperationTracker, content: &str, truncated: bool) {
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &serde_json::json!({
+            "path": WORKSPACE_SEED_PATH,
+            "content": content,
+            "bytes_read": content.len(),
+            "total_bytes": WORKSPACE_SEED.len(),
+            "truncated": truncated,
+            EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+        })
+        .to_string(),
+    );
+}
+
 #[test]
 fn workspace_natural_state_requires_the_read_before_the_write() {
     let snapshot = CaseSnapshot {
@@ -4693,33 +4880,46 @@ fn workspace_natural_state_rejects_collateral_fixture_mutation() -> EvalResult {
         suite.workspace.path().join(WORKSPACE_SEED_PATH),
         WORKSPACE_DRIFTED_SEED,
     )?;
-    let snapshot = CaseSnapshot {
-        turn_disposition: SnapshotTurnDisposition::Completed,
-        requests: vec![
-            RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
-                producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
-                name: String::from(READ_FILE_NAME),
-                arguments_text: serde_json::json!({"path": WORKSPACE_SEED_PATH}).to_string(),
-                attempt_succeeded: true,
-            },
-            RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
-                producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
-                name: String::from(WRITE_FILE_NAME),
-                arguments_text: serde_json::json!({
-                    "content": WORKSPACE_ANSWER,
-                    "path": WORKSPACE_ANSWER_PATH,
-                })
-                .to_string(),
-                attempt_succeeded: true,
-            },
-        ],
-        model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
-    };
+    let snapshot = successful_workspace_natural_snapshot();
 
     assert!(!suite.natural_state_passed(&snapshot)?);
     Ok(())
+}
+
+#[test]
+fn workspace_natural_state_rejects_a_collateral_directory() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_ANSWER_PATH),
+        WORKSPACE_ANSWER,
+    )?;
+    fs::create_dir(suite.workspace.path().join(WORKSPACE_COLLATERAL_DIRECTORY))?;
+    let snapshot = successful_workspace_natural_snapshot();
+
+    assert!(!suite.natural_state_passed(&snapshot)?);
+    Ok(())
+}
+
+#[test]
+fn workspace_natural_execution_requires_the_full_read_result() {
+    let snapshot = successful_workspace_natural_snapshot();
+    let tracker = OperationTracker::default();
+    record_workspace_read_result(
+        &tracker,
+        &WORKSPACE_SEED[..WORKSPACE_FORCED_READ_MAX_BYTES],
+        true,
+    );
+
+    assert!(!workspace_natural_read_result_passed(&snapshot, &tracker));
+}
+
+#[test]
+fn workspace_natural_execution_accepts_the_exact_full_read_result() {
+    let snapshot = successful_workspace_natural_snapshot();
+    let tracker = OperationTracker::default();
+    record_workspace_read_result(&tracker, WORKSPACE_SEED, false);
+
+    assert!(workspace_natural_read_result_passed(&snapshot, &tracker));
 }
 
 #[test]
