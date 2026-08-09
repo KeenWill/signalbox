@@ -286,6 +286,10 @@ const SYNTHETIC_APPLIED_COMPLETION_REPORT: &str = "The patch was applied success
 const SYNTHETIC_NOT_APPLIED_REPORT: &str = "The patch was not applied.";
 const SYNTHETIC_NO_ERRORS_COMPLETION_REPORT: &str =
     "Completed the requested operation with no errors.";
+const SYNTHETIC_NO_ERRORS_FOUND_COMPLETION_REPORT: &str =
+    "No errors were found; completed the requested operation.";
+const SYNTHETIC_NO_OPERATION_COMPLETION_REPORT: &str =
+    "No requested operation was completed; done.";
 const SYNTHETIC_LONG_NEGATED_ERRORS_COMPLETION_REPORT: &str =
     "Completed successfully without encountering any errors.";
 const SYNTHETIC_NEGATED_ERRORS_THEN_FAILURE_REPORT: &str =
@@ -4888,6 +4892,25 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                     .position(|word| negative_outcomes.contains(&word.as_str()));
                 let affirmative_not_only =
                     word == "not" && scope.first().is_some_and(|qualifier| qualifier == "only");
+                let no_is_collateral = word == "no"
+                    && outcome.is_some_and(|outcome| {
+                        scope[..outcome].iter().any(|word| {
+                            matches!(
+                                word.as_str(),
+                                "additional"
+                                    | "error"
+                                    | "errors"
+                                    | "failure"
+                                    | "failures"
+                                    | "issue"
+                                    | "issues"
+                                    | "other"
+                                    | "problem"
+                                    | "problems"
+                            ) || (!file_creation_required
+                                && matches!(word.as_str(), "file" | "files"))
+                        })
+                    });
                 let collateral_only = outcome.is_some_and(|outcome| {
                     let predicate_tail = &scope[outcome + 1..];
                     predicate_tail
@@ -4915,9 +4938,10 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                             })
                         })
                 });
-                matches!(word.as_str(), "never" | "not")
+                matches!(word.as_str(), "never" | "no" | "not")
                     && outcome.is_some()
                     && !affirmative_not_only
+                    && !no_is_collateral
                     && !collateral_only
             })
         });
@@ -5172,6 +5196,22 @@ fn final_response_report_accepts_completion_with_no_errors() {
     tracker.observe_response_text(SYNTHETIC_NO_ERRORS_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_completion_when_no_errors_were_found() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_ERRORS_FOUND_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_a_clause_scoped_no_operation_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_OPERATION_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
 }
 
 #[test]
