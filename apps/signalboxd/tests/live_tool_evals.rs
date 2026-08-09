@@ -136,17 +136,25 @@ const GIT_AUTHOR_NAME: &str = "Signalbox Tool Eval";
 const GIT_AUTHOR_EMAIL: &str = "signalbox-tool-eval@example.test";
 const GIT_SEED_PATH: &str = "seed.txt";
 const GIT_STAGE_PATH: &str = "stage-me.txt";
+const GIT_STAGE_CONTENT: &str = "stage me\n";
 const GIT_COMMIT_PATH: &str = "commit-me.txt";
 const GIT_COMMIT_CONTENT: &str = "commit me\n";
 const GIT_NATURAL_PATH: &str = "eval.txt";
+const GIT_NATURAL_CONTENT: &str = "natural eval\n";
 const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
 const GIT_SWITCH_CONTENT: &str = "seed two\n";
 const GIT_BASE_BRANCH: &str = "eval-base";
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
 const WORKSPACE_SEED: &str = "alpha\nbeta fixture\nalpha\n";
-const WORKSPACE_GLOB_PATH: &str = "zz-glob.txt";
+const WORKSPACE_GLOB_DIRECTORY: &str = "glob-scope";
+const WORKSPACE_GLOB_PATH: &str = "glob-scope/zz-glob.txt";
 const WORKSPACE_GLOB_CONTENT: &str = "beta glob fixture\n";
+const WORKSPACE_GLOB_OVERFLOW_PATH: &str = "glob-scope/zz-overflow.txt";
+const WORKSPACE_SEARCH_DIRECTORY: &str = "search-scope";
+const WORKSPACE_SEARCH_PATH: &str = "search-scope/match.txt";
+const WORKSPACE_SEARCH_CONTENT: &str = "beta search fixture\nbeta search overflow\n";
 const WORKSPACE_FORCED_READ_MAX_BYTES: usize = 6;
+const WORKSPACE_READ_MAX_BYTES: usize = 256 * 1024;
 const WORKSPACE_LIST_PATH: &str = "nested-list";
 const WORKSPACE_LIST_MAX_RESULTS: usize = 20;
 const WORKSPACE_LIST_ENTRY_COUNT: usize = WORKSPACE_LIST_MAX_RESULTS + 1;
@@ -509,13 +517,13 @@ const WORKSPACE_CASES: &[ForcedCase] = &[
     },
     ForcedCase {
         name: GLOB_FILES_NAME,
-        expected_arguments: r#"{"path":".","pattern":"*.txt","max_results":1}"#,
-        prompt: "Call glob_files with exactly {\"path\":\".\",\"pattern\":\"*.txt\",\"max_results\":1}. After its result, answer done without another tool call.",
+        expected_arguments: r#"{"path":"glob-scope","pattern":"*.txt","max_results":1}"#,
+        prompt: "Call glob_files with exactly {\"path\":\"glob-scope\",\"pattern\":\"*.txt\",\"max_results\":1}. After its result, answer done without another tool call.",
     },
     ForcedCase {
         name: SEARCH_FILES_NAME,
-        expected_arguments: r#"{"path":".","pattern":"beta","max_results":1}"#,
-        prompt: "Call search_files with exactly {\"path\":\".\",\"pattern\":\"beta\",\"max_results\":1}. After its result, answer done without another tool call.",
+        expected_arguments: r#"{"path":"search-scope","pattern":"beta","max_results":1}"#,
+        prompt: "Call search_files with exactly {\"path\":\"search-scope\",\"pattern\":\"beta\",\"max_results\":1}. After its result, answer done without another tool call.",
     },
 ];
 
@@ -580,9 +588,19 @@ impl FamilySuite {
     fn workspace() -> EvalResult<Self> {
         let workspace = tempfile::tempdir()?;
         fs::write(workspace.path().join(WORKSPACE_SEED_PATH), WORKSPACE_SEED)?;
+        fs::create_dir(workspace.path().join(WORKSPACE_GLOB_DIRECTORY))?;
         fs::write(
             workspace.path().join(WORKSPACE_GLOB_PATH),
             WORKSPACE_GLOB_CONTENT,
+        )?;
+        fs::write(
+            workspace.path().join(WORKSPACE_GLOB_OVERFLOW_PATH),
+            WORKSPACE_GLOB_CONTENT,
+        )?;
+        fs::create_dir(workspace.path().join(WORKSPACE_SEARCH_DIRECTORY))?;
+        fs::write(
+            workspace.path().join(WORKSPACE_SEARCH_PATH),
+            WORKSPACE_SEARCH_CONTENT,
         )?;
         fs::create_dir(workspace.path().join(WORKSPACE_LIST_PATH))?;
         for index in 0..WORKSPACE_LIST_ENTRY_COUNT {
@@ -904,6 +922,7 @@ fn git_forced_case_passed(
         GIT_DIFF_NAME => {
             result["patch"].as_str() == Some(expected_git_worktree_patch(root)?.as_str())
                 && result["truncated"] == false
+                && git_diff_fixture_unchanged(root, &repository)?
         }
         GIT_LOG_NAME => {
             let Some(revision) = arguments["revision"].as_str() else {
@@ -1031,6 +1050,17 @@ fn expected_git_worktree_patch(root: &Path) -> EvalResult<String> {
     String::from_utf8(expected).map_err(Into::into)
 }
 
+fn git_diff_fixture_unchanged(root: &Path, repository: &Repository) -> EvalResult<bool> {
+    Ok(
+        repository.status_file(Path::new(GIT_STAGE_PATH))? == Status::INDEX_NEW
+            && repository.status_file(Path::new(GIT_COMMIT_PATH))? == Status::WT_NEW
+            && repository.status_file(Path::new(GIT_NATURAL_PATH))? == Status::WT_NEW
+            && fs::read(root.join(GIT_STAGE_PATH))? == GIT_STAGE_CONTENT.as_bytes()
+            && fs::read(root.join(GIT_COMMIT_PATH))? == GIT_COMMIT_CONTENT.as_bytes()
+            && fs::read(root.join(GIT_NATURAL_PATH))? == GIT_NATURAL_CONTENT.as_bytes(),
+    )
+}
+
 fn workspace_forced_case_passed(
     root: &Path,
     name: &str,
@@ -1102,7 +1132,7 @@ fn workspace_forced_case_passed(
                 && result["truncated"] == true
         }
         GLOB_FILES_NAME => {
-            let expected = [(String::from(WORKSPACE_SEED_PATH), "file")];
+            let expected = [(String::from(WORKSPACE_GLOB_PATH), "file")];
             arguments["max_results"] == WORKSPACE_GLOB_MAX_RESULTS
                 && result_entries_equal(&result["matches"], &expected)
                 && result["truncated"] == true
@@ -1111,7 +1141,7 @@ fn workspace_forced_case_passed(
             let Some(pattern) = arguments["pattern"].as_str() else {
                 return Ok(false);
             };
-            let Some((line_index, line)) = WORKSPACE_SEED
+            let Some((line_index, line)) = WORKSPACE_SEARCH_CONTENT
                 .lines()
                 .enumerate()
                 .find(|(_, line)| line.contains(pattern))
@@ -1124,7 +1154,7 @@ fn workspace_forced_case_passed(
             result["matches"].as_array().is_some_and(|matches| {
                 matches.as_slice().first().is_some_and(|matched| {
                     matches.len() == 1
-                        && matched["path"] == WORKSPACE_SEED_PATH
+                        && matched["path"] == WORKSPACE_SEARCH_PATH
                         && matched["line"] == line_index + 1
                         && matched["column"] == column
                         && matched["text_start_column"] == 1
@@ -1233,9 +1263,9 @@ fn normalized_arguments_text(arguments: &str) -> EvalResult<String> {
 fn seed_git_repository(root: &Path) -> EvalResult<Oid> {
     let repository = Repository::init(root)?;
     fs::write(root.join(GIT_SEED_PATH), "seed\n")?;
-    fs::write(root.join(GIT_STAGE_PATH), "stage me\n")?;
+    fs::write(root.join(GIT_STAGE_PATH), GIT_STAGE_CONTENT)?;
     fs::write(root.join(GIT_COMMIT_PATH), GIT_COMMIT_CONTENT)?;
-    fs::write(root.join(GIT_NATURAL_PATH), "natural eval\n")?;
+    fs::write(root.join(GIT_NATURAL_PATH), GIT_NATURAL_CONTENT)?;
     let mut index = repository.index()?;
     index.add_path(Path::new(GIT_SEED_PATH))?;
     index.write()?;
@@ -2542,7 +2572,9 @@ fn workspace_read_covers_seed(arguments: &serde_json::Value) -> bool {
     let Ok(arguments) = serde_json::from_value::<ReadFileArguments>(arguments.clone()) else {
         return false;
     };
-    arguments.path == WORKSPACE_SEED_PATH && arguments.max_bytes >= WORKSPACE_SEED.len()
+    arguments.path == WORKSPACE_SEED_PATH
+        && arguments.max_bytes >= WORKSPACE_SEED.len()
+        && arguments.max_bytes <= WORKSPACE_READ_MAX_BYTES
 }
 
 fn successful_tool_requests(entries: &[ProcessTranscriptEntry]) -> BTreeSet<Uuid> {
@@ -3643,6 +3675,15 @@ fn unforced_workspace_tier_keeps_an_undersized_read_bound_as_a_miss() {
 }
 
 #[test]
+fn unforced_workspace_tier_keeps_an_oversized_read_bound_as_a_miss() {
+    let mut arguments = bounded_workspace_read_arguments();
+    arguments["max_bytes"] = serde_json::json!(WORKSPACE_READ_MAX_BYTES + 1);
+    let snapshot = failed_request_snapshot(READ_FILE_NAME, arguments);
+
+    assert!(!snapshot.exact_natural_request_failed(EvalFamily::Workspace));
+}
+
+#[test]
 fn unforced_web_tier_keeps_a_schema_invalid_extra_field_as_a_miss() {
     let snapshot = failed_request_snapshot(
         WEB_FETCH_NAME,
@@ -4021,6 +4062,28 @@ fn forced_git_diff_verifier_rejects_an_empty_patch() -> EvalResult {
 }
 
 #[test]
+fn forced_git_diff_verifier_rejects_an_unstaged_fixture() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_DIFF_NAME)
+        .expect("the Git diff fixture exists");
+    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    let result = serde_json::json!({
+        "patch": expected_git_worktree_patch(suite.workspace.path())?,
+        "truncated": false,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+    let mut index = Repository::open(suite.workspace.path())?.index()?;
+    index.remove_path(Path::new(GIT_STAGE_PATH))?;
+    index.write()?;
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_log_verifier_rejects_the_default_head() -> EvalResult {
     let suite = FamilySuite::git()?;
     let case = GIT_CASES
@@ -4173,14 +4236,14 @@ fn forced_workspace_search_verifier_accepts_the_bounded_first_match() -> EvalRes
         .iter()
         .find(|case| case.name == SEARCH_FILES_NAME)
         .expect("the workspace search fixture exists");
-    let match_line = WORKSPACE_SEED
+    let match_line = WORKSPACE_SEARCH_CONTENT
         .lines()
-        .nth(1)
+        .next()
         .expect("the workspace search fixture has a matching line");
     let result = serde_json::json!({
         "matches": [{
-            "path": WORKSPACE_SEED_PATH,
-            "line": 2,
+            "path": WORKSPACE_SEARCH_PATH,
+            "line": 1,
             "column": 1,
             "text_start_column": 1,
             "text": match_line,
@@ -4192,6 +4255,35 @@ fn forced_workspace_search_verifier_accepts_the_bounded_first_match() -> EvalRes
     .to_string();
 
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_search_verifier_rejects_a_root_match() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == SEARCH_FILES_NAME)
+        .expect("the workspace search fixture exists");
+    let root_match = WORKSPACE_SEED
+        .lines()
+        .nth(1)
+        .expect("the root fixture has a matching line");
+    let result = serde_json::json!({
+        "matches": [{
+            "path": WORKSPACE_SEED_PATH,
+            "line": 2,
+            "column": 1,
+            "text_start_column": 1,
+            "text": root_match,
+            "line_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
@@ -4236,7 +4328,7 @@ fn forced_workspace_listing_verifiers_reject_the_wrong_entry_kind() -> EvalResul
     })
     .to_string();
     let glob_result = serde_json::json!({
-        "matches": [{"path": WORKSPACE_SEED_PATH, "kind": "directory"}],
+        "matches": [{"path": WORKSPACE_GLOB_PATH, "kind": "directory"}],
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
@@ -4294,13 +4386,31 @@ fn forced_workspace_glob_verifier_accepts_the_bounded_first_match() -> EvalResul
         .find(|case| case.name == GLOB_FILES_NAME)
         .expect("the workspace glob fixture exists");
     let result = serde_json::json!({
-        "matches": [{"path": WORKSPACE_SEED_PATH, "kind": "file"}],
+        "matches": [{"path": WORKSPACE_GLOB_PATH, "kind": "file"}],
         "truncated": true,
         EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
     })
     .to_string();
 
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_glob_verifier_rejects_a_root_match() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == GLOB_FILES_NAME)
+        .expect("the workspace glob fixture exists");
+    let result = serde_json::json!({
+        "matches": [{"path": WORKSPACE_SEED_PATH, "kind": "file"}],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
