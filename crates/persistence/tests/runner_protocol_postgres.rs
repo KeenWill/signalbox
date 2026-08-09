@@ -7003,6 +7003,20 @@ async fn s32_inv029_inv044_stop_terminalizes_delegated_runner_recovery_wait()
             |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xa13b))),
         )
         .await?;
+    let recorded_command = SubmitInputRepository::new(pool.clone())
+        .load(command)
+        .await?;
+    let reload = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa13c)),
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa13d)),
+                ContextFrontierId::from_uuid(uuid(0xa13e)),
+                TurnAttemptId::from_uuid(uuid(0xa13f)),
+            ),
+        )
+        .await?;
     let terminal: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
         "SELECT state_kind, terminal_disposition_kind,
                 runner_recovery_runner_id
@@ -7054,6 +7068,14 @@ async fn s32_inv029_inv044_stop_terminalizes_delegated_runner_recovery_wait()
         )
     );
     assert_eq!(store.load_runner_recovery_wait(session).await?, None);
+    assert!(
+        recorded_command.is_some(),
+        "the interrupt receipt must reload with its non-accepted predecessor"
+    );
+    assert!(
+        reload.is_some(),
+        "the delegated runner-recovery successor must reload after its predecessor stops"
+    );
     drop(pool);
     Ok(())
 }

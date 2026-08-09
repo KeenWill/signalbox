@@ -26,8 +26,9 @@ use signalbox_domain::{
     GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
     ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
-    ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
-    OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
+    ModelSelectionRequest, NonAcceptedTurnPredecessorReconstitutionInput,
+    NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
+    OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
     ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
     RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
@@ -1882,7 +1883,9 @@ pub(crate) async fn require_recorded_batch(
                 SubmitInputCorruption::Inconsistent("unexpected batched command identity").into(),
             );
         }
-        if let Some(related_turn) = related_turn_origin_key(&row)? {
+        if non_accepted_predecessor(&row)?.is_none()
+            && let Some(related_turn) = related_turn_origin_key(&row)?
+        {
             related_turns.insert(related_turn);
         }
         if rows_by_command.insert(command_uuid, row).is_some() {
@@ -1901,17 +1904,27 @@ pub(crate) async fn require_recorded_batch(
         let row = rows_by_command
             .remove(&command_uuid)
             .ok_or(SubmitInputCorruption::Missing("batched origin command"))?;
-        let related_turn_origin = related_turn_origin_key(&row)?
-            .map(|key| {
-                related_origins
-                    .get(&key)
-                    .cloned()
-                    .ok_or(SubmitInputCorruption::Missing("related turn origin"))
-            })
-            .transpose()?;
+        let non_accepted_predecessor = non_accepted_predecessor(&row)?;
+        let related_turn_origin = if non_accepted_predecessor.is_some() {
+            None
+        } else {
+            related_turn_origin_key(&row)?
+                .map(|key| {
+                    related_origins
+                        .get(&key)
+                        .cloned()
+                        .ok_or(SubmitInputCorruption::Missing("related turn origin"))
+                })
+                .transpose()?
+        };
         let existing_interrupt = load_existing_interrupt(connection, &row).await?;
-        let reconstructed =
-            decode_complete(row, command_id, related_turn_origin, existing_interrupt)?;
+        let reconstructed = decode_complete(
+            row,
+            command_id,
+            related_turn_origin,
+            non_accepted_predecessor,
+            existing_interrupt,
+        )?;
         if recorded.insert(command_id, reconstructed).is_some() {
             return Err(
                 SubmitInputCorruption::Inconsistent("duplicate batched command row").into(),
@@ -6436,6 +6449,10 @@ async fn load_complete_rows(
             queued.acceptance_position AS queued_position,
             queued.priority_kind,
             queued.interrupt_predecessor_turn_id,
+            non_accepted_predecessor.session_id
+                AS non_accepted_predecessor_session_id,
+            non_accepted_predecessor.turn_id
+                AS non_accepted_predecessor_turn_id,
             queued.defaults_version AS queued_defaults_version,
             queued.requested_model_kind,
             queued.requested_direct_model_selection_id,
@@ -6483,6 +6500,21 @@ async fn load_complete_rows(
            ON accepted.accepted_input_id = typed.result_accepted_input_id
          LEFT JOIN queued_input_origin AS queued
            ON queued.accepted_input_id = accepted.accepted_input_id
+         LEFT JOIN turn_lifecycle AS non_accepted_predecessor
+           ON non_accepted_predecessor.session_id = queued.session_id
+          AND non_accepted_predecessor.turn_id = typed.expected_active_turn_id
+          AND non_accepted_predecessor.origin_kind = 'delegation'
+          AND (
+                non_accepted_predecessor.state_kind = 'terminal'
+                OR non_accepted_predecessor.delegation_runtime_terminal
+          )
+          AND typed.delivery_kind = 'interrupt'
+          AND queued.priority_kind = 'interrupt_immediately_after'
+          AND queued.interrupt_predecessor_turn_id =
+                  non_accepted_predecessor.turn_id
+          AND accepted_input_turn_queue_predecessor(
+                  queued.session_id, queued.turn_id
+              ) = non_accepted_predecessor.turn_id
          LEFT JOIN LATERAL (
               WITH RECURSIVE configuration_chain AS (
                   SELECT origin.*
@@ -6530,9 +6562,16 @@ async fn load_from_connection(
     if !rows.is_empty() {
         return Err(SubmitInputCorruption::Inconsistent("duplicate complete command rows").into());
     }
-    let related_turn_origin = load_related_turn_origin(connection, &row).await?;
+    let related = load_related_turn_evidence(connection, &row).await?;
     let existing_interrupt = load_existing_interrupt(connection, &row).await?;
-    decode_complete(row, command_id, related_turn_origin, existing_interrupt).map(Some)
+    decode_complete(
+        row,
+        command_id,
+        related.origin,
+        related.non_accepted_predecessor,
+        existing_interrupt,
+    )
+    .map(Some)
 }
 
 async fn load_existing_interrupt(
@@ -6555,8 +6594,14 @@ async fn load_existing_interrupt(
             SubmitInputCorruption::Inconsistent("duplicate existing interrupt command").into(),
         );
     }
-    let predecessor_origin = load_related_turn_origin(connection, &interrupt_row).await?;
-    let receipt = decode_complete(interrupt_row, command, predecessor_origin, None)?;
+    let predecessor = load_related_turn_evidence(connection, &interrupt_row).await?;
+    let receipt = decode_complete(
+        interrupt_row,
+        command,
+        predecessor.origin,
+        predecessor.non_accepted_predecessor,
+        None,
+    )?;
     let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) = receipt.result()
     else {
         return Err(
@@ -6570,18 +6615,66 @@ async fn load_existing_interrupt(
         .ok_or_else(|| SubmitInputCorruption::Inconsistent("existing interrupt authority").into())
 }
 
-async fn load_related_turn_origin(
+struct RelatedTurnEvidence {
+    origin: Option<SubmitInputTurnOriginReconstitutionInput>,
+    non_accepted_predecessor: Option<NonAcceptedTurnPredecessorReconstitutionInput>,
+}
+
+async fn load_related_turn_evidence(
     connection: &mut PgConnection,
     row: &PgRow,
-) -> Result<Option<SubmitInputTurnOriginReconstitutionInput>, SubmitInputRepositoryError> {
+) -> Result<RelatedTurnEvidence, SubmitInputRepositoryError> {
     let Some(key) = related_turn_origin_key(row)? else {
-        return Ok(None);
+        if non_accepted_predecessor(row)?.is_some() {
+            return Err(SubmitInputCorruption::Inconsistent(
+                "non-accepted predecessor without related turn",
+            )
+            .into());
+        }
+        return Ok(RelatedTurnEvidence {
+            origin: None,
+            non_accepted_predecessor: None,
+        });
     };
+    if let Some(predecessor) = non_accepted_predecessor(row)? {
+        if (
+            predecessor.session.into_uuid(),
+            predecessor.turn.into_uuid(),
+        ) != key
+        {
+            return Err(SubmitInputCorruption::Inconsistent(
+                "non-accepted predecessor correlation",
+            )
+            .into());
+        }
+        return Ok(RelatedTurnEvidence {
+            origin: None,
+            non_accepted_predecessor: Some(predecessor),
+        });
+    }
     let mut origins = load_turn_origin_graph(connection, &BTreeSet::from([key])).await?;
-    origins
+    let origin = origins
         .remove(&key)
-        .map(Some)
-        .ok_or_else(|| SubmitInputCorruption::Missing("related turn origin").into())
+        .ok_or(SubmitInputCorruption::Missing("related turn origin"))?;
+    Ok(RelatedTurnEvidence {
+        origin: Some(origin),
+        non_accepted_predecessor: None,
+    })
+}
+
+fn non_accepted_predecessor(
+    row: &PgRow,
+) -> Result<Option<NonAcceptedTurnPredecessorReconstitutionInput>, SubmitInputRepositoryError> {
+    let session: Option<Uuid> = row.try_get("non_accepted_predecessor_session_id")?;
+    let turn: Option<Uuid> = row.try_get("non_accepted_predecessor_turn_id")?;
+    match (session, turn) {
+        (None, None) => Ok(None),
+        (Some(session), Some(turn)) => Ok(Some(NonAcceptedTurnPredecessorReconstitutionInput {
+            session: session_id_from_uuid(session),
+            turn: turn_id_from_uuid(turn),
+        })),
+        _ => Err(SubmitInputCorruption::Inconsistent("non-accepted predecessor shape").into()),
+    }
 }
 
 fn related_turn_origin_key(
@@ -7116,7 +7209,7 @@ pub(crate) async fn load_turn_origin_graph(
                     .ok_or(SubmitInputCorruption::Missing("turn origin predecessor"))
             })
             .transpose()?;
-        let receipt = decode_complete(row, command_id, dependency.clone(), None)?;
+        let receipt = decode_complete(row, command_id, dependency.clone(), None, None)?;
         let reconstructed = match link.kind {
             StoredTurnOriginKind::Direct { .. } => {
                 let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
@@ -7205,6 +7298,7 @@ pub(crate) async fn load_turn_origin_graph(
                             interrupt_command,
                             Some(source_origin.clone()),
                             None,
+                            None,
                         )?;
                         let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
                             interrupt_origin,
@@ -7251,6 +7345,7 @@ pub(crate) async fn load_turn_origin_graph(
                             interrupt_row,
                             interrupt_command,
                             Some(source_origin.clone()),
+                            None,
                             None,
                         )?;
                         let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
@@ -7308,6 +7403,7 @@ fn decode_complete(
     row: PgRow,
     command_id: DurableCommandId,
     related_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
+    non_accepted_predecessor: Option<NonAcceptedTurnPredecessorReconstitutionInput>,
     existing_interrupt: Option<AppliedInterruptCommandResult>,
 ) -> Result<ReconstitutedSubmitInput, SubmitInputRepositoryError> {
     require_spelling(&row, "registry_kind", SUBMIT_INPUT_KIND)?;
@@ -7408,13 +7504,22 @@ fn decode_complete(
                         result_session,
                         result_accepted,
                         turn_id_from_uuid(result_turn),
-                        related_turn_origin,
+                        RelatedTurnEvidence {
+                            origin: related_turn_origin,
+                            non_accepted_predecessor,
+                        },
                     )?
                 }
                 (None, Some(source_turn)) if queued_effect_count <= 1 => {
                     let source_turn_origin = related_turn_origin.ok_or(
                         SubmitInputCorruption::Missing("pending steering source turn origin"),
                     )?;
+                    if non_accepted_predecessor.is_some() {
+                        return Err(SubmitInputCorruption::Inconsistent(
+                            "pending steering non-accepted predecessor",
+                        )
+                        .into());
+                    }
                     decode_applied_pending_steering(
                         &row,
                         command,
@@ -7433,6 +7538,12 @@ fn decode_complete(
             }
         }
         (REJECTED, Some(kind)) => {
+            if non_accepted_predecessor.is_some() {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "rejected command non-accepted predecessor",
+                )
+                .into());
+            }
             if accepted_effect_count != 0 || queued_effect_count != 0 {
                 return Err(
                     SubmitInputCorruption::Inconsistent("rejected command has effects").into(),
@@ -7485,7 +7596,7 @@ fn decode_applied_turn_origin(
     result_session: SessionId,
     result_accepted_input: AcceptedInputId,
     result_turn: TurnId,
-    predecessor_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
+    predecessor: RelatedTurnEvidence,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
     let command_storage_version: i16 = required(row, "typed_version")?;
     let accepting_command_uuid: Uuid = required(row, "accepting_command_id")?;
@@ -7656,7 +7767,8 @@ fn decode_applied_turn_origin(
             result_session,
             result_accepted_input,
             result_turn,
-            predecessor_origin,
+            predecessor_origin: predecessor.origin,
+            non_accepted_predecessor: predecessor.non_accepted_predecessor,
             accepted_command: accepting_command,
             accepted_input,
             accepted_session,
