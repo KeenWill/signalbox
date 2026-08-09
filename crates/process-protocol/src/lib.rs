@@ -2264,11 +2264,28 @@ where
 }
 
 /// Closed actor provenance carried by a metadata last-writer stamp.
+///
+/// The variants mirror the domain actor inventory exactly, because durable
+/// metadata already records every one of them: the tool-facing replacement
+/// constructor stamps a tool writer, and a narrower wire enum would leave a
+/// readable durable snapshot with no wire projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MetadataActor {
     /// The user wrote the snapshot.
     User {},
+    /// Model output from one exact turn wrote the snapshot.
+    Model {
+        /// The turn whose model output acted.
+        turn_id: CanonicalUuid,
+    },
+    /// The startup recovery scan wrote the snapshot.
+    Recovery {},
+    /// Execution of one exact tool request wrote the snapshot.
+    Tool {
+        /// The tool request whose execution acted.
+        tool_request_id: CanonicalUuid,
+    },
 }
 
 /// The post-lock database statement time and actor of the latest replacement.
@@ -12086,10 +12103,69 @@ mod tests {
         Ok(())
     }
 
+    /// INV-033: the last-writer actor projects every agency durable metadata can
+    /// record, and nothing else. The match is exhaustive so a later variant
+    /// cannot reach the wire without its own pinned bytes.
     #[test]
-    fn inv033_metadata_writer_actor_is_user_only() {
+    fn inv033_metadata_writer_actor_round_trips_every_agency()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for actor in [
+            MetadataActor::User {},
+            MetadataActor::Model { turn_id: uuid(2) },
+            MetadataActor::Recovery {},
+            MetadataActor::Tool {
+                tool_request_id: uuid(3),
+            },
+        ] {
+            let actor_json = match actor {
+                MetadataActor::User {} => r#"{"type":"user"}"#,
+                MetadataActor::Model { .. } => {
+                    r#"{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}"#
+                }
+                MetadataActor::Recovery {} => r#"{"type":"recovery"}"#,
+                MetadataActor::Tool { .. } => {
+                    r#"{"type":"tool","tool_request_id":"00000000-0000-0000-0000-000000000003"}"#
+                }
+            };
+            let writer = MetadataLastWriter::new(CanonicalU64::new(1), actor);
+            assert_server_message_round_trip(
+                request(1)?,
+                ServerMessage::SessionMetadataReplaced {
+                    session_id: uuid(1),
+                    metadata: SessionMetadata::empty(),
+                    last_writer: writer,
+                },
+                &format!(
+                    r#"{{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{{"title":null,"tags":[],"attributes":{{}},"archived":false}},"last_writer":{{"updated_at_unix_micros":"1","actor":{actor_json}}}}}"#
+                ),
+            )?;
+            assert_server_message_round_trip(
+                request(2)?,
+                ServerMessage::SessionMetadata {
+                    session_id: uuid(1),
+                    metadata: SessionMetadata::empty(),
+                    last_writer: Some(writer),
+                },
+                &format!(
+                    r#"{{"type":"session_metadata","session_id":"00000000-0000-0000-0000-000000000001","metadata":{{"title":null,"tags":[],"attributes":{{}},"archived":false}},"last_writer":{{"updated_at_unix_micros":"1","actor":{actor_json}}}}}"#
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// INV-033: the actor vocabulary stays closed — an unadmitted spelling and a
+    /// variant carrying the wrong reference are both malformed frames.
+    #[test]
+    fn inv033_metadata_writer_actor_rejects_unadmitted_shapes() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"model","turn_id":"00000000-0000-0000-0000-000000000002"}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"operator"}}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"tool","turn_id":"00000000-0000-0000-0000-000000000002"}}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"session_metadata_replaced","session_id":"00000000-0000-0000-0000-000000000001","metadata":{"title":null,"tags":[],"attributes":{},"archived":false},"last_writer":{"updated_at_unix_micros":"1","actor":{"type":"recovery","turn_id":"00000000-0000-0000-0000-000000000002"}}}}"#,
         );
     }
 

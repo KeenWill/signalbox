@@ -2913,6 +2913,9 @@ const fn last_writer_actor_label(last_writer: Option<MetadataLastWriter>) -> &'s
     match last_writer {
         Some(last_writer) => match last_writer.actor() {
             MetadataActor::User {} => "user",
+            MetadataActor::Model { .. } => "model",
+            MetadataActor::Recovery {} => "recovery",
+            MetadataActor::Tool { .. } => "tool",
         },
         None => "none",
     }
@@ -2972,7 +2975,7 @@ mod tests {
 
     use super::{
         ConversationRow, CostAggregateKey, DiskCostTotals, ImportedEntryRow, Output,
-        SessionMetadataRow, SnapshotSelection, TextField, control_safe,
+        SessionMetadataRow, SnapshotSelection, TextField, control_safe, last_writer_actor_label,
     };
     use crate::{
         error::ClientError,
@@ -3268,6 +3271,32 @@ mod tests {
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn search_names_every_last_writer_actor_the_wire_can_carry() {
+        for (actor, expected) in [
+            (MetadataActor::User {}, "user"),
+            (
+                MetadataActor::Model {
+                    turn_id: wire_uuid(2),
+                },
+                "model",
+            ),
+            (MetadataActor::Recovery {}, "recovery"),
+            (
+                MetadataActor::Tool {
+                    tool_request_id: wire_uuid(3),
+                },
+                "tool",
+            ),
+        ] {
+            assert_eq!(
+                last_writer_actor_label(Some(MetadataLastWriter::new(CanonicalU64::new(1), actor))),
+                expected
+            );
+        }
+        assert_eq!(last_writer_actor_label(None), "none");
     }
 
     #[test]
