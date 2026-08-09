@@ -14,7 +14,7 @@
 )]
 
 #[cfg(unix)]
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -166,6 +166,7 @@ const GIT_COLLATERAL_CONTENT: &str = "collateral\n";
 const GIT_COLLATERAL_DIRECTORY: &str = "collateral-directory";
 const GIT_HOOKS_DIRECTORY: &str = "hooks";
 const GIT_INFO_DIRECTORY: &str = "info";
+const GIT_LOGS_DIRECTORY: &str = "logs";
 const GIT_DESCRIPTION_PATH: &str = "description";
 const GIT_PRE_COMMIT_HOOK_PATH: &str = "hooks/pre-commit";
 const GIT_PRE_COMMIT_HOOK_CONTENT: &str = "#!/bin/sh\nexit 1\n";
@@ -173,6 +174,8 @@ const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
 const GIT_SWITCH_CONTENT: &str = "seed two\n";
 const GIT_BASE_CONTENT: &str = "seed three\n";
 const GIT_BASE_BRANCH: &str = "eval-base";
+const GIT_COMMIT_REFLOG_MESSAGE: &str = "commit";
+const GIT_SWITCH_REFLOG_MESSAGE: &str = "checkout: moving to configured local branch";
 const GIT_RESTORE_BRANCH_REFLOG_MESSAGE: &str = "restore synthetic seeded branch";
 const GIT_MERGE_HEAD_PATH: &str = "MERGE_HEAD";
 const GIT_MERGE_MESSAGE_PATH: &str = "MERGE_MSG";
@@ -213,6 +216,10 @@ const WORKSPACE_INSECURE_CREATION_MODE: u32 = 0o777;
 const WORKSPACE_CREATED_FILE_MODE: Option<u32> = Some(WORKSPACE_PRIVATE_CREATION_MODE);
 #[cfg(not(unix))]
 const WORKSPACE_CREATED_FILE_MODE: Option<u32> = None;
+#[cfg(unix)]
+const WORKSPACE_CREATED_FILE_LINKS: Option<u64> = Some(1);
+#[cfg(not(unix))]
+const WORKSPACE_CREATED_FILE_LINKS: Option<u64> = None;
 const SYNTHETIC_WRONG_STAGED_PATH_COUNT: usize = 0;
 const SYNTHETIC_WRONG_COMMIT_ID: &str = "synthetic-wrong-commit-id";
 const WORKSPACE_LIST_PATH: &str = "nested-list";
@@ -675,8 +682,14 @@ struct FamilySuite {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum WorkspaceEntrySnapshot {
-    Directory { mode: Option<u32> },
-    File { content: Vec<u8>, mode: Option<u32> },
+    Directory {
+        mode: Option<u32>,
+    },
+    File {
+        content: Vec<u8>,
+        mode: Option<u32>,
+        links: Option<u64>,
+    },
     Symlink,
     Other,
 }
@@ -688,6 +701,7 @@ struct GitFixtureSnapshot {
     worktree_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     metadata_top_level: BTreeMap<PathBuf, GitMetadataEntryKind>,
     static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    reflog_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1069,6 +1083,7 @@ impl FamilySuite {
         let expected_answer = WorkspaceEntrySnapshot::File {
             content: WORKSPACE_ANSWER.as_bytes().to_vec(),
             mode: WORKSPACE_CREATED_FILE_MODE,
+            links: WORKSPACE_CREATED_FILE_LINKS,
         };
         Ok(answer == Some(expected_answer) && actual == self.workspace_seed_entries)
     }
@@ -1145,7 +1160,15 @@ fn filesystem_entries(
             } else if file_type.is_file() {
                 let content = fs::read(entry.path())?;
                 let mode = worktree_mode(&entry.path())?;
-                entries.insert(relative, WorkspaceEntrySnapshot::File { content, mode });
+                let links = worktree_link_count(&entry.path())?;
+                entries.insert(
+                    relative,
+                    WorkspaceEntrySnapshot::File {
+                        content,
+                        mode,
+                        links,
+                    },
+                );
             } else if file_type.is_symlink() {
                 entries.insert(relative, WorkspaceEntrySnapshot::Symlink);
             } else {
@@ -1382,6 +1405,7 @@ fn git_forced_case_passed(
     };
     Ok(passed
         && git_fixture_snapshot_matches(root, &repository, seed_fixture)?
+        && git_forced_reflogs_match(root, name, seed, head.id(), seed_fixture)?
         && git_forced_worktree_matches(root, name, seed_fixture, pre_execution_worktree_entries)?)
 }
 
@@ -1650,6 +1674,16 @@ fn worktree_mode(path: &Path) -> EvalResult<Option<u32>> {
     }
 }
 
+fn worktree_link_count(path: &Path) -> EvalResult<Option<u64>> {
+    #[cfg(unix)]
+    return Ok(Some(fs::metadata(path)?.nlink()));
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(None)
+    }
+}
+
 fn workspace_forced_case_passed(
     root: &Path,
     seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
@@ -1795,9 +1829,11 @@ fn workspace_mutation_entries_match(
     expected: &[u8],
 ) -> EvalResult<bool> {
     let actual_entries = workspace_entries(root)?;
-    let mode = match (seed_entries.get(target), actual_entries.get(target)) {
-        (Some(WorkspaceEntrySnapshot::File { mode, .. }), _) => *mode,
-        (None, Some(WorkspaceEntrySnapshot::File { .. })) => WORKSPACE_CREATED_FILE_MODE,
+    let (mode, links) = match (seed_entries.get(target), actual_entries.get(target)) {
+        (Some(WorkspaceEntrySnapshot::File { mode, links, .. }), _) => (*mode, *links),
+        (None, Some(WorkspaceEntrySnapshot::File { .. })) => {
+            (WORKSPACE_CREATED_FILE_MODE, WORKSPACE_CREATED_FILE_LINKS)
+        }
         _ => return Ok(false),
     };
     let mut expected_entries = seed_entries.clone();
@@ -1806,6 +1842,7 @@ fn workspace_mutation_entries_match(
         WorkspaceEntrySnapshot::File {
             content: expected.to_vec(),
             mode,
+            links,
         },
     );
     Ok(actual_entries == expected_entries)
@@ -2006,7 +2043,135 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         worktree_entries: git_worktree_entries(root)?,
         metadata_top_level: git_metadata_top_level(root)?,
         static_metadata_entries: git_static_metadata_entries(root)?,
+        reflog_entries: git_reflog_entries(root)?,
     })
+}
+
+fn git_reflog_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntrySnapshot>> {
+    let repository = Repository::open(root)?;
+    filesystem_entries(&repository.path().join(GIT_LOGS_DIRECTORY), None)
+}
+
+fn git_forced_reflogs_match(
+    root: &Path,
+    case_name: &str,
+    seed: Oid,
+    head: Oid,
+    seed_fixture: &GitFixtureSnapshot,
+) -> EvalResult<bool> {
+    match case_name {
+        GIT_CREATE_COMMIT_NAME => {
+            let branch_reference = format!("refs/heads/{GIT_BASE_BRANCH}");
+            git_reflog_updates_match(
+                root,
+                seed,
+                head,
+                GIT_COMMIT_REFLOG_MESSAGE,
+                &["HEAD", branch_reference.as_str()],
+                &seed_fixture.reflog_entries,
+            )
+        }
+        GIT_BRANCH_SWITCH_NAME => {
+            let repository = Repository::open(root)?;
+            let target = repository
+                .find_branch("switch-target", BranchType::Local)?
+                .into_reference()
+                .peel_to_commit()?
+                .id();
+            git_reflog_updates_match(
+                root,
+                seed,
+                target,
+                GIT_SWITCH_REFLOG_MESSAGE,
+                &["HEAD"],
+                &seed_fixture.reflog_entries,
+            )
+        }
+        _ => Ok(git_reflog_entries(root)? == seed_fixture.reflog_entries),
+    }
+}
+
+fn git_reflog_updates_match(
+    root: &Path,
+    old: Oid,
+    new: Oid,
+    message: &str,
+    references: &[&str],
+    seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+) -> EvalResult<bool> {
+    let repository = Repository::open(root)?;
+    let actual_entries = git_reflog_entries(root)?;
+    let mut expected_entries = seed_entries.clone();
+    for reference in references {
+        if !replace_expected_reflog_update(
+            &repository,
+            &actual_entries,
+            &mut expected_entries,
+            reference,
+            old,
+            new,
+            message,
+        )? {
+            return Ok(false);
+        }
+    }
+    Ok(actual_entries == expected_entries)
+}
+
+fn replace_expected_reflog_update(
+    repository: &Repository,
+    actual_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    expected_entries: &mut BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    reference: &str,
+    old: Oid,
+    new: Oid,
+    message: &str,
+) -> EvalResult<bool> {
+    let path = Path::new(reference);
+    let Some(WorkspaceEntrySnapshot::File {
+        content: seed_content,
+        mode: seed_mode,
+        links: seed_links,
+    }) = expected_entries.get(path)
+    else {
+        return Ok(false);
+    };
+    let Some(WorkspaceEntrySnapshot::File {
+        content: actual_content,
+        mode: actual_mode,
+        links: actual_links,
+    }) = actual_entries.get(path)
+    else {
+        return Ok(false);
+    };
+    let Some(appended) = actual_content.strip_prefix(seed_content.as_slice()) else {
+        return Ok(false);
+    };
+    let Some(record) = appended.strip_suffix(b"\n") else {
+        return Ok(false);
+    };
+    if record.is_empty()
+        || record.contains(&b'\n')
+        || actual_mode != seed_mode
+        || actual_links != seed_links
+    {
+        return Ok(false);
+    }
+    let reflog = repository.reflog(reference)?;
+    let Some(latest) = reflog.get(0) else {
+        return Ok(false);
+    };
+    let committer = latest.committer();
+    if latest.id_old() != old
+        || latest.id_new() != new
+        || latest.message().ok().flatten() != Some(message)
+        || committer.name().ok() != Some(GIT_AUTHOR_NAME)
+        || committer.email().ok() != Some(GIT_AUTHOR_EMAIL)
+    {
+        return Ok(false);
+    }
+    expected_entries.insert(path.to_path_buf(), actual_entries[path].clone());
+    Ok(true)
 }
 
 fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetadataEntryKind>> {
@@ -2046,6 +2211,7 @@ fn git_static_metadata_entries(
         WorkspaceEntrySnapshot::File {
             content: fs::read(&description)?,
             mode: worktree_mode(&description)?,
+            links: worktree_link_count(&description)?,
         },
     );
     Ok(entries)
@@ -2097,17 +2263,19 @@ fn git_forced_worktree_matches(
         .unwrap_or_else(|| seed_fixture.worktree_entries.clone());
     match case_name {
         GIT_BRANCH_SWITCH_NAME => {
-            let Some(WorkspaceEntrySnapshot::File { mode, .. }) =
+            let Some(WorkspaceEntrySnapshot::File { mode, links, .. }) =
                 expected.get(Path::new(GIT_SEED_PATH))
             else {
                 return Ok(false);
             };
             let mode = *mode;
+            let links = *links;
             expected.insert(
                 PathBuf::from(GIT_SEED_PATH),
                 WorkspaceEntrySnapshot::File {
                     content: GIT_SWITCH_CONTENT.as_bytes().to_vec(),
                     mode,
+                    links,
                 },
             );
         }
@@ -2152,7 +2320,7 @@ fn insert_expected_file_with_observed_mode(
     path: &Path,
     content: &[u8],
 ) -> bool {
-    let Some(WorkspaceEntrySnapshot::File { mode, .. }) = actual.get(path) else {
+    let Some(WorkspaceEntrySnapshot::File { mode, links, .. }) = actual.get(path) else {
         return false;
     };
     expected.insert(
@@ -2160,6 +2328,7 @@ fn insert_expected_file_with_observed_mode(
         WorkspaceEntrySnapshot::File {
             content: content.to_vec(),
             mode: *mode,
+            links: *links,
         },
     );
     true
@@ -2240,13 +2409,20 @@ fn commit_staged_paths_with_identity(
         .as_ref()
         .map_or_else(|| vec![&parent], |merge_parent| vec![&parent, merge_parent]);
     let signature = Signature::now(author_name, author_email)?;
-    repository.commit(
+    let commit = repository.commit(
         Some("HEAD"),
         &signature,
         &signature,
         message,
         &tree,
         &parents,
+    )?;
+    normalize_latest_reflog_message(&repository, "HEAD", commit, &signature)?;
+    normalize_latest_reflog_message(
+        &repository,
+        &format!("refs/heads/{GIT_BASE_BRANCH}"),
+        commit,
+        &signature,
     )?;
     for state_path in [
         GIT_MERGE_HEAD_PATH,
@@ -2259,6 +2435,19 @@ fn commit_staged_paths_with_identity(
             Err(error) => return Err(error.into()),
         }
     }
+    Ok(())
+}
+
+fn normalize_latest_reflog_message(
+    repository: &Repository,
+    reference: &str,
+    commit: Oid,
+    signature: &Signature<'_>,
+) -> EvalResult {
+    let mut reflog = repository.reflog(reference)?;
+    reflog.remove(0, false)?;
+    reflog.append(commit, signature, Some(GIT_COMMIT_REFLOG_MESSAGE))?;
+    reflog.write()?;
     Ok(())
 }
 
@@ -2328,6 +2517,14 @@ fn git_natural_state_passed(
     );
     let complete_ref_inventory_matches = git_reference_inventory(&repository)? == expected_refs;
     let fixture_matches = git_fixture_snapshot_matches(root, &repository, seed_fixture)?;
+    let reflogs_match = git_reflog_updates_match(
+        root,
+        seed,
+        head.id(),
+        GIT_COMMIT_REFLOG_MESSAGE,
+        &["HEAD", format!("refs/heads/{GIT_BASE_BRANCH}").as_str()],
+        &seed_fixture.reflog_entries,
+    )?;
     let complete_worktree_inventory_matches =
         git_worktree_entries(root)? == seed_fixture.worktree_entries;
     Ok(head_remains_on_seeded_branch
@@ -2344,6 +2541,7 @@ fn git_natural_state_passed(
         && operation_state_is_clean
         && complete_ref_inventory_matches
         && fixture_matches
+        && reflogs_match
         && complete_worktree_inventory_matches)
 }
 
@@ -5434,6 +5632,33 @@ fn git_natural_state_rejects_extra_staging_after_the_target_commit() -> EvalResu
 }
 
 #[test]
+fn git_natural_state_rejects_a_missing_branch_reflog_record() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (seed, seed_refs, seed_fixture) = seed_git_repository_with_refs(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+    let branch_log = Repository::open(workspace.path())?
+        .path()
+        .join(GIT_LOGS_DIRECTORY)
+        .join("refs/heads")
+        .join(GIT_BASE_BRANCH);
+    let contents = fs::read(&branch_log)?;
+    let previous_record_end = contents[..contents.len() - 1]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .expect("the seeded branch reflog has a previous record");
+    fs::write(&branch_log, &contents[..=previous_record_end])?;
+
+    assert!(!git_natural_state_passed(
+        workspace.path(),
+        seed,
+        &seed_refs,
+        &seed_fixture,
+    )?);
+    Ok(())
+}
+
+#[test]
 fn git_natural_state_rejects_a_deleted_unrelated_fixture() -> EvalResult {
     let workspace = tempfile::tempdir()?;
     let (seed, seed_refs, seed_fixture) = seed_git_repository_with_refs(workspace.path())?;
@@ -5937,6 +6162,43 @@ fn forced_git_commit_verifier_accepts_the_exact_fixture_tree() -> EvalResult {
     .to_string();
 
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_commit_verifier_rejects_a_missing_branch_reflog_record() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_CREATE_COMMIT_NAME)
+        .expect("the Git commit fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let message = arguments["message"]
+        .as_str()
+        .expect("the Git commit fixture has a message");
+    suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
+    commit_staged_paths(suite.workspace.path(), message)?;
+    let repository = Repository::open(suite.workspace.path())?;
+    let head = repository.head()?.peel_to_commit()?.id();
+    let branch_log = repository
+        .path()
+        .join(GIT_LOGS_DIRECTORY)
+        .join("refs/heads")
+        .join(GIT_BASE_BRANCH);
+    let contents = fs::read(&branch_log)?;
+    let previous_record_end = contents[..contents.len() - 1]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .expect("the seeded branch reflog has a previous record");
+    fs::write(&branch_log, &contents[..=previous_record_end])?;
+    let result = serde_json::json!({
+        "commit": head.to_string(),
+        "state_cleaned": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
@@ -6499,6 +6761,41 @@ fn forced_git_log_verifier_accepts_the_bounded_target() -> EvalResult {
     .to_string();
 
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_reflog_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    let head_log = repository.path().join(GIT_LOGS_DIRECTORY).join("HEAD");
+    let mut contents = fs::read(&head_log)?;
+    contents.extend_from_slice(b"synthetic collateral reflog record\n");
+    fs::write(head_log, contents)?;
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
@@ -7422,6 +7719,29 @@ fn forced_workspace_list_verifier_rejects_collateral_mutation() -> EvalResult {
         suite.workspace.path().join(WORKSPACE_SEED_PATH),
         WORKSPACE_DRIFTED_SEED,
     )?;
+    let result = serde_json::json!({
+        "entries": workspace_listing_json(expected_workspace_listing()),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_workspace_list_verifier_rejects_collateral_hard_links() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == LIST_DIRECTORY_NAME)
+        .expect("the workspace list fixture exists");
+    let source = suite.workspace.path().join(workspace_list_entry_path(0));
+    let alias = suite.workspace.path().join(workspace_list_entry_path(1));
+    fs::remove_file(&alias)?;
+    fs::hard_link(&source, &alias)?;
     let result = serde_json::json!({
         "entries": workspace_listing_json(expected_workspace_listing()),
         "truncated": true,
@@ -8876,6 +9196,26 @@ fn workspace_natural_state_accepts_the_private_answer_mode() -> EvalResult {
     let snapshot = successful_workspace_natural_snapshot();
 
     assert!(suite.natural_state_passed(&snapshot)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_natural_state_rejects_collateral_hard_links() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let answer = suite.workspace.path().join(WORKSPACE_ANSWER_PATH);
+    fs::write(&answer, WORKSPACE_ANSWER)?;
+    fs::set_permissions(
+        &answer,
+        fs::Permissions::from_mode(WORKSPACE_PRIVATE_CREATION_MODE),
+    )?;
+    let source = suite.workspace.path().join(workspace_list_entry_path(0));
+    let alias = suite.workspace.path().join(workspace_list_entry_path(1));
+    fs::remove_file(&alias)?;
+    fs::hard_link(&source, &alias)?;
+    let snapshot = successful_workspace_natural_snapshot();
+
+    assert!(!suite.natural_state_passed(&snapshot)?);
     Ok(())
 }
 
