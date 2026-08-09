@@ -1932,7 +1932,7 @@ mod tests {
         let actual = fs::canonicalize(directories.actual).ok()?;
         let workspace = fs::canonicalize(directories.workspace).ok()?;
         let package = fs::canonicalize(directories.package).ok()?;
-        ((reported == workspace && actual == workspace)
+        ((reported == workspace && (actual == workspace || actual == package))
             || (reported == package && actual == package))
             .then_some(reported)
     }
@@ -2763,11 +2763,13 @@ mod tests {
     }
 
     #[test]
-    fn bridge_compiler_invocation_rejects_workspace_report_from_package_cwd() {
+    fn bridge_compiler_invocation_preserves_workspace_report_from_package_cwd() {
         let fixture = tempfile::tempdir().expect("fixture root exists");
         let workspace = fixture.path().join("workspace");
         let package = workspace.join("package");
         fs::create_dir_all(&package).expect("package fixture exists");
+        let expected_workspace = fs::canonicalize(&workspace).expect("workspace canonicalizes");
+
         assert_eq!(
             verified_compiler_invocation_directory_for(CompilerInvocationDirectories {
                 reported: &workspace,
@@ -2775,7 +2777,7 @@ mod tests {
                 workspace: &workspace,
                 package: &package,
             }),
-            None
+            Some(expected_workspace)
         );
     }
 
