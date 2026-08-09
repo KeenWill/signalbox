@@ -617,14 +617,16 @@ read-write at `/workspace`. The unshared network namespace denies IP egress, so
 a sandboxed command opens no connection to a remote host. It does not isolate an
 `AF_UNIX` pathname socket, which is reached through the filesystem rather than
 the network: a socket lying inside the workspace root stays connectable, and one
-fronting a proxy would carry egress with it. No daemon or adapter credential
-file is reachable, because the profile binds neither a home nor a configuration
-directory — but a credential the workspace itself holds is bound along with the
-workspace and is readable. The command may write anything under that root,
-including the repository's `.git`. The profile imposes no resource limits, drops
-no uid or gid, and applies no seccomp or landlock policy, so it does not contain
-a deliberately hostile program. It is not the runner's `WorkspaceRestricted`
-profile described by
+fronting a proxy would carry egress with it. The profile binds neither a home
+nor a configuration directory, so a daemon or adapter credential file placed
+outside the workspace root is not reachable. Nothing enforces that placement:
+credential settings are admitted on presence alone and are never checked against
+the workspace root, so a credential configured inside it — like any secret the
+repository itself carries — is bound along with the workspace and is readable.
+The command may write anything under that root, including the repository's
+`.git`. The profile imposes no resource limits, drops no uid or gid, and applies
+no seccomp or landlock policy, so it does not contain a deliberately hostile
+program. It is not the runner's `WorkspaceRestricted` profile described by
 [sandbox profiles and approval](runner-protocol.md#sandbox-profiles-and-approval),
 which additionally drops capabilities and brokers egress through a hostname
 allowlist, and which no present runner surface provides.
