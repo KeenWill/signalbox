@@ -1709,8 +1709,10 @@ mod tests {
     /// Composition preserves each execution declaration's permission default:
     /// the sandboxed command takes `Confirm`, because it accepts an arbitrary
     /// program and no unconfirmed turn may hold that authority; the diagnostics
-    /// reader stays automatic, since its argument schema admits only the fixed
-    /// Cargo commands it builds itself; and the unsandboxed command keeps
+    /// reader stays automatic, since its arguments select no program and it
+    /// issues only the fixed Cargo passes it builds itself — which do still run
+    /// the workspace's own build scripts, macros, and test binaries; and the
+    /// unsandboxed command keeps
     /// `AlwaysConfirm` — human-only regardless of the dangerous session blanket.
     /// Only an ignored live smoke observed this before, so a silent downgrade in
     /// the mapped composition could reach main unnoticed.

@@ -596,10 +596,14 @@ enumeration. `unsandboxed_exec` is compiled `AlwaysConfirm`, which no posture,
 approval judge, or session blanket can lower. `sandboxed_exec` defaults to
 `Confirm`, because it accepts an arbitrary program and argument vector and no
 unconfirmed turn may hold that authority. `cargo_diagnostics` defaults to
-`Auto`: its arguments carry no program, and the fixed Cargo commands it builds
-itself are the whole of what it can run. The runtime meaning and precedence of
-those declaration defaults, the explicit posture, the session blanket, and the
-durable approval wait are owned by
+`Auto`: its arguments carry no program, so a turn selects neither the binary nor
+its argument vector, and the tool issues only the fixed Cargo check, clippy, and
+test passes it builds itself. Those passes still compile and run the workspace's
+own build scripts, procedural macros, and test binaries, so an automatic
+diagnostics call executes whatever code the workspace already contains, under
+the profile described below. The runtime meaning and precedence of those
+declaration defaults, the explicit posture, the session blanket, and the durable
+approval wait are owned by
 [Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
 Only the explicit `[tool_approval_postures]` table changes a declaration's
 resolved posture; family composition itself does not.
@@ -609,12 +613,18 @@ profile whose confinement is stated here because its name overstates it. The
 profile unshares the user, mount, PID, IPC, UTS, and network namespaces, mounts
 a fresh `/proc`, `/dev`, and `/tmp`, binds a read-only operating-system runtime,
 clears the ambient environment, and binds the configured workspace root
-read-write at `/workspace`. A sandboxed command therefore reaches no host or
-remote service, and no credential file, because none is bound; it may write
-anything under the configured workspace root, including that repository's
-`.git`. The profile imposes no resource limits, drops no uid or gid, and applies
-no seccomp or landlock policy, so it does not contain a deliberately hostile
-program. It is not the runner's `WorkspaceRestricted` profile described by
+read-write at `/workspace`. The unshared network namespace denies IP egress, so
+a sandboxed command opens no connection to a remote host. It does not isolate an
+`AF_UNIX` pathname socket, which is reached through the filesystem rather than
+the network: a socket lying inside the workspace root stays connectable, and one
+fronting a proxy would carry egress with it. No daemon or adapter credential
+file is reachable, because the profile binds neither a home nor a configuration
+directory — but a credential the workspace itself holds is bound along with the
+workspace and is readable. The command may write anything under that root,
+including the repository's `.git`. The profile imposes no resource limits, drops
+no uid or gid, and applies no seccomp or landlock policy, so it does not contain
+a deliberately hostile program. It is not the runner's `WorkspaceRestricted`
+profile described by
 [sandbox profiles and approval](runner-protocol.md#sandbox-profiles-and-approval),
 which additionally drops capabilities and brokers egress through a hostname
 allowlist, and which no present runner surface provides.
