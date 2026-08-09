@@ -847,14 +847,26 @@ states the single property the store must satisfy and one pass that establishes
 it.
 
 **Exclusive custody.** No principal but the daemon's effective user may change
-what any path component denotes, and no principal but that user may reach the
-home or read a credential inside it. Concretely, in two parts, because ancestors
-and the home need different things: every path component is reached without
-traversing a symlink and cannot be renamed, replaced, or removed by another
-principal, though ordinary reading and traversal of an ancestor is expected and
-fine; and the home itself, together with every credential-bearing entry in it,
-is owned by the daemon's effective user and grants no other principal any access
-at all. An ancestor may be owned by `root`.
+what any path component denotes, and nothing the child reads under the home
+comes from outside the daemon's exclusive custody. Concretely, in three parts,
+because ancestors, the home, and its contents each need something different:
+
+- **Ancestors.** Every path component is reached without traversing a symlink
+  and cannot be renamed, replaced, or removed by another principal. Ordinary
+  reading and traversal of an ancestor is expected and fine, and an ancestor may
+  be owned by `root`.
+- **The home.** It is owned by the daemon's effective user and grants no other
+  principal any access at all.
+- **Its contents.** Nothing reachable within the home leaves it: no entry, at
+  any depth, resolves through a link to an object outside the verified home.
+  Credential-bearing entries are additionally regular files owned by that same
+  user with no other access.
+
+The third part is what makes the second one mean anything. A mode-`0700` home
+puts its *contents* beyond another principal's reach only if those contents are
+in fact inside it — a `skills` symlink pointing at a directory that principal
+can write is read by the child, becomes model-visible instruction, and never
+traverses the protected directory at all.
 
 One verification pass, the **custody walk**, establishes exactly that property,
 and every rule below is part of it rather than a separate check:
@@ -881,16 +893,18 @@ and every rule below is part of it rather than a separate check:
    adapter contract names as a place the CLI reads credentials from — must open
    no-follow as a *regular file* owned by the daemon's effective user with no
    group or other permission bit set at all. A symlink, FIFO, socket, device, or
-   directory in that position is rejected rather than inspected. The point of
-   this step is not permissions, which step 4 already settled, but escape: a
-   symlink here would resolve to an object outside the verified home, and no
-   entry is ever followed out of it.
-6. Every other entry in the home is the CLI's own working data — `sessions/`,
-   `log/`, `skills/<name>/SKILL.md`, and whatever else that release keeps — and
-   is neither inspected nor constrained. It does not need to be: step 4 already
-   put the whole directory beyond another principal's reach, and requiring
-   otherwise would reject the ordinary operator-established homes this delivery
-   exists to reuse.
+   directory in that position is rejected rather than inspected. This step is
+   about ownership and permissions; containment is step 6's job.
+6. It then descends the home to establish containment, opening every entry
+   no-follow. A regular file or directory is admitted without inspecting its
+   contents; the CLI's working data — `sessions/`, `log/`,
+   `skills/<name>/SKILL.md`, and whatever else that release keeps — is the CLI's
+   business, and constraining its shape would reject the ordinary
+   operator-established homes this delivery exists to reuse. A *link* is
+   admitted only when re-resolving it descriptor-relative from the home's own
+   descriptor lands inside the verified home; one that escapes is rejected, as
+   is any other non-regular, non-directory entry. Ownership and mode are not
+   re-checked here, because step 4 already settled who can reach any of it.
 7. It then records the home's device and inode as the profile's credential-home
    identity, and a later pass requires the same identity.
 
@@ -899,12 +913,13 @@ scheduling is blocked and no invocation starts against it.
 
 The facets that property covers, stated so a later report is either already
 answered or is honestly a new one: a symlink in any path component; a symlink or
-other non-regular entry standing where a credential file belongs; an ancestor,
-the home, or a credential file writable by another principal; the home readable
-or traversable by another principal; a credential file readable by another
-principal; and a home replaced by a different object between passes. A hard link
-to a credential file from elsewhere is covered too, because the check is on the
-inode the descriptor names rather than on the path that reached it.
+other non-regular entry standing where a credential file belongs; a link
+anywhere in the home resolving outside it; an ancestor, the home, or a
+credential file writable by another principal; the home readable or traversable
+by another principal; a credential file readable by another principal; and a
+home replaced by a different object between passes. A hard link to a credential
+file from elsewhere is covered too, because the check is on the inode the
+descriptor names rather than on the path that reached it.
 
 Why ancestors and not just the home: `CODEX_HOME` reaches the child as a path,
 and the child resolves that path itself. A principal who can write any ancestor
@@ -936,10 +951,13 @@ covered facet above, each asserting that scheduling is blocked and no invocation
 starts: a symlinked path component, a symlinked `auth.json`, a non-regular
 `auth.json`, a group-writable ancestor without sticky, a world-writable home, a
 mode-`0644` credential file, a group-readable home, and a home whose identity
-changed between passes. It owes one acceptance test too, because a property this
-strict is as easily wrong in the rejecting direction: an ordinary home carrying
-`sessions/`, `log/`, and `skills/<name>/SKILL.md` beside a mode-`0600`
-`auth.json`, under a mode-`0755` `root`-owned ancestor chain, must be admitted.
+changed between passes, and a `skills` entry symlinked outside the home. It owes
+two acceptance tests as well, because a property this strict is as easily wrong
+in the rejecting direction and has already regressed once that way: an ordinary
+home carrying `sessions/`, `log/`, and `skills/<name>/SKILL.md` beside a
+mode-`0600` `auth.json`, under a mode-`0755` `root`-owned ancestor chain, must
+be admitted; and so must one whose working data includes a link that stays
+inside the home.
 
 Every per-invocation recheck repeats the complete walk — every ancestor's
 ownership, mode, and sticky exemption, the home's own ownership and mode, its
@@ -1049,11 +1067,18 @@ operator, polls the configured token endpoint under the same
 one-POST-per-attempt and no-redirect rules the refresh path uses, and on success
 harvests the refresh token and non-secret account metadata into one transaction.
 No scratch credential home is involved, because no child runs: the CLI enters
-the picture only at dispatch, when it is handed a minted access token. Because
-each authorization mints an independent token family, provisioning neither
-disturbs nor depends on any other login for that account: an operator's existing
-CLI logins on this or any other machine keep working, and deleting the profile's
-stored authorization ends only the daemon's own family.
+the picture only at dispatch, when it is handed a minted access token.
+Provisioning depends on no other login for that account: it authorizes through
+its own configured client and stores what it harvests, reading nothing an
+operator's CLI already holds. Whether it *disturbs* one is the authorization
+server's to decide and not something this contract can promise — a server that
+issues one grant per client and account, or that revokes an earlier grant on a
+new authorization, will invalidate an operator's existing login, and the
+exchange gives the daemon no way to detect or prevent that. Deleting the
+profile's stored authorization likewise ends the daemon's own grant and whatever
+else that server ties to it. Where grant independence matters, it is a property
+of the configured authorization server that the operator must establish, not one
+this delivery provides.
 
 A stored authorization is bound to the tuple it was minted under. Provisioning
 persists, in the same transaction as the token generation, the exact
@@ -1204,14 +1229,19 @@ The five admitted actions are:
 | `avoid_new_sessions` | Sessions with a prior completed call through the member keep it; preparation for a session without one on this pool excludes it.                           |
 | `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an operator clears it.                                               |
 
-**Committed unimplemented functionality — durable trigger effects.** No present
-runtime observes a provider failure, derives a trigger, or stores a quarantine,
-membership exclusion, or session displacement, so no configured action above has
-any effect in this build. The action vocabulary is admitted by the grammar and
-validated at startup exactly as specified, and nothing else. Its implementing
-child owns how each action's durable record is scoped, correlated to the exact
-observation that caused it, serialized against a concurrent observation for the
-same profile, accumulated when a trigger repeats, and read by preparation.
+**Committed unimplemented functionality — durable trigger effects.** Provider
+failures are already observed and classified: each adapter maps its native
+terminal evidence to a closed `ProviderErrorKind`, and model-call execution
+already consumes that typed evidence. What no present runtime does is translate
+a classification into a pool trigger, or store a quarantine, membership
+exclusion, or session displacement, so no configured action above has any effect
+in this build. Its implementing child reuses the existing classification
+boundary rather than replacing it. The action vocabulary is admitted by the
+grammar and validated at startup exactly as specified, and nothing else. Its
+implementing child owns how each action's durable record is scoped, correlated
+to the exact observation that caused it, serialized against a concurrent
+observation for the same profile, accumulated when a trigger repeats, and read
+by preparation.
 
 `switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
 `on_overloaded`, because only those causes carry proof that the request was not
@@ -1529,14 +1559,16 @@ deployment-side rules that code cannot enforce are stated in
 
 - **External and daemon-owned CLI logins.** An `ambient` profile leaves login
   resolution to the CLI under the adapter's existing child-environment contract.
-  A `codex_home` profile instead names a login store the daemon never opens and
-  supplies that directory as the fresh Codex process's credential home. An
-  `oauth` profile inverts this — the daemon holds the rotating authorization and
-  hands each process a scratch home carrying only an access token. The
-  non-ambient forms make two profiles two independent logins, which is what lets
-  one pool hold several. The adapter invents no credential-value shape of its
-  own. The profile's configured billing kind labels derived cost; adapter kind
-  and delivery do not.
+  A `codex_home` profile instead names a login store whose contents the daemon
+  never reads or interprets — it opens entries for metadata alone, which is what
+  the custody walk's descriptor-relative `fstat` requires — and supplies that
+  directory as the fresh Codex process's credential home. An `oauth` profile
+  inverts this — the daemon holds the rotating authorization and hands each
+  process a scratch home carrying only an access token. The non-ambient forms
+  make two profiles two independent logins, which is what lets one pool hold
+  several. The adapter invents no credential-value shape of its own. The
+  profile's configured billing kind labels derived cost; adapter kind and
+  delivery do not.
 
 - **The value is the file's bytes less trailing line termination.** The read
   drops trailing `\n` and `\r` bytes and retains every other byte exactly,
