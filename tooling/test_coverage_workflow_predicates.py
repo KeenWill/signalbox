@@ -154,6 +154,12 @@ JQ_OPTIONS_READING_THE_FILTER_FROM_A_FILE = ("-f", "--from-file")
 WORD_TERMINATORS = " \t;|&\n()<>"
 LITERAL_WORD_KINDS = ("single-quoted", "double-quoted", "bare")
 
+# The only characters a backslash escapes inside double quotes. Before anything
+# else the shell keeps the backslash as well, which matters for a filter
+# carrying a regex: a scan that always dropped it would read `test(\"\d\")` as
+# `test("d")` and verify a program jq is never given.
+DOUBLE_QUOTE_ESCAPABLE = ("$", "`", '"', "\\")
+
 
 @dataclass(frozen=True)
 class ScannedInvocation:
@@ -169,6 +175,7 @@ class ScannedInvocation:
     reason: str
     excerpt: str
     through_gh_flag: bool
+    arguments: tuple[tuple[str, str], ...] = ()
 
     @property
     def readable(self) -> bool:
@@ -223,7 +230,18 @@ def read_shell_word(script: str, index: int) -> tuple[str, str, int]:
             buffer: list[str] = []
             while cursor < length and script[cursor] != '"':
                 if script[cursor] == "\\":
-                    buffer.append(script[cursor + 1 : cursor + 2])
+                    escaped = script[cursor + 1 : cursor + 2]
+                    # Inside double quotes a backslash escapes only these; before
+                    # anything else the shell keeps both characters. Dropping it
+                    # unconditionally would hand jq a different program than the
+                    # workflow does — `test(\"\\d\")` would arrive as `test("d")`,
+                    # and the harness would verify a filter jq never sees.
+                    if escaped == "\n":
+                        pass
+                    elif escaped in DOUBLE_QUOTE_ESCAPABLE:
+                        buffer.append(escaped)
+                    else:
+                        buffer.append("\\" + escaped)
                     cursor += 2
                     continue
                 if script[cursor] == "$":
@@ -291,6 +309,11 @@ def read_jq_invocation(script: str, index: int, *, through_gh_flag: bool) -> Sca
         )
 
     filter_comes_from_a_file = False
+    # The options the workflow passes, kept so a fixture can replay the
+    # invocation instead of choosing its own. `-n` is behaviour, not decoration:
+    # without it jq reads stdin, and a payload built with `--rawfile` alone
+    # produces nothing while still exiting zero.
+    arguments: list[tuple[str, str]] = []
     cursor = index
     while True:
         text, kind, following = read_shell_word(script, cursor)
@@ -313,11 +336,15 @@ def read_jq_invocation(script: str, index: int, *, through_gh_flag: bool) -> Sca
         if kind == "bare" and text.startswith("-") and text != "-":
             if text in JQ_OPTIONS_READING_THE_FILTER_FROM_A_FILE:
                 filter_comes_from_a_file = True
+            arguments.append((text, kind))
+            consumed = 0
             if text in JQ_OPTIONS_TAKING_A_NAME_AND_A_VALUE:
-                _, _, following = read_shell_word(script, following)
-                _, _, following = read_shell_word(script, following)
+                consumed = 2
             elif text in JQ_OPTIONS_TAKING_ONE_VALUE:
-                _, _, following = read_shell_word(script, following)
+                consumed = 1
+            for _ in range(consumed):
+                value, value_kind, following = read_shell_word(script, following)
+                arguments.append((value, value_kind))
             cursor = following
             continue
 
@@ -330,7 +357,11 @@ def read_jq_invocation(script: str, index: int, *, through_gh_flag: bool) -> Sca
             )
         if kind in LITERAL_WORD_KINDS:
             return ScannedInvocation(
-                program=text, reason="", excerpt=excerpt, through_gh_flag=through_gh_flag
+                program=text,
+                reason="",
+                excerpt=excerpt,
+                through_gh_flag=through_gh_flag,
+                arguments=tuple(arguments),
             )
         return ScannedInvocation(
             program=None,
@@ -359,6 +390,7 @@ class ExtractedProgram:
     step: str
     program: str
     through_gh_flag: bool
+    arguments: tuple[tuple[str, str], ...]
 
     def describe(self) -> str:
         excerpt = " ".join(self.program.split())[:80]
@@ -522,6 +554,7 @@ def extract_jq_programs(blocks: list[RunBlock]) -> list[ExtractedProgram]:
             step=block.step,
             program=invocation.program,
             through_gh_flag=invocation.through_gh_flag,
+            arguments=invocation.arguments,
         )
         for block in blocks
         for invocation in scan_jq_invocations(block.script)
@@ -948,6 +981,12 @@ IMPOSSIBLE_COVERED = 2
 
 # A target name that is not a string.
 NON_STRING_TARGET_NAME = 42
+
+# Every real xccov report carries the test bundles Xcode measured alongside the
+# product targets. The summarizer accepts them and excludes them from the
+# product total by design, so a predicate that refused a document containing one
+# would discard the ordinary baselines the summarizer reads.
+TEST_BUNDLE_TARGET = "SignalboxTests.xctest"
 
 
 def coverage_file(filename: str, *, lines: int, covered: int) -> dict:
@@ -1507,6 +1546,16 @@ NATIVE_DOCUMENTS: tuple[RecordedDocument, ...] = (
         divergence=AGREEMENT_REQUIRED,
     ),
     RecordedDocument(
+        name="a product target beside a test bundle",
+        document=native_report(
+            native_target(PRODUCT_TARGET, covered=40, executable=100),
+            native_target(TEST_BUNDLE_TARGET, covered=90, executable=100),
+        ),
+        loader_reads=True,
+        predicate_accepts=True,
+        divergence=AGREEMENT_REQUIRED,
+    ),
+    RecordedDocument(
         name="one impossible target inside a sane total",
         document=native_report(
             native_target("A.app", covered=IMPOSSIBLE_COVERED, executable=IMPOSSIBLE_COUNT),
@@ -1636,62 +1685,173 @@ def run_extracted(identifier: str, document: str) -> JqResult:
     return run_jq(extracted.program, document, *raw_output)
 
 
-def recorded_comment_pages() -> tuple[str, ...]:
-    """Comment pages a selector must survive, outside test bodies.
+# Which workflow each selector belongs to. Every selector check below is driven
+# from this rather than written per selector: the two are separate programs that
+# drift apart, and "covered for one, not the other" has been the shape of three
+# separate defects in this file. Driving both from one table means a case cannot
+# exist for one selector and be missing for the other.
+SELECTOR_WORKFLOWS = {
+    RUST_STICKY_SELECTOR: COVERAGE_WORKFLOW,
+    NATIVE_STICKY_SELECTOR: SWIFT_WORKFLOW,
+}
 
-    Every one of these is a page a real pull request can carry: this workflow's
-    own comment, the sibling workflow's, an ordinary comment from a person, and
-    each workflow's no-report body. A page whose comment has no body at all is
-    deliberately absent — the selector does fail on that, and it is recorded as
-    a divergence of its own rather than folded in here.
+
+@dataclass(frozen=True)
+class SelectorCase:
+    """One comment page a selector must handle, and the ids it must emit."""
+
+    name: str
+    page: str
+    expected: tuple[str, ...]
+
+
+def selector_cases(identifier: str) -> list[SelectorCase]:
+    """Every page one selector can meet on a pull request, outside test bodies.
+
+    The expected output is exact, not a shape. A selector that broadened to
+    match an ordinary comment would emit that comment's id, and the workflow
+    assigns the first id it reads to `first` and PATCHes it — rewriting what a
+    person wrote. Checking only that the output looks like an id would accept
+    exactly that.
     """
-    return (
-        comments_page({"id": MARKER_COMMENT_ID, "body": rust_comment_body()}),
-        comments_page({"id": MARKER_COMMENT_ID, "body": native_comment_body()}),
-        comments_page({"id": FOREIGN_COMMENT_ID, "body": "an ordinary review comment"}),
-        comments_page(
-            {"id": MARKER_COMMENT_ID, "body": no_report_comment_body(COVERAGE_WORKFLOW)}
-        ),
-        comments_page(
-            {"id": MARKER_COMMENT_ID, "body": no_report_comment_body(SWIFT_WORKFLOW)}
-        ),
+    own_workflow = SELECTOR_WORKFLOWS[identifier]
+    sibling_workflow = (
+        SWIFT_WORKFLOW if own_workflow == COVERAGE_WORKFLOW else COVERAGE_WORKFLOW
     )
+    own_body = (
+        rust_comment_body() if own_workflow == COVERAGE_WORKFLOW else native_comment_body()
+    )
+    sibling_body = (
+        native_comment_body() if own_workflow == COVERAGE_WORKFLOW else rust_comment_body()
+    )
+    marker = emitted_marker(own_workflow)
+    selected = str(MARKER_COMMENT_ID)
+    return [
+        SelectorCase(
+            name="the comment its own workflow wrote",
+            page=comments_page({"id": MARKER_COMMENT_ID, "body": own_body}),
+            expected=(selected,),
+        ),
+        SelectorCase(
+            name="its own no-report body",
+            page=comments_page(
+                {"id": MARKER_COMMENT_ID, "body": no_report_comment_body(own_workflow)}
+            ),
+            expected=(selected,),
+        ),
+        SelectorCase(
+            name="the sibling workflow's comment",
+            page=comments_page({"id": FOREIGN_COMMENT_ID, "body": sibling_body}),
+            expected=(),
+        ),
+        SelectorCase(
+            name="the sibling workflow's no-report body",
+            page=comments_page(
+                {"id": FOREIGN_COMMENT_ID, "body": no_report_comment_body(sibling_workflow)}
+            ),
+            expected=(),
+        ),
+        SelectorCase(
+            name="an ordinary comment from a person",
+            page=comments_page({"id": FOREIGN_COMMENT_ID, "body": "an ordinary review comment"}),
+            expected=(),
+        ),
+        SelectorCase(
+            name="an ordinary comment quoting the marker",
+            page=comments_page(
+                {"id": FOREIGN_COMMENT_ID, "body": f"Should the {marker} marker move?"}
+            ),
+            expected=(),
+        ),
+        SelectorCase(
+            name="duplicate marker comments, oldest first",
+            page=comments_page(
+                {"id": MARKER_COMMENT_ID, "body": own_body},
+                {"id": SECOND_MARKER_COMMENT_ID, "body": own_body},
+            ),
+            expected=(selected, str(SECOND_MARKER_COMMENT_ID)),
+        ),
+    ]
 
 
-def selector_incompatibilities(identifier: str) -> list[str]:
-    """Selector results a workflow could not use, outside test bodies.
+def selector_failures(identifier: str) -> list[str]:
+    """Everything one selector gets wrong across the pages it can meet.
 
-    Two things disqualify a result, and the status is checked first because a
-    filter that fails prints nothing, and judging it by its output alone reads
-    an aborted run as a clean no-match:
+    Runs outside test bodies and checks three things per page, in this order
+    because each would mask the next:
 
-    A nonzero exit. The workflow reads this filter through
+    The exit status. The workflow reads the filter through
     `existing="$(gh api ... --jq ...)"` in a step run under `bash -e`, so a
-    failure on any page a pull request can carry aborts the step and leaves the
-    coverage comment standing at whatever the last successful run wrote.
+    failure aborts the step and leaves the coverage comment at whatever the last
+    successful run wrote. A failing filter also prints nothing, so judging by
+    output alone reads an aborted run as a clean no-match.
 
-    Output that is not a plain integer. The GitHub CLI runs these filters on its
-    own jq implementation rather than the binary here, and the two agree about
-    numbers while differing about how they print strings. A selector that only
-    ever emits comment ids is therefore one whose behaviour does not depend on
-    which implementation runs it.
+    The exact ids emitted, in order. The workflow keeps only the first line, so
+    ordering across duplicates decides which comment gets rewritten, and an
+    unexpected id on a page that should match nothing is a comment belonging to
+    a person that the workflow would overwrite.
+
+    That every id is a plain integer. The GitHub CLI runs these filters on its
+    own jq implementation rather than the binary here; the two agree about
+    numbers and differ about how they print strings, so a selector that only
+    ever emits ids behaves the same under both.
     """
     problems: list[str] = []
-    for page in recorded_comment_pages():
-        result = run_extracted(identifier, page)
+    for case in selector_cases(identifier):
+        result = run_extracted(identifier, case.page)
         if result.status != 0:
             problems.append(
-                f"{identifier} exited {result.status} on a page a pull request can carry, "
-                f"which aborts the publishing step: {result.stderr.strip()}"
+                f"{identifier} on {case.name!r} exited {result.status}, which aborts the "
+                f"publishing step: {result.stderr.strip()}"
             )
             continue
+        emitted = tuple(result.stdout.split())
+        if emitted != case.expected:
+            problems.append(
+                f"{identifier} on {case.name!r} emitted {emitted} but must emit "
+                f"{case.expected}"
+            )
         problems.extend(
-            f"{identifier} emitted {line!r}, which is not a comment id, so the two jq "
-            "implementations need not print it alike"
-            for line in result.stdout.split()
+            f"{identifier} on {case.name!r} emitted {line!r}, which is not a comment id, "
+            "so the two jq implementations need not print it alike"
+            for line in emitted
             if not line.lstrip("-").isdigit()
         )
     return problems
+
+
+def selectors_not_stopped_by_a_bodyless_comment() -> list[str]:
+    """Selectors that do not fail on a comment carrying no body, outside test bodies.
+
+    This records a divergence rather than a requirement, and it is checked for
+    both selectors because both carry the same clause. `startswith` raises on a
+    null body, so one such comment ends the whole selection and the run posts
+    nothing. Recorded, not fixed: the workflow files belong elsewhere.
+    """
+    page = comments_page(
+        {"id": FOREIGN_COMMENT_ID},
+        {"id": MARKER_COMMENT_ID, "body": rust_comment_body()},
+    )
+    return [
+        identifier
+        for identifier in SELECTOR_WORKFLOWS
+        if not run_extracted(identifier, page).errored
+    ]
+
+
+def replayed_arguments(extracted: ExtractedProgram, body_path: Path) -> tuple[str, ...]:
+    """The workflow's own jq arguments, pointed at a fixture, outside test bodies.
+
+    Every option the workflow passes is replayed rather than chosen here, and
+    the one word that names a file is redirected to the fixture. Supplying a
+    working set of arguments instead would test an invocation the workflow does
+    not make: dropping `-n` while keeping `--rawfile` leaves jq reading stdin,
+    which writes no payload and still exits zero.
+    """
+    return tuple(
+        str(body_path) if kind == "shell-expansion" else text
+        for text, kind in extracted.arguments
+    )
 
 
 def payload_round_trip_failures() -> list[str]:
@@ -1722,14 +1882,21 @@ def payload_round_trip_failures() -> list[str]:
         ),
     ):
         for variant, body in sorted(producer_bodies(workflow, report).items()):
+            extracted = one_extracted_for(identifier)
             with tempfile.TemporaryDirectory() as workspace:
                 body_path = Path(workspace) / COMMENT_FILE
                 body_path.write_text(body, encoding="utf-8")
                 result = run_jq(
-                    one_program_for(identifier), "", "-n", "--rawfile", "body", str(body_path)
+                    extracted.program, "", *replayed_arguments(extracted, body_path)
                 )
             if result.status != 0:
                 failures.append(f"{workflow.name}/{variant}: jq failed: {result.stderr.strip()}")
+                continue
+            if not result.stdout.strip():
+                failures.append(
+                    f"{workflow.name}/{variant}: the invocation wrote no payload while exiting "
+                    "zero, which is what dropping -n from a --rawfile invocation does"
+                )
                 continue
             returned = json.loads(result.stdout)
             if list(returned) != ["body"] or returned["body"] != body:
@@ -2120,14 +2287,18 @@ class CommentPayloadTests(JqBackedTestCase):
 
     def payload_body(self, identifier: str, body: str) -> str:
         """Run one extracted payload program over a body file, as CI does."""
+        extracted = one_extracted_for(identifier)
         with tempfile.TemporaryDirectory() as workspace:
-            body_path = Path(workspace) / "comment.md"
+            body_path = Path(workspace) / COMMENT_FILE
             body_path.write_text(body, encoding="utf-8")
-            result = run_jq(
-                one_program_for(identifier), "", "-n", "--rawfile", "body", str(body_path)
-            )
+            result = run_jq(extracted.program, "", *replayed_arguments(extracted, body_path))
 
         self.assertEqual(result.status, 0, f"jq failed: {result.stderr}")
+        self.assertTrue(
+            result.stdout.strip(),
+            "the workflow's own invocation wrote no payload while exiting zero, which is "
+            "what dropping -n from a --rawfile invocation does",
+        )
         payload = json.loads(result.stdout)
         self.assertEqual(list(payload), ["body"], "the API takes exactly one field")
         return payload["body"]
@@ -2227,182 +2398,40 @@ class CommentPayloadTests(JqBackedTestCase):
 
 
 class StickySelectorTests(JqBackedTestCase):
-    """The selector must find exactly the comment its own workflow wrote.
+    """Each selector against every comment page it can meet.
 
-    Both halves of this pair come out of the same workflow: the shell builds
+    Both halves of this pair come out of the workflow: the shell builds
     `comment.md` by prepending a marker to the rendered report, and the selector
     later finds that comment among every comment on the pull request. The
     invariant is agreement — what a workflow writes, its own selector must find,
-    and the sibling workflow's must not.
+    and everything else on the page it must leave alone.
+
+    The cases are held in one table driven over both selectors rather than
+    written out per selector. They are independent programs that drift apart,
+    and a case covered for one and missing for the other has been the shape of
+    three separate defects here; a table cannot be asymmetric.
     """
 
-    def assert_selection(self, result: JqResult, expected: str) -> None:
-        """Assert what the selector printed and that it also exited cleanly.
+    def test_the_rust_selector_handles_every_page_it_can_meet(self) -> None:
+        """Status, exact ids in order, and id-shaped output, over every page:
+        its own comment and no-report body, the sibling workflow's, an ordinary
+        comment, one quoting the marker, and duplicates."""
+        self.assertEqual(selector_failures(RUST_STICKY_SELECTOR), [])
 
-        The workflow reads this filter through
-        `existing="$(gh api ... --jq ...)"`, in a step GitHub runs under
-        `bash -e`. A filter that printed the right comment id and then failed
-        would abort the step before the id was ever used, so comparing output
-        alone would call a broken selector correct — which is how the one
-        recorded live defect in this file behaves.
-        """
-        self.assertEqual(result.status, 0, f"the selector failed: {result.stderr.strip()}")
-        self.assertEqual(result.stdout.strip(), expected)
+    def test_the_native_selector_handles_every_page_it_can_meet(self) -> None:
+        """The same table against the native selector, which is a separate
+        program and drifts on its own."""
+        self.assertEqual(selector_failures(NATIVE_STICKY_SELECTOR), [])
 
-    def test_the_rust_selector_finds_the_comment_the_coverage_workflow_wrote(self) -> None:
-        """The end-to-end agreement this module exists for: the real summarizer
-        renders, the workflow's own marker shell wraps, and the workflow's own
-        extracted selector then finds it by id."""
-        page = comments_page({"id": MARKER_COMMENT_ID, "body": rust_comment_body()})
-
-        result = run_extracted(RUST_STICKY_SELECTOR, page)
-
-        self.assert_selection(result, str(MARKER_COMMENT_ID))
-
-    def test_the_native_selector_finds_the_comment_the_swift_workflow_wrote(self) -> None:
-        """The same round trip through the native renderer and the native
-        marker, which are a separate copy and can drift."""
-        page = comments_page({"id": MARKER_COMMENT_ID, "body": native_comment_body()})
-
-        result = run_extracted(NATIVE_STICKY_SELECTOR, page)
-
-        self.assert_selection(result, str(MARKER_COMMENT_ID))
-
-    def test_the_rust_selector_finds_the_no_report_comment(self) -> None:
-        """The body a run writes when it measured nothing must be findable by
-        the same selector, because its entire job is to replace the previous
-        run's numbers under one marker. A no-report body the selector could not
-        find would post beside the stale report instead of over it, leaving the
-        old numbers reading as the current head's."""
-        page = comments_page(
-            {
-                "id": MARKER_COMMENT_ID,
-                "body": no_report_comment_body(COVERAGE_WORKFLOW),
-            }
-        )
-
-        result = run_extracted(RUST_STICKY_SELECTOR, page)
-
-        self.assert_selection(result, str(MARKER_COMMENT_ID))
-
-    def test_the_native_selector_finds_the_no_report_comment(self) -> None:
-        """The same for the native workflow's own no-report body."""
-        page = comments_page(
-            {
-                "id": MARKER_COMMENT_ID,
-                "body": no_report_comment_body(SWIFT_WORKFLOW),
-            }
-        )
-
-        result = run_extracted(NATIVE_STICKY_SELECTOR, page)
-
-        self.assert_selection(result, str(MARKER_COMMENT_ID))
-
-    def test_the_rust_selector_ignores_the_native_comment(self) -> None:
-        """The workflows state that their two sticky comments never collide.
-        Were that wrong, each would rewrite the other's comment on every push
-        and a pull request would end up with one report where it should carry
-        two."""
-        page = comments_page({"id": FOREIGN_COMMENT_ID, "body": native_comment_body()})
-
-        result = run_extracted(RUST_STICKY_SELECTOR, page)
-
-        self.assert_selection(result, "")
-
-    def test_the_native_selector_ignores_the_rust_comment(self) -> None:
-        """The other direction of the same claim, which is not implied by the
-        first: the markers could have been prefixes of each other one way."""
-        page = comments_page({"id": FOREIGN_COMMENT_ID, "body": rust_comment_body()})
-
-        result = run_extracted(NATIVE_STICKY_SELECTOR, page)
-
-        self.assert_selection(result, "")
-
-    def test_a_comment_merely_quoting_the_marker_is_not_selected(self) -> None:
-        """The selector anchors at the start of a body, and it must: a review
-        comment quoting the marker is an ordinary comment from a person, and
-        rewriting it in place would destroy what they wrote."""
-        quoting = f"I think the {RUST_MARKER} marker should move."
-        page = comments_page({"id": FOREIGN_COMMENT_ID, "body": quoting})
-
-        result = run_extracted(RUST_STICKY_SELECTOR, page)
-
-        self.assert_selection(result, "")
-
-    def test_a_comment_merely_quoting_the_native_marker_is_not_selected(self) -> None:
-        """The native selector is a separate program and can broaden on its
-        own. Were it to gain a looser branch while keeping the registered
-        `startswith` clause, the registry and every other native test would
-        still pass, and the Swift workflow would then PATCH an ordinary human
-        comment that happens to quote the marker — overwriting what somebody
-        wrote."""
-        quoting = f"Should the {NATIVE_MARKER} marker move?"
-        page = comments_page({"id": FOREIGN_COMMENT_ID, "body": quoting})
-
-        result = run_extracted(NATIVE_STICKY_SELECTOR, page)
-
-        self.assert_selection(result, "")
-
-    def test_the_oldest_marker_comment_is_reported_first(self) -> None:
-        """The shell keeps only the first line of the selector's output. Should
-        a duplicate marker comment ever exist, the workflow must keep rewriting
-        the same one rather than alternate between them."""
-        body = rust_comment_body()
-        page = comments_page(
-            {"id": MARKER_COMMENT_ID, "body": body},
-            {"id": SECOND_MARKER_COMMENT_ID, "body": body},
-        )
-
-        result = run_extracted(RUST_STICKY_SELECTOR, page)
-
-        self.assertEqual(result.status, 0, f"the selector failed: {result.stderr.strip()}")
-        self.assertEqual(
-            result.stdout.split(), [str(MARKER_COMMENT_ID), str(SECOND_MARKER_COMMENT_ID)]
-        )
-
-    def test_the_selectors_survive_every_page_a_pull_request_can_carry(self) -> None:
-        """Each selector is run over every page it can meet and judged on its
-        exit status as well as its output.
-
-        The status half is not decoration: the workflow reads the filter through
-        a command substitution in a step run under `bash -e`, so a filter that
-        fails on any of these pages aborts the step and leaves the previous
-        run's numbers standing as the current readout. A filter that fails also
-        prints nothing, so judging by output alone reads an aborted run as a
-        clean no-match.
-
-        The output half bounds the one behaviour where the GitHub CLI's jq
-        implementation and the binary here can disagree. The CLI exposes its
-        formatter only on a live API request, which this module will not make,
-        so instead of assuming the difference is harmless this checks that the
-        selectors only ever emit comment ids — a shape both print alike."""
-        self.assertEqual(selector_incompatibilities(RUST_STICKY_SELECTOR), [])
-        self.assertEqual(selector_incompatibilities(NATIVE_STICKY_SELECTOR), [])
-
-    def test_a_comment_carrying_no_body_stops_the_selector(self) -> None:
+    def test_a_comment_carrying_no_body_stops_both_selectors(self) -> None:
         """An expected divergence, recorded rather than fixed: the workflow
-        files belong to #484 and this branch changes neither.
+        files belong to the coverage-delta work and this branch changes neither.
 
         `startswith` raises on a non-string, so one comment with no body ends
-        the whole selection and the run posts nothing — the same shape as the
-        recorded non-string target name, in the same costly direction. The job
-        continues on error, so the visible symptom is a coverage comment that
-        silently stops updating."""
-        page = comments_page(
-            {"id": FOREIGN_COMMENT_ID},
-            {"id": MARKER_COMMENT_ID, "body": rust_comment_body()},
-        )
-
-        result = run_extracted(RUST_STICKY_SELECTOR, page)
-
-        self.assertTrue(result.errored, "expected jq to refuse a comment with no body")
-        self.assertIn("startswith", result.stderr)
-        self.assertEqual(result.stdout.strip(), "", "the marker comment went unfound")
-
-
-# --------------------------------------------------------------------------
-# The recorded documents, loader half
-# --------------------------------------------------------------------------
+        the whole selection and the run posts nothing. The job continues on
+        error, so the visible symptom is a coverage comment that silently stops
+        updating. Checked for both selectors, because both carry the clause."""
+        self.assertEqual(selectors_not_stopped_by_a_bodyless_comment(), [])
 
 
 class RecordedDocumentTests(unittest.TestCase):
