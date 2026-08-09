@@ -1348,6 +1348,59 @@ def one_program_for(identifier: str) -> str:
     return matches[0].program
 
 
+# Which fixture set drives each specification. `exercised` is checked against
+# this rather than trusted: a specification counts as covering a program only
+# when cases behind it appear here, so setting the flag without writing fixtures
+# fails by name instead of making the harness green over nothing. That failure
+# mode is the one this module exists to refuse, and it applies to the module's
+# own bookkeeping as much as to the workflows it reads.
+def fixture_cases_by_specification() -> dict[str, list]:
+    """The fixture cases driving each specification, outside test bodies.
+
+    These are the same collections the tests below iterate, so a specification
+    named here with cases behind it is one the suite actually drives. What this
+    cannot tell on its own is whether a name has been pointed at an unrelated
+    collection; it converts a bare assertion into one that fails when nothing
+    backs it, which is the property being claimed and not more.
+    """
+    return {
+        RUST_COMMENT_PAYLOAD: list(producer_bodies(COVERAGE_WORKFLOW, "").values()),
+        NATIVE_COMMENT_PAYLOAD: list(producer_bodies(SWIFT_WORKFLOW, "").values()),
+        RUST_STICKY_SELECTOR: list(selector_cases(RUST_STICKY_SELECTOR)),
+        NATIVE_STICKY_SELECTOR: list(selector_cases(NATIVE_STICKY_SELECTOR)),
+        RUST_DOCUMENT_PREDICATE: list(RUST_DOCUMENTS),
+        NATIVE_DOCUMENT_PREDICATE: list(NATIVE_DOCUMENTS),
+    }
+
+
+def misdeclared_exercised_specs() -> list[str]:
+    """Specifications whose `exercised` flag disagrees with their fixtures.
+
+    Runs outside test bodies, and checks both directions. A flag set without
+    fixtures makes `unexercised_programs()` accept a program nothing drives —
+    the silent pass this module is built to prevent, turned inward. A flag left
+    unset while fixtures exist is the opposite mistake: the exhaustiveness check
+    keeps demanding work that is already done.
+    """
+    cases = fixture_cases_by_specification()
+    problems: list[str] = []
+    for spec in PREDICATE_SPECS:
+        backing = cases.get(spec.identifier, [])
+        if spec.exercised and not backing:
+            problems.append(
+                f"{spec.identifier} declares exercised=True but no fixture set drives it. "
+                "Give it cases in fixture_cases_by_specification(), or set exercised=False: "
+                "the exhaustiveness check counts this specification as covering a program, "
+                "and a flag on its own covers nothing"
+            )
+        if not spec.exercised and backing:
+            problems.append(
+                f"{spec.identifier} has {len(backing)} fixture cases but declares "
+                "exercised=False, so the exhaustiveness check still demands work already done"
+            )
+    return problems
+
+
 def unexercised_programs() -> list[str]:
     """Every extracted program no fixture-backed specification covers, outside test bodies.
 
@@ -2743,6 +2796,15 @@ class WorkflowReadingTests(unittest.TestCase):
         every test that depends on it instead of failing. Promotion is a
         one-word edit, and this failure is what demands it."""
         self.assertEqual(misdeclared_presence(), [])
+
+    def test_every_exercised_specification_is_backed_by_fixtures(self) -> None:
+        """`exercised` decides whether a landed program counts as covered, so
+        an unbacked flag makes this module pass over a predicate nothing drives
+        — the silent pass it exists to refuse, turned on its own bookkeeping.
+
+        Checked both ways: a flag set without fixtures fails, and so does a
+        fixture set whose specification still declares itself uncovered."""
+        self.assertEqual(misdeclared_exercised_specs(), [])
 
     def test_every_extracted_program_is_exercised(self) -> None:
         """The direction that closes the defect class. A jq program that no
