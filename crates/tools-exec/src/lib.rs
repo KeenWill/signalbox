@@ -22,13 +22,12 @@
 //! `known_truncated` flag reports positive truncation evidence; false never
 //! claims that the workspace-influenced collection is complete or authentic.
 //!
-//! The profile unshares the network namespace, so a sandboxed command holds
-//! only a loopback interface and opens no connection to a remote host. A
-//! network namespace does not cover an `AF_UNIX` pathname socket, so one lying
-//! inside the bound workspace root stays connectable. The profile still
-//! imposes no resource limits, drops no uid or gid, and applies no seccomp or
-//! landlock policy, so it remains an inadmissible boundary for executing
-//! untrusted code — the network fence narrows that gap rather than closing it.
+//! The profile unshares the network namespace, imposes no resource limits,
+//! drops no uid or gid, and applies no seccomp or landlock policy. It is
+//! therefore not an admissible boundary for executing untrusted code; the
+//! network fence narrows that gap rather than closing it. Exactly what the
+//! profile does and does not confine is owned by
+//! `docs/spec/configuration-and-credentials.md` and is not restated here.
 //! Because the sandbox binds no host Cargo home, a Cargo pass through
 //! [`CargoDiagnosticsTool`] now resolves only against an already-populated
 //! workspace-local registry cache. Shell sessions and PTYs are likewise outside
