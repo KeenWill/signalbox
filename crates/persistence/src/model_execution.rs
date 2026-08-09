@@ -52,9 +52,11 @@ use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 use crate::{
     commit_failure_is_ambiguous,
     mapping::{
+        DelegationUpdateStorageKind, DelegationWakeStorageKind,
         ToolApprovalDecisionSourceStorageKind, accepted_input_id_from_uuid,
         dangerous_tool_auto_approval_to_str, defaults_version_to_numeric,
         delegation_outcome_kind_to_str, delegation_outcome_reason_to_str,
+        delegation_update_kind_to_str, delegation_wake_subject_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, input_position_from_numeric,
         positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
         tool_approval_decision_source_to_str, tool_approval_posture_to_str,
@@ -5023,25 +5025,36 @@ async fn persist_delegated_child_result(
             .ok_or(ModelCallCorruption::Inconsistent(
                 "delegated child result provenance",
             ))?;
-    let (outcome_kind, reason_kind) = match (outcome.kind(), outcome.reason()) {
-        (DelegationOutcomeKind::ResultReturned, DelegationOutcomeReason::ChildCompleted) => {
-            ("result_returned", "child_completed")
-        }
-        (DelegationOutcomeKind::ChildFailed, DelegationOutcomeReason::ChildExecutionFailed) => {
-            ("child_failed", "child_execution_failed")
-        }
-        (DelegationOutcomeKind::ChildFailed, DelegationOutcomeReason::ChildResultUnavailable) => {
-            ("child_failed", "child_result_unavailable")
-        }
-        (DelegationOutcomeKind::ChildCancelled, DelegationOutcomeReason::ChildCancelled) => {
-            ("child_cancelled", "child_cancelled")
-        }
+    // The match admits only the outcome/reason pairings a terminal child result
+    // may carry; the spellings themselves come from the canonical encoders, so
+    // this states the pairing rule without restating the durable vocabulary.
+    let (outcome_pairing, reason_pairing) = match (outcome.kind(), outcome.reason()) {
+        pairing @ (
+            DelegationOutcomeKind::ResultReturned,
+            DelegationOutcomeReason::ChildCompleted,
+        )
+        | pairing @ (
+            DelegationOutcomeKind::ChildFailed,
+            DelegationOutcomeReason::ChildExecutionFailed,
+        )
+        | pairing @ (
+            DelegationOutcomeKind::ChildFailed,
+            DelegationOutcomeReason::ChildResultUnavailable,
+        )
+        | pairing @ (
+            DelegationOutcomeKind::ChildCancelled,
+            DelegationOutcomeReason::ChildCancelled,
+        ) => pairing,
         _ => {
             return Err(
                 ModelCallCorruption::Inconsistent("terminal delegated child outcome").into(),
             );
         }
     };
+    let outcome_kind = delegation_outcome_kind_to_str(outcome_pairing);
+    let reason_kind = delegation_outcome_reason_to_str(reason_pairing).ok_or(
+        ModelCallCorruption::Inconsistent("terminal delegated child outcome"),
+    )?;
     let content = outcome.content().map(DelegationContent::as_str);
     let relation = load_delegation_terminal_relation(
         connection,
@@ -5171,7 +5184,7 @@ async fn persist_delegated_child_result(
              provenance_session_id, provenance_turn_id,
              result_spawning_request_id, content_text)
          SELECT event_sequence, event_kind, storage_version, session_id,
-                'child_result', $2, $3, $4, $5,
+                $8::text, $2, $3, $4, $5,
                 'child_turn', $3, $6, $2, $7
            FROM header",
     )
@@ -5182,6 +5195,9 @@ async fn persist_delegated_child_result(
     .bind(reason_kind)
     .bind(turn_id_to_uuid(turn))
     .bind(content)
+    .bind(delegation_update_kind_to_str(
+        DelegationUpdateStorageKind::ChildResult,
+    ))
     .execute(&mut *connection)
     .await?;
     sqlx::query(
@@ -5196,11 +5212,14 @@ async fn persist_delegated_child_result(
              spawning_tool_request_id, subject_kind,
              result_spawning_request_id, awaiting_tool_request_id)
          SELECT event_sequence, event_kind, storage_version, session_id,
-                $2, 'result', $2, NULL
+                $2, $3::text, $2, NULL
            FROM header",
     )
     .bind(parent)
     .bind(spawning_request)
+    .bind(delegation_wake_subject_to_str(
+        DelegationWakeStorageKind::Result,
+    ))
     .execute(&mut *connection)
     .await?;
     Ok(())
