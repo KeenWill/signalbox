@@ -1588,7 +1588,7 @@ mod tests {
     struct ComparableBridgeTool {
         name: String,
         description: String,
-        input_schema: serde_json::Value,
+        input_schema: ToolInputSchema,
     }
 
     #[derive(Deserialize)]
@@ -1625,30 +1625,30 @@ mod tests {
         name: String,
         description: String,
         #[serde(rename = "inputSchema")]
-        input_schema: serde_json::Value,
+        input_schema: Box<serde_json::value::RawValue>,
     }
 
     impl ListedBridgeResponse {
         fn into_tools(self, request_id: u64) -> Option<Vec<ComparableBridgeTool>> {
-            (self.jsonrpc == MCP_JSON_RPC_VERSION && self.id == request_id && !self.error_present)
-                .then_some(self.result?)
-                .map(|result| {
-                    result
-                        .tools
-                        .into_iter()
-                        .map(ListedBridgeTool::into_comparable)
-                        .collect()
-                })
+            let result = (self.jsonrpc == MCP_JSON_RPC_VERSION
+                && self.id == request_id
+                && !self.error_present)
+                .then_some(self.result?)?;
+            result
+                .tools
+                .into_iter()
+                .map(ListedBridgeTool::into_comparable)
+                .collect()
         }
     }
 
     impl ListedBridgeTool {
-        fn into_comparable(self) -> ComparableBridgeTool {
-            ComparableBridgeTool {
+        fn into_comparable(self) -> Option<ComparableBridgeTool> {
+            Some(ComparableBridgeTool {
                 name: self.name,
                 description: self.description,
-                input_schema: self.input_schema,
-            }
+                input_schema: ToolInputSchema::try_new(self.input_schema.get().to_owned()).ok()?,
+            })
         }
     }
 
@@ -1664,8 +1664,7 @@ mod tests {
             .map(|definition| ComparableBridgeTool {
                 name: definition.name().as_str().to_owned(),
                 description: definition.description().to_owned(),
-                input_schema: serde_json::from_str(definition.input_schema().as_str())
-                    .expect("daemon tool schemas are valid JSON values"),
+                input_schema: definition.input_schema().clone(),
             })
             .collect()
     }
@@ -1674,10 +1673,19 @@ mod tests {
     const SYNTHETIC_BRIDGE_TOOL_DESCRIPTION: &str = "Projects a synthetic bridge tool.";
     const SYNTHETIC_BRIDGE_TOOL_SCHEMA: &str =
         r#"{"properties":{"value":{"type":"string"}},"required":["value"],"type":"object"}"#;
+    const SYNTHETIC_DEEP_BRIDGE_SCHEMA_DEPTH: usize = 512;
     const SYNTHETIC_UNMODELED_BRIDGE_TOOL_TITLE: &str = "Synthetic unmodeled title";
     const SYNTHETIC_MCP_NEXT_CURSOR: &str = "synthetic-next-page";
     const SYNTHETIC_MCP_SERVER_NAME: &str = "synthetic";
     const SYNTHETIC_MCP_IGNORED_ARGUMENT: &str = "ready path";
+
+    fn synthetic_deep_bridge_tool_schema() -> String {
+        let mut schema = String::from(r#"{"type":"string"}"#);
+        for _ in 0..SYNTHETIC_DEEP_BRIDGE_SCHEMA_DEPTH {
+            schema = format!(r#"{{"properties":{{"nested":{schema}}},"type":"object"}}"#);
+        }
+        schema
+    }
 
     #[cfg(target_os = "linux")]
     #[track_caller]
@@ -1804,6 +1812,7 @@ mod tests {
     const SYNTHETIC_CARGO_CHANGE_DIRECTORY_OPTION_VALUE: &str = "synthetic-workspace";
     const SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE: &str = "unstable-options";
     const CARGO_RELEASE_OPTION: &str = "--release";
+    const CARGO_RELEASE_SHORT_OPTION: &str = "-r";
     const MCP_JSON_RPC_VERSION: &str = "2.0";
     const SYNTHETIC_WRONG_JSON_RPC_VERSION: &str = "1.0";
     #[cfg(target_os = "linux")]
@@ -1989,7 +1998,10 @@ done
                 index += 1;
                 continue;
             }
-            if argument == OsStr::new(CARGO_RELEASE_OPTION) {
+            if matches!(
+                argument.to_str(),
+                Some(CARGO_RELEASE_OPTION | CARGO_RELEASE_SHORT_OPTION)
+            ) {
                 profile = Some(OsString::from(CARGO_RELEASE_PROFILE));
             }
             index += 1;
@@ -2567,6 +2579,20 @@ done
     }
 
     #[test]
+    fn cargo_test_invocation_recognizes_the_short_release_option() {
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new(CARGO_TEST_SUBCOMMAND),
+            OsStr::new(CARGO_RELEASE_SHORT_OPTION),
+        ];
+
+        assert_eq!(
+            cargo_test_profile_from_arguments(&arguments),
+            Some(OsString::from(CARGO_RELEASE_PROFILE))
+        );
+    }
+
+    #[test]
     fn bridge_artifact_selection_preserves_an_explicit_bench_profile() {
         let arguments = [
             OsStr::new(CARGO_PROGRAM_STEM),
@@ -2701,15 +2727,18 @@ done
 
     #[test]
     fn bridge_artifact_selection_preserves_a_custom_profile() {
-        let executable = Path::new("synthetic-target/ci-fast/deps/daemon-tools-test");
+        let custom_profile = "ci-fast";
+        let executable = Path::new("synthetic-target")
+            .join(custom_profile)
+            .join("deps/daemon-tools-test");
 
         assert_bridge_artifact_selection(BridgeArtifactExpectation {
-            executable,
+            executable: &executable,
             target_dir: Path::new("synthetic-target"),
             configured_target_dir: None,
             default_target_dir: Path::new("synthetic-target"),
             debug_profile: CARGO_TEST_PROFILE,
-            expected_profile: "ci-fast",
+            expected_profile: custom_profile,
             expected_target: None,
             recognized_target: None,
         });
@@ -4344,6 +4373,27 @@ done
             serde_json::from_str(&response).expect("synthetic list response is valid JSON");
 
         assert_eq!(response.into_tools(MCP_LIST_TOOLS_REQUEST_ID), None);
+    }
+
+    #[test]
+    fn raw_list_response_compares_a_deep_schema_semantically() {
+        let schema = synthetic_deep_bridge_tool_schema();
+        let response = format!(
+            r#"{{"jsonrpc":"{MCP_JSON_RPC_VERSION}","id":{MCP_LIST_TOOLS_REQUEST_ID},"result":{{"tools":[{{"name":"{SYNTHETIC_BRIDGE_TOOL_NAME}","description":"{SYNTHETIC_BRIDGE_TOOL_DESCRIPTION}","inputSchema":{schema}}}]}}}}"#
+        );
+        let response: ListedBridgeResponse =
+            serde_json::from_str(&response).expect("deep synthetic list response is valid JSON");
+        let expected_schema =
+            ToolInputSchema::try_new(schema).expect("deep synthetic schema is admitted");
+
+        assert_eq!(
+            response.into_tools(MCP_LIST_TOOLS_REQUEST_ID),
+            Some(vec![ComparableBridgeTool {
+                name: String::from(SYNTHETIC_BRIDGE_TOOL_NAME),
+                description: String::from(SYNTHETIC_BRIDGE_TOOL_DESCRIPTION),
+                input_schema: expected_schema,
+            }])
+        );
     }
 
     #[test]
