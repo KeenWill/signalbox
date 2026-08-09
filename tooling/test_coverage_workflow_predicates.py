@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -90,6 +91,12 @@ RUST_TOP_UNCOVERED = 25
 NATIVE_TOP_UNCOVERED = 30
 
 JQ_BINARY = shutil.which("jq")
+
+# Whether this run is CI. A missing jq is a developer's machine and skips; the
+# same absence on a runner is a broken image or PATH, and skipping there would
+# leave every predicate unexecuted behind a green check — which is the shape of
+# silent pass this module exists to refuse. GitHub sets both of these.
+RUNNING_IN_CI = os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("CI") == "true"
 
 # Every failure a malformed document can raise out of either summarizer. The
 # summarizers themselves catch this same set when they read a baseline, so a
@@ -505,14 +512,73 @@ def extract_jq_programs(blocks: list[RunBlock]) -> list[ExtractedProgram]:
 EMITTED_MARKER = re.compile(r"<!--[^>]*-->")
 SELECTED_MARKER = re.compile(r'startswith\("(?P<marker>[^"]*)"\)')
 
+# The file each workflow writes its sticky-comment body into, and how many
+# steps write one. Two, in both workflows, and the pair is the point: one step
+# writes the comment for a run that produced a report, and a second writes the
+# comment that retires those numbers when a run produced none. Both must carry
+# the marker, and a workflow-wide check cannot tell that one of them stopped.
+COMMENT_FILE = "comment.md"
+EXPECTED_COMMENT_PRODUCERS = 2
+
+
+def shell_emitted_markers(script: str) -> list[str]:
+    """Markers the shell itself writes in one script, outside test bodies.
+
+    Every jq filter is blanked out first. A selector carries the marker it
+    searches for inside its own program text, so a scan that read the whole
+    script would find the consumer's copy and call it a producer's — which
+    makes the producer/consumer comparison compare a string with itself.
+
+    Occurrences are returned rather than a set, because each one belongs to a
+    different path through the step and each has to be right on its own.
+    """
+    shell_only = script
+    for program in jq_programs_in(script):
+        shell_only = shell_only.replace(program, " " * len(program))
+    return EMITTED_MARKER.findall(shell_only)
+
+
+def comment_producing_blocks(workflow: Path) -> list[RunBlock]:
+    """Every run block that writes a sticky-comment body, outside test bodies."""
+    return [block for block in read_run_blocks(workflow) if COMMENT_FILE in block.script]
+
 
 def emitted_markers(workflow: Path) -> set[str]:
-    """Every sticky-comment marker the workflow's shell writes, outside test bodies."""
+    """Every distinct marker the workflow's shell writes, outside test bodies."""
     return {
         marker
         for block in read_run_blocks(workflow)
-        for marker in EMITTED_MARKER.findall(block.script)
+        for marker in shell_emitted_markers(block.script)
     }
+
+
+def producers_disagreeing_with_selector(workflow: Path, identifier: str) -> list[str]:
+    """Comment producers that do not emit the marker their selector looks for.
+
+    Runs outside test bodies, and checks each producer separately rather than
+    collapsing the workflow into one set of markers. A workflow writes its
+    comment down more than one path — one for a run that measured something and
+    one for a run that measured nothing — and a set is satisfied as long as any
+    single path still emits the marker. The path that stopped emitting it would
+    post a comment its own selector can never find again, so the next run
+    writes a second one instead of rewriting the first.
+    """
+    marker = selected_marker(identifier)
+    problems: list[str] = []
+    for block in comment_producing_blocks(workflow):
+        emitted = shell_emitted_markers(block.script)
+        if not emitted:
+            problems.append(
+                f"{block.workflow}/{block.job}/{block.step!r} writes {COMMENT_FILE} but emits "
+                f"no marker, so the comment it writes cannot be found again"
+            )
+        problems.extend(
+            f"{block.workflow}/{block.job}/{block.step!r} emits {found!r} but the selector "
+            f"looks for {marker!r}"
+            for found in emitted
+            if found != marker
+        )
+    return problems
 
 
 def emitted_marker(workflow: Path) -> str:
@@ -974,6 +1040,59 @@ def native_comment_body() -> str:
     return f"{emitted_marker(SWIFT_WORKFLOW)}\n\n{report}"
 
 
+# What each workflow adds around the rendered report. The report-producing step
+# appends provenance after the report, and the publish step writes a wholly
+# different body when a run measured nothing. Both are built here in the shape
+# the workflows print rather than copied out of them: the wording belongs to the
+# workflow files, which this branch does not touch, while the shape is what the
+# payload program has to survive. None of these characters — backticks around a
+# SHA, a Markdown link's brackets and parentheses, a URL — comes from the
+# renderer, so a payload that mangled only workflow-added text would round-trip
+# a report-only fixture perfectly.
+MEASURED_SHA = "0123456789abcdef0123456789abcdef01234567"
+PULL_REQUEST_HEAD_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+WORKFLOW_RUN_ID = "1234567890"
+RUN_URL = f"https://github.com/owner/repository/actions/runs/{WORKFLOW_RUN_ID}"
+
+
+def provenance_footer() -> str:
+    """The provenance a report-producing step appends, outside test bodies."""
+    return (
+        f"\nMeasured at `{MEASURED_SHA}`, the merge commit this pull request builds, whose "
+        f"head is `{PULL_REQUEST_HEAD_SHA}`, by [run {WORKFLOW_RUN_ID}]({RUN_URL}), which "
+        "uploads the report as an artifact.\n"
+    )
+
+
+def rust_full_comment_body() -> str:
+    """The whole comment the coverage workflow writes: marker, report, provenance."""
+    return f"{rust_comment_body()}{provenance_footer()}"
+
+
+def native_full_comment_body() -> str:
+    """The whole comment the swift workflow writes, in the same three parts."""
+    return f"{native_comment_body()}{provenance_footer()}"
+
+
+def no_report_comment_body(workflow: Path, title: str) -> str:
+    """The comment a publish step writes when its run measured nothing.
+
+    Built outside test bodies, and carrying the workflow's own marker, because
+    that is the whole point of this body: it replaces the previous run's numbers
+    under the same marker rather than leaving them standing as the current
+    readout. A body that lost the marker would post beside the stale comment
+    instead of over it.
+    """
+    return (
+        f"{emitted_marker(workflow)}\n\n"
+        f"## {title}\n\n"
+        f"The coverage run for `{PULL_REQUEST_HEAD_SHA}` produced no report; see "
+        f"[run {WORKFLOW_RUN_ID}]({RUN_URL}).\n\n"
+        "Nothing is gated on this. The measurement is missing, not failing, and no merge "
+        "waits on it.\n"
+    )
+
+
 def comments_page(*comments: dict) -> str:
     """One page of the GitHub issue-comments API, as `gh api` returns it."""
     return json.dumps(list(comments))
@@ -1346,10 +1465,18 @@ class JqBackedTestCase(unittest.TestCase):
     """
 
     def setUp(self) -> None:
+        if JQ_BINARY is None and RUNNING_IN_CI:
+            self.fail(
+                "jq is not on PATH in CI, so every predicate below would have gone "
+                "unexecuted while this step still exited zero. The runner image is "
+                "expected to provide jq — both coverage workflows invoke it with no "
+                "install step of their own — so its absence here is a broken runner or a "
+                "broken PATH, and it is failed rather than skipped."
+            )
         if JQ_BINARY is None:
             raise unittest.SkipTest(
                 "jq is not on PATH, so the workflow predicate tests did not run. CI has jq "
-                "and runs them; this skip is a local-machine gap, not a pass."
+                "and fails without it; this skip is a local-machine gap, not a pass."
             )
         probe = subprocess.run(
             [JQ_BINARY, "--version"],
@@ -1575,6 +1702,38 @@ class WorkflowReadingTests(unittest.TestCase):
         of both halves."""
         self.assertEqual(emitted_marker(SWIFT_WORKFLOW), selected_marker(NATIVE_STICKY_SELECTOR))
 
+    def test_both_coverage_comment_producers_are_found(self) -> None:
+        """Each workflow writes its comment down two paths — one for a run that
+        measured something, one that retires those numbers when a run measured
+        nothing. Finding fewer means a path was removed or the reader stopped
+        seeing it, and the per-producer check below would then pass by
+        examining less than the workflow does."""
+        self.assertEqual(
+            len(comment_producing_blocks(COVERAGE_WORKFLOW)), EXPECTED_COMMENT_PRODUCERS
+        )
+        self.assertEqual(
+            len(comment_producing_blocks(SWIFT_WORKFLOW)), EXPECTED_COMMENT_PRODUCERS
+        )
+
+    def test_every_coverage_comment_producer_emits_the_selected_marker(self) -> None:
+        """Each producer checked on its own, not folded into one set.
+
+        A set over the whole workflow is satisfied while any single path still
+        emits the marker, so the path that stopped emitting it stays invisible
+        — and that path posts a comment its own selector can never find,
+        leaving the next run to write a second one beside it rather than
+        rewriting the first."""
+        self.assertEqual(
+            producers_disagreeing_with_selector(COVERAGE_WORKFLOW, RUST_STICKY_SELECTOR), []
+        )
+
+    def test_every_native_comment_producer_emits_the_selected_marker(self) -> None:
+        """The same per-producer check in the native workflow, which carries
+        its own copy of both paths."""
+        self.assertEqual(
+            producers_disagreeing_with_selector(SWIFT_WORKFLOW, NATIVE_STICKY_SELECTOR), []
+        )
+
     def test_the_recorded_markers_are_the_ones_the_workflows_use(self) -> None:
         """The constants in this module are a convenience for reading the tests
         below, never the source of truth. Checked against the workflows so they
@@ -1643,6 +1802,32 @@ class CommentPayloadTests(JqBackedTestCase):
 
         self.assertEqual(self.payload_body(RUST_COMMENT_PAYLOAD, body), body)
 
+    def test_the_rust_payload_round_trips_the_whole_produced_comment(self) -> None:
+        """The report is only the middle of what the workflow posts. The step
+        appends provenance after it — a SHA in backticks, a Markdown link, a
+        URL — and none of those characters come from the renderer, so a payload
+        that preserved the report and mangled the provenance would pass a
+        report-only round trip while posting a broken comment."""
+        body = rust_full_comment_body()
+
+        self.assertEqual(self.payload_body(RUST_COMMENT_PAYLOAD, body), body)
+
+    def test_the_rust_payload_round_trips_the_no_report_comment(self) -> None:
+        """The other body the workflow writes, and the one no earlier test
+        passed through the payload program at all. A run that measured nothing
+        posts this instead of a report, and it has to survive the same
+        machinery."""
+        body = no_report_comment_body(COVERAGE_WORKFLOW, RUST_REPORT_TITLE)
+
+        self.assertEqual(self.payload_body(RUST_COMMENT_PAYLOAD, body), body)
+
+    def test_the_native_payload_round_trips_the_no_report_comment(self) -> None:
+        """The native workflow writes its own no-report body through its own
+        copy of the payload program."""
+        body = no_report_comment_body(SWIFT_WORKFLOW, NATIVE_REPORT_TITLE)
+
+        self.assertEqual(self.payload_body(NATIVE_COMMENT_PAYLOAD, body), body)
+
     def test_the_native_payload_round_trips_its_own_renderer(self) -> None:
         """The native workflow runs its own copy of the payload program over a
         differently shaped report, so it is checked against its own renderer
@@ -1694,6 +1879,36 @@ class StickySelectorTests(JqBackedTestCase):
         """The same round trip through the native renderer and the native
         marker, which are a separate copy and can drift."""
         page = comments_page({"id": MARKER_COMMENT_ID, "body": native_comment_body()})
+
+        result = run_jq(one_program_for(NATIVE_STICKY_SELECTOR), page)
+
+        self.assert_selection(result, str(MARKER_COMMENT_ID))
+
+    def test_the_rust_selector_finds_the_no_report_comment(self) -> None:
+        """The body a run writes when it measured nothing must be findable by
+        the same selector, because its entire job is to replace the previous
+        run's numbers under one marker. A no-report body the selector could not
+        find would post beside the stale report instead of over it, leaving the
+        old numbers reading as the current head's."""
+        page = comments_page(
+            {
+                "id": MARKER_COMMENT_ID,
+                "body": no_report_comment_body(COVERAGE_WORKFLOW, RUST_REPORT_TITLE),
+            }
+        )
+
+        result = run_jq(one_program_for(RUST_STICKY_SELECTOR), page)
+
+        self.assert_selection(result, str(MARKER_COMMENT_ID))
+
+    def test_the_native_selector_finds_the_no_report_comment(self) -> None:
+        """The same for the native workflow's own no-report body."""
+        page = comments_page(
+            {
+                "id": MARKER_COMMENT_ID,
+                "body": no_report_comment_body(SWIFT_WORKFLOW, NATIVE_REPORT_TITLE),
+            }
+        )
 
         result = run_jq(one_program_for(NATIVE_STICKY_SELECTOR), page)
 
