@@ -2759,7 +2759,11 @@ impl SessionRunnerPlacement {
                 registration,
                 profileless_tombstone,
             ),
-            _ => Err(RunnerDomainError::CorruptStoredFacts),
+            SessionRunnerPlacementState::Unpinned
+            | SessionRunnerPlacementState::RunnerLostBeforePin(_)
+            | SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(
+                _,
+            )) => Err(RunnerDomainError::CorruptStoredFacts),
         }
     }
 }
@@ -2821,13 +2825,14 @@ fn placement_revision_history_matches(
             prior_request,
             replacement_request,
         } => {
+            let successor_differs = match request.selector {
+                RunnerSelector::Identity(successor) => successor != *lost_runner,
+                RunnerSelector::CapabilityClass(_) => false,
+            };
             prior_revision.checked_next() == Some(revision)
                 && prior_request.selector == RunnerSelector::Identity(*lost_runner)
                 && replacement_request.as_ref() == request
-                && matches!(
-                    request.selector,
-                    RunnerSelector::Identity(successor) if successor != *lost_runner
-                )
+                && successor_differs
         }
     }
 }
