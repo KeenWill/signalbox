@@ -269,6 +269,8 @@ const SYNTHETIC_EXECUTOR_FAILURE: &str = "synthetic executor failure";
 const DRIFTED_APPLY_PATCH_ARGUMENTS: &str =
     r#"{"patch":"*** Begin Patch\n*** Add File: other.txt\n+drifted by eval\n*** End Patch"}"#;
 const SYNTHETIC_EVAL_RECEIPT: &str = "01988c5f-89c4-7000-8000-000000000001";
+const SYNTHETIC_COMPLETION_REPORT: &str = "Completed the requested operation.";
+const SYNTHETIC_FAILURE_REPORT: &str = "Failed to complete the requested operation.";
 const EVAL_RECEIPT_FIELD: &str = "eval_receipt";
 const RESULT_RECEIPT_INSTRUCTION: &str =
     "In your final answer, include every exact eval_receipt value returned by the tools.";
@@ -2836,8 +2838,39 @@ impl OperationTracker {
                 report = report.replace(&receipt, "");
             }
         }
-        report.chars().any(char::is_alphabetic)
+        report_affirms_completion(&report)
     }
+}
+
+fn report_affirms_completion(report: &str) -> bool {
+    let words = report
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<BTreeSet<_>>();
+    let has_completion = [
+        "committed",
+        "completed",
+        "created",
+        "done",
+        "finished",
+        "written",
+        "wrote",
+    ]
+    .iter()
+    .any(|word| words.contains(*word));
+    let has_failure = [
+        "cannot",
+        "couldn",
+        "failed",
+        "failure",
+        "incomplete",
+        "not",
+        "unable",
+    ]
+    .iter()
+    .any(|word| words.contains(*word));
+    has_completion && !has_failure
 }
 
 impl OperationTrackerState {
@@ -2934,11 +2967,24 @@ fn final_response_report_accepts_the_fetched_fixture() {
         Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
         &synthetic_result_with_receipt(),
     );
-    let response = format!("{WEB_FETCH_BODY} {SYNTHETIC_EVAL_RECEIPT}");
+    let response =
+        format!("{SYNTHETIC_COMPLETION_REPORT} {WEB_FETCH_BODY} {SYNTHETIC_EVAL_RECEIPT}");
     tracker.observe_response_text(&response, false);
 
     assert!(tracker.final_response_reports(WEB_FETCH_BODY));
     assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_an_explicit_failure() {
+    let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &synthetic_result_with_receipt(),
+    );
+    tracker.observe_response_text(SYNTHETIC_FAILURE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
 }
 
 struct EvalDatabase {
