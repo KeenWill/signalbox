@@ -511,8 +511,9 @@ INV-tagged test names and attached doc comments.
   conversation truth.
 - **Owning component:** Daemon owns policy and history; a daemon-local adapter
   executes under central credentials. A workspace-root-bound adapter executes
-  against the requesting session's own derived root, so concurrent sessions do
-  not share one tree.
+  against the root the requesting session bound: its own derived root where the
+  deployment provisioned one, so two such sessions share no tree, and otherwise
+  the configured root that every session shares.
 - **Failure behavior:** Adapter loss is classified with the same known/ambiguous
   distinction; central placement does not imply safe automatic retry. A session
   whose derived workspace cannot be composed receives a known tool failure and
