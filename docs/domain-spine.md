@@ -3181,6 +3181,13 @@ impl AcceptedInputSchedulingProjection {
         interrupt: AppliedInterruptCommandResult,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_retryable_runner_tool_recovery(
+        self,
+        batch: ToolBatch,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
     pub fn apply_interrupt_to_tool_batch(
         self,
         batch: ToolBatch,
@@ -3271,6 +3278,14 @@ impl ActivatedTurn {
         interrupt: AppliedInterruptCommandResult,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_retryable_runner_tool_recovery(
+        self,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        batch: ToolBatch,
+        result_projection: PreparedToolResultProjection,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
     // accessors: session(), turn(), configuration(), configuration_provenance(),
     // start(), phase(), pending_steering(), consumed_steering()
 }

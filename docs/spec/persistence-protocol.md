@@ -412,11 +412,17 @@ Representation rules, all enforced in the schema:
   **Committed unimplemented functionality.** No present adapter produces the
   phase: the dedicated runner-loss propagation transaction will install it under
   the lock order below. Independently of that future writer, a present
-  interrupted-attempt fact on the placement-loss record is admitted only when
-  the attempt is terminal and ambiguous and carries physical runner-lease
-  lineage to the record's exact lost runner and placement revision, and the same
-  active runner-recovery tool-round boundary names it. A same-session foreign or
-  older same-placement attempt therefore cannot survive placement readback.
+  interrupted-attempt fact on the placement-loss record is admitted only for one
+  of two exact lease-derived shapes: an in-flight retryable attempt whose loss
+  proves no execution or whose pure/idempotent effect permits successor
+  reissuance, or a terminal ambiguous side-effecting attempt whose execution may
+  have occurred. Both carry physical runner-lease lineage to the record's exact
+  lost runner and placement revision, and the same active runner-recovery
+  tool-round boundary names the attempt. Stopping the wait retires retryable
+  authority before releasing the active slot: no-execution and pure work become
+  known crash loss and cancel, while execution-possible idempotent work becomes
+  ambiguous and requires reconciliation. A same-session foreign or older
+  same-placement attempt therefore cannot survive placement readback.
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.
