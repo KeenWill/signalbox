@@ -12,6 +12,8 @@
 # places: GitHub withholds secrets from ordinary fork pull_request runs; the
 # secretless eligibility job rejects a fork before any credentialed job starts;
 # and every credentialed matrix job repeats the head-repository comparison.
+# Dependabot pull requests are excluded by the same secret-withholding,
+# secretless-eligibility, and credentialed-job checks.
 #
 # The API key is referenced by name in exactly one step. The integration-test
 # binary is compiled before that step and executed directly afterward, so no
@@ -144,6 +146,7 @@ jobs:
         id: eligibility
         env:
           EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPOSITORY: ${{ github.repository }}
         run: |
@@ -154,12 +157,18 @@ jobs:
             echo "Fork pull requests cannot enter the credentialed tool eval."
             exit 0
           fi
+          if [[ "${EVENT_NAME}" == "pull_request" \
+            && "${ACTOR}" == "dependabot[bot]" ]]; then
+            echo "allowed=false" >> "${GITHUB_OUTPUT}"
+            echo "Dependabot pull requests cannot enter the credentialed tool eval."
+            exit 0
+          fi
           echo "allowed=true" >> "${GITHUB_OUTPUT}"
 
   eval:
     name: ${{ matrix.family }} tool eval (report only)
     needs: eligibility
-    if: ${{ needs.eligibility.outputs.allowed == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ needs.eligibility.outputs.allowed == 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) }}
     permissions:
       contents: read
     environment: openai-smoke
