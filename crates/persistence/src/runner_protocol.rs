@@ -40,9 +40,9 @@ use signalbox_domain::{
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::lock_inventory::{
-    RUNNER_ENROLLMENT, RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY,
-    RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
-    RUNNER_REGISTRATION_HEAD,
+    RUNNER_CONNECTION_LOSS_HEAD, RUNNER_ENROLLMENT, RUNNER_GRANT,
+    RUNNER_LEASE_ENROLLMENT_AUTHORITY, RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD,
+    RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD, RUNNER_REGISTRATION_HEAD,
 };
 use crate::mapping::{
     runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
@@ -2532,15 +2532,10 @@ async fn append_runner_connection_loss_epoch(
     if snapshot.state() != RunnerConnectionState::Lost {
         return Ok(None);
     }
-    let prior: Option<Decimal> = sqlx::query_scalar(
-        "SELECT loss_epoch
-           FROM runner_current_connection_loss
-          WHERE enrollment_id = $1
-          FOR UPDATE",
-    )
-    .bind(enrollment.into_uuid())
-    .fetch_optional(&mut *connection)
-    .await?;
+    let prior: Option<Decimal> = sqlx::query_scalar(RUNNER_CONNECTION_LOSS_HEAD)
+        .bind(enrollment.into_uuid())
+        .fetch_optional(&mut *connection)
+        .await?;
     let has_prior = prior.is_some();
     let loss_epoch = match prior {
         Some(prior) => RunnerConnectionLossEpoch::try_from_u64(decode_u64(prior)?)
