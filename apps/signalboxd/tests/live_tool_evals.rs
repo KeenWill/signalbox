@@ -774,6 +774,7 @@ impl FamilySuite {
             workspace,
             git_seed: None,
             git_seed_refs: BTreeMap::new(),
+            git_stage_seed_worktree_mode: None,
             catalog: MergedCatalog::try_new([
                 sandboxed_catalog,
                 unsandboxed_catalog,
