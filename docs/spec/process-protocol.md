@@ -3,6 +3,9 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The coherent-snapshot admission, lock-acquisition, and lock-hold bounds are
+verified through this PR (`agent/f2-snapshot-lock`).
+
 The typed usage provenance, derived-cost row shape, and labeled client
 aggregation are verified against PR #389 (`agent/cost-accounting`).
 
@@ -418,12 +421,12 @@ pool-capacity budget, leaving two connections reserved for non-snapshot work; a
 pool with fewer than four configured connections cannot start the process
 listener. The database-global snapshot admission loser rolls back its
 transaction before an exponential retry wait that begins at 10 ms and is capped
-at 100 ms. One admitted attempt waits at most one second for the shared table
-locks, and an expired wait rolls back and retries on the same schedule as a lost
-admission, so a queued snapshot never holds writers behind it for longer than
-that wait. Admission is bounded to five seconds, after which the read reports
+at 100 ms. Admission is bounded to five seconds, after which the read reports
 unavailable; daemon shutdown cancels the admission wait and releases its
-capacity.
+capacity. The database enforces that same five-second bound on the lock
+acquisition itself, across the whole multi-table statement rather than each lock
+within it, so the locks an unsuccessful acquisition already took are released on
+the deadline instead of when the daemon abandons the request.
 
 Holding those locks is bounded too, because the inventory includes the tables
 ordinary turn processing writes. The loaders run for at most fifteen seconds

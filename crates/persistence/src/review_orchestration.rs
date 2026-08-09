@@ -33,13 +33,10 @@ const STORAGE_VERSION: i16 = 1;
 const SNAPSHOT_ADMISSION_INITIAL_BACKOFF: Duration = Duration::from_millis(10);
 const SNAPSHOT_ADMISSION_MAX_BACKOFF: Duration = Duration::from_millis(100);
 const SNAPSHOT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long one admission attempt waits in the table lock queue.
-///
-/// A `SHARE` request that is itself waiting queues conflicting writers behind
-/// it, so an unbounded wait stalls writes before the snapshot holds anything.
-/// Expiring the wait and retrying under the same admission bound lets the
-/// queued writers drain between attempts.
-const SNAPSHOT_LOCK_WAIT: Duration = Duration::from_secs(1);
+/// The states in which acquiring the shared locks ran out the admission bound:
+/// `query_canceled` from `statement_timeout`, `lock_not_available` from a
+/// `lock_timeout` the database was already configured with.
+const LOCK_ACQUISITION_EXPIRY_STATES: [&str; 2] = ["57014", "55P03"];
 /// How long the shared table locks may be held while the loaders run.
 ///
 /// The loaders run on separate pool connections, so a snapshot that cannot
@@ -56,8 +53,6 @@ const SNAPSHOT_LOCK_PHASE_TIMEOUT: Duration = Duration::from_secs(15);
 /// outlast [`SNAPSHOT_LOCK_PHASE_TIMEOUT`], which is the bound a healthy
 /// daemon enforces first.
 const SNAPSHOT_GUARD_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
-/// PostgreSQL's `lock_not_available`, raised when `lock_timeout` expires.
-const LOCK_NOT_AVAILABLE: &str = "55P03";
 const REVIEW_SNAPSHOT_LOCKS: &str = "LOCK TABLE
     accepted_input,
     turn_lifecycle,
@@ -415,12 +410,11 @@ impl PostgresReviewOrchestrationStore {
     /// begins at 10 ms and is capped at 100 ms, preserving one reader connection
     /// without polling PostgreSQL on every scheduler turn.
     ///
-    /// Both phases are bounded, because the locked tables include the ones
-    /// ordinary turn processing writes: admission may wait at most
-    /// [`SNAPSHOT_ADMISSION_TIMEOUT`], and the loaders may hold the shared
-    /// locks at most [`SNAPSHOT_LOCK_PHASE_TIMEOUT`]. Either expiry releases
-    /// the guard and reports the phase that ran out of time, so no read leaves
-    /// writers blocked for longer than the sum of the two bounds.
+    /// Admission and the locked phase are separately bounded, and each expiry
+    /// releases the guard and reports which phase ran out of time. The bounds
+    /// themselves are stated by
+    /// [the process protocol](../../../docs/spec/process-protocol.md), which
+    /// owns them; the constants here carry the reasoning for their values.
     pub async fn load_snapshot(
         &self,
         attempt: ReviewOrchestrationAttemptId,
@@ -431,7 +425,13 @@ impl PostgresReviewOrchestrationStore {
             ));
         }
         let snapshot_keeper = self.begin_snapshot_guard().await?;
-        let result = bounded_snapshot_lock_phase(self.load_snapshot_while_locked(attempt)).await;
+        // Boxed so the bounding wrapper holds a pointer rather than another
+        // copy of the locked phase's state machine. That phase awaits every
+        // loader in turn and is the largest future the daemon builds on the
+        // task serving a review read, so keeping it off this frame is what
+        // leaves the surrounding request chain its stack headroom.
+        let loading = Box::pin(self.load_snapshot_while_locked(attempt));
+        let result = bounded_snapshot_lock_phase(loading).await;
         let released = snapshot_keeper.rollback().await;
         let facts = result?;
         released?;
@@ -459,10 +459,11 @@ impl PostgresReviewOrchestrationStore {
 
     /// Takes database-global admission and the shared table locks exactly once.
     ///
-    /// `None` reports the two losses a later attempt can win — another snapshot
-    /// holds admission, or the bounded lock wait expired behind conflicting
-    /// writers. Both roll the attempt back before returning, so neither a
-    /// connection nor a queued lock request survives into the retry wait.
+    /// `None` reports the one loss a later attempt can win: another snapshot
+    /// holds admission. It rolls the attempt back before returning, so no
+    /// connection survives into the retry wait. Running out the acquisition
+    /// bound is not a retryable loss — the budget it exhausted is the whole
+    /// admission budget — so it is reported as the admission expiry it is.
     async fn try_admit_snapshot(
         &self,
     ) -> Result<Option<Transaction<'_, Postgres>>, ReviewOrchestrationStoreError> {
@@ -475,21 +476,20 @@ impl PostgresReviewOrchestrationStore {
         )
         .fetch_one(&mut *transaction)
         .await?;
-        if admitted {
-            match sqlx::query(REVIEW_SNAPSHOT_LOCKS)
-                .execute(&mut *transaction)
-                .await
-            {
-                Ok(_) => return Ok(Some(transaction)),
-                Err(error) if !lock_wait_expired(&error) => {
-                    transaction.rollback().await?;
-                    return Err(error.into());
-                }
-                Err(_) => {}
+        if !admitted {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        match sqlx::query(REVIEW_SNAPSHOT_LOCKS)
+            .execute(&mut *transaction)
+            .await
+        {
+            Ok(_) => Ok(Some(transaction)),
+            Err(error) => {
+                transaction.rollback().await?;
+                Err(acquisition_failure(error))
             }
         }
-        transaction.rollback().await?;
-        Ok(None)
     }
 
     async fn load_snapshot_while_locked(
@@ -1989,23 +1989,31 @@ fn encode_disposition(
     }
 }
 
-/// Installs the guard transaction's own lock-wait and lock-hold bounds.
+/// Installs the guard transaction's own acquisition and lock-hold bounds.
 ///
-/// `lock_timeout` bounds the `LOCK TABLE` wait; `idle_in_transaction_session_timeout`
-/// bounds the phase the guard spends idle while the loaders run on other
-/// connections. The second is the database's own backstop: it releases the
-/// shared locks even when the daemon never reaches its rollback. Both are set
-/// through `set_config`'s local form so the bounds stay bind parameters
-/// derived from the constants rather than a rendered statement that could
-/// drift from them.
+/// `statement_timeout` bounds the whole `LOCK TABLE` statement at the same
+/// admission budget the caller enforces. It is a statement bound rather than a
+/// `lock_timeout` because the inventory takes 34 locks in one statement and
+/// PostgreSQL applies `lock_timeout` to each acquisition separately: waits that
+/// each stay under a per-lock deadline still accumulate, and the statement goes
+/// on holding every lock it has already taken while it waits for the next. Only
+/// a statement-wide deadline bounds what writers are actually blocked behind.
+///
+/// `idle_in_transaction_session_timeout` bounds the phase the guard spends idle
+/// while the loaders run on other connections — the database's own backstop,
+/// releasing the shared locks even when the daemon never reaches its rollback.
+///
+/// Both are set through `set_config`'s local form so the bounds stay bind
+/// parameters derived from the constants rather than a rendered statement that
+/// could drift from them.
 async fn bound_snapshot_guard(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), ReviewOrchestrationStoreError> {
     sqlx::query(
-        "SELECT set_config('lock_timeout', $1, true),
+        "SELECT set_config('statement_timeout', $1, true),
                 set_config('idle_in_transaction_session_timeout', $2, true)",
     )
-    .bind(milliseconds(SNAPSHOT_LOCK_WAIT))
+    .bind(milliseconds(SNAPSHOT_ADMISSION_TIMEOUT))
     .bind(milliseconds(SNAPSHOT_GUARD_IDLE_TIMEOUT))
     .execute(&mut **transaction)
     .await?;
@@ -2017,11 +2025,18 @@ fn milliseconds(bound: Duration) -> String {
     format!("{}ms", bound.as_millis())
 }
 
-/// Reports the bounded lock wait expiring behind a conflicting writer.
-fn lock_wait_expired(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .is_some_and(|database| database.code().as_deref() == Some(LOCK_NOT_AVAILABLE))
+/// Names an expired lock acquisition as the admission expiry it is, so the
+/// daemon reports one unavailable read rather than an opaque database failure.
+fn acquisition_failure(error: sqlx::Error) -> ReviewOrchestrationStoreError {
+    let expired = error.as_database_error().is_some_and(|database| {
+        database
+            .code()
+            .is_some_and(|code| LOCK_ACQUISITION_EXPIRY_STATES.contains(&code.as_ref()))
+    });
+    if expired {
+        return ReviewOrchestrationStoreError::SnapshotAdmissionTimedOut;
+    }
+    ReviewOrchestrationStoreError::Database(error)
 }
 
 async fn bounded_snapshot_admission<Output>(
@@ -2640,7 +2655,7 @@ const fn corruption(detail: &'static str) -> ReviewOrchestrationStoreError {
 mod tests {
     use super::{
         REVIEW_SNAPSHOT_LOCKS, ReviewOrchestrationStoreError, SNAPSHOT_ADMISSION_TIMEOUT,
-        SNAPSHOT_GUARD_IDLE_TIMEOUT, SNAPSHOT_LOCK_PHASE_TIMEOUT, SNAPSHOT_LOCK_WAIT,
+        SNAPSHOT_GUARD_IDLE_TIMEOUT, SNAPSHOT_LOCK_PHASE_TIMEOUT,
         bounded_snapshot_admission_with_timeout, bounded_snapshot_lock_phase_with_timeout,
     };
 
@@ -2687,11 +2702,11 @@ mod tests {
         assert!(SNAPSHOT_LOCK_PHASE_TIMEOUT < SNAPSHOT_GUARD_IDLE_TIMEOUT);
     }
 
-    /// One expired lock wait must leave room for a retry inside admission,
-    /// otherwise the bounded wait converts a winnable attempt into a failure.
+    /// The guard's idle backstop must also outlast admission, since the guard
+    /// is already idle between acquiring its locks and the loaders starting.
     #[test]
-    fn the_bounded_lock_wait_fits_inside_admission() {
-        assert!(SNAPSHOT_LOCK_WAIT < SNAPSHOT_ADMISSION_TIMEOUT);
+    fn the_guard_idle_bound_outlasts_admission() {
+        assert!(SNAPSHOT_ADMISSION_TIMEOUT < SNAPSHOT_GUARD_IDLE_TIMEOUT);
     }
 
     #[test]
