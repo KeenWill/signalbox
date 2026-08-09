@@ -27,9 +27,14 @@ use sqlx::types::Uuid;
 use crate::approval_judge::FailedApprovalJudgeDisposition;
 
 /// Closed delegated-session relationship policy discriminators in PostgreSQL.
+///
+/// Public because the outbox decode tripwire drives these spellings with the
+/// exact set the durable `CHECK` constraint admits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DelegationPolicyStorageKind {
+pub enum DelegationPolicyStorageKind {
+    /// The child outlives parent state changes.
     Background,
+    /// The child follows the two explicit parent-state actions.
     Bound,
 }
 
@@ -37,16 +42,15 @@ pub(crate) enum DelegationPolicyStorageKind {
     dead_code,
     reason = "delegation relationship inserts are owned by the deferred placement writer"
 )]
-pub(crate) const fn delegation_policy_kind_to_str(
-    value: DelegationPolicyStorageKind,
-) -> &'static str {
+pub const fn delegation_policy_kind_to_str(value: DelegationPolicyStorageKind) -> &'static str {
     match value {
         DelegationPolicyStorageKind::Background => "background",
         DelegationPolicyStorageKind::Bound => "bound",
     }
 }
 
-pub(crate) fn delegation_policy_kind_from_str(value: &str) -> Option<DelegationPolicyStorageKind> {
+/// Decodes one durable `policy_kind` spelling.
+pub fn delegation_policy_kind_from_str(value: &str) -> Option<DelegationPolicyStorageKind> {
     match value {
         "background" => Some(DelegationPolicyStorageKind::Background),
         "bound" => Some(DelegationPolicyStorageKind::Bound),

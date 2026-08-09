@@ -42,7 +42,9 @@ use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
     create_session::CreateSessionRepository,
     local_test_connection_options,
-    mapping::{DelegationUpdateStorageKind, DelegationWakeStorageKind},
+    mapping::{
+        DelegationPolicyStorageKind, DelegationUpdateStorageKind, DelegationWakeStorageKind,
+    },
     migrate,
     outbox::{
         DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
@@ -50,8 +52,9 @@ use signalbox_persistence::{
         DispatchedDelegationWaitMode, DispatchedDelegationWake, DispatchedModelCallDisposition,
         DispatchedModelCallState, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
         DispatchedToolBatchState, OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError,
-        OutboxDispatcher, decode_bound_action, decode_delegation_outcome, decode_delegation_reason,
-        decode_delegation_update_kind, decode_delegation_wake_subject, decode_wait_mode,
+        OutboxDispatcher, decode_bound_action, decode_delegation_outcome,
+        decode_delegation_policy_kind, decode_delegation_reason, decode_delegation_update_kind,
+        decode_delegation_wake_subject, decode_wait_mode,
     },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -93,6 +96,7 @@ const ARBITRARY_ORDINAL: u64 = 1;
 /// table's partial unique indexes are indexes, not triggers, so they stay
 /// enforced even while referential triggers are disabled.
 const SPAWNED_REQUEST_SEED: u128 = 0x0f01;
+const BOUND_SPAWN_REQUEST_SEED: u128 = 0x0f06;
 const WAITING_REQUEST_SEED: u128 = 0x0f02;
 const LIFECYCLE_REQUEST_SEED: u128 = 0x0f03;
 const RESULT_REQUEST_SEED: u128 = 0x0f04;
@@ -187,6 +191,20 @@ fn every_delegation_update_kind() -> Vec<DelegationUpdateStorageKind> {
                 Some(DelegationUpdateStorageKind::SessionMessage)
             }
             DelegationUpdateStorageKind::SessionMessage => None,
+        };
+        kinds.push(current);
+    }
+    kinds
+}
+
+/// Every delegation policy kind, in an inventory the compiler keeps complete.
+fn every_delegation_policy_storage_kind() -> Vec<DelegationPolicyStorageKind> {
+    let mut kinds = Vec::new();
+    let mut next = Some(DelegationPolicyStorageKind::Background);
+    while let Some(current) = next {
+        next = match current {
+            DelegationPolicyStorageKind::Background => Some(DelegationPolicyStorageKind::Bound),
+            DelegationPolicyStorageKind::Bound => None,
         };
         kinds.push(current);
     }
@@ -662,6 +680,8 @@ fn admitted_text_literals_reads_a_rendered_check_definition() {
 fn row_decoded_families_are_enumerated() {
     assert_eq!(every_delegation_update().len(), 5);
     assert_eq!(every_delegation_wake().len(), 2);
+    // The storage discriminator is decoder-driven above; this is the dispatched
+    // projection, which is still decoded from the row's shape.
     assert_eq!(every_delegation_policy().len(), 2);
     assert_eq!(every_delegation_provenance().len(), 3);
     assert_eq!(every_model_call_state().len(), 4);
@@ -837,6 +857,12 @@ async fn delegation_storage_and_decoder_close_over_the_same_spellings() -> Resul
         "subject_kind",
     );
     assert_storage_and_decoder_agree(
+        &admitted_spellings(&pool, DELEGATION_UPDATES, "policy_kind").await?,
+        decode_delegation_policy_kind,
+        &every_delegation_policy_storage_kind(),
+        "policy_kind",
+    );
+    assert_storage_and_decoder_agree(
         &admitted_spellings(&pool, DELEGATION_UPDATES, "outcome_kind").await?,
         decode_delegation_outcome,
         &every_delegation_outcome(),
@@ -987,17 +1013,44 @@ async fn an_undecodable_committed_row_stalls_every_session() -> Result<(), Box<d
 // sequence allocator on the header table is likewise left enabled, so
 // `event_sequence` is assigned the way production assigns it.
 
+/// The identities one planted delegation update names.
+///
+/// The planters below took a run of adjacent `Uuid` arguments whose roles were
+/// legible only from the helper's signature, which is exactly the cross-wiring
+/// hazard the fixture rules warn about. Naming them here means a call site
+/// reads its roles, and the one knob a planted kind actually varies — the
+/// relationship identity — is turned by [`RelationshipFacts::spawned_by`].
+#[derive(Clone, Copy)]
+struct RelationshipFacts {
+    parent: Uuid,
+    spawning: Uuid,
+    child: Uuid,
+    awaiting: Uuid,
+    turn: Uuid,
+    command: Uuid,
+    message: Uuid,
+    sender: Uuid,
+}
+
+impl RelationshipFacts {
+    /// Returns the same relationship under a different spawning identity.
+    ///
+    /// Each planted kind needs its own: the table's per-kind unique indexes are
+    /// indexes rather than triggers, so they stay enforced here.
+    const fn spawned_by(self, spawning: Uuid) -> Self {
+        Self { spawning, ..self }
+    }
+}
+
 // Each planter writes its header and typed record in one statement so the
 // deferred "header requires a typed record" constraint is satisfied at commit,
 // and each states only the columns its kind admits — the omitted ones must be
 // NULL, and `delegation_update_subject_shape` still enforces that.
 
-/// Plants a background spawn update.
-async fn plant_child_spawned(
+/// Plants a spawn update whose child outlives parent state changes.
+async fn plant_child_spawned_background(
     pool: &PgPool,
-    session: Uuid,
-    spawning: Uuid,
-    child: Uuid,
+    facts: RelationshipFacts,
 ) -> Result<(), Box<dyn Error>> {
     sqlx::query(
         "WITH header AS (
@@ -1013,9 +1066,40 @@ async fn plant_child_spawned(
                 'child_spawned', $2, $3, 'background', 1, 'spawned'
            FROM header",
     )
-    .bind(session)
-    .bind(spawning)
-    .bind(child)
+    .bind(facts.parent)
+    .bind(facts.spawning)
+    .bind(facts.child)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Plants a spawn update whose child follows the two parent-state actions.
+///
+/// The stopped and cancelled actions differ so that an arm reading one column
+/// for the other is visible in the decoded variant.
+async fn plant_child_spawned_bound(
+    pool: &PgPool,
+    facts: RelationshipFacts,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
+            VALUES ('delegation_update', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_update_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             update_kind, spawning_tool_request_id, child_session_id, policy_kind,
+             on_parent_stopped, on_parent_cancelled,
+             delegation_event_ordinal, delegation_event_kind)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                'child_spawned', $2, $3, 'bound', 'stop', 'cancel', 1, 'spawned'
+           FROM header",
+    )
+    .bind(facts.parent)
+    .bind(facts.spawning)
+    .bind(facts.child)
     .execute(pool)
     .await?;
     Ok(())
@@ -1024,10 +1108,7 @@ async fn plant_child_spawned(
 /// Plants a foreground wait registration.
 async fn plant_child_waiting(
     pool: &PgPool,
-    session: Uuid,
-    spawning: Uuid,
-    child: Uuid,
-    awaiting: Uuid,
+    facts: RelationshipFacts,
 ) -> Result<(), Box<dyn Error>> {
     sqlx::query(
         "WITH header AS (
@@ -1043,10 +1124,10 @@ async fn plant_child_waiting(
                 'child_waiting', $2, $3, $4, 'foreground'
            FROM header",
     )
-    .bind(session)
-    .bind(spawning)
-    .bind(child)
-    .bind(awaiting)
+    .bind(facts.parent)
+    .bind(facts.spawning)
+    .bind(facts.child)
+    .bind(facts.awaiting)
     .execute(pool)
     .await?;
     Ok(())
@@ -1055,11 +1136,7 @@ async fn plant_child_waiting(
 /// Plants a parent-stop lifecycle disposition with command provenance.
 async fn plant_child_lifecycle_disposition(
     pool: &PgPool,
-    session: Uuid,
-    spawning: Uuid,
-    child: Uuid,
-    turn: Uuid,
-    durable_command: Uuid,
+    facts: RelationshipFacts,
 ) -> Result<(), Box<dyn Error>> {
     sqlx::query(
         "WITH header AS (
@@ -1079,11 +1156,11 @@ async fn plant_child_lifecycle_disposition(
                 'parent_turn_command', $1, $4, $5
            FROM header",
     )
-    .bind(session)
-    .bind(spawning)
-    .bind(child)
-    .bind(turn)
-    .bind(durable_command)
+    .bind(facts.parent)
+    .bind(facts.spawning)
+    .bind(facts.child)
+    .bind(facts.turn)
+    .bind(facts.command)
     .execute(pool)
     .await?;
     Ok(())
@@ -1092,10 +1169,7 @@ async fn plant_child_lifecycle_disposition(
 /// Plants a returned child result with child-turn provenance.
 async fn plant_child_result(
     pool: &PgPool,
-    session: Uuid,
-    spawning: Uuid,
-    child: Uuid,
-    turn: Uuid,
+    facts: RelationshipFacts,
     content: &str,
 ) -> Result<(), Box<dyn Error>> {
     sqlx::query(
@@ -1114,10 +1188,10 @@ async fn plant_child_result(
                 'child_turn', $3, $4, $2, $5
            FROM header",
     )
-    .bind(session)
-    .bind(spawning)
-    .bind(child)
-    .bind(turn)
+    .bind(facts.parent)
+    .bind(facts.spawning)
+    .bind(facts.child)
+    .bind(facts.turn)
     .bind(content)
     .execute(pool)
     .await?;
@@ -1127,10 +1201,7 @@ async fn plant_child_result(
 /// Plants a relationship message addressed to the owning session.
 async fn plant_session_message(
     pool: &PgPool,
-    session: Uuid,
-    spawning: Uuid,
-    message: Uuid,
-    sender: Uuid,
+    facts: RelationshipFacts,
     content: &str,
 ) -> Result<(), Box<dyn Error>> {
     sqlx::query(
@@ -1147,10 +1218,10 @@ async fn plant_session_message(
                 'session_message', $2, $3, $4, $1, 1, $5
            FROM header",
     )
-    .bind(session)
-    .bind(spawning)
-    .bind(message)
-    .bind(sender)
+    .bind(facts.parent)
+    .bind(facts.spawning)
+    .bind(facts.message)
+    .bind(facts.sender)
     .bind(content)
     .execute(pool)
     .await?;
@@ -1177,6 +1248,10 @@ async fn dispatch_next_kind(
 /// `child_lifecycle_disposition` are written by production code, and an arm
 /// that cannot decode its own committed row stalls the singleton cursor for
 /// every session rather than losing one event.
+///
+/// Both spawn policies are planted, because `background` and `bound` take
+/// different arms of the same decode and only the bound arm reads the two
+/// parent-state action columns.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Box<dyn Error>> {
@@ -1193,44 +1268,38 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
         .execute(&pool)
         .await?;
 
-    let spawned = Uuid::from_u128(SPAWNED_REQUEST_SEED);
-    let waiting = Uuid::from_u128(WAITING_REQUEST_SEED);
-    let lifecycle = Uuid::from_u128(LIFECYCLE_REQUEST_SEED);
-    let result = Uuid::from_u128(RESULT_REQUEST_SEED);
-    let message_request = Uuid::from_u128(MESSAGE_REQUEST_SEED);
-    // Distinct from the spawning identity: if the arm read
-    // `spawning_tool_request_id` for the awaited request, equal values would
-    // hide it. The real relationship requires them to differ too.
-    let awaiting = Uuid::from_u128(ARBITRARY_AWAITING_REQUEST_SEED);
-    let child = Uuid::from_u128(ARBITRARY_CHILD_SESSION_SEED);
-    let turn = Uuid::from_u128(ARBITRARY_TURN_SEED);
-    let durable = Uuid::from_u128(ARBITRARY_COMMAND_SEED);
-    let message = Uuid::from_u128(ARBITRARY_MESSAGE_SEED);
-    let sender = Uuid::from_u128(ARBITRARY_SENDER_SESSION_SEED);
-
-    plant_child_spawned(&pool, parent, spawned, child).await?;
-    plant_child_waiting(&pool, parent, waiting, child, awaiting).await?;
-    plant_child_lifecycle_disposition(&pool, parent, lifecycle, child, turn, durable).await?;
-    plant_child_result(&pool, parent, result, child, turn, RESULT_CONTENT).await?;
-    plant_session_message(
-        &pool,
+    let facts = RelationshipFacts {
         parent,
-        message_request,
-        message,
-        sender,
-        MESSAGE_CONTENT,
-    )
-    .await?;
+        spawning: Uuid::from_u128(SPAWNED_REQUEST_SEED),
+        child: Uuid::from_u128(ARBITRARY_CHILD_SESSION_SEED),
+        awaiting: Uuid::from_u128(ARBITRARY_AWAITING_REQUEST_SEED),
+        turn: Uuid::from_u128(ARBITRARY_TURN_SEED),
+        command: Uuid::from_u128(ARBITRARY_COMMAND_SEED),
+        message: Uuid::from_u128(ARBITRARY_MESSAGE_SEED),
+        sender: Uuid::from_u128(ARBITRARY_SENDER_SESSION_SEED),
+    };
+    let bound = facts.spawned_by(Uuid::from_u128(BOUND_SPAWN_REQUEST_SEED));
+    let waiting = facts.spawned_by(Uuid::from_u128(WAITING_REQUEST_SEED));
+    let lifecycle = facts.spawned_by(Uuid::from_u128(LIFECYCLE_REQUEST_SEED));
+    let result = facts.spawned_by(Uuid::from_u128(RESULT_REQUEST_SEED));
+    let messaged = facts.spawned_by(Uuid::from_u128(MESSAGE_REQUEST_SEED));
+
+    plant_child_spawned_background(&pool, facts).await?;
+    plant_child_spawned_bound(&pool, bound).await?;
+    plant_child_waiting(&pool, waiting).await?;
+    plant_child_lifecycle_disposition(&pool, lifecycle).await?;
+    plant_child_result(&pool, result, RESULT_CONTENT).await?;
+    plant_session_message(&pool, messaged, MESSAGE_CONTENT).await?;
     // The decoder reads `delivery_sequence` through a join, so the message kind
-    // needs its delivery row; the other four read only their own columns.
+    // needs its delivery row; the other kinds read only their own columns.
     sqlx::query(
         "INSERT INTO session_message_delivery
             (message_id, spawning_tool_request_id, recipient_session_id,
              delivery_sequence, delivery_kind)
          VALUES ($1, $2, $3, 1, 'message')",
     )
-    .bind(message)
-    .bind(message_request)
+    .bind(messaged.message)
+    .bind(messaged.spawning)
     .bind(parent)
     .execute(&pool)
     .await?;
@@ -1251,17 +1320,28 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
     assert_eq!(
         dispatch_next_kind(&dispatcher).await?,
         DispatchedOutboxEventKind::DelegationUpdate(DispatchedDelegationUpdate::ChildSpawned {
-            spawning_request: ToolRequestId::from_uuid(spawned),
-            child: SessionId::from_uuid(child),
+            spawning_request: ToolRequestId::from_uuid(facts.spawning),
+            child: SessionId::from_uuid(facts.child),
             policy: DispatchedDelegationPolicy::Background,
         })
     );
     assert_eq!(
         dispatch_next_kind(&dispatcher).await?,
+        DispatchedOutboxEventKind::DelegationUpdate(DispatchedDelegationUpdate::ChildSpawned {
+            spawning_request: ToolRequestId::from_uuid(bound.spawning),
+            child: SessionId::from_uuid(bound.child),
+            policy: DispatchedDelegationPolicy::Bound {
+                on_parent_stopped: DispatchedBoundChildAction::Stop,
+                on_parent_cancelled: DispatchedBoundChildAction::Cancel,
+            },
+        })
+    );
+    assert_eq!(
+        dispatch_next_kind(&dispatcher).await?,
         DispatchedOutboxEventKind::DelegationUpdate(DispatchedDelegationUpdate::ChildWaiting {
-            spawning_request: ToolRequestId::from_uuid(waiting),
-            child: SessionId::from_uuid(child),
-            awaiting_request: ToolRequestId::from_uuid(awaiting),
+            spawning_request: ToolRequestId::from_uuid(waiting.spawning),
+            child: SessionId::from_uuid(waiting.child),
+            awaiting_request: ToolRequestId::from_uuid(waiting.awaiting),
             mode: DispatchedDelegationWaitMode::Foreground,
         })
     );
@@ -1269,15 +1349,15 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
         dispatch_next_kind(&dispatcher).await?,
         DispatchedOutboxEventKind::DelegationUpdate(
             DispatchedDelegationUpdate::ChildLifecycleDisposition {
-                spawning_request: ToolRequestId::from_uuid(lifecycle),
-                child: SessionId::from_uuid(child),
+                spawning_request: ToolRequestId::from_uuid(lifecycle.spawning),
+                child: SessionId::from_uuid(lifecycle.child),
                 event_ordinal: ARBITRARY_ORDINAL,
                 outcome: DispatchedDelegationOutcome::ChildStopped,
                 reason: DispatchedDelegationReason::ParentStoppedWithDescendants,
                 provenance: DispatchedDelegationProvenance::ParentTurnCommand {
                     session: SessionId::from_uuid(parent),
-                    turn: TurnId::from_uuid(turn),
-                    command: DurableCommandId::from_uuid(durable),
+                    turn: TurnId::from_uuid(lifecycle.turn),
+                    command: DurableCommandId::from_uuid(lifecycle.command),
                 },
             }
         )
@@ -1285,13 +1365,13 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
     assert_eq!(
         dispatch_next_kind(&dispatcher).await?,
         DispatchedOutboxEventKind::DelegationUpdate(DispatchedDelegationUpdate::ChildResult {
-            spawning_request: ToolRequestId::from_uuid(result),
-            child: SessionId::from_uuid(child),
+            spawning_request: ToolRequestId::from_uuid(result.spawning),
+            child: SessionId::from_uuid(result.child),
             outcome: DispatchedDelegationOutcome::ResultReturned,
             reason: DispatchedDelegationReason::ChildCompleted,
             provenance: DispatchedDelegationProvenance::ChildTurn {
-                session: SessionId::from_uuid(child),
-                turn: TurnId::from_uuid(turn),
+                session: SessionId::from_uuid(result.child),
+                turn: TurnId::from_uuid(result.turn),
             },
             content: Some(RESULT_CONTENT.to_owned()),
         })
@@ -1299,9 +1379,9 @@ async fn every_admitted_update_kind_dispatches_to_its_variant() -> Result<(), Bo
     assert_eq!(
         dispatch_next_kind(&dispatcher).await?,
         DispatchedOutboxEventKind::DelegationUpdate(DispatchedDelegationUpdate::SessionMessage {
-            spawning_request: ToolRequestId::from_uuid(message_request),
-            message: DelegationMessageId::from_uuid(message),
-            sender: SessionId::from_uuid(sender),
+            spawning_request: ToolRequestId::from_uuid(messaged.spawning),
+            message: DelegationMessageId::from_uuid(messaged.message),
+            sender: SessionId::from_uuid(messaged.sender),
             recipient: SessionId::from_uuid(parent),
             message_ordinal: ARBITRARY_ORDINAL,
             delivery_sequence: ARBITRARY_ORDINAL,

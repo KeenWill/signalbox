@@ -23,9 +23,10 @@ use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 use crate::{
     lock_inventory,
     mapping::{
-        DelegationUpdateStorageKind, DelegationWakeStorageKind, accepted_input_id_to_uuid,
-        bound_child_action_from_str, defaults_version_from_numeric, defaults_version_to_numeric,
-        delegation_outcome_kind_from_str, delegation_outcome_reason_from_str,
+        DelegationPolicyStorageKind, DelegationUpdateStorageKind, DelegationWakeStorageKind,
+        accepted_input_id_to_uuid, bound_child_action_from_str, defaults_version_from_numeric,
+        defaults_version_to_numeric, delegation_outcome_kind_from_str,
+        delegation_outcome_reason_from_str, delegation_policy_kind_from_str,
         delegation_update_kind_from_str, delegation_wait_mode_from_str,
         delegation_wake_subject_from_str, durable_command_id_from_uuid,
         input_position_from_numeric, input_position_to_numeric, model_change_adjustments_from_json,
@@ -1974,9 +1975,15 @@ async fn load_delegation_update(
             let policy_kind: Option<String> = row.try_get("policy_kind")?;
             let stopped: Option<String> = row.try_get("on_parent_stopped")?;
             let cancelled: Option<String> = row.try_get("on_parent_cancelled")?;
-            let policy = match (policy_kind.as_deref(), stopped, cancelled) {
-                (Some("background"), None, None) => DispatchedDelegationPolicy::Background,
-                (Some("bound"), Some(stopped), Some(cancelled)) => {
+            let policy_kind = policy_kind
+                .as_deref()
+                .map(decode_delegation_policy_kind)
+                .transpose()?;
+            let policy = match (policy_kind, stopped, cancelled) {
+                (Some(DelegationPolicyStorageKind::Background), None, None) => {
+                    DispatchedDelegationPolicy::Background
+                }
+                (Some(DelegationPolicyStorageKind::Bound), Some(stopped), Some(cancelled)) => {
                     DispatchedDelegationPolicy::Bound {
                         on_parent_stopped: decode_bound_action(&stopped)?,
                         on_parent_cancelled: decode_bound_action(&cancelled)?,
@@ -2128,6 +2135,13 @@ pub fn decode_delegation_update_kind(
     value: &str,
 ) -> Result<DelegationUpdateStorageKind, OutboxCorruption> {
     delegation_update_kind_from_str(value).ok_or(OutboxCorruption::InvalidDelegationEvent)
+}
+
+/// Decodes the durable `policy_kind` spelling, lifting as above.
+pub fn decode_delegation_policy_kind(
+    value: &str,
+) -> Result<DelegationPolicyStorageKind, OutboxCorruption> {
+    delegation_policy_kind_from_str(value).ok_or(OutboxCorruption::InvalidDelegationEvent)
 }
 
 /// Decodes the durable `subject_kind` spelling, lifting as above.
