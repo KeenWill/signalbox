@@ -1800,6 +1800,9 @@ mod tests {
     const CARGO_COLOR_OPTION: &str = "--color";
     const CARGO_CHANGE_DIRECTORY_OPTION: &str = "-C";
     const CARGO_UNSTABLE_OPTION: &str = "-Z";
+    const SYNTHETIC_CARGO_COLOR_OPTION_VALUE: &str = "always";
+    const SYNTHETIC_CARGO_CHANGE_DIRECTORY_OPTION_VALUE: &str = "synthetic-workspace";
+    const SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE: &str = "unstable-options";
     const CARGO_RELEASE_OPTION: &str = "--release";
     const MCP_JSON_RPC_VERSION: &str = "2.0";
     const SYNTHETIC_WRONG_JSON_RPC_VERSION: &str = "1.0";
@@ -1809,6 +1812,8 @@ mod tests {
     const PROC_COMMAND_LINE_FILENAME: &str = "cmdline";
     #[cfg(target_os = "linux")]
     const PROC_PROCESS_STAT_FILENAME: &str = "stat";
+    #[cfg(target_os = "linux")]
+    const PROC_WORKING_DIRECTORY_FILENAME: &str = "cwd";
     #[cfg(target_os = "linux")]
     const MAX_CARGO_COMMAND_LINE_BYTES: u64 = 64 * 1024;
     const SYNTHETIC_GOAL_DATABASE_URL: &str =
@@ -1887,9 +1892,9 @@ done
     #[track_caller]
     fn current_cargo_test_invocation() -> CargoTestInvocation {
         let parent = rustix::process::getppid().expect("the test process has a parent");
-        let command_line_path = Path::new(PROC_FILESYSTEM_ROOT)
-            .join(parent.as_raw_nonzero().get().to_string())
-            .join(PROC_COMMAND_LINE_FILENAME);
+        let parent_process_directory =
+            Path::new(PROC_FILESYSTEM_ROOT).join(parent.as_raw_nonzero().get().to_string());
+        let command_line_path = parent_process_directory.join(PROC_COMMAND_LINE_FILENAME);
         let mut command_line = Vec::new();
         fs::File::open(command_line_path)
             .expect("the parent process command line is readable")
@@ -1905,11 +1910,15 @@ done
             .filter(|argument| !argument.is_empty())
             .map(OsStr::from_bytes)
             .collect::<Vec<_>>();
-        cargo_test_invocation_from_arguments(
-            &arguments,
-            &std::env::current_dir().expect("the Cargo invocation directory is available"),
-        )
-        .expect("the daemon-tools suite retains its parent Cargo test invocation")
+        let invocation_directory = cargo_invocation_directory(&parent_process_directory)
+            .expect("the parent Cargo invocation directory is readable");
+        cargo_test_invocation_from_arguments(&arguments, &invocation_directory)
+            .expect("the daemon-tools suite retains its parent Cargo test invocation")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cargo_invocation_directory(parent_process_directory: &Path) -> io::Result<PathBuf> {
+        fs::read_link(parent_process_directory.join(PROC_WORKING_DIRECTORY_FILENAME))
     }
 
     fn cargo_test_profile_from_arguments(arguments: &[&OsStr]) -> Option<OsString> {
@@ -2603,11 +2612,11 @@ done
         let arguments = [
             OsStr::new(CARGO_PROGRAM_STEM),
             OsStr::new(CARGO_COLOR_OPTION),
-            OsStr::new("always"),
+            OsStr::new(SYNTHETIC_CARGO_COLOR_OPTION_VALUE),
             OsStr::new(CARGO_CHANGE_DIRECTORY_OPTION),
-            OsStr::new("synthetic-workspace"),
+            OsStr::new(SYNTHETIC_CARGO_CHANGE_DIRECTORY_OPTION_VALUE),
             OsStr::new(CARGO_UNSTABLE_OPTION),
-            OsStr::new("unstable-options"),
+            OsStr::new(SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE),
             OsStr::new(CARGO_TEST_SUBCOMMAND),
             OsStr::new(CARGO_PROFILE_OPTION),
             OsStr::new(CARGO_DEV_PROFILE),
@@ -2616,6 +2625,27 @@ done
         assert_eq!(
             cargo_test_profile_from_arguments(&arguments),
             Some(OsString::from(CARGO_DEV_PROFILE))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cargo_invocation_directory_reads_the_parent_process_working_directory() {
+        let process_directory = tempfile::tempdir().expect("synthetic process directory exists");
+        let invocation_directory =
+            tempfile::tempdir().expect("synthetic Cargo invocation directory exists");
+        std::os::unix::fs::symlink(
+            invocation_directory.path(),
+            process_directory
+                .path()
+                .join(PROC_WORKING_DIRECTORY_FILENAME),
+        )
+        .expect("synthetic process working-directory link is created");
+
+        assert_eq!(
+            cargo_invocation_directory(process_directory.path())
+                .expect("synthetic process working-directory link resolves"),
+            invocation_directory.path()
         );
     }
 
