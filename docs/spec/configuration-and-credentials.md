@@ -839,54 +839,89 @@ component to be a directory, then records its device and inode as the profile's
 credential-home identity; failure blocks scheduling but cannot block recovery of
 acknowledged work.
 
-Identity alone is not enough, because a directory another local principal can
-write is an authentication-material substitution surface that never changes the
-device and inode the recheck compares. The walk therefore verifies the whole
-path, not the endpoint, and it verifies objects rather than names.
-
-Starting from a descriptor for the filesystem root, the daemon opens each
-component in turn with `openat` on the descriptor it already holds, refusing to
-follow symlinks and requiring a directory, and keeps every descriptor open
-through the walk. Each component is judged by `fstat` on the descriptor just
-opened — never by a second lookup of the same name, which is precisely the step
-an attacker races. For every ancestor directory the daemon requires that it be
-owned by the daemon's effective user or by `root`, and that it be neither
-group-writable nor other-writable *unless* it carries the sticky bit, which is
-what makes a shared directory like `/tmp` safe: sticky permits creating entries
-but forbids renaming or removing one you do not own. For the final home the
-daemon requires ownership by its own effective user and no group-write or
-other-write bit at all, with no sticky exemption, and requires every regular
-file directly within it to be owned by that same user and likewise not group- or
-other-writable. Then it records the home's device and inode as the profile's
-credential-home identity. A path failing any of these is rejected exactly as a
-symlinked component is: scheduling is blocked and no invocation starts against
+Identity alone is not enough. A directory another principal can write is a
+substitution surface that never changes the device and inode a recheck compares,
+and a credential file another principal can read is a disclosure that changes
+nothing at all. Rather than enumerate those hazards one at a time, this contract
+states the single property the store must satisfy and one pass that establishes
 it.
+
+**Exclusive custody.** Every object the daemon reaches on the way to a
+credential value — each path component, the home itself, and each entry directly
+within the home — is reached without traversing a symlink, is owned by the
+daemon's effective user, and grants no access to any other principal beyond the
+traversal an ancestor must permit. An ancestor may instead be owned by `root`.
+
+One verification pass, the **custody walk**, establishes exactly that property,
+and every rule below is part of it rather than a separate check:
+
+1. It begins at a descriptor for the filesystem root and opens each component in
+   turn with `openat` on the descriptor it already holds, refusing to follow
+   symlinks, and keeps every descriptor open through the walk.
+2. It judges each object by `fstat` on the descriptor just opened — never by a
+   second lookup of the same name, which is precisely the step an attacker
+   races.
+3. Each ancestor must be a directory owned by the daemon's effective user or by
+   `root`, and neither group- nor other-writable *unless* it carries the sticky
+   bit. Sticky is admitted because it permits creating entries while forbidding
+   renaming or removing one you do not own, which is what keeps a shared
+   directory like `/tmp` usable. Ancestors keep whatever traversal bits they
+   need; requiring otherwise would reject `/`.
+4. The home must be a directory owned by the daemon's effective user with no
+   group or other permission bit set at all — not write, not read, not execute,
+   and no sticky exemption. Denying group and other traversal is what stops
+   another principal reaching an entry inside it by name.
+5. Each entry directly within the home must open no-follow as a *regular file*
+   owned by the daemon's effective user with no group or other permission bit
+   set at all. A symlink, FIFO, socket, device, or nested directory is rejected
+   rather than inspected, and no entry is ever followed to a target outside the
+   verified home.
+6. It then records the home's device and inode as the profile's credential-home
+   identity, and a later pass requires the same identity.
+
+A store failing any step is rejected exactly as a symlinked component is:
+scheduling is blocked and no invocation starts against it.
+
+The facets that property covers, stated so a later report is either already
+answered or is honestly a new one: a symlink in any path component; a symlink or
+other non-regular credential entry; an ancestor, the home, or a credential file
+writable by another principal; the home traversable by another principal; a
+credential file readable by another principal; and a home replaced by a
+different object between passes. A hard link to a credential file from elsewhere
+is covered too, because the check is on the inode the descriptor names rather
+than on the path that reached it.
 
 Why ancestors and not just the home: `CODEX_HOME` reaches the child as a path,
 and the child resolves that path itself. A principal who can write any ancestor
 can rename the verified home aside, put a directory of their own in its place,
 let the CLI resolve it, and restore the original afterward — a substitution no
-later identity comparison sees, because by then the original is back. Requiring
-exclusive namespace control over every component is what makes the path the
-child resolves denote the object the daemon verified. Why
-effective-user-and-mode rather than "unwritable": those are the facts the daemon
-can establish at open time from a descriptor it holds, without racing a lookup.
+later identity comparison sees, because by then the original is back. Exclusive
+custody over every component is what makes the path the child resolves denote
+the object the daemon verified. Why the property is stated as ownership and mode
+rather than "unwritable" or "unreadable": those are the facts the daemon can
+establish at open time from a descriptor it holds, without racing a lookup.
 
-What this does not prove is worth stating. It does not defend against `root` or
-any principal holding equivalent capability: a root-writable ancestor is
-accepted because the superuser can replace any component and can read the
-credential regardless, so treating that as a rejection would fail every ordinary
+What the property does not cover is worth stating with equal precision. It does
+not defend against `root` or any principal holding equivalent capability: a
+root-owned ancestor is admitted because the superuser can replace any component
+and read the credential regardless, so rejecting it would fail every ordinary
 deployment while protecting nothing. It does not defend against mount-point
 substitution, where a principal with mount privilege changes what a path
-resolves to while every directory's ownership and mode stay correct; the next
-per-invocation identity comparison detects that the target changed, but not
-within the window. And it ends at spawn: the child resolves the path once more
-in its own address space, so the guarantee is that no unprivileged principal
-could have changed the answer between the daemon's walk and the child's
-resolution, not that the daemon handed over an object directly. Handing the
-child a descriptor-pinned spelling instead would close even that gap, but the
-CLI accepts only a path, so this contract buys the same property through
-namespace control.
+resolves to while every ownership and mode stays correct; the next pass detects
+that the identity changed, but not within the window. It ends at spawn, because
+the child resolves the path once more in its own address space — handing the
+child a descriptor-pinned spelling would close that gap, but the CLI accepts
+only a path, so exclusive custody buys the same property by other means. And it
+says nothing about what the CLI itself writes after it starts.
+
+**Committed unimplemented functionality — the custody walk.** No present
+composition performs any part of it; `codex_home` is rejected as an undelivered
+delivery before any store is opened. The implementing child owes a test per
+covered facet above, each asserting that scheduling is blocked and no invocation
+starts: a symlinked path component, a symlinked `auth.json`, a non-regular
+`auth.json`, a group-writable ancestor without sticky, a world-writable home, a
+mode-`0644` credential file, a group-readable home, and a home whose identity
+changed between passes.
 
 Every per-invocation recheck repeats the complete walk — every ancestor's
 ownership, mode, and sticky exemption, the home's own ownership and mode, its
@@ -958,7 +993,12 @@ request the same authorization while the exact-duplicate rule and the persisted
 provisioning tuple treat them as different values. Declared order is request
 order, exact duplicate strings are rejected, and no trimming, case folding,
 sorting, or other normalization occurs. Both endpoint values must be absolute
-`https` URLs; startup rejects every other scheme and provides no plaintext or
+`https` URLs carrying no fragment. A fragment is rejected rather than stripped
+because it is never transmitted: two endpoints differing only after `#` are the
+same request, yet the provisioning tuple compares the configured string byte for
+byte, so accepting them would let an edit that changes nothing on the wire
+quarantine a working authorization, and would give one wire endpoint two stored
+identities. Startup rejects every other scheme and provides no plaintext or
 local-host exception.
 
 **Committed unimplemented functionality — OAuth delivery and administration.**
@@ -1546,12 +1586,17 @@ deployment-side rules that code cannot enforce are stated in
   while an uncertain mutation acknowledgement follows the tool loop's
   external-effect ambiguity contract.
 
-- **Durable references, and one narrow class of value.** Postgres stores a
-  credential value only where that credential rotates and the daemon alone
-  refreshes it — exactly the `oauth` delivery in
-  [credential deliveries](#credential-deliveries), and nothing else. Every other
-  credential is reference-only. Each model call durably pins its non-secret
-  credential reference at the `Prepared` insert
+- **Durable references only.** Postgres stores no credential value in this
+  build. Every credential is reference-only.
+
+- **Committed unimplemented functionality — stored OAuth material.** The one
+  admitted exception to the rule above arrives with the `oauth` delivery in
+  [credential deliveries](#credential-deliveries), whose implementing child
+  stores a credential value precisely where that credential rotates and the
+  daemon alone refreshes it, and nowhere else. No present migration or
+  repository stores daemon-owned OAuth material, so the reference-only rule
+  above is the current at-rest boundary without exception. Each model call
+  durably pins its non-secret credential reference at the `Prepared` insert
   (`model_call.credential_reference`), immutable thereafter under the
   authorization-facts trigger; the column is total (`NOT NULL` and non-empty),
   because every insert writes it and no database predates the stack. Resuming a

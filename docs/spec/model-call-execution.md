@@ -822,10 +822,13 @@ roles), the in-process gate, and `RuntimeModelCallProvider` over the
 configuration-selected Anthropic HTTP, OpenAI HTTP, Claude CLI, or Codex CLI
 runtime, with the domain target catalog, runtime model catalog, and exact
 adapter routes built from one versioned static configuration file. Direct HTTP
-runtimes reread their credential files; CLI runtimes use the selected profile's
-delivery ([configuration-and-credentials](configuration-and-credentials.md)).
-The `signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`)
-drives one session through the real scheduler and PostgreSQL path with either a
+runtimes reread their credential files; each CLI runtime uses its ambient login,
+which is the only delivery the present composition supplies for one. Selecting a
+CLI credential from the profile's own delivery is committed unimplemented
+functionality owned by
+[configuration-and-credentials](configuration-and-credentials.md). The
+`signalbox-debug` binary (`apps/signalboxd/src/bin/signalbox-debug.rs`) drives
+one session through the real scheduler and PostgreSQL path with either a
 deterministic scripted reply or an explicit `--anthropic` smoke mode, then
 prints the semantic transcript; it is deliberately not the client protocol.
 
