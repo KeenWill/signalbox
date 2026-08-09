@@ -25,6 +25,9 @@ verified against this PR (`agent/mcp-bridge-wiring`).
 The rule binding one provider-model spelling to one adapter is verified against
 this PR (`agent/adapter-model-catalogs`).
 
+The runtime-bridge invalid-schema diagnostic fields and redaction boundary are
+verified against this PR (`agent/tool-evals-mcp`).
+
 This page describes the implemented configuration and credential behavior of
 Signalbox, verified against the implementing stack through PR #217
 (`agent/credential-reference-total`). This includes signalboxd configuration
@@ -1157,8 +1160,11 @@ Enforcement as implemented:
   errors log phase, failure class, counts, and aggregate ids only. The
   `crates/application` tracing sites emit the same typed fields, plus the closed
   tool error kind and the daemon-authored catalog tool name at the failed
-  tool-attempt site; no call site in the codebase passes accepted-input,
-  assistant content, tool arguments, or tool error detail to `tracing`.
+  tool-attempt site. A runtime-bridge schema rejection additionally emits the
+  daemon-authored tool name and the JSON parser's grammar-and-position
+  diagnostic, never the rejected schema bytes. No call site in the codebase
+  passes accepted-input, assistant content, tool arguments, or tool error detail
+  to `tracing`.
 - Every provider-controlled text that leaves the Anthropic adapter — stream text
   and thinking deltas, tool-argument JSON, tool proposals, native error bodies,
   provider request ids, reported model identity, stop-sequence and finish

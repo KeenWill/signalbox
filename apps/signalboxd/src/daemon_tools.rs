@@ -1438,7 +1438,6 @@ mod tests {
         let expected_workspace = tempfile::tempdir().expect("expected workspace exists");
         let expected_catalog = mapped_daemon_catalog(expected_workspace.path());
         let expected_definitions = expected_catalog.definitions();
-        let expected_names = definition_names(&expected_definitions);
         let workspace = tempfile::tempdir().expect("production workspace exists");
         git2::Repository::init(workspace.path()).expect("production repository initializes");
         let support = tempfile::tempdir().expect("credential fixture root exists");
@@ -1480,7 +1479,6 @@ mod tests {
         let actual_names = definition_names(&actual_definitions);
 
         assert_eq!(actual_definitions, expected_definitions);
-        assert_eq!(actual_names, expected_names);
         assert!(actual_names.contains(&GOAL_DECLARE_NAME));
     }
 
@@ -3600,7 +3598,8 @@ done
         let status = match wait_for_owned_process_group(&mut child, timeout) {
             Ok(Some(status)) => status,
             Ok(None) => {
-                terminate_owned_process_group(&mut child);
+                kill_owned_process_group(&child);
+                terminate_child(&mut child);
                 join_bounded_stdout(reader)?;
                 return Ok(None);
             }
