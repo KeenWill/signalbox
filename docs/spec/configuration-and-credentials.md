@@ -10,6 +10,10 @@ verified against the implementing stack through this PR
 The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
 
+The execution family's permission defaults and the confinement its bubblewrap
+profile does and does not provide are verified against this PR
+(`agent/exec-sandbox-net-fence`).
+
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
 
@@ -590,12 +594,77 @@ publication, and every workspace mutation default to `Confirm`. Reading the
 invoking session's transcript defaults to `Auto`, while listing conversations
 and reading another native or imported conversation default to `Confirm`.
 `web_search` and `web_fetch` also default to `Confirm`; the checked-in example
-maps both exact names to `human`. The runtime meaning and precedence of those
-declaration defaults, the explicit posture, the session blanket, and the durable
-approval wait are owned by
+maps both exact names to `human`. The three execution tools complete the
+enumeration. `unsandboxed_exec` is compiled `AlwaysConfirm`, which no posture,
+approval judge, or session blanket can lower. `sandboxed_exec` defaults to
+`Confirm`, because it accepts an arbitrary program and argument vector. That is
+a compiled default and not a floor: an explicit `auto` posture resolves it to
+policy-automatic, and with no posture mapped a session blanket approves it
+without a per-call decision. Only the `human` posture parks it for a person
+whatever the blanket says. `cargo_diagnostics` defaults to `Auto`: its arguments
+carry no program, so a turn selects neither the binary nor its argument vector,
+and the tool issues only the fixed Cargo check, clippy, and test passes it
+builds itself. Those passes still compile and run the workspace's own build
+scripts, procedural macros, and test binaries, so an automatic diagnostics call
+executes whatever code the workspace already contains, under the profile
+described below. The runtime meaning and precedence of those declaration
+defaults, the explicit posture, the session blanket, and the durable approval
+wait are owned by
 [Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
 Only the explicit `[tool_approval_postures]` table changes a declaration's
 resolved posture; family composition itself does not.
+
+`sandboxed_exec` and `cargo_diagnostics` share one daemon-local bubblewrap
+profile. Its name claims more than it delivers, so this page recites the launch
+and then lists separately what the profile does not provide. The recitation
+draws no consequence, because every consequence stated here so far has proved
+narrower than it sounded.
+
+The launch is this. Bubblewrap receives `--die-with-parent`, `--new-session`,
+`--unshare-user`, `--unshare-pid`, `--unshare-ipc`, `--unshare-uts`, and
+`--unshare-net`. It mounts a fresh `/proc`, a fresh `/dev`, and a `tmpfs` at
+`/tmp`; creates `/etc`; and read-only binds `/usr`, `/bin`, `/lib`, `/lib64`,
+`/nix/store`, `/etc/alternatives`, `/etc/hosts`, `/etc/nsswitch.conf`, and
+`/etc/ssl`, each where it is present. It does not bind `/etc/resolv.conf`. It
+binds the configured workspace root read-write at `/workspace`, read-only binds
+the pinned execution supervisor — a host path that need not lie under that root
+— at `/signalbox-exec-dispatch`, and changes directory to `/workspace` or to the
+requested directory beneath it. The child environment is cleared and then set to
+`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every command is dispatched
+through the supervisor.
+
+The profile does not provide the following, and no other daemon-local control
+supplies them:
+
+- Two transports outside the network namespace's reach stay available. An
+  `AF_UNIX` *pathname* socket inside the workspace root is connectable, because
+  it is reached through the filesystem, and one fronting a proxy carries egress
+  with it; `AF_VSOCK` to a host CID remains available wherever the platform
+  provides it. Abstract `AF_UNIX` sockets are not in this class — that namespace
+  is scoped by the network namespace, so unsharing it does isolate them.
+- A credential inside the workspace root is readable. Credential settings are
+  admitted on presence alone and are never checked against that root, so one
+  configured inside it is bound along with the workspace, as is any secret the
+  repository itself carries.
+- The fresh `/proc` and `/dev` are not a private surface. They carry kernel- and
+  host-derived data — `/proc/cpuinfo`, `/proc/meminfo`, and the boot identifier
+  among it — that no bind governs, so the readable surface is wider than the
+  bound paths alone.
+- `HOME` is the workspace root, so home-relative configuration discovery —
+  `~/.cargo`, `~/.config`, and anything else a program resolves that way — lands
+  inside the writable workspace rather than at a host location.
+- Everything under the workspace root is writable, including the repository's
+  `.git`.
+- `cargo_diagnostics` compiles and runs the workspace's own build scripts,
+  procedural macros, and test binaries under this profile, so an automatic call
+  executes whatever code the workspace already contains.
+- No resource limit, uid or gid drop, seccomp policy, or landlock policy
+  applies, so the profile does not contain a deliberately hostile program.
+
+This is not the runner's `WorkspaceRestricted` profile described by
+[sandbox profiles and approval](runner-protocol.md#sandbox-profiles-and-approval),
+which additionally drops capabilities and brokers egress through a hostname
+allowlist, and which no present runner surface provides.
 
 The conversation adapter uses the existing application listing service and the
 established persistence projections for native semantic transcripts and

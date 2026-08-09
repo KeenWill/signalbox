@@ -5475,11 +5475,17 @@ done
             .assert_eq(&called["error"].to_string());
     }
     /// Composition preserves each execution declaration's permission default:
-    /// the sandboxed command and the diagnostics reader stay automatic, while
-    /// the unsandboxed command keeps `AlwaysConfirm` — human-only regardless of
-    /// the dangerous session blanket. Only an ignored live smoke observed this
-    /// before, so a silent downgrade in the mapped composition could reach main
-    /// unnoticed.
+    /// the sandboxed command takes `Confirm`, because it accepts an arbitrary
+    /// program — a compiled default an explicit posture or a session blanket
+    /// can still lower, so this pins the declaration and not the resolved
+    /// approval; the diagnostics
+    /// reader stays automatic, since its arguments select no program and it
+    /// issues only the fixed Cargo passes it builds itself — which do still run
+    /// the workspace's own build scripts, macros, and test binaries; and the
+    /// unsandboxed command keeps
+    /// `AlwaysConfirm` — human-only regardless of the dangerous session blanket.
+    /// Only an ignored live smoke observed this before, so a silent downgrade in
+    /// the mapped composition could reach main unnoticed.
     #[test]
     fn composed_execution_tools_keep_their_declared_permission_defaults() {
         let workspace = tempfile::tempdir().expect("workspace root exists");
@@ -5521,7 +5527,7 @@ done
 
         assert_eq!(
             permission_default(SANDBOXED_EXEC_NAME),
-            ToolPermissionDefault::Auto
+            signalbox_domain::ToolPermissionDefault::Confirm
         );
         assert_eq!(
             permission_default(CARGO_DIAGNOSTICS_NAME),
