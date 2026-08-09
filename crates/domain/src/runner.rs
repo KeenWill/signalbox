@@ -3123,6 +3123,9 @@ fn validate_placement_request_against(
         return Err(RunnerDomainError::CredentialProfileUnavailable);
     }
     if let WorkspaceRequirement::RepositoryWorktree { repository } = &request.workspace {
+        if !registration.supports_workspace(WorkspaceCapability::WorktreePerSession) {
+            return Err(RunnerDomainError::WorkspaceCapabilityUnavailable);
+        }
         let entry = registration
             .repository(repository)
             .ok_or(RunnerDomainError::RepositoryUnavailable)?;
@@ -6214,6 +6217,44 @@ mod tests {
         assert_eq!(replacement.before.runner(), selected);
         assert_eq!(replacement.prior_request, initial_request);
         assert_eq!(replacement.replacement_request, replacement_request);
+    }
+
+    #[test]
+    fn s32_inv044_pre_pin_replacement_requires_repository_workspace_capability() {
+        let selected = runner_id(RUNNER);
+        let replacement_runner = runner_id(REPLACEMENT_RUNNER);
+        let replacement_registration = enrollment_for(replacement_runner)
+            .register(
+                RunnerAdvertisement::new(
+                    [class()],
+                    [tool("inspect"), tool("deploy"), tool("sync")],
+                    [profile("readonly"), profile("admin")],
+                    [],
+                    sandbox_profiles(),
+                    [RunnerRepositoryEntry::new(repository_key(), None)],
+                ),
+                &catalog(),
+            )
+            .expect("the repository inventory is valid without workspace capability");
+        let lost =
+            SessionRunnerPlacement::new(session_id(SESSION), exact_placement_request(selected))
+                .mark_runner_lost_before_pin(selected)
+                .expect("the exact selection may be lost before pinning");
+        let replacement_request = SessionRunnerPlacementRequest {
+            selector: RunnerSelector::Identity(replacement_runner),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::RepositoryWorktree {
+                repository: repository_key(),
+            },
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        };
+
+        assert_eq!(
+            lost.replace_lost_runner_before_pin(replacement_request, &replacement_registration,),
+            Err(RunnerDomainError::WorkspaceCapabilityUnavailable),
+        );
     }
 
     #[test]

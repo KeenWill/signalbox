@@ -24,19 +24,18 @@ use signalbox_domain::{
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerId,
     RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseLoss,
     RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
-    RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
-    RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration,
-    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
-    RunnerToolPermissionOverrides, RunnerWorkingDirectory, SessionId, SessionRunnerPin,
-    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind,
-    ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
-    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
-    WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceManifestId,
-    WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement,
-    WorkspaceRevision,
+    RunnerLostBeforePin, RunnerPlacementReconstitutionHistory, RunnerRepositoryEntry,
+    RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass,
+    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
+    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd, ToolAttemptId,
+    ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind, ToolName,
+    ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
+    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceBranchName,
+    WorkspaceCapability, WorkspaceManifestId, WorkspaceRecovery, WorkspaceRelativePath,
+    WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -45,7 +44,27 @@ use crate::lock_inventory::{
     RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
     RUNNER_REGISTRATION_HEAD,
 };
-use crate::mapping::{tool_permission_default_from_str, tool_permission_default_to_str};
+use crate::mapping::{
+    runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
+    tool_permission_default_from_str, tool_permission_default_to_str,
+};
+
+#[derive(Clone, Copy)]
+enum PlacementProjectionAuthority {
+    Generic,
+    #[cfg(feature = "postgres-integration")]
+    RunnerReplacementTestProjection,
+}
+
+impl PlacementProjectionAuthority {
+    const fn admits_runner_replacement(self) -> bool {
+        match self {
+            Self::Generic => false,
+            #[cfg(feature = "postgres-integration")]
+            Self::RunnerReplacementTestProjection => true,
+        }
+    }
+}
 
 /// Adapter-owned positive revision of one validated registration.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1291,8 +1310,13 @@ impl RunnerProtocolStore {
         registration: Option<&StoredValidatedRunnerRegistration>,
         grant: Option<&CredentialProfileGrant>,
     ) -> Result<(), RunnerProtocolStoreError> {
-        self.store_placement_projection(placement, registration, grant, false)
-            .await
+        self.store_placement_projection(
+            placement,
+            registration,
+            grant,
+            PlacementProjectionAuthority::Generic,
+        )
+        .await
     }
 
     /// Stores a checked runner-replacement projection for PostgreSQL integration tests.
@@ -1308,8 +1332,13 @@ impl RunnerProtocolStore {
         registration: &StoredValidatedRunnerRegistration,
         grant: Option<&CredentialProfileGrant>,
     ) -> Result<(), RunnerProtocolStoreError> {
-        self.store_placement_projection(placement, Some(registration), grant, true)
-            .await
+        self.store_placement_projection(
+            placement,
+            Some(registration),
+            grant,
+            PlacementProjectionAuthority::RunnerReplacementTestProjection,
+        )
+        .await
     }
 
     async fn store_placement_projection(
@@ -1317,7 +1346,7 @@ impl RunnerProtocolStore {
         placement: &SessionRunnerPlacement,
         registration: Option<&StoredValidatedRunnerRegistration>,
         grant: Option<&CredentialProfileGrant>,
-        admit_test_runner_replacement: bool,
+        authority: PlacementProjectionAuthority,
     ) -> Result<(), RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
@@ -1344,7 +1373,7 @@ impl RunnerProtocolStore {
                 | "runner_lost"
                 | "runner_replaced"
                 | "abandoned"
-        ) && !(admit_test_runner_replacement && event_kind == "runner_replaced")
+        ) && !(authority.admits_runner_replacement() && event_kind == "runner_replaced")
         {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
@@ -3463,7 +3492,10 @@ async fn decode_placement(
         .map(runner_id);
     let loss_source = row
         .decode_column::<Option<String>>("loss_source_kind")?
-        .map(|source| decode_loss_source(&source))
+        .map(|source| {
+            runner_placement_loss_source_from_str(&source)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)
+        })
         .transpose()?;
     let state = if state_kind == "unpinned" {
         if lost_runner.is_some() || loss_source.is_some() {
@@ -4480,13 +4512,13 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
             "runner_lost",
             lost.pinned(),
             Some(lost.pinned().runner.into_uuid()),
-            Some(encode_loss_source(lost.source())),
+            Some(runner_placement_loss_source_to_str(lost.source())),
         ),
         SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(lost)) => (
             "runner_abandoned",
             lost.pinned(),
             Some(lost.pinned().runner.into_uuid()),
-            Some(encode_loss_source(lost.source())),
+            Some(runner_placement_loss_source_to_str(lost.source())),
         ),
     };
     let workspace = pinned.workspace.as_ref();
@@ -4525,13 +4557,6 @@ fn encode_placement_state(state: &SessionRunnerPlacementState) -> EncodedPlaceme
         workspace_recovery_kind,
         workspace_branch_name,
         workspace_revision,
-    }
-}
-
-const fn encode_loss_source(source: RunnerPlacementLossSource) -> &'static str {
-    match source {
-        RunnerPlacementLossSource::Connection => "connection",
-        RunnerPlacementLossSource::Registration => "registration",
     }
 }
 
@@ -4743,14 +4768,6 @@ fn decode_sandbox(value: String) -> Result<RunnerSandboxProfile, RunnerProtocolS
     match value.as_str() {
         "ambient" => Ok(RunnerSandboxProfile::Ambient),
         "workspace_restricted" => Ok(RunnerSandboxProfile::WorkspaceRestricted),
-        _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
-    }
-}
-
-fn decode_loss_source(value: &str) -> Result<RunnerPlacementLossSource, RunnerProtocolStoreError> {
-    match value {
-        "connection" => Ok(RunnerPlacementLossSource::Connection),
-        "registration" => Ok(RunnerPlacementLossSource::Registration),
         _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
     }
 }

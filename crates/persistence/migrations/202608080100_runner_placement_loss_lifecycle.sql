@@ -46,7 +46,7 @@ ALTER TABLE runner_session_placement_record
         );
 
 -- Supersedes the state-shape constraint from
--- 202607280401_runner_protocol.sql.
+-- 202607280402_runner_grant_tombstones.sql.
 ALTER TABLE runner_session_placement_record
     DROP CONSTRAINT runner_session_placement_state_shape,
     ADD CONSTRAINT runner_session_placement_state_shape
