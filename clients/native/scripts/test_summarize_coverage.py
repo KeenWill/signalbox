@@ -565,6 +565,34 @@ class BaselineLoadingTests(unittest.TestCase):
         self.assertIsNone(baseline)
         self.assertIn("could not be read", reason)
 
+    def test_a_baseline_covering_more_than_exists_reports_a_reason(self) -> None:
+        """More covered than executable renders a complete current run as a
+        fabricated regression instead of degrading to the unavailable note."""
+        document = report(target("App.app", source_file("/repo/App.swift", executable=1, covered=2)))
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "coverage.json", json.dumps(document))
+
+            baseline, reason = summarize_coverage.load_baseline(
+                path, label=summarize_coverage.BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
+            )
+
+        self.assertIsNone(baseline)
+        self.assertIn("impossible", reason)
+
+    def test_a_fully_covered_baseline_is_still_accepted(self) -> None:
+        """The guard: covered == executable is the boundary, not an
+        impossibility."""
+        document = report(target("App.app", source_file("/repo/App.swift", executable=100, covered=100)))
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "coverage.json", json.dumps(document))
+
+            baseline, reason = summarize_coverage.load_baseline(
+                path, label=summarize_coverage.BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
+            )
+
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(baseline)
+
     def test_a_missing_baseline_file_reports_a_reason(self) -> None:
         """An extraction that produced nothing leaves no file, and reading
         one that is not there is an expected outcome here."""

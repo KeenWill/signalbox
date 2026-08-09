@@ -588,6 +588,71 @@ class BaselineLoadingTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("No baseline to compare against", rendered.getvalue())
 
+    def test_a_baseline_covering_more_than_exists_reports_a_reason(self) -> None:
+        """`{"count": 1, "covered": 2}` is a 200% baseline, so a complete
+        current run renders against it as a fabricated -100.00 pp — a number
+        indistinguishable from a real collapse. The workflow predicate has
+        refused this shape for several rounds; the loader has to as well,
+        because the CLI contract permits direct use.
+        """
+        document = export(coverage_file("/repo/crates/domain/src/a.rs", lines=1, covered=2))
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "summary.json", json.dumps(document))
+
+            baseline, reason = load_baseline(
+                path, label=BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
+            )
+
+        self.assertIsNone(baseline)
+        self.assertIn("impossible", reason)
+
+    def test_a_negative_baseline_counter_reports_a_reason(self) -> None:
+        document = export(coverage_file("/repo/crates/domain/src/a.rs", lines=-5, covered=0))
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "summary.json", json.dumps(document))
+
+            baseline, reason = load_baseline(
+                path, label=BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
+            )
+
+        self.assertIsNone(baseline)
+        self.assertIn("impossible", reason)
+
+    def test_a_report_states_no_delta_against_an_impossible_baseline(self) -> None:
+        """The end-to-end shape: no fabricated regression, and the run still
+        exits 0 saying why the delta is missing."""
+        current = export(coverage_file("/repo/crates/domain/src/a.rs", lines=100, covered=60))
+        corrupt = export(coverage_file("/repo/crates/domain/src/a.rs", lines=1, covered=2))
+        with tempfile.TemporaryDirectory() as directory:
+            report = written(directory, "summary.json", json.dumps(current))
+            baseline = written(directory, "baseline.json", json.dumps(corrupt))
+
+            with contextlib.redirect_stdout(io.StringIO()) as rendered:
+                exit_code = main([
+                    str(report), "--title", "T",
+                    "--baseline", str(baseline),
+                    "--baseline-label", BASE,
+                    "--baseline-sha", "abc1234",
+                    "--baseline-date", "2026-08-01T09:00:00Z",
+                ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("No baseline to compare against", rendered.getvalue())
+        self.assertNotIn("-100.00 pp", rendered.getvalue())
+
+    def test_a_fully_covered_baseline_is_still_accepted(self) -> None:
+        """The guard: covered == count is the boundary, not an impossibility."""
+        document = export(coverage_file("/repo/crates/domain/src/a.rs", lines=100, covered=100))
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "summary.json", json.dumps(document))
+
+            baseline, reason = load_baseline(
+                path, label=BASE, sha="abc1234", date="2026-08-01T09:00:00Z"
+            )
+
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(baseline)
+
     def test_a_missing_baseline_file_reports_a_reason(self) -> None:
         """An extraction that produced nothing leaves no file, and reading
         one that is not there is an expected outcome here."""

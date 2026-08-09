@@ -266,6 +266,30 @@ def load_baseline(path: Path, *, label: str, sha: str, date: str) -> tuple["Base
             for counter in (total.lines, total.functions, total.regions)
         ):
             return None, "the baseline summary has a counter that cannot be rendered"
+        # A counter reporting more covered than exist, or a negative one, is a
+        # corrupt measurement rather than a low one. Left alone it renders a
+        # complete current run as a fabricated regression — `{"count": 1,
+        # "covered": 2}` is a 200% baseline, and a full current measurement
+        # against it reads as -100.00 pp, which is indistinguishable from a real
+        # collapse. The workflow predicate has refused this shape for several
+        # rounds; the loader has to refuse it too, because the CLI contract
+        # permits direct use and a fabricated number is worse than no delta.
+        impossible = [
+            name
+            for name, counter in (
+                ("lines", total.lines),
+                ("functions", total.functions),
+                ("regions", total.regions),
+            )
+            if counter.count < 0
+            or counter.covered < 0
+            or counter.covered > counter.count
+        ]
+        if impossible:
+            return None, (
+                "the baseline summary reports impossible counters "
+                f"({', '.join(impossible)})"
+            )
     except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError) as error:
         return None, f"the baseline summary could not be read ({error.__class__.__name__})"
     # An export with no instrumented line is not a measurement to compare

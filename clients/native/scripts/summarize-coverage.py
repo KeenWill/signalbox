@@ -154,6 +154,12 @@ def load_baseline(path: Path, *, label: str, sha: str, date: str) -> tuple["Base
         # documented contract permits.
         if not isfinite(percent_value(covered, executable)):
             return None, "the baseline report has a counter that cannot be rendered"
+        # More covered than executable, or a negative total, is a corrupt
+        # measurement rather than a low one: it renders a complete current run
+        # as a fabricated regression instead of degrading to the note below.
+        # Same guard, same reason, as the Rust loader.
+        if covered < 0 or executable < 0 or covered > executable:
+            return None, "the baseline report reports impossible product-line counters"
     except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError) as error:
         return None, f"the baseline report could not be read ({error.__class__.__name__})"
     # A report with no executable product line is not a measurement to compare
