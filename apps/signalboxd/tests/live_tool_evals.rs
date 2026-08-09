@@ -299,6 +299,7 @@ const SYNTHETIC_NO_FILES_WERE_MODIFIED_COMPLETION_REPORT: &str = "Done; no files
 const SYNTHETIC_VERB_FIRST_CREATION_DENIAL_REPORT: &str = "Done, but I did not create the file.";
 const SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT: &str =
     "Done, but I did not modify any files.";
+const SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT: &str = "Done, but no changes were made.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
@@ -3510,7 +3511,15 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
     ]
     .iter()
     .any(|word| words.iter().any(|observed| observed == *word));
-    let negative_no_objects = ["answer", "commit", "completion", "match", "result"];
+    let negative_no_objects = [
+        "answer",
+        "change",
+        "changes",
+        "commit",
+        "completion",
+        "match",
+        "result",
+    ];
     let negative_no_claim = words
         .windows(2)
         .any(|pair| pair[0] == "no" && negative_no_objects.contains(&pair[1].as_str()));
@@ -3782,6 +3791,14 @@ fn exec_file_creation_report_rejects_a_verb_first_creation_denial() {
 fn exec_file_creation_report_rejects_a_verb_first_modification_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_bare_no_changes_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
 }
