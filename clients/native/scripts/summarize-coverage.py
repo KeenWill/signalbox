@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass
 from math import isfinite
@@ -105,12 +106,68 @@ def delta(*, covered: int, executable: int, baseline: Baseline) -> str:
     return f"{difference:+.2f} pp"
 
 
+def numeric_counter_value(value: object) -> bool:
+    """Whether `value` is a shape `int()` should be trusted to convert.
+
+    Mirrors the workflow predicate's `okint` and the Rust summarizer's
+    function of the same name, so none of the three drift apart again on this
+    axis: a plain integer, an integral float, or a string of digits (`int()`
+    accepts "3" but raises on "5.5", so this does too rather than truncating
+    or rounding it into looking valid).
+
+    `bool` is excluded even though it is an `int` subclass in Python: Xcode
+    never emits `true`/`false` for `coveredLines`/`executableLines`, and
+    `int(True)` succeeding as 1 would read a type error as a real, if oddly
+    small, measurement. A finite fractional float is excluded for the same
+    reason: `{"coveredLines": 1.5}` is not a smaller-but-real count, and
+    `int()` truncating it silently would turn a corrupt value into a
+    fabricated one. An integral float (`5.0`) is kept, matching the Rust
+    function: jq has one numeric type and cannot tell `5.0` from `5` once
+    parsed, so refusing it only here would make this reader stricter than the
+    predicate gating the same documents.
+
+    A non-finite float (`1e999` parses as infinity) is also kept: that is an
+    out-of-range value, not a wrong-shaped one, and `int()` raising
+    `OverflowError` on it below is the more specific diagnosis `load_baseline`
+    already names.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return not isfinite(value) or value.is_integer()
+    if isinstance(value, str):
+        return bool(re.fullmatch(r"[+-]?[0-9]+", value))
+    return False
+
+
+def numeric_counter(value: object, *, field: str) -> int:
+    """Convert one `coveredLines`/`executableLines` value, refusing a shape
+    `int()` would otherwise coerce rather than genuinely convert.
+
+    Raises rather than defaulting: unlike the Rust summarizer's per-file
+    `Counter.present`, nothing here tracks partial measurement per target, so
+    a target reporting a counter of the wrong type is treated the same way an
+    unreadably large one already is — `load_baseline`'s broad exception
+    handler turns the raise into a reason string, refusing the whole baseline
+    rather than rendering a fabricated delta from a truncated or coerced
+    value.
+    """
+    if not numeric_counter_value(value):
+        raise TypeError(f"{field} is not a usable counter value: {value!r}")
+    return int(value)
+
+
 def product_totals(document: dict) -> tuple[int, int]:
     """Sum covered and executable lines over the product targets alone."""
     products = [target for target in document.get("targets", []) if not is_test_bundle(target)]
     return (
-        sum(int(target["coveredLines"]) for target in products),
-        sum(int(target["executableLines"]) for target in products),
+        sum(numeric_counter(target["coveredLines"], field="coveredLines") for target in products),
+        sum(
+            numeric_counter(target["executableLines"], field="executableLines")
+            for target in products
+        ),
     )
 
 
@@ -127,8 +184,8 @@ def impossible_product_targets(document: dict) -> list[str]:
     for target in document.get("targets", []):
         if is_test_bundle(target):
             continue
-        covered = int(target["coveredLines"])
-        executable = int(target["executableLines"])
+        covered = numeric_counter(target["coveredLines"], field="coveredLines")
+        executable = numeric_counter(target["executableLines"], field="executableLines")
         if covered < 0 or executable < 0 or covered > executable:
             impossible.append(str(target.get("name", "<unnamed>")))
     return impossible

@@ -548,6 +548,64 @@ class BaselineLoadingTests(unittest.TestCase):
         self.assertIsNone(baseline)
         self.assertIn("could not be read", reason)
 
+    def test_a_fractional_baseline_counter_is_refused_not_truncated(self) -> None:
+        """`int(100.9)` truncates to 100 rather than raising, so a baseline
+        reporting `executableLines: 100.9` used to be accepted as an ordinary
+        50% measurement and rendered a real-looking delta against it, instead
+        of being refused and reporting no baseline at all. `covered` and the
+        truncated `executable` stay in a sane relationship on purpose, so
+        nothing here also trips the impossible-counter guard; the point is
+        the type, not the magnitude."""
+        current = report(target("App.app", source_file("/repo/App.swift", executable=100, covered=60)))
+        baseline_document = report(
+            target("App.app", source_file("/repo/App.swift", executable=100, covered=50))
+        )
+        baseline_document["targets"][0]["executableLines"] = 100.9
+        with tempfile.TemporaryDirectory() as directory:
+            report_path = written(directory, "coverage.json", json.dumps(current))
+            baseline_path = written(directory, "baseline.json", json.dumps(baseline_document))
+
+            with contextlib.redirect_stdout(io.StringIO()) as rendered:
+                exit_code = summarize_coverage.main([
+                    str(report_path), "--title", TITLE,
+                    "--baseline", str(baseline_path),
+                    "--baseline-label", summarize_coverage.BASE,
+                    "--baseline-sha", "abc1234",
+                    "--baseline-date", "2026-08-01T09:00:00Z",
+                ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("No baseline to compare against", rendered.getvalue())
+        self.assertNotIn(" pp", rendered.getvalue())
+
+    def test_a_boolean_baseline_counter_is_refused_not_coerced(self) -> None:
+        """`bool` is an `int` subclass in Python, so `int(True)` succeeds as 1
+        rather than raising — the same silent-coercion shape as the
+        fractional case above, on JSON's other type Xcode never emits for a
+        counter."""
+        current = report(target("App.app", source_file("/repo/App.swift", executable=100, covered=60)))
+        baseline_document = report(
+            target("App.app", source_file("/repo/App.swift", executable=1, covered=0))
+        )
+        baseline_document["targets"][0]["executableLines"] = True
+        baseline_document["targets"][0]["coveredLines"] = False
+        with tempfile.TemporaryDirectory() as directory:
+            report_path = written(directory, "coverage.json", json.dumps(current))
+            baseline_path = written(directory, "baseline.json", json.dumps(baseline_document))
+
+            with contextlib.redirect_stdout(io.StringIO()) as rendered:
+                exit_code = summarize_coverage.main([
+                    str(report_path), "--title", TITLE,
+                    "--baseline", str(baseline_path),
+                    "--baseline-label", summarize_coverage.BASE,
+                    "--baseline-sha", "abc1234",
+                    "--baseline-date", "2026-08-01T09:00:00Z",
+                ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("No baseline to compare against", rendered.getvalue())
+        self.assertNotIn(" pp", rendered.getvalue())
+
     def test_a_counter_too_large_to_render_reports_a_reason(self) -> None:
         """`int()` accepts a 400-digit decimal string, so the loader returned a
         baseline whose percentage then raised `OverflowError` during rendering

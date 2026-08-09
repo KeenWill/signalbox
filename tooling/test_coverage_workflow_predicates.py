@@ -1613,6 +1613,55 @@ def incomplete_lines_counter_export() -> dict:
     }
 
 
+def fractional_lines_counter_export() -> dict:
+    """An export whose one file reports a fractional lines counter.
+
+    A third axis on the same field `incomplete_lines_counter_export()`
+    exercises: present, non-null, complete, and still wrong — `int()` accepts
+    a float by truncating it, so `{"count": 1.5, "covered": 0.5}` used to
+    convert cleanly into a smaller-looking real measurement instead of being
+    refused. llvm-cov never emits a fractional count.
+    """
+    return {
+        "type": EXPORT_TYPE,
+        "version": "2.0.1",
+        "data": [
+            {
+                "files": [
+                    {
+                        "filename": HEALTHY_FILE,
+                        "summary": {"lines": {"count": 1.5, "covered": 0.5}},
+                    }
+                ]
+            }
+        ],
+    }
+
+
+def boolean_lines_counter_export() -> dict:
+    """An export whose one file reports a boolean lines counter.
+
+    The same third axis, on JSON's other type `int()` silently accepts:
+    `bool` is an `int` subclass in Python, so `int(True)` succeeds as `1`
+    rather than raising, and a document `{"count": true, "covered": false}`
+    used to read as a real, if oddly small, measurement.
+    """
+    return {
+        "type": EXPORT_TYPE,
+        "version": "2.0.1",
+        "data": [
+            {
+                "files": [
+                    {
+                        "filename": HEALTHY_FILE,
+                        "summary": {"lines": {"count": True, "covered": False}},
+                    }
+                ]
+            }
+        ],
+    }
+
+
 def healthy_export() -> dict:
     """The export every rejection fixture is a one-change edit of."""
     return export(coverage_file(HEALTHY_FILE, lines=HEALTHY_LINES, covered=HEALTHY_COVERED))
@@ -2095,6 +2144,27 @@ RUST_DOCUMENTS: tuple[RecordedDocument, ...] = (
         ),
     ),
     RecordedDocument(
+        name="a fractional lines counter",
+        document=fractional_lines_counter_export(),
+        loader_reads=True,
+        predicate_accepts=False,
+        divergence=(
+            "the loader treats a counter of the wrong type as absent, the same as one "
+            "missing a member, so rendering degrades that row rather than fail; the "
+            f"predicate refuses the candidate outright and keeps scanning. {STRICTER_BY_DESIGN}"
+        ),
+    ),
+    RecordedDocument(
+        name="a boolean lines counter",
+        document=boolean_lines_counter_export(),
+        loader_reads=True,
+        predicate_accepts=False,
+        divergence=(
+            "the same wrong-type divergence as the fractional case above, on the other "
+            f"type `int()` silently accepts. {STRICTER_BY_DESIGN}"
+        ),
+    ),
+    RecordedDocument(
         name="impossible counters",
         document=export(
             coverage_file(HEALTHY_FILE, lines=IMPOSSIBLE_COUNT, covered=IMPOSSIBLE_COVERED)
@@ -2177,6 +2247,20 @@ NATIVE_DOCUMENTS: tuple[RecordedDocument, ...] = (
         ),
         loader_reads=True,
         predicate_accepts=True,
+        divergence=AGREEMENT_REQUIRED,
+    ),
+    RecordedDocument(
+        name="a fractional executable-lines counter",
+        document=native_report(native_target(PRODUCT_TARGET, covered=50, executable=100.9)),
+        loader_reads=False,
+        predicate_accepts=False,
+        divergence=AGREEMENT_REQUIRED,
+    ),
+    RecordedDocument(
+        name="a boolean covered-lines counter",
+        document=native_report(native_target(PRODUCT_TARGET, covered=True, executable=100)),
+        loader_reads=False,
+        predicate_accepts=False,
         divergence=AGREEMENT_REQUIRED,
     ),
     RecordedDocument(

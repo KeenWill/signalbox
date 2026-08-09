@@ -733,6 +733,47 @@ class BaselineLoadingTests(unittest.TestCase):
         self.assertIn("not in baseline", row)
         self.assertNotIn(" pp", row)
 
+    def test_a_fractional_baseline_counter_gets_no_delta(self) -> None:
+        """`int(1.5)` truncates to 1 rather than raising, so a counter
+        reporting `{"count": 1.5, "covered": 0.5}` used to convert cleanly
+        into a real-looking `Counter(count=1, covered=0)` — a smaller number,
+        not a refused one. Against a current 60/100 that renders a fabricated
+        `+60.00 pp`, the same shape of false delta as the missing-member case
+        above, just reached through a value present and non-null but of the
+        wrong type instead of an absent one."""
+        baseline_document = export(
+            {
+                "filename": "/repo/crates/domain/src/session.rs",
+                "summary": {"lines": {"count": 1.5, "covered": 0.5}},
+            }
+        )
+        summaries = [summary for _, summary in read_file_summaries(baseline_document)]
+        total = total_of(summaries)
+
+        row = measure_row("Lines", Counter(count=100, covered=60), total.lines)
+
+        self.assertIn("not in baseline", row)
+        self.assertNotIn(" pp", row)
+
+    def test_a_boolean_baseline_counter_gets_no_delta(self) -> None:
+        """`bool` is an `int` subclass in Python, so `int(True)` succeeds as 1
+        rather than raising — the same silent-coercion shape as the
+        fractional case above, on JSON's other type llvm-cov never emits for
+        a counter."""
+        baseline_document = export(
+            {
+                "filename": "/repo/crates/domain/src/session.rs",
+                "summary": {"lines": {"count": True, "covered": False}},
+            }
+        )
+        summaries = [summary for _, summary in read_file_summaries(baseline_document)]
+        total = total_of(summaries)
+
+        row = measure_row("Lines", Counter(count=100, covered=60), total.lines)
+
+        self.assertIn("not in baseline", row)
+        self.assertNotIn(" pp", row)
+
     def test_a_wholly_measured_baseline_counter_still_gets_its_delta(self) -> None:
         """The guard: presence tracking must not start suppressing the deltas
         the report exists to show."""

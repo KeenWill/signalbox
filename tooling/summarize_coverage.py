@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from math import isfinite
@@ -126,6 +127,43 @@ class Baseline:
     date: str
 
 
+def numeric_counter_value(value: object) -> bool:
+    """Whether `value` is a shape `int()` should be trusted to convert.
+
+    Mirrors the workflow predicate's `okint`, so the two cannot drift apart
+    again on a third axis: a plain integer, an integral float, or a string of
+    digits (`int()` accepts "3" but raises on "5.5", so this does too rather
+    than rounding or truncating it into looking valid).
+
+    `bool` is excluded even though it is an `int` subclass in Python: llvm-cov
+    never emits `true`/`false` for a counter, and `int(True)` succeeding as 1
+    would read a type error as a real, if oddly small, measurement. A finite
+    fractional float is excluded for the same reason `read_counter` refuses a
+    partial counter object below — `{"count": 1.5}` is truncated data, not a
+    smaller-but-real one, and `int()` truncating it silently would turn a
+    corrupt value into a fabricated one. An integral float (`5.0`) is kept:
+    jq cannot tell it apart from `5` once parsed, so refusing it here would
+    make this stricter than the predicate that is supposed to gate the same
+    documents, which is the asymmetry this function exists to close.
+
+    A non-finite float (`1e999` parses as infinity) is also kept, deliberately
+    not refused here: that is an out-of-range value, not a wrong-shaped one,
+    and `load_baseline()` already has a more specific path for it — `int(inf)`
+    raising `OverflowError` — that names the magnitude problem for what it is.
+    Refusing it here first would report the same document as an ordinary
+    absent counter and lose that distinction.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return not isfinite(value) or value.is_integer()
+    if isinstance(value, str):
+        return bool(re.fullmatch(r"[+-]?[0-9]+", value))
+    return False
+
+
 def read_counter(summary: dict, name: str) -> Counter:
     """Read one named counter, tolerating counters a toolchain omits.
 
@@ -141,9 +179,23 @@ def read_counter(summary: dict, name: str) -> Counter:
     measurement of "nothing covered" rather than the absent one it actually
     is, which is exactly the fabricated delta `Counter.present` exists to
     refuse.
+
+    A member present with the wrong shape gets the same refusal, for the same
+    reason: `int()` accepts a float (truncating it) and a bool (`int` being a
+    supertype in Python's numeric tower), so `{"count": 1.5}` or
+    `{"count": true}` would otherwise convert cleanly into a plausible-looking
+    number, unlike `{"count": "not-a-number"}`, which `int()` already refuses
+    outright — that case used to reach `int()` and raise, which this function
+    is documented not to do; it is now refused here, before the call, instead.
     """
     block = summary.get(name)
-    if not isinstance(block, dict) or "count" not in block or "covered" not in block:
+    if (
+        not isinstance(block, dict)
+        or "count" not in block
+        or "covered" not in block
+        or not numeric_counter_value(block["count"])
+        or not numeric_counter_value(block["covered"])
+    ):
         return Counter(present=False)
     return Counter(count=int(block["count"]), covered=int(block["covered"]))
 

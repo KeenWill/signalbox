@@ -413,9 +413,31 @@ jobs:
             # block never gave one; accepting it here would select this
             # candidate and stop the scan on an artifact the render path can
             # only turn into a fabricated delta. Values that are present are
-            # further required to be ones `int()` accepts — a number, or a
+            # further required to be ones `int()` accepts — an integer, or a
             # string of digits. `tonumber` is deliberately not the test: it
             # accepts "5.5", which `int()` rejects.
+            #
+            # A fractional *number* is refused for the same reason: `int()`
+            # accepts one by truncating it, `int(1.5)` succeeding as `1` and
+            # reading as a smaller real measurement rather than a corrupt one.
+            # `okint` now checks the value equals its own `floor`, which is as
+            # far as jq can take this — jq has one numeric type, so `5.0` and
+            # `5` are the same value once parsed and this cannot refuse one
+            # without the other, unlike Python's `read_counter`, which sees
+            # the distinct `float`/`int` types the source JSON used. A JSON
+            # boolean needs no equivalent check: jq's `type` reports `true`
+            # and `false` as `"boolean"`, never `"number"`, so `okint` already
+            # refuses one on the first branch — the type system does the work
+            # `read_counter` needs an explicit `isinstance(value, bool)` guard
+            # for, because `bool` is an `int` subclass in Python and jq has no
+            # such subtyping to fall into.
+            #
+            # An infinite number (`1e999` parses as one) is deliberately still
+            # accepted here: `. == (.|floor)` holds for infinity too, so this
+            # does not newly refuse it. That magnitude problem keeps its own,
+            # more specific path below (`sane`, bounded by `maxcounter`) rather
+            # than being folded into this shape check and reported as though
+            # the counter were merely missing.
             #
             # The sum applies `read_counter`'s object guard too. `okcounter`
             # accepts a non-object counter because the loader tolerates one —
@@ -434,7 +456,7 @@ jobs:
             # and treating one as a baseline would render nonsense deltas
             # rather than fall through to an artifact that measures something.
             if ! jq -e '
-                  def okint: (type == "number")
+                  def okint: (type == "number" and (. == (. | floor)))
                     or (type == "string" and test("^[+-]?[0-9]+$"));
                   def trunc: if . < 0 then -((-.) | floor) else floor end;
                   # The largest counter the summarizer can carry through to a

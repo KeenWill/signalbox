@@ -495,18 +495,36 @@ jobs:
             # `coveredLines` and `executableLines` off each product target and
             # raises `KeyError` on a missing one, so a target carrying only
             # `executableLines` passes an executable-only predicate and still
-            # fails to load. Both are required to be values `int()` accepts — a
-            # number, or a string of digits — matching the loader in both
+            # fails to load. Both are required to be values `int()` accepts — an
+            # integer, or a string of digits — matching the loader in both
             # directions: a numeric string is accepted because `int()` accepts
             # it, and "5.5" is not, because `int()` rejects it. A predicate
             # stricter than its loader would discard a usable baseline for an
             # older one, which is the same defect in the other direction.
             #
+            # A fractional *number* is refused for the same reason: `int()`
+            # accepts one by truncating it, so `executableLines: 100.9` used to
+            # convert cleanly into a plausible-looking 100 rather than being
+            # refused. `okint` checks the value equals its own `floor`, as far
+            # as jq can take this — one numeric type means `5.0` and `5` are
+            # the same value once parsed, so this cannot refuse one without the
+            # other, unlike `numeric_counter_value` in the loader, which sees
+            # the distinct `float`/`int` types the source JSON used. A JSON
+            # boolean needs no equivalent check: jq reports `true`/`false` as
+            # type `"boolean"`, never `"number"`, so `okint` already refuses
+            # one on its first branch — the loader needs an explicit
+            # `isinstance(value, bool)` guard for the same case only because
+            # `bool` is an `int` subclass in Python and jq has no such
+            # subtyping to fall into. An infinite number (`1e999` parses as
+            # one) is deliberately still accepted: `. == (.|floor)` holds for
+            # infinity too, and that magnitude problem keeps its own path below
+            # (`maxcounter`) rather than being folded into this shape check.
+            #
             # The total is summed the way `product_totals` sums it: `int()`
             # truncates each target's value toward zero before the addition, so
             # a plain sum can be positive where the loader's total is zero.
             if ! jq -e '
-                  def okint: (type == "number")
+                  def okint: (type == "number" and (. == (. | floor)))
                     or (type == "string" and test("^[+-]?[0-9]+$"));
                   def trunc: if . < 0 then -((-.) | floor) else floor end;
                   # The largest counter the summarizer can carry through to a
