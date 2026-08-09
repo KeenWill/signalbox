@@ -5903,34 +5903,45 @@ scopes = ["model:invoke"]"#,
         );
     }
 
-    #[test]
-    fn configuration_rejects_an_oauth_endpoint_holding_user_information() {
-        // User information never reaches the request target, so it cannot
-        // distinguish two provisioning tuples, and it would put a secret in the
-        // static catalog. The delivery is undelivered either way; this asserts
-        // the grammar refuses the endpoint first, on its own terms.
-        for endpoint in [
-            "https://alice@example.test/token",
-            "https://alice:secret@example.test/token",
-            "https://:secret@example.test/token",
-        ] {
-            let oauth = CONFIGURATION.replace(
-                "delivery = \"ambient\"",
-                &format!(
-                    r#"delivery = "oauth"
+    /// Asserts one OAuth `token_url` is refused by the endpoint grammar itself,
+    /// before the delivery's undelivered result.
+    ///
+    /// User information never reaches the request target, so it cannot
+    /// distinguish two provisioning tuples, and it would put a secret in the
+    /// static catalog. The delivery is undelivered either way; these tests
+    /// assert the grammar refuses the endpoint first, on its own terms.
+    #[track_caller]
+    fn assert_oauth_token_url_rejected(token_url: &str) {
+        let oauth = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                r#"delivery = "oauth"
 client_id = "synthetic-client"
-token_url = "{endpoint}"
+token_url = "{token_url}"
 device_authorization_url = "https://example.test/device"
 scopes = ["model:invoke"]"#
-                ),
-            );
+            ),
+        );
 
-            assert_eq!(
-                HubModelConfiguration::parse(&oauth).err(),
-                Some(HubModelConfigurationError::InvalidCredentialDelivery),
-                "{endpoint} should be rejected before the undelivered result"
-            );
-        }
+        assert_eq!(
+            HubModelConfiguration::parse(&oauth).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_endpoint_holding_a_username() {
+        assert_oauth_token_url_rejected("https://alice@example.test/token");
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_endpoint_holding_a_username_and_password() {
+        assert_oauth_token_url_rejected("https://alice:secret@example.test/token");
+    }
+
+    #[test]
+    fn configuration_rejects_an_oauth_endpoint_holding_a_password_alone() {
+        assert_oauth_token_url_rejected("https://:secret@example.test/token");
     }
 
     #[test]

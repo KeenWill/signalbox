@@ -915,12 +915,15 @@ cannot; this contract says which for every delivery, and there is no third case.
   deployment, because a home copied from another has its own device and inode
   while carrying the same refresh token, and the daemon cannot detect the
   sharing: the store's contents are exactly what it never reads.
-- `oauth` — *established, and not admitted by this build*, by comparing the
-  provisioning tuple as parsed canonical components — scheme, lowercased host,
-  effective port, path, and query — and never as configured bytes. Two spellings
-  that a URL parser sends to the same request target are therefore one identity
-  rather than two, and fragments and user information are rejected at admission
-  because neither reaches the request target at all.
+- `oauth` — *owed by the delivery, which this build does not admit.* No present
+  parser retains a provisioning tuple or compares one profile's against
+  another's; every `oauth` profile is refused outright. The delivery that admits
+  it owes the comparison over parsed canonical components — scheme, lowercased
+  host, effective port, path, and query — and never over the configured bytes,
+  so that two spellings a URL parser sends to the same request target are one
+  identity rather than two. What this build does supply is the admission half of
+  that rule: fragments and user information are rejected when the endpoint is
+  parsed, because neither reaches the request target at all.
 
 Two exceptions, and only these two. `quarantine` excludes a member from every
 pool rather than from the one that observed it, so an authorization that turns
