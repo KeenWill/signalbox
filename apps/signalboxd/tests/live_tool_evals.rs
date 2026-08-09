@@ -818,6 +818,18 @@ fn current_git_recorded_time() -> Result<GitRecordedTime, git2::Error> {
     Signature::now(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL).map(|signature| signature.when().into())
 }
 
+fn git_commit_times_match_execution(
+    author: Time,
+    committer: Time,
+    execution_window: Option<GitExecutionTimeWindow>,
+) -> bool {
+    let author_time = GitRecordedTime::from(author);
+    let committer_time = GitRecordedTime::from(committer);
+    author_time == committer_time
+        && execution_window
+            .is_some_and(|window| window.contains(author) && window.contains(committer))
+}
+
 #[test]
 fn git_execution_window_accepts_a_recorded_time_within_its_bounds() {
     let window = GitExecutionTimeWindow {
@@ -873,6 +885,82 @@ fn git_execution_window_rejects_a_timezone_outside_its_bounds() {
         SYNTHETIC_GIT_EXECUTION_RECORDED_SECONDS,
         SYNTHETIC_OTHER_GIT_TIMEZONE_OFFSET,
     )));
+}
+
+#[test]
+fn git_commit_times_accept_equal_values_within_the_execution_window() {
+    let recorded = Time::new(
+        SYNTHETIC_GIT_EXECUTION_RECORDED_SECONDS,
+        SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+    );
+    let window = GitExecutionTimeWindow {
+        started: GitRecordedTime {
+            seconds: SYNTHETIC_GIT_EXECUTION_STARTED_SECONDS,
+            offset_minutes: SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+        },
+        finished: GitRecordedTime {
+            seconds: SYNTHETIC_GIT_EXECUTION_FINISHED_SECONDS,
+            offset_minutes: SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+        },
+    };
+
+    assert!(git_commit_times_match_execution(
+        recorded,
+        recorded,
+        Some(window),
+    ));
+}
+
+#[test]
+fn git_commit_times_reject_equal_values_outside_the_execution_window() {
+    let recorded = Time::new(
+        SYNTHETIC_GIT_EXECUTION_STARTED_SECONDS - 1,
+        SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+    );
+    let window = GitExecutionTimeWindow {
+        started: GitRecordedTime {
+            seconds: SYNTHETIC_GIT_EXECUTION_STARTED_SECONDS,
+            offset_minutes: SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+        },
+        finished: GitRecordedTime {
+            seconds: SYNTHETIC_GIT_EXECUTION_FINISHED_SECONDS,
+            offset_minutes: SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+        },
+    };
+
+    assert!(!git_commit_times_match_execution(
+        recorded,
+        recorded,
+        Some(window),
+    ));
+}
+
+#[test]
+fn git_commit_times_reject_distinct_author_and_committer_values() {
+    let author = Time::new(
+        SYNTHETIC_GIT_EXECUTION_RECORDED_SECONDS,
+        SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+    );
+    let committer = Time::new(
+        SYNTHETIC_GIT_EXECUTION_RECORDED_SECONDS,
+        SYNTHETIC_OTHER_GIT_TIMEZONE_OFFSET,
+    );
+    let window = GitExecutionTimeWindow {
+        started: GitRecordedTime {
+            seconds: SYNTHETIC_GIT_EXECUTION_STARTED_SECONDS,
+            offset_minutes: SYNTHETIC_GIT_EXECUTION_TIMEZONE_OFFSET,
+        },
+        finished: GitRecordedTime {
+            seconds: SYNTHETIC_GIT_EXECUTION_FINISHED_SECONDS,
+            offset_minutes: SYNTHETIC_OTHER_GIT_TIMEZONE_OFFSET,
+        },
+    };
+
+    assert!(!git_commit_times_match_execution(
+        author,
+        committer,
+        Some(window),
+    ));
 }
 
 type GitReferenceInventory = BTreeMap<Vec<u8>, GitReferenceTarget>;
@@ -1158,6 +1246,31 @@ impl FamilySuite {
         Ok(())
     }
 
+    fn commit_staged_paths_for_test(&self, message: &str) -> EvalResult {
+        self.commit_staged_paths_with_identity_for_test(message, GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL)
+    }
+
+    fn commit_staged_paths_with_identity_for_test(
+        &self,
+        message: &str,
+        author_name: &str,
+        author_email: &str,
+    ) -> EvalResult {
+        let started = current_git_recorded_time()?;
+        commit_staged_paths_with_identity(
+            self.workspace.path(),
+            message,
+            author_name,
+            author_email,
+        )?;
+        let finished = current_git_recorded_time()?;
+        self.executor.record_git_execution_window(
+            GIT_CREATE_COMMIT_NAME,
+            GitExecutionTimeWindow { started, finished },
+        );
+        Ok(())
+    }
+
     fn has_forced_case_verifier(&self, name: &str) -> bool {
         match self.family {
             EvalFamily::Git => matches!(
@@ -1247,11 +1360,12 @@ impl FamilySuite {
                 let seed = self.git_seed.ok_or_else(|| {
                     io::Error::other("the Git eval suite has no captured seed identity")
                 })?;
-                Ok(git_natural_state_passed(
+                Ok(git_natural_state_passed_in_window(
                     self.workspace.path(),
                     seed,
                     &self.git_seed_refs,
                     &self.git_seed_fixture,
+                    self.executor.git_execution_window(GIT_CREATE_COMMIT_NAME),
                 )? && snapshot.git_natural_requests_passed()?)
             }
             EvalFamily::Workspace => {
@@ -1502,6 +1616,11 @@ fn git_forced_case_passed(
                 && head.author().email().ok() == Some(GIT_AUTHOR_EMAIL)
                 && head.committer().name().ok() == Some(GIT_AUTHOR_NAME)
                 && head.committer().email().ok() == Some(GIT_AUTHOR_EMAIL)
+                && git_commit_times_match_execution(
+                    head.author().when(),
+                    head.committer().when(),
+                    execution_window,
+                )
                 && commit_adds_exact_fixture(
                     &repository,
                     &head,
@@ -3119,6 +3238,28 @@ fn git_natural_state_passed(
     seed_fixture: &GitFixtureSnapshot,
 ) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
+    let head = repository.head()?.peel_to_commit()?;
+    let recorded = GitRecordedTime::from(head.author().when());
+    git_natural_state_passed_in_window(
+        root,
+        seed,
+        seed_refs,
+        seed_fixture,
+        Some(GitExecutionTimeWindow {
+            started: recorded,
+            finished: recorded,
+        }),
+    )
+}
+
+fn git_natural_state_passed_in_window(
+    root: &Path,
+    seed: Oid,
+    seed_refs: &GitReferenceInventory,
+    seed_fixture: &GitFixtureSnapshot,
+    execution_window: Option<GitExecutionTimeWindow>,
+) -> EvalResult<bool> {
+    let repository = Repository::open(root)?;
     let head_reference = repository.head()?;
     let head_remains_on_seeded_branch = head_reference.shorthand().ok() == Some(GIT_BASE_BRANCH);
     let head = head_reference.peel_to_commit()?;
@@ -3129,6 +3270,11 @@ fn git_natural_state_passed(
         && head.author().email().ok() == Some(GIT_AUTHOR_EMAIL)
         && head.committer().name().ok() == Some(GIT_AUTHOR_NAME)
         && head.committer().email().ok() == Some(GIT_AUTHOR_EMAIL);
+    let signature_times_match = git_commit_times_match_execution(
+        head.author().when(),
+        head.committer().when(),
+        execution_window,
+    );
     let Ok(parent) = head.parent(0) else {
         return Ok(false);
     };
@@ -3201,6 +3347,7 @@ fn git_natural_state_passed(
         && seeded_branch_advanced
         && message_matches
         && identity_matches
+        && signature_times_match
         && exactly_one_descendant_commit
         && commit_changes_only_natural_path
         && natural_path_is_clean
@@ -3528,6 +3675,13 @@ impl SharedFamilyExecutor {
             .get(name)
             .copied()
     }
+
+    fn record_git_execution_window(&self, name: &str, window: GitExecutionTimeWindow) {
+        self.git_execution_windows
+            .lock()
+            .expect("Git execution-window lock is available")
+            .insert(name.to_owned(), window);
+    }
 }
 
 #[derive(Debug)]
@@ -3579,10 +3733,13 @@ impl ToolExecutor for SharedFamilyExecutor {
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
         let name = invocation.request().name().as_str().to_owned();
-        let git_execution_started = (name == GIT_BRANCH_SWITCH_NAME)
-            .then(current_git_recorded_time)
-            .transpose()
-            .map_err(FamilyExecutorError::new)?;
+        let git_execution_started = matches!(
+            name.as_str(),
+            GIT_BRANCH_SWITCH_NAME | GIT_CREATE_COMMIT_NAME
+        )
+        .then(current_git_recorded_time)
+        .transpose()
+        .map_err(FamilyExecutorError::new)?;
         let receipt_binding = invocation.clone();
         let mut inner = self.inner.lock().await;
         let evidence = match &mut *inner {
@@ -4217,6 +4374,8 @@ fn report_words_deny_success(report: &str, words: &[String]) -> bool {
         "create",
         "created",
         "done",
+        "fetch",
+        "fetched",
         "find",
         "finish",
         "finished",
@@ -4480,6 +4639,15 @@ fn final_response_report_rejects_an_unapplied_outcome() {
 fn final_response_report_rejects_a_negative_web_report() {
     let tracker = OperationTracker::default();
     let response = format!("I did not find the {WEB_FETCH_BODY}.");
+    tracker.observe_response_text(&response, false);
+
+    assert!(!tracker.final_response_reports(WEB_FETCH_BODY));
+}
+
+#[test]
+fn final_response_report_rejects_a_negated_web_fetch_action() {
+    let tracker = OperationTracker::default();
+    let response = format!("I could not fetch {WEB_FETCH_BODY}.");
     tracker.observe_response_text(&response, false);
 
     assert!(!tracker.final_response_reports(WEB_FETCH_BODY));
@@ -7374,7 +7542,7 @@ fn forced_git_commit_verifier_accepts_the_exact_fixture_tree() -> EvalResult {
         .as_str()
         .expect("the Git commit fixture has a message");
     suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
-    commit_staged_paths(suite.workspace.path(), message)?;
+    suite.commit_staged_paths_for_test(message)?;
     let head = Repository::open(suite.workspace.path())?
         .head()?
         .peel_to_commit()?
@@ -7403,7 +7571,7 @@ fn forced_git_commit_verifier_rejects_a_collateral_object() -> EvalResult {
         .as_str()
         .expect("the Git commit fixture has a message");
     suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
-    commit_staged_paths(suite.workspace.path(), message)?;
+    suite.commit_staged_paths_for_test(message)?;
     let repository = Repository::open(suite.workspace.path())?;
     repository.blob(GIT_COLLATERAL_OBJECT_CONTENT)?;
     let head = repository.head()?.peel_to_commit()?.id().to_string();
@@ -7430,7 +7598,7 @@ fn forced_git_commit_verifier_rejects_a_missing_branch_reflog_record() -> EvalRe
         .as_str()
         .expect("the Git commit fixture has a message");
     suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
-    commit_staged_paths(suite.workspace.path(), message)?;
+    suite.commit_staged_paths_for_test(message)?;
     let repository = Repository::open(suite.workspace.path())?;
     let head = repository.head()?.peel_to_commit()?.id();
     let branch_log = repository
@@ -7467,7 +7635,7 @@ fn forced_git_commit_verifier_rejects_reflog_timestamp_drift() -> EvalResult {
         .as_str()
         .expect("the Git commit fixture has a message");
     suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
-    commit_staged_paths(suite.workspace.path(), message)?;
+    suite.commit_staged_paths_for_test(message)?;
     let repository = Repository::open(suite.workspace.path())?;
     let head = repository.head()?.peel_to_commit()?;
     let commit_time = head.committer().when();
@@ -7497,7 +7665,7 @@ fn forced_git_commit_verifier_rejects_a_mutated_untracked_fixture() -> EvalResul
         .as_str()
         .expect("the Git commit fixture has a message");
     suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
-    commit_staged_paths(suite.workspace.path(), message)?;
+    suite.commit_staged_paths_for_test(message)?;
     fs::write(
         suite.workspace.path().join(GIT_STAGE_PATH),
         GIT_NATURAL_CONTENT,
@@ -7530,7 +7698,7 @@ fn forced_git_commit_verifier_rejects_a_detached_head_without_branch_advancement
         .as_str()
         .expect("the Git commit fixture has a message");
     suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
-    commit_staged_paths(suite.workspace.path(), message)?;
+    suite.commit_staged_paths_for_test(message)?;
     let repository = Repository::open(suite.workspace.path())?;
     let head = repository.head()?.peel_to_commit()?.id();
     let seed = suite
@@ -7571,7 +7739,7 @@ fn forced_git_commit_verifier_rejects_the_wrong_fixture_tree() -> EvalResult {
     index.remove_path(Path::new(GIT_COMMIT_PATH))?;
     index.add_path(Path::new(GIT_STAGE_PATH))?;
     index.write()?;
-    commit_staged_paths(suite.workspace.path(), message)?;
+    suite.commit_staged_paths_for_test(message)?;
     let head = Repository::open(suite.workspace.path())?
         .head()?
         .peel_to_commit()?
@@ -7600,8 +7768,7 @@ fn forced_git_commit_verifier_rejects_the_wrong_identity() -> EvalResult {
         .as_str()
         .expect("the Git commit fixture has a message");
     suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
-    commit_staged_paths_with_identity(
-        suite.workspace.path(),
+    suite.commit_staged_paths_with_identity_for_test(
         message,
         SYNTHETIC_OTHER_GIT_AUTHOR_NAME,
         SYNTHETIC_OTHER_GIT_AUTHOR_EMAIL,
@@ -7634,7 +7801,7 @@ fn forced_git_commit_verifier_rejects_retained_merge_state() -> EvalResult {
         .as_str()
         .expect("the Git commit fixture has a message");
     suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
-    commit_staged_paths(suite.workspace.path(), message)?;
+    suite.commit_staged_paths_for_test(message)?;
     install_git_merge_state(
         suite.workspace.path(),
         suite
@@ -7669,7 +7836,7 @@ fn forced_git_commit_verifier_rejects_retained_cherry_pick_state() -> EvalResult
         .as_str()
         .expect("the Git commit fixture has a message");
     suite.prepare_git_case(GIT_CREATE_COMMIT_NAME)?;
-    commit_staged_paths(suite.workspace.path(), message)?;
+    suite.commit_staged_paths_for_test(message)?;
     let repository = Repository::open(suite.workspace.path())?;
     let head = repository.head()?.peel_to_commit()?.id();
     fs::write(
