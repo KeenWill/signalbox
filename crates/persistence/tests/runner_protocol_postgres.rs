@@ -3973,22 +3973,32 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
     .await?;
     let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
     let replacement = tokio::spawn(async move {
-        replacement_store
-            .register(&expected_enrollment, narrowed_advertisement())
-            .await
+        tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            replacement_store.register(&expected_enrollment, narrowed_advertisement()),
+        )
+        .await
     });
-    let replacement_blocked = blocked_backends_reached(&pool, 1).await?;
-    let lease_store = tokio::spawn(async move { store.store_lease(&lease).await });
-    let lease_blocked = blocked_backends_reached(&pool, 2).await?;
+    let replacement_blocked =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1))
+            .await
+            .expect("registration replacement lock observation must remain bounded")?;
+    let lease_store = tokio::spawn(async move {
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, store.store_lease(&lease)).await
+    });
+    let lease_blocked =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2))
+            .await
+            .expect("lease admission lock observation must remain bounded")?;
     blocker.commit().await?;
-    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, replacement)
+    replacement
         .await
-        .expect("registration replacement must finish after enrollment authority releases")
-        .expect("registration replacement task must remain joinable")?;
-    let rejected = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, lease_store)
+        .expect("registration replacement task must remain joinable")
+        .expect("registration replacement must finish within its task-owned timeout")?;
+    let rejected = lease_store
         .await
-        .expect("lease admission must finish after registration replacement")
         .expect("lease admission task must remain joinable")
+        .expect("lease admission must finish within its task-owned timeout")
         .expect_err("withdrawn current availability cannot authorize the later lease");
 
     assert!(
