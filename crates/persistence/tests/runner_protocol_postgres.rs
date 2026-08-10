@@ -6917,6 +6917,89 @@ async fn s32_inv009_inv044_nullable_runner_wait_rejects_hidden_tool_round()
     Ok(())
 }
 
+/// INV-009 / INV-044: a tool round inserted after a nullable runner wait
+/// rechecks and rejects the now-hidden yielded boundary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_late_tool_round_rechecks_nullable_runner_wait()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let mut recovery = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL, active_tool_round_call_id = NULL,
+                runner_recovery_runner_id = $1,
+                runner_recovery_placement_revision = $2
+          WHERE turn_id = $3 AND session_id = $4",
+    )
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    recovery.commit().await?;
+    let producing_call = ModelCallId::from_uuid(uuid(0xa17f));
+    let request = ToolRequestId::from_uuid(uuid(0xa180));
+    let boundary = ContextFrontierId::from_uuid(uuid(0xa181));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        request,
+        boundary,
+    )
+    .await?;
+    sqlx::query("ALTER TABLE tool_round DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM tool_round WHERE producing_model_call_id = $1")
+        .bind(producing_call.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE tool_round ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let rejected = sqlx::query(
+        "INSERT INTO tool_round
+            (producing_model_call_id, session_id, turn_id, boundary_kind,
+             boundary_frontier_id, response_part_count, request_count)
+         VALUES ($1, $2, $3, 'continuing', $4, 1, 1)",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(boundary.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a late continuing round must expose the hidden runner-wait boundary");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-009 / INV-044: a nullable runner-recovery wait cannot hide a live
 /// physical attempt in its retained tool round.
 #[tokio::test]
@@ -7467,6 +7550,32 @@ async fn s32_inv029_inv044_runner_recovery_stop_uses_tool_round_boundary()
     assert_eq!(closure.1, request.into_uuid());
     assert_eq!(denied.0, "tool_denied");
     assert_eq!(denied.1, denied_request.into_uuid());
+    sqlx::query("ALTER TABLE context_frontier_delta DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let corrupted_member = sqlx::query(
+        "UPDATE context_frontier_delta
+            SET semantic_entry_id = $1
+          WHERE owning_session_id = $2
+            AND semantic_entry_id = $3",
+    )
+    .bind(uuid(0xa15f))
+    .bind(session.into_uuid())
+    .bind(tool_closure.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE context_frontier_delta ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    assert_eq!(corrupted_member.rows_affected(), 1);
+    let malformed = sqlx::query("SELECT assert_cancelled_turn_final_state($1)")
+        .bind(turn.into_uuid())
+        .execute(&pool)
+        .await
+        .expect_err("runner recovery cancellation authenticates every tool-result suffix member");
+
+    assert_check_violation(malformed);
     drop(pool);
     Ok(())
 }
@@ -8818,6 +8927,152 @@ async fn s32_inv009_inv044_runner_recovery_rechecks_turn_attempt_continuations()
     .expect_err("a later continuation must invalidate the stale yielded boundary");
 
     assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a continuation writer takes the scheduler rendezvous
+/// before inserting a successor to the yielded runner-recovery attempt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_serializes_turn_attempt_continuations()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let mut recovery = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $1,
+                runner_recovery_placement_revision = $2
+          WHERE turn_id = $3 AND session_id = $4",
+    )
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    recovery.commit().await?;
+    let mut stop = pool.begin().await?;
+    sqlx::query(
+        "SELECT session_id
+           FROM session_scheduler
+          WHERE session_id = $1
+          FOR UPDATE",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&mut *stop)
+    .await?;
+    let mut continuation = Box::pin(
+        sqlx::query(
+            "INSERT INTO turn_attempt
+                (turn_attempt_id, turn_id, session_id,
+                 continued_from_attempt_id, state_kind,
+                 end_variant, end_disposition)
+             VALUES ($1, $2, $3, $4, 'ended', 'without_stop',
+                     'known_failure')",
+        )
+        .bind(uuid(0xa16e))
+        .bind(turn.into_uuid())
+        .bind(session.into_uuid())
+        .bind(turn_attempt.into_uuid())
+        .execute(&pool),
+    );
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut continuation)
+        .await
+        .expect_err("continuation insertion must wait for the scheduler rendezvous");
+    stop.rollback().await?;
+    let rejected = tokio::time::timeout(Duration::from_secs(10), &mut continuation)
+        .await
+        .expect("continuation admission finishes after the scheduler is released")
+        .expect_err("the stale yielded boundary still rejects the continuation");
+
+    assert_check_violation(rejected);
+    drop(continuation);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a lease writer takes the scheduler rendezvous before
+/// advancing the lease head retained by an active runner-recovery wait.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_serializes_lease_head_advances()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin) =
+        stored_side_effecting_pin_fixture(&pool).await?;
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the exact fixture lease correlation claims");
+    store.store_lease(&claimed).await?;
+    let stale_completion = duplicate_lease(&claimed, registration.registration())
+        .complete(pin.lease.correlation())
+        .expect("the pre-loss claimed snapshot admits its exact completion");
+    let loss = claimed
+        .lose()
+        .expect("claimed side-effecting work admits execution-possible loss");
+    store.store_lease_loss(&loss).await?;
+    let session = pin.placement.session();
+    let turn = TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn));
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    insert_runner_recovery_turn_with_interrupted_loss(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session,
+            turn,
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: ModelCallId::from_uuid(uuid(
+                INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+            )),
+        },
+    )
+    .await?;
+    let mut stop = pool.begin().await?;
+    sqlx::query(
+        "SELECT session_id
+           FROM session_scheduler
+          WHERE session_id = $1
+          FOR UPDATE",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&mut *stop)
+    .await?;
+    let mut lease_store = Box::pin(store.store_lease(&stale_completion));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
+        .await
+        .expect_err("lease admission must wait for the scheduler rendezvous");
+    stop.rollback().await?;
+    let rejected = tokio::time::timeout(Duration::from_secs(10), &mut lease_store)
+        .await
+        .expect("lease admission finishes after the scheduler is released")
+        .expect_err("the stale lease snapshot cannot advance the retained loss");
+
+    assert_store_check_violation(rejected);
+    drop(lease_store);
     drop(pool);
     Ok(())
 }

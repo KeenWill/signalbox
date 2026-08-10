@@ -6216,7 +6216,8 @@ mod tests {
     fn send_fails_explicitly_when_runner_recovery_is_required() {
         let state = TurnState::ActiveAwaitingRunnerRecovery {
             runner_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
-            placement_revision: CanonicalU64::new(2),
+            placement_revision: signalbox_process_protocol::PositiveCanonicalU64::try_new(2)
+                .expect("the fixture revision is positive"),
             tool_attempt_id: None,
         };
         let error = terminal_snapshot_state(Some(&state))
