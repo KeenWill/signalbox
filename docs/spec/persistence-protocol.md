@@ -734,7 +734,55 @@ Locks per transaction, in acquisition order:
   child. When it is, they lock the immutable parent/child session pair
   `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
   scheduler lock. This is the shared prefix for any path that can record a child
-  result.
+  result. **Committed unimplemented functionality.** No present migration or
+  repository operation stores pool state, capacity reservations, or availability
+  waits, so the credential-pool locks described in the rest of this bullet are
+  the protocol its implementing child must follow, not a guarantee this build
+  provides. This bullet is the whole of that protocol: which objects each
+  credential-pool transaction takes, in what order, and in which mode is stated
+  here and nowhere else.
+  [The credential-availability machine](credential-availability.md#the-credential-availability-machine)
+  names the transaction that commits each selection ending, which is how a
+  reader arrives at the right sentence below; it states no locks of its own and
+  must not be consulted for any. A transaction that admits a wait or proves
+  exhaustion without preparing a call takes the scheduler lock and the action
+  heads below and no cursor row, because it selects nothing; the admission that
+  creates a contended wait additionally holds capacity rows, as stated further
+  down. Credential-pool call preparation additionally locks the action head of
+  every member of the pinned policy it may select, in profile-reference byte
+  order, immediately after the scheduler lock and before it reads any exclusion
+  state. The mode follows what the transaction does to that member and not which
+  path reached it: `FOR SHARE` for a member whose exclusion state it only reads,
+  and `FOR UPDATE` for one it writes — including the member whose pending
+  `switch_next_turn` displacement a successful preparation consumes, which is a
+  write that reads like a read. This holds for every preparation alike,
+  including the one that releases a credential-availability wait, so no path
+  acquires a weaker mode by arriving through a wait. It then locks every
+  potentially selected bounded profile's shared capacity row `FOR UPDATE`, in
+  the same order, before reading reservation counts. When `round_robin` decides
+  among the first admitted priority's members, preparation next locks that
+  immutable-policy-and-priority cursor row `FOR UPDATE` before reading the
+  cursor, choosing a member, or advancing it with `Prepared`. It rereads the
+  protected selection facts after acquiring each lock and holds all of them
+  through the `Prepared` insert. A transaction that mints, activates, or clears
+  a credential exclusion — a terminal observation applying a pool trigger, a
+  delivery-layer quarantine, or an operator clear — takes those same action
+  heads `FOR UPDATE` at that same ordering position. Share and exclusive modes
+  conflict, so one of the two transactions waits: a `Prepared` insert either
+  precedes the exclusion commit or reads the member as already excluded. This is
+  what a selection needs when it takes no other lock the writer takes — an
+  unbounded `first_listed` member acquires neither a capacity row nor a cursor
+  row. Releasing a bounded profile's reservation takes that profile's capacity
+  row `FOR UPDATE` at the same position and holds it through the atomic
+  release-and-wake commit, and a woken waiter rewriting its own wait evidence
+  takes the capacity rows of every bounded member that evidence names, in the
+  same byte order. A release and a snapshot rewrite therefore cannot interleave:
+  no wait can commit naming a reservation another transaction has already
+  released, and no release can publish its wake between a loser's read and its
+  rewrite. No other path may take a scheduler lock while holding an action-head,
+  capacity-, or cursor-row lock; take an action-head lock while holding a
+  capacity-row or cursor-row lock; or take a capacity-row lock while holding a
+  cursor-row lock.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -1526,12 +1574,340 @@ delivery still validates the allocator singleton and cursor. Daemon task
 ownership, polling, fan-out, and client observation semantics are owned by
 [process-protocol](process-protocol.md).
 
+**Committed unimplemented functionality — OAuth refresh staging.** No present
+migration or repository stores daemon-owned OAuth material. Its implementing
+child must supply three durable shapes and no interpretation of them: a
+per-generation `refresh_in_progress` marker that exactly one transaction can
+win, an atomic replace-and-clear that in one commit rewrites the refresh token,
+rewrites or retains the identity token, and clears the marker, and a reread of a
+generation that reports whether a replacement committed and whether the marker
+is still set. A generation stores the identity token beside its refresh token
+and under the same protections, because dispatch requires one on every
+invocation while a refresh happens about once per access-token lifetime, so a
+generation that held only the refresh token would leave the first preparation
+after any restart with no source for it. The replace shape must express both an
+exchange that returned a new identity token and one that returned none, without
+a second commit for either and without a state in which a new refresh token is
+durable beside an identity token from another exchange.
+
+What those facts mean — which outcome each combination selects, which failures
+may clear the marker without changing the token, how many attempts a generation
+admits, and why an ambiguous exchange is never replayed — is the refresh
+protocol, owned by
+[the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery).
+This paragraph makes those decisions representable and takes none of them.
+Provisioning replaces the quarantined generation with a fresh authorization in
+one transaction, and publishes the durable member-availability update the
+scheduler consumes in that same transaction, for the reason an accepted clear
+does: re-provisioning is the only recovery from an OAuth delivery-origin
+quarantine, so a wait held by that quarantine has no other wake, and a crash
+between the replacement and any in-memory notification would leave the repaired
+profile's turn parked with its session slot held and nothing left to release it.
+That transaction also decides account-level independence, and its lock *order*
+is what makes that decision total. It reads the pool-policy revisions its
+profile is pinned into, forms the complete set of profile rows it will need —
+**its own row together with every co-member's** — and acquires that whole set in
+one acquisition ordered by profile reference, holding it until after its own
+commit. Under those locks it re-reads its memberships; if the set has grown it
+releases, repeats with the enlarged set, and proceeds only once the read taken
+under the locks agrees with the set it locked.
+
+Two properties of that shape are load-bearing, and neither survives a simpler
+one. Including the provisioned row in the *same* ordered acquisition is what
+avoids a cycle: taking one's own row first and only then the discovered
+co-members lets two concurrent provisionings of co-members A and B each hold
+their own row while waiting for the other's, which the database resolves by
+aborting one — a deadlock between two provisionings that need not even share an
+account. Re-reading the memberships under the locks is what closes the other
+direction: a profile currently in no revision would otherwise lock only itself,
+while a concurrent interning that first makes it a co-member commits, and the
+provisioning then stores a co-member's account identity having never seen it.
+
+The transaction that interns a pool-policy revision acquires the profile row of
+every member it is about to freeze in that same global order. Every transaction
+therefore takes profile rows in one order, so no cycle exists, and any two that
+share a profile serialize on it: an interning that loses sees the stored
+identity and refuses to intern, and a provisioning that loses re-reads the new
+revision under its locks and fails on the collision. Which memberships are
+consulted, and what a collision does, are owned by
+[the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery);
+this paragraph supplies only the lock span that makes two concurrent commits
+decide it the same way. Each generation stores the exact provisioning tuple it
+was minted under — `client_id`, `token_url`, `device_authorization_url`, and
+ordered `scopes` — and every refresh and dispatch compares it with the current
+registration under the same profile lock, by the canonical components
+[configuration and credentials](configuration-and-credentials.md#distinct-members-are-distinct-authorizations)
+defines rather than by the configured bytes; a difference quarantines instead of
+exchanging, so an edited endpoint cannot receive a token minted for another.
+This paragraph constrains the future schema; no present storage surface provides
+it.
+
+**Committed unimplemented functionality — credential-pool state.** No present
+migration stores a pool-policy revision, pool action, or pre-call exhaustion
+failure. The implementing schema must intern each policy as one immutable header
+plus ordered membership and action rows. Each membership row stores the expected
+adapter and delivery kind beside its profile reference and settings. A deferred
+uniqueness constraint covers the complete canonical structural value. The
+surrogate identity is reused only after full relational equality succeeds; a
+digest is not identity. Cursor rows key that identity and priority, so an
+unchanged policy retains its cursor across restart and an edited policy cannot
+inherit one. Selection locks the exact cursor row `FOR UPDATE` before reading it
+and commits the chosen call and successor cursor together.
+
+Legacy family-to-reference entries are rewritten only by a post-schema backfill
+running with the validated profile registry, after the configuration-independent
+recovery scan completes and before scheduling is enabled. For each locked entry
+it requires the referenced profile registration, copies that registration's
+adapter and delivery kind, and never consults the current family mapping or pool
+table. It interns the deterministic
+`legacy/<session-uuid>/<event-ordinal>/sha256:<model-family-digest>` singleton
+policy defined by the configuration contract, using that contract's exact
+spelling: one priority-1 member, no headroom reserve, `first_listed`, `fail`,
+and `stay` for every trigger. The policy insert and entry rewrite are atomic and
+idempotent; a missing registration aborts before any rewrite and blocks
+scheduling without blocking recovery of acknowledged work (INV-034). Thus the
+migration has an authoritative source for its two profile-owned fields and
+canonical values for every policy-owned field.
+
+Every pool-selected model call stores the immutable policy identity beside its
+credential reference as an insert-only authorization fact. Observation commit
+joins through that call identity to the exact stored policy before applying a
+trigger action; a session credential-history update racing with the call cannot
+substitute its newer policy. The call's target adapter and the current profile
+registration must agree with the membership row's expected adapter and delivery
+kind before credential resolution, or preparation fails before send.
+
+Each profile owns one durable action head **per exclusion origin** — policy and
+delivery — naming that origin's current exclusion generation. Every transaction
+that mints, activates, or clears an exclusion locks the head for its own origin
+`FOR UPDATE` before reading it, so concurrent observations in different sessions
+cannot mint two active generations for one profile and origin, and a uniqueness
+conflict cannot prevent a terminal observation from committing with its required
+action record. Origin separates the heads because the clear protocol answers
+administrability from it, and a single head would force a policy quarantine and
+a delivery quarantine onto one generation with two contradictory answers; the
+two are independent states of one profile and neither supersedes the other. Call
+preparation locks the head of every member it may select before reading
+exclusion state and holds it through the `Prepared` insert, in the modes the
+lock protocol above fixes — `FOR SHARE` for a member it only reads, and
+`FOR UPDATE` for one whose pending displacement it consumes — so selection and
+exclusion mutation are serialized against each other rather than only against
+their own kind.
+
+Profile-quarantine, membership-exclusion, and session-displacement rows each
+carry a positive generation, active/cleared state, and their exact scope. A
+provider-observation-derived row also carries the model-call observation
+correlation; deferred constraints require it and that exact terminal observation
+to exist together in the same transaction. A delivery-layer quarantine instead
+correlates its typed pre-request failure. A session displacement stores its
+source turn and cannot apply within that turn. Clearing marks the exact
+generation inactive rather than deleting it, which supplies the replay and
+`already_cleared` contract. An accepted clear additionally publishes the durable
+member-availability update the scheduler consumes, in the same transaction that
+marks the generation inactive. Without that atomicity a clear that commits and
+then loses its daemon strands the wait it was meant to release: the row is
+inactive, no update was ever published, startup reconstitutes the stored wait
+without reclassifying it, and a restart alone is not a wake, so a turn whose
+only remaining wake was that exclusion holds its session slot indefinitely while
+the operator's replay reports `credential_exclusion_cleared`. A clear that
+changes no active generation publishes nothing, because nothing became
+available.
+
+Each attached correlation stores the reset that observation reported, as a
+required-nullable instant, and the generation stores the effective reset derived
+from them. That derivation is the accumulation rule the configuration contract
+states: the latest reported reset wins, and any correlation reporting none makes
+the effective reset null and absorbing, so no later correlation restores a
+deadline. Storing the per-correlation resets as well as the derived value is
+what lets reconstitution reproduce the rule exactly after a restart instead of
+inferring it — without them a repository could clear a member on a stale
+deadline or hold it excluded forever, and the two would be indistinguishable
+from the stored row.
+
+A chain-exclusion row is scoped to the session, turn, immutable pool policy,
+profile, and predecessor model call whose qualifying observation created it. It
+carries that exact observation correlation rather than an independently
+allocated generation, and two separate states: a *turn-local* fact that this
+profile's qualifying failure occurred in this turn, and the *clearable*
+active/cleared state an operator command touches.
+
+The turn-local fact is insert-only and never cleared. It is what the execution
+contract means when it says nothing readmits a failed member within its turn, so
+an operator clear during a parked turn marks the clearable state inactive — with
+the availability update every accepted clear publishes, stated once above — and
+still leaves the member excluded for the remainder of that turn, so the clear
+takes effect from the next turn. It invents no provider evidence either way.
+Without the split there would be one row to both retain and clear, and a clear
+mid-turn would either readmit the failed profile or make the turn unable to
+record why it stayed excluded.
+
+Pre-call exhaustion — the `pre-call fail` and `wait-transition fail (no call)`
+endings of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+whose durable-records column this page owns — uses one turn-correlated failure
+header with cause exactly `credential_pool_exhausted`, the current attempt, and
+the immutable policy identity, plus contiguous member rows in policy order
+carrying the closed exclusion kind, correlated record generation or predecessor
+observation, and optional reset. Deferred constraints require the complete
+policy membership, no model call for the attempt, `KnownFailure` attempt end,
+`Failed` turn, exact `TurnFailed` marker and terminal frontier, and one typed
+preparation-failure outbox row in the same commit; the wait-transition ending
+additionally consumes its wait in that same commit and leaves none stored.
+Reconstitution rejects a missing, duplicate, reordered, or foreign evidence row
+and any correlation with no durable basis at that failure commit. A chain
+exclusion's basis is its turn-local fact, which no clear removes, so a member
+excluded by a predecessor failure supplies complete evidence even when an
+operator cleared its clearable state while the turn was parked. Every other
+exclusion kind uses its active-at-commit record, and reconstitution accepts one
+later marked inactive by an authorized clear; the immutable generation or
+predecessor observation and its active-at-failure fact remain historical
+evidence. This paragraph constrains the future schema; no present storage
+surface provides it.
+
+**Committed unimplemented functionality — availability-successor storage.** No
+present migration, repository operation, or reconstitution path stores an
+availability successor or credential-availability wait. Its implementing child
+must give a predecessor-linked attempt a closed origin distinct from the
+tool-loop continuation origin and atomically persist its predecessor model call,
+the qualifying availability cause, and the typed non-acceptance evidence that
+authorized substitution. That origin covers only a substitution authorized by a
+predecessor call. A wait entered before any call was issued — because a bounded
+member was full, or because every member was already excluded — has no such
+predecessor, so releasing it needs a second closed origin: a wait-release origin
+carrying the exact consumed wait and the call-free attempt that ended
+`WithoutStop(YieldedToDurableWait)`. That origin's predecessor evidence is
+optional and is present exactly when the released wait was entered after a
+qualifying provider failure **this availability chain** had already observed — a
+chain that failed and then found no member it could yet substitute to. The scope
+is the chain and not the turn: a later tool round opens a fresh chain, and
+attaching an earlier round's failure to it would link a new call to a failure it
+did not follow. In that case the same origin additionally carries the
+predecessor model call, its qualifying availability cause, and the typed
+non-acceptance proof, which is what lets the eventual successor record its
+authorizing predecessor as the model-call contract requires. Splitting these
+across two origins instead would make the continuation chain non-total for the
+common post-failure wait, which fails reconstitution closed and loses
+acknowledged work at restart. It is distinct from both the tool-loop and
+successor origins, so every continuation still names exactly one origin and the
+unique continuation chain stays total. The successor's call remains subject to
+`model_call_attempt_once`, pins the same target and a different profile, and
+cannot exist without that complete predecessor proof. A credential-availability
+wait must atomically retain the active turn slot and store a closed
+`exhausted`/`contended` discriminator plus the immutable pool-policy identity.
+The exhausted form stores every policy member's exclusion evidence and optional
+reset plus the optional deadline the machine derives from them. The contended
+form stores every durable exclusion in the selection snapshot, the complete
+nonempty set of otherwise-admissible bounded members with their exact
+invocation-reservation identities, and a deadline over those durable exclusions
+derived by that same rule. These shapes store the derived value and its inputs;
+the derivation is the machine's alone, so no page but that one states which
+exclusion kinds contribute a reset. A reservation identity is the whole of that
+evidence: it is allocated once with the reservation row, never reused, and never
+versioned, so reconstitution compares identities alone and needs no separate
+generation. One shared capacity row per bounded profile serializes reservation
+admission across sessions and pools. Preparation locks all candidate capacity
+rows in profile-reference byte order, counts their live reservation rows under
+those locks, and inserts the selected reservation with the `Prepared` call.
+Every `codex_home` invocation inserts a reservation regardless of whether its
+profile currently declares a bound; the bound decides only whether preparation
+takes that capacity lock and counts, so an unbounded profile records the same
+supervision evidence without serializing. A deferred constraint rejects any
+commit that *raises* a profile's live reservation count to a value above the
+bound the profile's current registration declares; a commit that leaves that
+count unchanged or lower is admitted whatever the count is. The constraint is
+scoped to admissions rather than to states because the bound is a live profile
+property rather than a frozen policy field: it governs the next admission and
+never retroactively invalidates a committed reservation, so lowering the bound
+below the live count commits, the excess drains as those invocations complete,
+and each completion commits while the count is still over the bound. A
+state-scoped constraint would instead reject the lowering registration itself,
+or reject every draining completion, and leave the system in a state its own
+invariant forbids with no legal transition out. Because every invocation is
+recorded, a bound newly lowered from unbounded is still enforced against
+complete startup fencing evidence rather than against only the invocations that
+were bounded when they started. The admission that *creates* a contended wait
+holds the capacity row of every bounded member it is about to name `FOR UPDATE`,
+from before it counts live reservations until after the wait row is inserted.
+Without that span a concurrent invocation can complete between the count and the
+insert, publish its wake while no wait yet exists to receive it, and leave the
+new wait parked on reservation identities already released — the stale evidence
+reconstitution must fail closed on, reached with no crash involved. Invocation
+completion releases its reservation and writes the wake signal atomically,
+holding that profile's capacity row `FOR UPDATE` across both so a release and
+its wake are never visible apart. One release can wake several waits while
+admitting one, so each woken transaction reruns admission under the same
+capacity locks. The one that acquires the freed reservation releases its wait. A
+transaction finding no admissible member instead re-derives its ending from
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine)
+under those locks and stores whatever that row requires: where a bounded member
+still holds the pool it atomically rewrites its own wait's evidence to the live
+reservation identities now holding the bound and stays parked; where every
+formerly bounded member has become durably excluded, contention is over and the
+machine's wait-selection rule decides, so the wait is rewritten to the exhausted
+form exactly where an exclusion a wake can clear remains and **no wait is stored
+at all otherwise**, which instead terminalizes the turn with the cause that
+table gives its row. Deriving it from the surviving exclusions rather than from
+the configured value is what stops a `park` pool whose members are all excluded
+by this turn's own chain exclusions from being rewritten into a wait no wake
+could ever release. Storage never keeps a turn parked under a policy that says
+to fail it, and never parks one nothing could wake. Because the rewrite holds
+the capacity rows of every bounded member it names, a concurrent completion
+cannot release one of them between the read and the commit. A deferred
+constraint therefore never has to reject a losing waiter's call, and no stored
+wait names a released reservation or misses the only wake that concerned it.
+Entering either wait ends the call-free current attempt as
+`WithoutStop(YieldedToDurableWait)` in the same transaction. Release atomically
+consumes the wait and creates its fresh `Prepared` successor attempt;
+`stop_turn` instead atomically consumes it, creates the fresh
+immediate-successor attempt, applies the interrupt proof, ends that attempt
+`AfterCancellation(Cancelled)`, and terminalizes the turn. Each reservation has
+a closed `pending_spawn` state with no process identity and a
+`spawned { process_group_identity }` state carrying the child process group's
+reuse-safe host identity. Successful spawn replaces `pending_spawn` with
+`spawned` immediately, and that attach is guarded on the reservation still being
+`pending_spawn` for this exact reservation identity. The invocation path may not
+finish while that update's outcome is unknown: a failed or ambiguous commit is
+resolved before the caller proceeds. It rereads the reservation authoritatively
+— a committed `spawned` carrying this exact process-group identity is adopted,
+and a still-`pending_spawn` row is reattached under the same guard. Only when it
+can neither commit the attach nor confirm one does it terminate that exact
+process group, prove it absent, and close the reservation as lost in one
+transaction. Leaving a live child behind a `pending_spawn` row is what the
+startup rule below cannot recover from, so this path never exits into that
+state. Startup must resolve every prior-process `spawned` reservation before
+scheduling — proving that exact group absent, or terminating it and then proving
+absence — and only then closes it as lost; failure to establish absence fails
+startup. Retaining one for a later death notice is not admitted, because the
+terminal observation that would release it died with its daemon. It retains a
+`spawned` reservation owned by the live fenced process, whose observation path
+this daemon still owns. A prior-process `pending_spawn` reservation is ambiguous
+because its child may have started before the identity update, so startup fails
+before scheduling rather than releasing it without process-death proof. After
+that reconciliation and before scheduling is enabled, startup iterates the
+retained `contended` waits themselves rather than the currently bounded
+profiles, so a profile whose bound was removed still has an entry to evaluate.
+Each wait stores a complete nonempty bounded-member set, so startup evaluates
+every member in that set rather than one profile: a member the current
+registration leaves unbounded makes the wait eligible outright with no count to
+compare against, and a member still bounded makes it eligible when that
+profile's surviving live reservation count, taken under its capacity lock, is
+below the current bound. Any one such member suffices, since one admissible
+member is all preparation needs. A bound raised, lowered, or removed across a
+restart is therefore evaluated the same way for every member of every wait,
+without waiting for an unrelated release. These are the shapes required by
+[turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot).
+Reconstitution and wake must fail closed on partial, stale, or mismatched
+evidence. This paragraph constrains that future schema; no present storage
+surface provides it.
+
 ## Open edges
 
 - Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
   in [open questions](../open-questions.md#protocols-and-persistence).
-- Attempt continuation is admitted only for the tool-loop yield/approval path;
-  no other producer can construct a predecessor-linked attempt.
+- Attempt continuation is presently admitted only for the tool-loop
+  yield/approval path. The availability-successor producer described above is
+  committed but unimplemented; no current producer can construct that second
+  predecessor-linked shape.
 - Frontier lineage checks admit `none` and checked imported-frontier ancestry;
   native `SingleSource` fork ancestry remains unimplemented.
 - The aggregate-map rows for model calls and the tool loop have landed; provider
