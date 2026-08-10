@@ -343,6 +343,8 @@ const SYNTHETIC_NEGATED_ERRORS_THEN_FAILURE_REPORT: &str =
     "Completed without errors but later failed.";
 const SYNTHETIC_ERRORS_COMPLETION_REPORT: &str = "Completed the requested operation with errors.";
 const SYNTHETIC_ERROR_FREE_COMPLETION_REPORT: &str = "Done error-free.";
+const SYNTHETIC_EXECUTED_COMPLETION_REPORT: &str =
+    "The command executed successfully and exec-result.txt exists.";
 const SYNTHETIC_NEGATED_ERROR_FREE_REPORT: &str = "Done, but not error-free.";
 const SYNTHETIC_WITHOUT_FAILURE_COMPLETION_REPORT: &str =
     "Completed the requested operation without failure.";
@@ -405,6 +407,8 @@ const SYNTHETIC_EXISTING_FILE_ASSURANCE_REPORT: &str =
     "Created exec-result.txt without modifying any existing files.";
 const SYNTHETIC_PREEXISTING_FILE_ASSURANCE_REPORT: &str =
     "Created exec-result.txt without modifying any pre-existing files.";
+const SYNTHETIC_QUALIFIER_FIRST_EXISTING_FILE_ASSURANCE_REPORT: &str =
+    "Created exec-result.txt. No existing files were changed.";
 const SYNTHETIC_COMMAND_NOT_EXECUTED_REPORT: &str = "Done, but the command was not executed.";
 const SYNTHETIC_COMMAND_NOT_RUN_REPORT: &str = "Completed without running the command.";
 const SYNTHETIC_COLLATERAL_NO_CHANGES_REPORT: &str =
@@ -1770,6 +1774,7 @@ impl FamilySuite {
                         &self.workspace_seed_entries,
                         &self.workspace_seed_modified_times,
                         &self.workspace_seed_entry_identities,
+                        &self.workspace_seed_extended_attributes,
                     )
                 } else {
                     exec_workspace_matches_seed(
@@ -1934,10 +1939,12 @@ fn cargo_diagnostics_workspace_matches_seed(
     seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
     seed_entry_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
+    seed_extended_attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
 ) -> EvalResult<bool> {
     let actual_entries = workspace_entries(root)?;
     let actual_modified_times = workspace_modified_times(root)?;
     let actual_entry_identities = workspace_entry_identities(root)?;
+    let actual_extended_attributes = workspace_extended_attributes(root)?;
     let target = Path::new("target");
     let seed_entries_preserved = seed_entries
         .iter()
@@ -1960,10 +1967,14 @@ fn cargo_diagnostics_workspace_matches_seed(
             actual_entry_identities.get(path) == Some(identity)
         }
     });
+    let seed_extended_attributes_preserved = seed_extended_attributes
+        .iter()
+        .all(|(path, attributes)| actual_extended_attributes.get(path) == Some(attributes));
     Ok(seed_entries_preserved
         && additions_are_target_only
         && seed_times_preserved
         && seed_entry_identities_preserved
+        && seed_extended_attributes_preserved
         && matches!(
             actual_entries.get(target),
             Some(WorkspaceEntrySnapshot::Directory { .. })
@@ -6084,6 +6095,7 @@ fn report_affirms_completion(report: &str, file_creation_required: bool) -> bool
         "completed",
         "created",
         "done",
+        "executed",
         "fetched",
         "finished",
         "listed",
@@ -6597,7 +6609,9 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                                     | "failures"
                                     | "issue"
                                     | "issues"
+                                    | "existing"
                                     | "other"
+                                    | "preexisting"
                                     | "problem"
                                     | "problems"
                             ) || (!file_creation_required
@@ -6906,6 +6920,14 @@ fn final_response_report_accepts_error_free_completion() {
     tracker.observe_response_text(SYNTHETIC_ERROR_FREE_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_affirmative_execution_and_existence() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EXECUTED_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
 }
 
 #[test]
@@ -7224,6 +7246,17 @@ fn exec_file_creation_report_accepts_an_existing_file_assurance() {
 fn exec_file_creation_report_accepts_a_preexisting_file_assurance() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_PREEXISTING_FILE_ASSURANCE_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_qualifier_first_existing_file_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_QUALIFIER_FIRST_EXISTING_FILE_ASSURANCE_REPORT,
+        false,
+    );
 
     assert!(tracker.final_response_reports_file_creation());
 }
@@ -15995,6 +16028,7 @@ fn forced_direct_exec_workspace_rejects_byte_identical_seed_replacement() -> Eva
 fn forced_cargo_diagnostics_workspace_accepts_target_artifacts() -> EvalResult {
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
     fs::create_dir(workspace.path().join("target"))?;
     fs::write(
         workspace.path().join("target/.rustc_info.json"),
@@ -16006,6 +16040,7 @@ fn forced_cargo_diagnostics_workspace_accepts_target_artifacts() -> EvalResult {
         &seed_entries,
         &seed_modified_times,
         &seed_entry_identities,
+        &seed_extended_attributes,
     )?);
     Ok(())
 }
@@ -16014,6 +16049,7 @@ fn forced_cargo_diagnostics_workspace_accepts_target_artifacts() -> EvalResult {
 fn forced_cargo_diagnostics_workspace_rejects_a_mutated_seed_file() -> EvalResult {
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
     fs::create_dir(workspace.path().join("target"))?;
     fs::write(workspace.path().join("src/lib.rs"), "pub fn drifted() {}\n")?;
 
@@ -16022,6 +16058,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_mutated_seed_file() -> EvalResul
         &seed_entries,
         &seed_modified_times,
         &seed_entry_identities,
+        &seed_extended_attributes,
     )?);
     Ok(())
 }
@@ -16030,6 +16067,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_mutated_seed_file() -> EvalResul
 fn forced_cargo_diagnostics_workspace_rejects_a_deleted_seed_file() -> EvalResult {
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
     fs::create_dir(workspace.path().join("target"))?;
     fs::remove_file(workspace.path().join("Cargo.toml"))?;
 
@@ -16038,6 +16076,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_deleted_seed_file() -> EvalResul
         &seed_entries,
         &seed_modified_times,
         &seed_entry_identities,
+        &seed_extended_attributes,
     )?);
     Ok(())
 }
@@ -16047,6 +16086,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_deleted_seed_file() -> EvalResul
 fn forced_cargo_diagnostics_rejects_byte_identical_seed_replacement() -> EvalResult {
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
     fs::create_dir(workspace.path().join("target"))?;
     replace_exec_seed_file_byte_identically(workspace.path(), &seed_modified_times)?;
 
@@ -16055,6 +16095,31 @@ fn forced_cargo_diagnostics_rejects_byte_identical_seed_replacement() -> EvalRes
         &seed_entries,
         &seed_modified_times,
         &seed_entry_identities,
+        &seed_extended_attributes,
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_cargo_diagnostics_rejects_root_extended_attribute_drift() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    fs::create_dir(workspace.path().join("target"))?;
+    rustix::fs::setxattr(
+        workspace.path(),
+        SYNTHETIC_UNEXPECTED_XATTR_NAME,
+        SYNTHETIC_UNEXPECTED_XATTR_VALUE,
+        rustix::fs::XattrFlags::CREATE,
+    )?;
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
     )?);
     Ok(())
 }
