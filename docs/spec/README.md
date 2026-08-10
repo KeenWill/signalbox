@@ -57,6 +57,7 @@ owned by a sibling page is linked, never restated.
 - [Model-runtime substrate](runtime-substrate.md)
 - [Model and session settings](model-session-settings.md)
 - [Configuration and credentials](configuration-and-credentials.md)
+- [Credential availability](credential-availability.md)
 - [Process protocol](process-protocol.md)
 - [Repository watch and event dispatch](repo-watch.md)
 
