@@ -190,13 +190,11 @@ def container_start_sites() -> tuple[list[str], list[str]]:
     cannot see, which is the leak this whole tool exists to bound, so the check
     is mechanical rather than a convention anyone has to remember.
 
-    The scan arms on awaited `.start()` in any file that reaches for
-    `testcontainers`, not on any one image type: `AsyncRunner::start` is the only
-    way that library creates a container, and it is async, which is what
-    separates it from the synchronous domain accessors of the same name in these
-    suites. Keying on `Postgres::default()` would miss a suite that later builds
-    its container through `GenericImage`, a shared helper, or anything else, and
-    an unmarked start would then pass unnoticed.
+    The scan arms on `.start()` in any file that reaches for `testcontainers`,
+    not on any one image type: `AsyncRunner::start` is the only way that library
+    creates a container. Keying on `Postgres::default()` would miss a suite that
+    later builds its container through `GenericImage`, a shared helper, or
+    anything else, and an unmarked start would then pass unnoticed.
     """
     tracked = subprocess.run(
         ["git", "ls-files", "-z", "--", "*.rs"],
@@ -212,11 +210,14 @@ def container_start_sites() -> tuple[list[str], list[str]]:
         if "testcontainers" not in text:
             continue
         lines = text.splitlines()
-        awaited = r"\.start\(\)\s*\.await"
-        # A synchronous runner would call `.start()` without awaiting it, so
-        # in a file that reaches for one every `.start()` counts. No file does
-        # today; the alternative is a start form this scan cannot see.
-        method = r"\.start\(\)" if "SyncRunner" in text else awaited
+        # Every `.start()` that is not the beginning of a longer chain. The
+        # runner's `start` returns a future the caller may await anywhere —
+        # adjacently, or after binding it — so requiring `.await` next would
+        # miss a start that was simply stored first. What it must not match is
+        # the synchronous domain accessors of the same name in these suites,
+        # and those are always read straight through: `activated.start()` is
+        # followed by `.lineage()` or `.frontier()`, never left standing.
+        method = r"\.start\(\)(?!\s*\.\s*(?!await\b)\w)"
         # Whatever the runner trait is called at this use site. An import may
         # rename it, and `<Image as AsyncRunner>::start` qualifies it, so the
         # spellings are collected from the file rather than assumed.
