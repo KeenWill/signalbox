@@ -2023,7 +2023,7 @@ test -n "$mcp_config"
 test -n "$settings"
 capture_dir=${0%/*}
 cp "$mcp_config" "$capture_dir/captured-mcp-config.json"
-python3 -c 'import json, pathlib, shlex, shutil, subprocess, sys
+python3 -c 'import json, pathlib, shlex, shutil, subprocess, sys, time
 with open(sys.argv[1], encoding="utf-8") as source:
     servers = json.load(source)["mcpServers"]
 assert len(servers) == 1
@@ -2035,6 +2035,8 @@ with open(sys.argv[3], encoding="utf-8") as source:
     settings = json.load(source)
 hook = settings["hooks"]["SessionStart"][0]["hooks"][0]
 assert hook["type"] == "command"
+hook_timeout = hook["timeout"]
+assert hook_timeout == 10
 expected_bridge = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
 assert server["command"] == expected_bridge
 hook_arguments = shlex.split(hook["command"])
@@ -2052,6 +2054,7 @@ bridge = subprocess.Popen(
 waiter = subprocess.Popen(
     hook["command"], shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
 )
+hook_deadline = time.monotonic() + hook_timeout
 try:
     initialize = {
         "jsonrpc": "2.0",
@@ -2071,7 +2074,7 @@ try:
     bridge.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}) + "\n")
     bridge.stdin.flush()
     assert json.loads(bridge.stdout.readline())["id"] == 2
-    assert waiter.wait(timeout=12) == 0
+    assert waiter.wait(timeout=max(0, hook_deadline - time.monotonic())) == 0
     assert pathlib.Path(arguments[2]).is_file()
     pathlib.Path(sys.argv[5]).write_text(arguments[2], encoding="utf-8")
     bridge.stdin.close()
