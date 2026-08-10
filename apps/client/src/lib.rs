@@ -3279,8 +3279,8 @@ async fn send(
             &command_id.into_uuid().hyphenated().to_string(),
         )?;
     }
-    let (delivery, wait_mode) = match delivery {
-        SendDeliveryArgument::StartWhenIdle => (None, TurnWaitMode::SelectedTurn),
+    let delivery = match delivery {
+        SendDeliveryArgument::StartWhenIdle => None,
         SendDeliveryArgument::Queue {
             expected_active_turn_id,
         } => {
@@ -3289,12 +3289,9 @@ async fn send(
                 None => observe_active_turn(client, session_id).await?,
             };
             output.recovery_value("turn", &expected_active_turn.to_string())?;
-            (
-                Some(InputDelivery::Queue {
-                    expected_active_turn_id: expected_active_turn,
-                }),
-                TurnWaitMode::QueuedTurn,
-            )
+            Some(InputDelivery::Queue {
+                expected_active_turn_id: expected_active_turn,
+            })
         }
     };
     let defaults_version =
@@ -3313,7 +3310,7 @@ async fn send(
         return Err(ClientError::Protocol("send returned a steering receipt").mutation());
     };
 
-    await_and_report_turn(client, output, session_id, turn_id, wait_mode).await
+    await_and_report_turn(client, output, session_id, turn_id).await
 }
 
 async fn steer(
@@ -3398,14 +3395,7 @@ async fn reconcile(
     )
     .await?;
 
-    await_and_report_turn(
-        client,
-        output,
-        session_id,
-        successor_turn_id,
-        TurnWaitMode::SelectedTurn,
-    )
-    .await
+    await_and_report_turn(client, output, session_id, successor_turn_id).await
 }
 
 /// Requests cancellation of the exact active turn through the interrupt
@@ -3455,14 +3445,7 @@ async fn stop(
     )
     .await?;
 
-    await_and_report_turn(
-        client,
-        output,
-        session_id,
-        successor_turn_id,
-        TurnWaitMode::SelectedTurn,
-    )
-    .await
+    await_and_report_turn(client, output, session_id, successor_turn_id).await
 }
 
 /// Reads the authoritative transcript and returns the single turn holding the
@@ -3506,9 +3489,8 @@ async fn await_and_report_turn(
     output: &mut Output<'_>,
     session_id: CanonicalUuid,
     turn_id: CanonicalUuid,
-    wait_mode: TurnWaitMode,
 ) -> Result<(), ClientError> {
-    match await_turn_terminal(client, session_id, turn_id, wait_mode).await? {
+    match await_turn_terminal(client, session_id, turn_id).await? {
         TurnTerminal::Completed => {
             let mut snapshot = transcript(client, session_id).await?;
             let state = snapshot.turn_state(turn_id)?;
@@ -3722,17 +3704,10 @@ enum TurnTerminal {
     ReconciliationRequired,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TurnWaitMode {
-    SelectedTurn,
-    QueuedTurn,
-}
-
 async fn await_turn_terminal(
     client: &mut ProcessClient,
     session_id: CanonicalUuid,
     turn_id: CanonicalUuid,
-    wait_mode: TurnWaitMode,
 ) -> Result<TurnTerminal, ClientError> {
     loop {
         let mut connection = client
@@ -3743,10 +3718,7 @@ async fn await_turn_terminal(
         if let Some(terminal) = terminal_snapshot_state(state.as_ref())? {
             return Ok(terminal);
         }
-        if wait_mode == TurnWaitMode::QueuedTurn {
-            queued_turn_blocker_recovery(&mut snapshot, turn_id)?;
-            queued_turn_runner_recovery(snapshot.runner())?;
-        }
+        queued_turn_recovery(&mut snapshot, turn_id)?;
         let mut observed_cursor = snapshot.cursor();
         loop {
             match connection.message().await? {
@@ -3768,10 +3740,7 @@ async fn await_turn_terminal(
                         if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
                             return Ok(terminal);
                         }
-                        if wait_mode == TurnWaitMode::QueuedTurn {
-                            queued_turn_blocker_recovery(&mut refreshed, turn_id)?;
-                            queued_turn_runner_recovery(refreshed.runner())?;
-                        }
+                        queued_turn_recovery(&mut refreshed, turn_id)?;
                         if !runner_recovery_transition(&event) {
                             return Err(ClientError::Protocol(
                                 "a recovery event did not produce recovery or terminal state",
@@ -3785,14 +3754,13 @@ async fn await_turn_terminal(
                             return Ok(terminal);
                         }
                     }
-                    if wait_mode == TurnWaitMode::QueuedTurn && session_recovery_transition(&event)
-                    {
+                    if session_recovery_transition(&event) {
                         let mut refreshed = transcript(client, session_id).await?;
                         let refreshed_state = refreshed.turn_state(turn_id)?;
                         if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
                             return Ok(terminal);
                         }
-                        queued_turn_blocker_recovery(&mut refreshed, turn_id)?;
+                        queued_turn_recovery(&mut refreshed, turn_id)?;
                     }
                 }
                 ServerMessage::ProviderTextDelta {
@@ -3818,7 +3786,7 @@ async fn await_turn_terminal(
     }
 }
 
-fn queued_turn_blocker_recovery(
+fn queued_turn_recovery(
     snapshot: &mut TranscriptSnapshot,
     selected_turn: CanonicalUuid,
 ) -> Result<(), ClientError> {
@@ -3831,15 +3799,15 @@ fn queued_turn_blocker_recovery(
         return Ok(());
     }
 
-    let Some(active_turn) = snapshot.active_turn()? else {
-        return Ok(());
-    };
-    let active_state = snapshot
-        .turn_state(active_turn)?
-        .ok_or(ClientError::Protocol(
-            "follow snapshot omitted the session active turn",
-        ))?;
-    blocker_recovery_snapshot_state(&active_state)
+    if let Some(active_turn) = snapshot.active_turn()? {
+        let active_state = snapshot
+            .turn_state(active_turn)?
+            .ok_or(ClientError::Protocol(
+                "follow snapshot omitted the session active turn",
+            ))?;
+        blocker_recovery_snapshot_state(&active_state)?;
+    }
+    queued_turn_runner_recovery(snapshot.runner())
 }
 
 fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError> {
@@ -5390,13 +5358,13 @@ mod tests {
         MAX_INPUT_CONTENT_BYTES, MAX_REVIEW_FINDINGS_PER_RUN, MAX_REVIEW_JSON_INPUT_BYTES,
         MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ModelSystemPromptChoice, ProcessClient,
         ReviewCommand, ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest,
-        SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
+        SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument, TurnTerminal,
         await_turn_terminal, blocker_recovery_snapshot_state, collect_import_paths,
         continue_imported, conversation_import_chunk_read_limit, conversations, create, decide,
         decode_goal_mutation_receipt, delegation_rejection_matches, descendant_scope,
         import_conversation_file, imported, model_call_recovery_transition,
         open_scanned_import_source, placement_update_receipt_matches,
-        placement_update_rejection_matches, queued_turn_runner_recovery,
+        placement_update_rejection_matches, queued_turn_recovery, queued_turn_runner_recovery,
         read_delegation_content_file, read_goal_text_file, read_import_file, read_input,
         read_review_json_file, read_system_prompt_file, reconcile_turn, replace_session_model,
         replacement_receipt_settings_match, review, review_concern_state_is_coherent,
@@ -5407,7 +5375,10 @@ mod tests {
         source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
         terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
-    use crate::{child_lifecycle_terminalization, error::ClientError, presentation::Output};
+    use crate::{
+        child_lifecycle_terminalization, error::ClientError, presentation::Output,
+        transcript::TranscriptSnapshot,
+    };
 
     /// The session a follower reads. Only a delegation event addressed to this
     /// exact session terminalizes the follower's own turn.
@@ -6436,13 +6407,7 @@ mod tests {
         });
 
         let mut client = ProcessClient::new(socket);
-        let result = await_turn_terminal(
-            &mut client,
-            session_id,
-            queued_turn_id,
-            TurnWaitMode::QueuedTurn,
-        )
-        .await;
+        let result = await_turn_terminal(&mut client, session_id, queued_turn_id).await;
 
         assert!(matches!(result, Err(ClientError::TurnRecoveryRequired)));
         server.await??;
@@ -6581,9 +6546,7 @@ mod tests {
         });
 
         let mut client = ProcessClient::new(socket);
-        let terminal =
-            await_turn_terminal(&mut client, session_id, turn_id, TurnWaitMode::SelectedTurn)
-                .await?;
+        let terminal = await_turn_terminal(&mut client, session_id, turn_id).await?;
 
         assert_eq!(terminal, TurnTerminal::Completed);
         server.await??;
@@ -6676,9 +6639,7 @@ mod tests {
         });
 
         let mut client = ProcessClient::new(socket);
-        let terminal =
-            await_turn_terminal(&mut client, session_id, turn_id, TurnWaitMode::SelectedTurn)
-                .await?;
+        let terminal = await_turn_terminal(&mut client, session_id, turn_id).await?;
 
         assert_eq!(terminal, TurnTerminal::Completed);
         server.await??;
@@ -6757,8 +6718,7 @@ mod tests {
         });
 
         let mut client = ProcessClient::new(socket);
-        let result =
-            await_turn_terminal(&mut client, session_id, turn_id, TurnWaitMode::SelectedTurn).await;
+        let result = await_turn_terminal(&mut client, session_id, turn_id).await;
 
         assert!(matches!(
             result,
@@ -6880,6 +6840,29 @@ mod tests {
     fn queued_send_stops_on_current_pre_pin_runner_loss_from_snapshot() {
         let projection = runner_projection(1, RunnerProjectionState::RunnerLostBeforePin, None);
         let result = queued_turn_runner_recovery(Some(&projection));
+
+        assert!(matches!(result, Err(ClientError::RunnerRecoveryRequired)));
+    }
+
+    #[test]
+    fn selected_send_stops_when_its_authoritative_turn_is_still_queued_on_runner_loss() {
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let projection = runner_projection(1, RunnerProjectionState::RunnerLost, None);
+        let mut snapshot = TranscriptSnapshot::from_messages_with_runner(
+            1,
+            Some(projection),
+            [ServerMessage::TranscriptTurn {
+                turn_id,
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::Queued {
+                    accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                    content: InputContent::new(String::from("queued selected input")),
+                },
+            }],
+        )
+        .expect("the queued selected-turn fixture spools");
+        let result = queued_turn_recovery(&mut snapshot, turn_id);
 
         assert!(matches!(result, Err(ClientError::RunnerRecoveryRequired)));
     }
