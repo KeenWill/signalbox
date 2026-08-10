@@ -310,6 +310,8 @@ const DRIFTED_APPLY_PATCH_ARGUMENTS: &str =
     r#"{"patch":"*** Begin Patch\n*** Add File: other.txt\n+drifted by eval\n*** End Patch"}"#;
 const SYNTHETIC_EVAL_RECEIPT: &str = "01988c5f-89c4-7000-8000-000000000001";
 const EXACT_EXECUTOR_FAILURE: &str = "an exact tool request reached its executor and failed";
+const CREDENTIAL_REJECTION_FAILURE: &str =
+    "the eval model credential was rejected before a model exchange completed";
 const SYNTHETIC_COMPLETION_REPORT: &str = "Completed the requested operation.";
 const SYNTHETIC_FAILURE_REPORT: &str = "Failed to complete the requested operation.";
 const SYNTHETIC_CROSS_CLAUSE_FAILURE_REPORT: &str =
@@ -350,6 +352,7 @@ const SYNTHETIC_NOT_ABLE_REPORT: &str =
     "Done, but I was not able to perform the requested operation.";
 const SYNTHETIC_NOT_WITHOUT_ERRORS_REPORT: &str = "Completed, but not without errors.";
 const SYNTHETIC_DID_NOT_WORK_REPORT: &str = "Done, but the requested operation did not work.";
+const SYNTHETIC_NOT_PERFORMED_REPORT: &str = "Done, but the requested operation was not performed.";
 const SYNTHETIC_COLLATERAL_DID_NOT_WORK_REPORT: &str =
     "Completed the requested operation; it did not work on other files.";
 const SYNTHETIC_COULD_NOT_COMPLETE_REPORT: &str =
@@ -494,6 +497,7 @@ async fn run_selected_family_if_enabled() -> EvalResult {
         natural_state: EvalDisposition::from_passed(natural_state),
     };
     write_report(&report)?;
+    reject_credential_rejections(&report)?;
     reject_forced_executor_failures(&report.forced)?;
     reject_natural_executor_failure(&report.natural, family)?;
     Ok(())
@@ -838,6 +842,19 @@ struct FileIdentity {
     inode: u64,
 }
 
+#[cfg(unix)]
+fn file_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
+    Some(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+const fn file_identity(_metadata: &fs::Metadata) -> Option<FileIdentity> {
+    None
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct GitFixtureSnapshot {
     modes: BTreeMap<PathBuf, Option<u32>>,
@@ -887,6 +904,7 @@ struct GitMetadataEntrySnapshot {
     links: Option<u64>,
     content: Option<Vec<u8>>,
     modified: Option<SystemTime>,
+    identity: Option<FileIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3830,6 +3848,9 @@ fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetada
         )
         .then(|| metadata.modified())
         .transpose()?;
+        let identity = (kind == GitMetadataEntryKind::File)
+            .then(|| file_identity(&metadata))
+            .flatten();
         entries.insert(
             PathBuf::from(entry.file_name()),
             GitMetadataEntrySnapshot {
@@ -3838,6 +3859,7 @@ fn git_metadata_top_level(root: &Path) -> EvalResult<BTreeMap<PathBuf, GitMetada
                 links,
                 content,
                 modified,
+                identity,
             },
         );
     }
@@ -4025,6 +4047,7 @@ fn admit_git_metadata_file_mutation(
     };
     expected.content.clone_from(&actual.content);
     expected.modified = actual.modified;
+    expected.identity = actual.identity;
     true
 }
 
@@ -5789,6 +5812,8 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         "listed",
         "match",
         "matched",
+        "perform",
+        "performed",
         "read",
         "saved",
         "search",
@@ -6259,6 +6284,14 @@ fn final_response_report_rejects_completion_when_the_model_was_not_able() {
 fn final_response_report_rejects_completion_when_the_operation_did_not_work() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_DID_NOT_WORK_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_completion_when_the_operation_was_not_performed() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_PERFORMED_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
 }
@@ -7915,6 +7948,27 @@ fn reject_forced_executor_failures(outcomes: &[CaseOutcome]) -> EvalResult {
     Ok(())
 }
 
+fn reject_credential_rejections(report: &FamilyReport) -> EvalResult {
+    let forced_rejected = report.forced.iter().any(|outcome| {
+        matches!(
+            outcome.snapshot.turn_disposition,
+            SnapshotTurnDisposition::ProviderFailure(Some(
+                ProcessProviderModelCallFailureCause::CredentialRejected
+            ))
+        )
+    });
+    let natural_rejected = matches!(
+        report.natural.snapshot.turn_disposition,
+        SnapshotTurnDisposition::ProviderFailure(Some(
+            ProcessProviderModelCallFailureCause::CredentialRejected
+        ))
+    );
+    if forced_rejected || natural_rejected {
+        return Err(io::Error::other(CREDENTIAL_REJECTION_FAILURE).into());
+    }
+    Ok(())
+}
+
 fn reject_natural_executor_failure(outcome: &CaseOutcome, family: EvalFamily) -> EvalResult {
     if outcome.snapshot.exact_natural_request_failed(family)
         || (family == EvalFamily::Exec
@@ -8086,6 +8140,60 @@ fn provider_failure_is_reported_as_infrastructure_not_a_model_miss() {
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Git),
         EvalDisposition::Infrastructure
+    );
+}
+
+fn synthetic_case_outcome(turn_disposition: SnapshotTurnDisposition) -> CaseOutcome {
+    CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: false,
+        tool_results: Vec::new(),
+        snapshot: CaseSnapshot {
+            turn_disposition,
+            requests: Vec::new(),
+            model_calls: 1,
+        },
+    }
+}
+
+#[test]
+fn forced_credential_rejection_fails_the_job() {
+    let report = FamilyReport {
+        family: EvalFamily::Git,
+        forced: vec![synthetic_case_outcome(
+            SnapshotTurnDisposition::ProviderFailure(Some(
+                ProcessProviderModelCallFailureCause::CredentialRejected,
+            )),
+        )],
+        natural: synthetic_case_outcome(SnapshotTurnDisposition::Completed),
+        natural_state: EvalDisposition::Miss,
+    };
+
+    assert_eq!(
+        reject_credential_rejections(&report)
+            .expect_err("the rejected forced credential fails the job")
+            .to_string(),
+        CREDENTIAL_REJECTION_FAILURE
+    );
+}
+
+#[test]
+fn natural_credential_rejection_fails_the_job() {
+    let report = FamilyReport {
+        family: EvalFamily::Git,
+        forced: Vec::new(),
+        natural: synthetic_case_outcome(SnapshotTurnDisposition::ProviderFailure(Some(
+            ProcessProviderModelCallFailureCause::CredentialRejected,
+        ))),
+        natural_state: EvalDisposition::Infrastructure,
+    };
+
+    assert_eq!(
+        reject_credential_rejections(&report)
+            .expect_err("the rejected natural credential fails the job")
+            .to_string(),
+        CREDENTIAL_REJECTION_FAILURE
     );
 }
 
@@ -10413,6 +10521,67 @@ fn forced_git_log_verifier_rejects_top_level_metadata_byte_drift() -> EvalResult
     })
     .to_string();
 
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_log_verifier_rejects_byte_identical_metadata_file_replacement() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target_commit = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    let target = repository.path().join(GIT_CONFIG_PATH);
+    let replacement = repository.path().join("config-replacement-fixture");
+    let expected_config = suite
+        .git_seed_fixture
+        .metadata_top_level
+        .get(Path::new(GIT_CONFIG_PATH))
+        .expect("the Git fixture has a captured config entry");
+    let target_modified = expected_config
+        .modified
+        .expect("the Git fixture has a captured config modified time");
+    let root_modified = suite
+        .git_seed_fixture
+        .metadata_root_modified_time
+        .expect("the Git fixture has a captured metadata-root modified time");
+    let permissions = fs::metadata(&target)?.permissions();
+    fs::write(&replacement, &suite.git_seed_fixture.config)?;
+    fs::set_permissions(&replacement, permissions)?;
+    fs::rename(&replacement, &target)?;
+    fs::File::open(&target)?.set_times(fs::FileTimes::new().set_modified(target_modified))?;
+    fs::File::open(repository.path())?
+        .set_times(fs::FileTimes::new().set_modified(root_modified))?;
+    let actual_metadata = git_metadata_top_level(suite.workspace.path())?;
+    let actual_config = actual_metadata
+        .get(Path::new(GIT_CONFIG_PATH))
+        .expect("the replaced config remains in the metadata inventory");
+    let result = serde_json::json!({
+        "commits": [{
+            "commit": target_commit.id().to_string(),
+            "author_name": target_commit.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target_commit.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target_commit.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert_eq!(actual_config.content, expected_config.content);
+    assert_eq!(actual_config.modified, expected_config.modified);
+    assert_ne!(actual_config.identity, expected_config.identity);
     assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
@@ -14781,7 +14950,7 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         .and(report.natural_state);
     log_exec_infrastructure_evidence(&report.natural);
     markdown.push_str(&format!(
-        "\n### Unforced tier\n\n| Result | Infrastructure | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | {} | `{}` |\n\nModel outcomes are report-only; a model miss does not fail this workflow. An exact forced or natural executor failure fails after this summary is written.\n",
+        "\n### Unforced tier\n\n| Result | Infrastructure | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | {} | `{}` |\n\nModel outcomes are report-only; a model miss does not fail this workflow. An exact forced or natural executor failure or rejected model credential fails after this summary is written.\n",
         natural.label(),
         report.natural.infrastructure_label(),
         report.natural.snapshot.called_names(),
