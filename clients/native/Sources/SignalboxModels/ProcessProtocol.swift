@@ -2064,11 +2064,32 @@ public struct SignalboxProcessSessionSummary: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let defaultsVersion: SignalboxCanonicalUInt64
   public let modelSelection: SignalboxModelSelection
+  public let runner: SignalboxRunnerProjection?
 
-  private enum CodingKeys: String, CodingKey {
-    case sessionID = "session_id"
-    case defaultsVersion = "defaults_version"
-    case modelSelection = "model_selection"
+  public init(
+    sessionID: SignalboxCanonicalUUID,
+    defaultsVersion: SignalboxCanonicalUInt64,
+    modelSelection: SignalboxModelSelection,
+    runner: SignalboxRunnerProjection?
+  ) {
+    self.sessionID = sessionID
+    self.defaultsVersion = defaultsVersion
+    self.modelSelection = modelSelection
+    self.runner = runner
+  }
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    let fields: Set<String> = [
+      "type", "session_id", "defaults_version", "model_selection", "placement_version",
+      "placement", "runner",
+    ]
+    try tagged.rejectUnadmittedFields(fields, decoder: decoder)
+    try tagged.requireFields(fields, decoder: decoder)
+    sessionID = try decoder.decode("session_id")
+    defaultsVersion = try decoder.decode("defaults_version")
+    modelSelection = try decoder.decode("model_selection")
+    runner = try decoder.decodeIfPresent("runner")
   }
 }
 
@@ -2236,6 +2257,17 @@ public enum SignalboxRunnerProjectionState: String, Decodable, Equatable, Sendab
   case runnerLostBeforePin = "runner_lost_before_pin"
   case runnerLost = "runner_lost"
   case runnerAbandoned = "runner_abandoned"
+}
+
+public enum SignalboxRunnerStateTransitionState: String, Decodable, Equatable, Sendable {
+  case pinned
+  case suspect
+  case connected
+  case runnerLostBeforePin = "runner_lost_before_pin"
+  case runnerLost = "runner_lost"
+  case replaced
+  case workingDirectoryChanged = "working_directory_changed"
+  case abandoned
 }
 
 public struct SignalboxRunnerProjection: Decodable, Equatable, Sendable {
@@ -3659,6 +3691,13 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
   case toolBatchTransition(
     turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID,
     state: SignalboxToolBatchState)
+  case runnerStateTransition(
+    runnerID: SignalboxCanonicalUUID,
+    placementRevision: SignalboxCanonicalUInt64,
+    sandboxProfile: SignalboxRunnerSandboxProfile,
+    workingDirectory: SignalboxRunnerWorkingDirectory?,
+    state: SignalboxRunnerStateTransitionState
+  )
   case toolApprovalDecided(
     turnID: SignalboxCanonicalUUID,
     toolRequestID: SignalboxCanonicalUUID,
@@ -3745,6 +3784,30 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
         self = .toolBatchTransition(
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),
+          state: try decoder.decode("state")
+        )
+      case "runner_state_transition":
+        let fields: Set<String> = [
+          "type", "runner_id", "placement_revision", "sandbox_profile", "working_directory",
+          "state",
+        ]
+        try tagged.rejectUnadmittedFields(fields, decoder: decoder)
+        try tagged.requireFields(["working_directory"], decoder: decoder)
+        let placementRevision: SignalboxCanonicalUInt64 = try decoder.decode(
+          "placement_revision")
+        guard placementRevision.rawValue > 0 else {
+          throw DecodingError.dataCorrupted(
+            .init(
+              codingPath: decoder.codingPath,
+              debugDescription: "Runner state transition placement revision must be positive."
+            )
+          )
+        }
+        self = .runnerStateTransition(
+          runnerID: try decoder.decode("runner_id"),
+          placementRevision: placementRevision,
+          sandboxProfile: try decoder.decode("sandbox_profile"),
+          workingDirectory: try decoder.decodeIfPresent("working_directory"),
           state: try decoder.decode("state")
         )
       case "tool_approval_decided":

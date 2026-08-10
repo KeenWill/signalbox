@@ -5599,11 +5599,9 @@ impl RunnerWorkingDirectory {
 
     /// Admits nonempty, NUL-free text within the exact byte bound.
     pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
-        if value.is_empty() || value.len() > Self::MAX_UTF8_BYTES || value.contains('\0') {
-            Err(CanonicalValueError::RunnerWorkingDirectory)
-        } else {
-            Ok(Self(value))
-        }
+        DomainRunnerWorkingDirectory::try_new(value.clone())
+            .map_err(|_| CanonicalValueError::RunnerWorkingDirectory)?;
+        Ok(Self(value))
     }
 
     /// Borrows the exact validated directory text.
@@ -6724,6 +6722,9 @@ pub enum ServerMessage {
         placement_version: CanonicalU64,
         /// Current opt-in placement decision.
         placement: SessionPlacement,
+        /// Complete current runner projection, null for daemon-only sessions.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        runner: Option<RunnerProjection>,
     },
     /// Completes a session-summary sequence.
     SessionsEnd {
@@ -12010,6 +12011,7 @@ mod tests {
                 placement: super::SessionPlacement::Scoped {
                     path: maximum_structural_path,
                 },
+                runner: None,
             },
         )
         .expect("legacy structural placement remains response-encodable");
@@ -14145,8 +14147,9 @@ mod tests {
                 model_selection: ModelSelection::Alias { alias_id: uuid(4) },
                 placement_version: CanonicalU64::new(1),
                 placement: super::SessionPlacement::Pathless {},
+                runner: None,
             },
-            r#"{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000004"},"placement_version":"1","placement":{"kind":"pathless"}}"#,
+            r#"{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000004"},"placement_version":"1","placement":{"kind":"pathless"},"runner":null}"#,
         )?;
         assert_server_message_round_trip(
             request(5)?,
@@ -15400,6 +15403,51 @@ mod tests {
             r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000003","event":{"type":"runner_state_transition","runner_id":"00000000-0000-0000-0000-000000000004","placement_revision":"5","sandbox_profile":"workspace-restricted","working_directory":"workspace/project","state":"working_directory_changed"}}"#,
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn inv033_inv044_runner_placed_session_summary_round_trips_complete_projection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let runner = RunnerProjection::try_new(
+            RunnerProjectionSelector::CapabilityClass {
+                name: RunnerCapabilityClass::try_new(String::from("linux.workspace"))?,
+            },
+            Some(uuid(4)),
+            RunnerPlacementRevision::try_new(3)
+                .expect("the fixture placement revision is positive"),
+            RunnerSandboxProfile::WorkspaceRestricted,
+            Some(RunnerCredentialProfileName::try_new(String::from(
+                "readonly",
+            ))?),
+            Some(RunnerRepositoryKey::try_new(String::from("primary"))?),
+            Some(RunnerWorkingDirectory::try_new(String::from(
+                "workspace/project",
+            ))?),
+            None,
+            RunnerProjectionState::RunnerLost,
+        )?;
+
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::SessionSummary {
+                session_id: uuid(2),
+                defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Alias { alias_id: uuid(3) },
+                placement_version: CanonicalU64::new(1),
+                placement: super::SessionPlacement::Pathless {},
+                runner: Some(runner),
+            },
+            r#"{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000003"},"placement_version":"1","placement":{"kind":"pathless"},"runner":{"selector":{"type":"capability_class","name":"linux.workspace"},"runner_id":"00000000-0000-0000-0000-000000000004","placement_revision":"3","sandbox_profile":"workspace-restricted","credential_profile":"readonly","repository":"primary","working_directory":"workspace/project","connection_health":null,"state":"runner_lost"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_session_summary_rejects_an_omitted_required_nullable_runner() {
+        let encoded = br#"{"version":1,"request_id":"1","message":{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000003"},"placement_version":"1","placement":{"kind":"pathless"}}}
+"#;
+
+        assert!(decode_server_line(encoded).is_err());
     }
 
     #[test]

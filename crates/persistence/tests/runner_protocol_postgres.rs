@@ -528,9 +528,16 @@ fn replacement_runner_directory() -> RunnerWorkingDirectory {
 }
 
 fn exact_runner_request(runner: RunnerId) -> SessionRunnerPlacementRequest {
+    exact_runner_request_with_directory(runner, exact_runner_directory())
+}
+
+fn exact_runner_request_with_directory(
+    runner: RunnerId,
+    working_directory: RunnerWorkingDirectory,
+) -> SessionRunnerPlacementRequest {
     SessionRunnerPlacementRequest {
         selector: RunnerSelector::Identity(runner),
-        working_directory: WorkingDirectorySelection::Exact(exact_runner_directory()),
+        working_directory: WorkingDirectorySelection::Exact(working_directory),
         credential_profile: None,
         workspace: WorkspaceRequirement::None,
         sandbox: RunnerSandboxProfile::WorkspaceRestricted,
@@ -5708,9 +5715,10 @@ async fn s32_inv044_transcript_snapshot_authenticates_current_pre_pin_runner_los
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let expected_directory = exact_runner_directory();
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
-        exact_runner_request(runner),
+        exact_runner_request_with_directory(runner, expected_directory.clone()),
     );
     store.store_placement(&placement, None, None).await?;
     let lost = placement
@@ -5731,14 +5739,75 @@ async fn s32_inv044_transcript_snapshot_authenticates_current_pre_pin_runner_los
     assert_eq!(projection.sandbox(), lost.request().sandbox);
     assert_eq!(projection.credential_profile(), None);
     assert_eq!(projection.repository(), None);
-    assert_eq!(
-        projection.working_directory(),
-        Some(&exact_runner_directory())
-    );
+    assert_eq!(projection.working_directory(), Some(&expected_directory));
     assert_eq!(
         projection.state(),
         ProcessRunnerProjectionState::RunnerLostBeforePin
     );
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_session_summary_authenticates_current_pre_pin_runner_loss()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let selection = DirectModelSelection::from_uuid(uuid(0xa141));
+    let credentials = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+        "fixture-model-family",
+        "fixture-credential-reference",
+    )])
+    .expect("the fixture credential pin is valid");
+    let creation = CreateSession::new(
+        DurableCommandId::from_uuid(uuid(0xa142)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+    )
+    .prepare(session)
+    .expect("the fixture session creation is preparable");
+    CreateSessionRepository::new(pool.clone(), credentials)
+        .handle(creation)
+        .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let expected_directory = exact_runner_directory();
+    let placement = SessionRunnerPlacement::new(
+        session,
+        exact_runner_request_with_directory(runner, expected_directory.clone()),
+    );
+    store.store_placement(&placement, None, None).await?;
+    let lost = placement
+        .mark_runner_lost_before_pin(runner)
+        .expect("the exact selected runner may be lost before pinning");
+    append_runner_lost_before_pin_projection(&pool, lost.session()).await?;
+    let mut summaries = ProcessReadRepository::new(pool.clone())
+        .open_session_summaries()
+        .await?;
+    let summary = summaries
+        .next_summary()
+        .await?
+        .expect("the fixture session has a session summary");
+    let projection = summary
+        .runner()
+        .expect("the runner-placed session projects its current placement");
+
+    assert_eq!(projection.selector(), &lost.request().selector);
+    assert_eq!(projection.runner(), Some(runner));
+    assert_eq!(projection.placement_revision(), lost.revision());
+    assert_eq!(projection.sandbox(), lost.request().sandbox);
+    assert_eq!(projection.credential_profile(), None);
+    assert_eq!(projection.repository(), None);
+    assert_eq!(projection.working_directory(), Some(&expected_directory));
+    assert_eq!(
+        projection.state(),
+        ProcessRunnerProjectionState::RunnerLostBeforePin
+    );
+    drop(summaries);
     drop(pool);
     Ok(())
 }
@@ -12776,9 +12845,10 @@ async fn s32_inv032_inv044_runner_lost_before_pin_outbox_round_trips() -> Result
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let expected_directory = exact_runner_directory();
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
-        exact_runner_request(runner),
+        exact_runner_request_with_directory(runner, expected_directory.clone()),
     );
     RunnerProtocolStore::new(pool.clone(), catalog())
         .store_placement(&placement, None, None)
@@ -12793,7 +12863,7 @@ async fn s32_inv032_inv044_runner_lost_before_pin_outbox_round_trips() -> Result
             runner,
             placement_revision,
             placement.request().sandbox,
-            Some(exact_runner_directory()),
+            Some(expected_directory.clone()),
             DispatchedRunnerState::RunnerLostBeforePin,
             RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
         ),
@@ -12809,7 +12879,7 @@ async fn s32_inv032_inv044_runner_lost_before_pin_outbox_round_trips() -> Result
             runner,
             placement_revision,
             sandbox: placement.request().sandbox,
-            working_directory: Some(exact_runner_directory()),
+            working_directory: Some(expected_directory),
             state: DispatchedRunnerState::RunnerLostBeforePin,
         }
     );
@@ -12870,9 +12940,10 @@ async fn s32_inv032_inv044_runner_pre_pin_replaced_outbox_round_trips() -> Resul
     insert_session(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
     let successor = RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER));
+    let expected_directory = exact_runner_directory();
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
-        exact_runner_request(runner),
+        exact_runner_request_with_directory(runner, expected_directory.clone()),
     );
     RunnerProtocolStore::new(pool.clone(), catalog())
         .store_placement(&placement, None, None)
@@ -12888,7 +12959,7 @@ async fn s32_inv032_inv044_runner_pre_pin_replaced_outbox_round_trips() -> Resul
             successor,
             placement_revision,
             placement.request().sandbox,
-            Some(exact_runner_directory()),
+            Some(expected_directory.clone()),
             DispatchedRunnerState::Replaced,
             RunnerStateTransitionOutboxTestSource::placement(placement_event_ordinal),
         ),
@@ -12904,7 +12975,7 @@ async fn s32_inv032_inv044_runner_pre_pin_replaced_outbox_round_trips() -> Resul
             runner: successor,
             placement_revision,
             sandbox: placement.request().sandbox,
-            working_directory: Some(exact_runner_directory()),
+            working_directory: Some(expected_directory),
             state: DispatchedRunnerState::Replaced,
         }
     );

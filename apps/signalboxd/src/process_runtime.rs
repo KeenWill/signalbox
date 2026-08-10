@@ -8231,6 +8231,11 @@ async fn spool_session_summaries(
                 model_selection: wire_model_selection(summary.model_selection()),
                 placement_version: CanonicalU64::new(summary.placement().version().as_u64()),
                 placement: wire_session_placement(summary.placement().placement()),
+                runner: summary
+                    .runner()
+                    .map(wire_runner_projection)
+                    .transpose()
+                    .map_err(SessionListSpoolError::Spool)?,
             },
         )
         .await
