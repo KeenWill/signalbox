@@ -82,9 +82,13 @@ if ! command -v docker >/dev/null 2>&1; then
 	exit 1
 fi
 
-# A hung daemon makes every later call block forever rather than fail, which on
-# a box already out of disk is indistinguishable from the script doing nothing.
-# Fail fast with a message that names the real problem.
+# A daemon that is stopped or refusing connections would otherwise surface as an
+# empty container listing, which reads exactly like a clean box and would leave
+# an operator believing the sweep found nothing to do. Ask once, and name the
+# real problem. A daemon that is hung rather than absent — the socket accepts
+# but never answers — blocks here instead of failing, as it would at any later
+# call; that is visible to the operator as a stall, which an empty listing is
+# not.
 if ! docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
 	echo "sweep-test-containers: cannot reach the Docker daemon" >&2
 	exit 1
