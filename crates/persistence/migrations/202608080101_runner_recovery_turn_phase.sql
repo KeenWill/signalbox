@@ -497,6 +497,11 @@ BEGIN
                ON request.request_id = attempt.request_id
                AND request.turn_id = attempt.turn_id
                AND request.session_id = attempt.session_id
+              JOIN tool_round AS active_round
+                ON active_round.producing_model_call_id =
+                    request.producing_model_call_id
+               AND active_round.turn_id = request.turn_id
+               AND active_round.session_id = request.session_id
               JOIN turn_attempt AS yielded_attempt
                 ON yielded_attempt.turn_attempt_id =
                     attempt.issuing_turn_attempt_id
@@ -551,6 +556,7 @@ BEGIN
                )
                AND request.producing_model_call_id =
                     lifecycle.active_tool_round_call_id
+               AND active_round.boundary_kind = 'continuing'
                AND yielded_attempt.state_kind = 'ended'
                AND yielded_attempt.end_variant = 'without_stop'
                AND yielded_attempt.end_disposition =
