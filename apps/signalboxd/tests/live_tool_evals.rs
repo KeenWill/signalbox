@@ -535,6 +535,11 @@ const SYNTHETIC_PARTIAL_RUN_REPORT: &str = "The command only partially ran.";
 const SYNTHETIC_ABORTED_RUN_REPORT: &str = "I aborted the run.";
 const SYNTHETIC_CANCELED_RUN_REPORT: &str = "The run was canceled.";
 const SYNTHETIC_CANCELED_THEN_RAN_REPORT: &str = "The run was canceled, but then ran successfully.";
+const SYNTHETIC_INTERRUPTED_RUN_REPORT: &str = "The run was interrupted.";
+const SYNTHETIC_STOPPED_RUN_REPORT: &str = "The run was stopped.";
+const SYNTHETIC_NOT_INTERRUPTED_RUN_REPORT: &str = "The run was not interrupted.";
+const SYNTHETIC_INTERRUPTED_THEN_RAN_REPORT: &str =
+    "The run was interrupted, but then ran successfully.";
 const SYNTHETIC_SKIPPED_RUN_REPORT: &str = "I skipped the run.";
 const SYNTHETIC_SKIPPED_THEN_RAN_REPORT: &str = "I skipped the run, but then ran it successfully.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
@@ -7842,7 +7847,7 @@ fn report_words_deny_success(
     let deferred_completion = report_has_deferred_outcome(report);
     let hedged_completion = report_hedges_outcome(report);
     let attempted_completion = report_only_attempts_outcome(report);
-    let skipped_or_aborted_completion = report_skips_or_aborts_outcome(report);
+    let stopped_skipped_or_aborted_completion = report_stops_skips_or_aborts_outcome(report);
     let canceled_completion = report_cancels_outcome(report);
     let partial_completion = report_partially_completes_outcome(report);
     let clauses_with_dotted_paths_preserved = normalized_report_clauses(report);
@@ -7975,7 +7980,7 @@ fn report_words_deny_success(
         || deferred_completion
         || hedged_completion
         || attempted_completion
-        || skipped_or_aborted_completion
+        || stopped_skipped_or_aborted_completion
         || canceled_completion
         || partial_completion
         || affirmative_pending
@@ -8081,7 +8086,7 @@ fn report_only_attempts_outcome(report: &str) -> bool {
     })
 }
 
-fn report_skips_or_aborts_outcome(report: &str) -> bool {
+fn report_stops_skips_or_aborts_outcome(report: &str) -> bool {
     normalized_report_segments(report, false)
         .into_iter()
         .any(|clause| {
@@ -8090,13 +8095,24 @@ fn report_skips_or_aborts_outcome(report: &str) -> bool {
                 let boundary = scope
                     .iter()
                     .position(|word| matches!(word.as_str(), "and" | "but" | "then"));
-                let skipped_scope = &scope[..boundary.unwrap_or(scope.len())];
                 let coordinated_scope = boundary.map_or(&[][..], |boundary| &scope[boundary + 1..]);
+                let nearby = &clause[index.saturating_sub(4)..clause.len().min(index + 5)];
                 matches!(
                     word.as_str(),
-                    "abort" | "aborted" | "aborting" | "skip" | "skipped" | "skipping"
+                    "abort"
+                        | "aborted"
+                        | "aborting"
+                        | "interrupt"
+                        | "interrupted"
+                        | "interrupting"
+                        | "skip"
+                        | "skipped"
+                        | "skipping"
+                        | "stop"
+                        | "stopped"
+                        | "stopping"
                 ) && !failure_term_is_negated(&clause, index)
-                    && skipped_scope.iter().any(|word| is_negative_outcome(word))
+                    && nearby.iter().any(|word| is_negative_outcome(word))
                     && !coordinated_scope_affirms_outcome(coordinated_scope)
             })
         })
@@ -9833,6 +9849,54 @@ fn forced_sandboxed_exec_report_rejects_a_canceled_run() {
 fn forced_sandboxed_exec_report_accepts_cancellation_followed_by_a_successful_run() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_CANCELED_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_an_interrupted_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_INTERRUPTED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_stopped_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_STOPPED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_a_not_interrupted_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_INTERRUPTED_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_interruption_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_INTERRUPTED_THEN_RAN_REPORT, false);
 
     assert!(forced_case_completion_reported(
         SANDBOXED_EXEC_NAME,
