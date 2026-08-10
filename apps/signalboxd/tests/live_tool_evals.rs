@@ -1685,9 +1685,14 @@ impl FamilySuite {
         Ok(answer == Some(expected_answer)
             && actual == self.workspace_seed_entries
             && actual_modified_times == expected_modified_times
-            && workspace_mutation_target_times_match(
+            && workspace_mutation_entry_times_match(
                 self.workspace.path(),
                 Path::new(WORKSPACE_ANSWER_PATH),
+                self.executor.filesystem_execution_window(WRITE_FILE_NAME),
+            )?
+            && workspace_mutation_entry_times_match(
+                self.workspace.path(),
+                Path::new(""),
                 self.executor.filesystem_execution_window(WRITE_FILE_NAME),
             )?
             && workspace_extended_attributes_match_for_mutation(
@@ -2745,23 +2750,25 @@ fn workspace_forced_case_passed(
                 && workspace_entry_identities(root)? == *seed_entry_identities
                 && workspace_extended_attributes(root)? == *seed_extended_attributes)
         }
-        APPLY_PATCH_NAME => Ok(workspace_modified_times_match_except(
-            root,
-            seed_modified_times,
-            &[Path::new(""), Path::new("patched.txt")],
-        )? && workspace_entry_identities_match_except(
-            root,
-            seed_entry_identities,
-            &[Path::new("patched.txt")],
-        )? && workspace_extended_attributes_match_for_mutation(
-            root,
-            seed_extended_attributes,
-            Path::new("patched.txt"),
-        )? && workspace_mutation_target_times_match(
-            root,
-            Path::new("patched.txt"),
-            execution_window,
-        )?),
+        APPLY_PATCH_NAME => {
+            Ok(workspace_modified_times_match_except(
+                root,
+                seed_modified_times,
+                &[Path::new(""), Path::new("patched.txt")],
+            )? && workspace_entry_identities_match_except(
+                root,
+                seed_entry_identities,
+                &[Path::new("patched.txt")],
+            )? && workspace_extended_attributes_match_for_mutation(
+                root,
+                seed_extended_attributes,
+                Path::new("patched.txt"),
+            )? && workspace_mutation_entry_times_match(
+                root,
+                Path::new("patched.txt"),
+                execution_window,
+            )? && workspace_mutation_entry_times_match(root, Path::new(""), execution_window)?)
+        }
         EDIT_FILE_NAME => {
             let Some(path) = arguments["path"].as_str() else {
                 return Ok(false);
@@ -2782,7 +2789,8 @@ fn workspace_forced_case_passed(
                         seed_extended_attributes,
                         path,
                     )?
-                    && workspace_mutation_target_times_match(root, path, execution_window)?,
+                    && workspace_mutation_entry_times_match(root, path, execution_window)?
+                    && workspace_mutation_entry_times_match(root, parent, execution_window)?,
             )
         }
         WRITE_FILE_NAME => {
@@ -2801,17 +2809,14 @@ fn workspace_forced_case_passed(
                 root,
                 seed_extended_attributes,
                 Path::new(path),
-            )? && workspace_mutation_target_times_match(
-                root,
-                Path::new(path),
-                execution_window,
-            )?)
+            )? && workspace_mutation_entry_times_match(root, Path::new(path), execution_window)?
+                && workspace_mutation_entry_times_match(root, Path::new(""), execution_window)?)
         }
         _ => Ok(false),
     }
 }
 
-fn workspace_mutation_target_times_match(
+fn workspace_mutation_entry_times_match(
     root: &Path,
     target: &Path,
     execution_window: Option<FilesystemExecutionTimeWindow>,
@@ -11770,7 +11775,7 @@ fn workspace_mutation_target_time_gate_rejects_a_pre_execution_mtime() -> EvalRe
         started,
         finished: current_filesystem_recorded_time()?,
     };
-    assert!(workspace_mutation_target_times_match(
+    assert!(workspace_mutation_entry_times_match(
         suite.workspace.path(),
         target,
         Some(window),
@@ -11778,7 +11783,7 @@ fn workspace_mutation_target_time_gate_rejects_a_pre_execution_mtime() -> EvalRe
     fs::File::open(suite.workspace.path().join(target))?
         .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
 
-    assert!(!workspace_mutation_target_times_match(
+    assert!(!workspace_mutation_entry_times_match(
         suite.workspace.path(),
         target,
         Some(window),
@@ -12749,6 +12754,8 @@ fn forced_workspace_edit_fixture_exercises_replace_all() -> EvalResult {
         suite.workspace.path().join(WORKSPACE_SEED_PATH),
         WORKSPACE_EDITED_SEED,
     )?;
+    fs::File::open(suite.workspace.path())?
+        .set_times(fs::FileTimes::new().set_modified(current_filesystem_recorded_time()?))?;
     suite.executor.record_filesystem_execution_window(
         EDIT_FILE_NAME,
         FilesystemExecutionTimeWindow {
@@ -12782,7 +12789,7 @@ fn forced_workspace_edit_verifier_accepts_atomic_parent_mtime_change() -> EvalRe
         WORKSPACE_EDITED_SEED,
     )?;
     fs::File::open(suite.workspace.path())?
-        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+        .set_times(fs::FileTimes::new().set_modified(current_filesystem_recorded_time()?))?;
     suite.executor.record_filesystem_execution_window(
         EDIT_FILE_NAME,
         FilesystemExecutionTimeWindow {
@@ -12799,6 +12806,39 @@ fn forced_workspace_edit_verifier_accepts_atomic_parent_mtime_change() -> EvalRe
     .to_string();
 
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_workspace_edit_verifier_rejects_pre_execution_parent_mtime() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == EDIT_FILE_NAME)
+        .expect("the workspace edit fixture exists");
+    let started = current_filesystem_recorded_time()?;
+    fs::write(
+        suite.workspace.path().join(WORKSPACE_SEED_PATH),
+        WORKSPACE_EDITED_SEED,
+    )?;
+    fs::File::open(suite.workspace.path())?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    suite.executor.record_filesystem_execution_window(
+        EDIT_FILE_NAME,
+        FilesystemExecutionTimeWindow {
+            started,
+            finished: current_filesystem_recorded_time()?,
+        },
+    );
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "replacements": EXPECTED_WORKSPACE_EDIT_REPLACEMENTS,
+        "bytes_written": EXPECTED_WORKSPACE_EDIT_BYTES,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
@@ -13292,6 +13332,27 @@ fn workspace_natural_state_accepts_the_private_answer_mode() -> EvalResult {
     let snapshot = successful_workspace_natural_snapshot();
 
     assert!(suite.natural_state_passed(&snapshot)?);
+    Ok(())
+}
+
+#[test]
+fn workspace_natural_state_rejects_pre_execution_parent_mtime() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let answer = suite.workspace.path().join(WORKSPACE_ANSWER_PATH);
+    let started = current_filesystem_recorded_time()?;
+    fs::write(&answer, WORKSPACE_ANSWER)?;
+    fs::File::open(suite.workspace.path())?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    suite.executor.record_filesystem_execution_window(
+        WRITE_FILE_NAME,
+        FilesystemExecutionTimeWindow {
+            started,
+            finished: current_filesystem_recorded_time()?,
+        },
+    );
+    let snapshot = successful_workspace_natural_snapshot();
+
+    assert!(!suite.natural_state_passed(&snapshot)?);
     Ok(())
 }
 
