@@ -8425,13 +8425,13 @@ pub enum SessionRunnerPlacementState {
 pub struct SessionRunnerPlacement { /* private */ }
 pub enum RunnerPlacementReconstitutionHistory {
     Initial,
-    PrePinReplacement {
-        predecessor_history: Box<RunnerPlacementReconstitutionHistory>,
-        prior_revision: RunnerGeneration,
-        lost_runner: RunnerId,
-        prior_request: Box<SessionRunnerPlacementRequest>,
-        replacement_request: Box<SessionRunnerPlacementRequest>,
-    },
+    PrePinReplacements(Vec<RunnerPrePinReplacementHistory>),
+}
+pub struct RunnerPrePinReplacementHistory {
+    pub prior_revision: RunnerGeneration,
+    pub lost_runner: RunnerId,
+    pub prior_request: SessionRunnerPlacementRequest,
+    pub replacement_request: SessionRunnerPlacementRequest,
 }
 pub struct SessionRunnerPlacementReconstitutionInput {
     /* public complete typed placement facts + append-only history proof */
@@ -9988,7 +9988,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 69                    |
+| domain: runner                                     | 70                    |
 | **signalbox-domain total**                         | **759 (+10 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
