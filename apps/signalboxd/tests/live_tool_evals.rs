@@ -436,6 +436,10 @@ const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
 const SYNTHETIC_NOTHING_CHANGED_REPORT: &str = "Done; nothing was changed.";
 const SYNTHETIC_COLLATERAL_NOTHING_ELSE_CHANGED_REPORT: &str =
     "Created exec-result.txt; nothing else was changed.";
+const SYNTHETIC_REQUESTED_FILE_EXCEPTION_REPORT: &str =
+    "Created exec-result.txt; no files except exec-result.txt were modified.";
+const SYNTHETIC_REQUESTED_FILE_BESIDES_REPORT: &str =
+    "Created exec-result.txt; no files besides exec-result.txt were modified.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
 const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
@@ -1872,7 +1876,8 @@ impl FamilySuite {
                 snapshot,
                 tracker,
             )? && tracker.final_response_reports_completion()),
-            EvalFamily::Exec => Ok(tracker.final_response_reports_file_creation()),
+            EvalFamily::Exec => Ok(tracker
+                .final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))),
         }
     }
 
@@ -1910,11 +1915,17 @@ fn exec_natural_entries_match(
         Some(WorkspaceEntrySnapshot::File { content, links, .. })
             if content == EXEC_RESULT.as_bytes() && links == WORKSPACE_CREATED_FILE_LINKS
     );
+    let actual_entry_identities = workspace_entry_identities(root)?;
     let mut expected_modified_times = seed_modified_times.clone();
     expected_modified_times.remove(Path::new(""));
     Ok(result_matches
         && actual == *seed_entries
         && actual_modified_times == expected_modified_times
+        && created_entry_ownership_matches(
+            &actual_entry_identities,
+            seed_entry_identities,
+            Path::new(EXEC_RESULT_PATH),
+        )
         && workspace_entry_identities_match_except(
             root,
             seed_entry_identities,
@@ -3146,6 +3157,14 @@ fn entry_identities_match_except(
         expected.remove(*path);
     }
     actual == expected
+}
+
+fn created_entry_ownership_matches(
+    actual: &BTreeMap<PathBuf, FilesystemIdentity>,
+    expected: &BTreeMap<PathBuf, FilesystemIdentity>,
+    created_path: &Path,
+) -> bool {
+    filesystem_ownership_matches(actual.get(created_path), expected.get(Path::new("")))
 }
 
 fn workspace_mutation_entries_match(
@@ -6089,6 +6108,23 @@ impl OperationTracker {
                 .as_deref()
                 .is_some_and(|report| !report_denies_file_changes(report))
     }
+
+    fn final_response_reports_file_creation_excepting_path(&self, path: &Path) -> bool {
+        let state = self
+            .state
+            .lock()
+            .expect("operation-tracker lock is available");
+        let Some(mut report) = state.final_response_text.clone() else {
+            return false;
+        };
+        for content in state.result_contents.values() {
+            if let Some(receipt) = eval_receipt(content) {
+                report = report.replace(&receipt, "");
+            }
+        }
+        report_affirms_completion(&report, true)
+            && !report_denies_file_changes_excepting_path(&report, path)
+    }
 }
 
 fn report_affirms_completion(report: &str, file_creation_required: bool) -> bool {
@@ -6124,6 +6160,14 @@ fn report_denies_success(report: &str, file_creation_required: bool) -> bool {
 }
 
 fn report_denies_file_changes(report: &str) -> bool {
+    report_denies_file_changes_with_exception(report, None)
+}
+
+fn report_denies_file_changes_excepting_path(report: &str, path: &Path) -> bool {
+    report_denies_file_changes_with_exception(report, Some(path))
+}
+
+fn report_denies_file_changes_with_exception(report: &str, excepted_path: Option<&Path>) -> bool {
     let words = normalized_report_words(report);
     let no_changes = report
         .split([';', '.', ',', '!', '?', '\n'])
@@ -6146,32 +6190,33 @@ fn report_denies_file_changes(report: &str) -> bool {
                 matches!(word.as_str(), "no" | "zero") && change && !collateral
             })
         });
-    let no_file_change = report
-        .split([';', '.', ',', '!', '?', '\n'])
-        .map(normalized_report_words)
-        .any(|clause| {
-            clause.iter().enumerate().any(|(index, word)| {
-                let scope_start = clause.len().min(index + 2);
-                let scope = &clause[scope_start..clause.len().min(index + 10)];
-                let denied_outcome = scope.iter().position(|word| {
-                    matches!(
-                        word.as_str(),
-                        "change" | "changed" | "changes" | "created" | "modified" | "written"
-                    )
-                });
-                let collateral = denied_outcome.is_some_and(|outcome| {
-                    scope[outcome + 1..]
-                        .iter()
-                        .any(|word| is_collateral_file_qualifier(word))
-                });
-                word == "no"
-                    && clause
-                        .get(index + 1)
-                        .is_some_and(|object| matches!(object.as_str(), "file" | "files"))
-                    && denied_outcome.is_some()
-                    && !collateral
-            })
-        });
+    let no_file_change = normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            let scope_start = clause.len().min(index + 2);
+            let scope = &clause[scope_start..clause.len().min(index + 10)];
+            let denied_outcome = scope.iter().position(|word| {
+                matches!(
+                    word.as_str(),
+                    "change" | "changed" | "changes" | "created" | "modified" | "written"
+                )
+            });
+            let collateral = denied_outcome.is_some_and(|outcome| {
+                scope[outcome + 1..]
+                    .iter()
+                    .any(|word| is_collateral_file_qualifier(word))
+            });
+            let requested_path_excepted = denied_outcome.is_some_and(|outcome| {
+                excepted_path.is_some_and(|path| words_except_named_path(&scope[..outcome], path))
+            });
+            word == "no"
+                && clause
+                    .get(index + 1)
+                    .is_some_and(|object| matches!(object.as_str(), "file" | "files"))
+                && denied_outcome.is_some()
+                && !collateral
+                && !requested_path_excepted
+        })
+    });
     let no_modifications_made = report
         .split([';', '.', ',', '!', '?', '\n'])
         .map(normalized_report_words)
@@ -6348,6 +6393,16 @@ fn report_denies_file_changes(report: &str) -> bool {
         || without_modifying
         || nothing_changed
         || unchanged_file
+}
+
+fn words_except_named_path(words: &[String], path: &Path) -> bool {
+    let path_words = normalized_report_words(&path.to_string_lossy());
+    words.iter().enumerate().any(|(index, word)| {
+        matches!(word.as_str(), "besides" | "except")
+            && words[index + 1..]
+                .windows(path_words.len())
+                .any(|candidate| candidate == path_words)
+    })
 }
 
 fn is_collateral_file_qualifier(word: &str) -> bool {
@@ -7283,6 +7338,36 @@ fn exec_file_creation_report_accepts_nothing_else_changed() {
     tracker.observe_response_text(SYNTHETIC_COLLATERAL_NOTHING_ELSE_CHANGED_REPORT, false);
 
     assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_the_requested_file_exception() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_EXCEPTION_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_the_requested_file_besides_scope() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_BESIDES_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_unrelated_file_exception() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_EXCEPTION_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new("unrelated.txt"))
+    );
 }
 
 #[test]
@@ -15958,6 +16043,27 @@ fn prepared_exec_natural_workspace() -> EvalResult<PreparedExecNaturalWorkspace>
         seed_entry_identities,
         seed_extended_attributes,
     ))
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_natural_created_file_gate_rejects_changed_ownership() -> EvalResult {
+    let (workspace, _entries, _times, expected_identities, _attributes) =
+        prepared_exec_natural_workspace()?;
+    let target = Path::new(EXEC_RESULT_PATH);
+    let mut actual_identities = workspace_entry_identities(workspace.path())?;
+    let changed_group_id = actual_identities[target].group_id.wrapping_add(1);
+    actual_identities
+        .get_mut(target)
+        .expect("the Exec result has a filesystem identity")
+        .group_id = changed_group_id;
+
+    assert!(!created_entry_ownership_matches(
+        &actual_identities,
+        &expected_identities,
+        target,
+    ));
+    Ok(())
 }
 
 #[cfg(unix)]
