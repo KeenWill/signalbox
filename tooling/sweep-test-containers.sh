@@ -102,10 +102,30 @@ fi
 # digits; the fraction is truncated rather than parsed since only whole hours
 # matter here. Identifiers arrive on stdin so a sweep of several thousand
 # containers cannot overflow the argument list.
-selected="$(
+#
+# A container listed a moment ago can be gone by the time it is inspected: a
+# concurrent test run finishing, or a second operator sweeping. `docker inspect`
+# then names that identifier on stderr and exits nonzero while still printing
+# every container it did find, which under `set -o pipefail` would abort the
+# sweep having removed nothing. A container that left on its own is the outcome
+# this sweep wants, so the status is tolerated and whatever was returned is
+# filtered; the daemon was already proven reachable above, so a genuine fault
+# cannot hide behind this.
+inspected="$(
 	printf '%s\n' "$candidates" |
 		xargs docker inspect \
-			--format '{{.Id}} {{.Created}} {{.State.Status}} {{.Config.Image}}' |
+			--format '{{.Id}} {{.Created}} {{.State.Status}} {{.Config.Image}}' ||
+		true
+)"
+
+if [ -z "$inspected" ]; then
+	echo "sweep-test-containers: every candidate container was gone before it" \
+		"could be inspected"
+	exit 0
+fi
+
+selected="$(
+	printf '%s\n' "$inspected" |
 		python3 -c '
 import datetime as dt, sys
 

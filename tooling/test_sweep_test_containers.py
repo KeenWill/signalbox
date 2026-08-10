@@ -39,8 +39,14 @@ elif command == "inspect":
         for line in os.environ["FAKE_DOCKER_INSPECT"].splitlines()
     )
     assert sys.argv[2] == "--format", sys.argv
+    missing = 0
     for container_id in sys.argv[4:]:
-        print(f"{container_id} {inventory[container_id]}")
+        if container_id in inventory:
+            print(f"{container_id} {inventory[container_id]}")
+        else:
+            missing += 1
+            print(f"Error: No such object: {container_id}", file=sys.stderr)
+    sys.exit(1 if missing else 0)
 elif command == "rm":
     assert "--force" in sys.argv and "--volumes" in sys.argv, sys.argv
     with open(os.environ["FAKE_DOCKER_RM_LOG"], "a") as log:
@@ -73,15 +79,21 @@ def run_sweep(
     arguments: list[str],
     daemon_reachable: bool = True,
     dangling_volumes: int = 0,
+    vanished: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    """Invoke the real sweep against one fake inventory, outside test bodies."""
+    """Invoke the real sweep against one fake inventory, outside test bodies.
+
+    `vanished` names containers the listing reports but inspection no longer
+    finds, reproducing a container removed between the two calls.
+    """
     with tempfile.TemporaryDirectory() as scratch:
         scratch_path = Path(scratch)
         write_fake_docker(scratch_path)
         removal_log = scratch_path / "removed.txt"
         environment = dict(os.environ)
         environment["PATH"] = f"{scratch_path}:{environment['PATH']}"
-        environment["FAKE_DOCKER_PS"] = "".join(f"{i}\n" for i, _ in inventory)
+        listed = [i for i, _ in inventory] + list(vanished)
+        environment["FAKE_DOCKER_PS"] = "".join(f"{i}\n" for i in listed)
         environment["FAKE_DOCKER_PS_FILTER"] = MANAGED_LABEL
         environment["FAKE_DOCKER_INSPECT"] = "\n".join(
             f"{i} {rest}" for i, rest in inventory
@@ -177,6 +189,27 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(removed, ["old111"])
         self.assertNotIn("docker volume prune", completed.stdout)
+
+    def test_a_container_removed_mid_sweep_does_not_abort_the_rest(self) -> None:
+        completed, removed = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            vanished=("gone222",),
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(removed, ["old111"])
+
+    def test_every_container_vanishing_exits_clean(self) -> None:
+        completed, removed = run_sweep(
+            [],
+            arguments=["--apply"],
+            vanished=("gone111", "gone222"),
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(removed, [])
+        self.assertIn("gone before it could be inspected", completed.stdout)
 
     def test_an_empty_inventory_exits_clean(self) -> None:
         completed, removed = run_sweep([], arguments=["--apply"])
