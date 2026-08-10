@@ -2313,6 +2313,7 @@ pub struct AcceptedInputSchedulingProjection {
     active_model_call_recovery: Option<ActiveModelCallRecoveryWait>,
     active_tool_recovery_attempt: Option<EndedTurnAttempt>,
     active_executing_tool_batch: Option<ActiveExecutingToolBatchCorrelation>,
+    ordinary_preceding_non_accepted_terminal: Option<TurnId>,
     preceding_non_accepted_terminals:
         BTreeMap<TurnId, (ResolvedContextFrontierSnapshot, DirectModelSelection)>,
 }
@@ -3963,6 +3964,17 @@ fn reconstitute_inner(
                 .map(|record| (record.turn, *predecessor))
         })
         .collect::<BTreeMap<_, _>>();
+    let interrupt_predecessors = preceding_non_accepted_successors
+        .values()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut ordinary_predecessors = preceding_non_accepted_terminal_turns
+        .difference(&interrupt_predecessors)
+        .copied();
+    let ordinary_preceding_non_accepted_terminal = ordinary_predecessors.next();
+    if let Some(turn) = ordinary_predecessors.next() {
+        return Err(AcceptedInputSchedulingReconstitutionFailure::TurnSessionMismatch { turn });
+    }
     // The generic accepted-input order owns only accepted origins. Its first
     // runtime-relevant record can instead be the immediate successor of the
     // separately authenticated non-accepted terminal boundary; treat that one
@@ -5128,8 +5140,12 @@ fn reconstitute_inner(
     }
 
     let mut turns = Vec::with_capacity(total_order.len());
-    let mut previous_terminal = None;
-    let mut previous_selected = None;
+    let mut previous_terminal = ordinary_preceding_non_accepted_terminal.map(|predecessor| {
+        let (snapshot, _) = &preceding_non_accepted_terminals[&predecessor];
+        (predecessor, snapshot.clone())
+    });
+    let mut previous_selected = ordinary_preceding_non_accepted_terminal
+        .map(|predecessor| preceding_non_accepted_terminals[&predecessor].1);
     let mut active = None;
     let mut active_model_call_recovery = None;
     let mut active_tool_recovery_attempt = None;
@@ -6773,6 +6789,7 @@ fn reconstitute_inner(
         active_model_call_recovery,
         active_tool_recovery_attempt,
         active_executing_tool_batch,
+        ordinary_preceding_non_accepted_terminal,
         preceding_non_accepted_terminals,
     })
 }
@@ -7836,6 +7853,14 @@ fn prepare_earliest_queued_activation(
             .preceding_non_accepted_terminals
             .get(&predecessor)
             .map(|(snapshot, selected)| (predecessor, snapshot, *selected)),
+        AcceptedInputQueuePriority::Ordinary if index == 0 => projection
+            .ordinary_preceding_non_accepted_terminal
+            .and_then(|predecessor| {
+                projection
+                    .preceding_non_accepted_terminals
+                    .get(&predecessor)
+                    .map(|(snapshot, selected)| (predecessor, snapshot, *selected))
+            }),
         AcceptedInputQueuePriority::Ordinary => None,
     };
     let origin_entry = SemanticTranscriptEntry::from_validated_parts(
