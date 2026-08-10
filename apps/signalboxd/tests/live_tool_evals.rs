@@ -331,6 +331,8 @@ const SYNTHETIC_APPLIED_COMPLETION_REPORT: &str = "The patch was applied success
 const SYNTHETIC_NOT_APPLIED_REPORT: &str = "The patch was not applied.";
 const SYNTHETIC_NO_ERRORS_COMPLETION_REPORT: &str =
     "Completed the requested operation with no errors.";
+const SYNTHETIC_ZERO_ERRORS_COMPLETION_REPORT: &str =
+    "Completed the requested operation with zero errors.";
 const SYNTHETIC_NO_ERRORS_FOUND_COMPLETION_REPORT: &str =
     "No errors were found; completed the requested operation.";
 const SYNTHETIC_NO_OPERATION_COMPLETION_REPORT: &str =
@@ -1011,16 +1013,7 @@ struct FilesystemExecutionTimeWindow {
 
 impl FilesystemExecutionTimeWindow {
     fn contains_modified(self, modified: SystemTime) -> bool {
-        let Ok(started) = self.started.duration_since(UNIX_EPOCH) else {
-            return false;
-        };
-        let Ok(finished) = self.finished.duration_since(UNIX_EPOCH) else {
-            return false;
-        };
-        let Ok(modified) = modified.duration_since(UNIX_EPOCH) else {
-            return false;
-        };
-        (started.as_secs()..=finished.as_secs()).contains(&modified.as_secs())
+        (self.started..=self.finished).contains(&modified)
     }
 
     fn contains_change_time(self, identity: FilesystemIdentity) -> bool {
@@ -1033,8 +1026,18 @@ impl FilesystemExecutionTimeWindow {
         let Ok(seconds) = u64::try_from(identity.change_time_seconds) else {
             return false;
         };
-        (started.as_secs()..=finished.as_secs()).contains(&seconds)
+        let Ok(nanoseconds) = u32::try_from(identity.change_time_nanoseconds) else {
+            return false;
+        };
+        ((started.as_secs(), started.subsec_nanos())
+            ..=(finished.as_secs(), finished.subsec_nanos()))
+            .contains(&(seconds, nanoseconds))
     }
+}
+
+fn current_filesystem_recorded_time() -> io::Result<SystemTime> {
+    let marker = tempfile::tempfile()?;
+    marker.metadata()?.modified()
 }
 
 impl GitExecutionTimeWindow {
@@ -1826,7 +1829,7 @@ impl FamilySuite {
         Ok(answer == Some(expected_answer)
             && actual == self.workspace_seed_entries
             && actual_modified_times == expected_modified_times
-            && workspace_created_target_times_match(
+            && workspace_mutation_target_times_match(
                 self.workspace.path(),
                 Path::new(WORKSPACE_ANSWER_PATH),
                 self.executor.filesystem_execution_window(WRITE_FILE_NAME),
@@ -2999,7 +3002,7 @@ fn workspace_forced_case_passed(
             root,
             seed_extended_attributes,
             Path::new("patched.txt"),
-        )? && workspace_created_target_times_match(
+        )? && workspace_mutation_target_times_match(
             root,
             Path::new("patched.txt"),
             execution_window,
@@ -3023,7 +3026,8 @@ fn workspace_forced_case_passed(
                         root,
                         seed_extended_attributes,
                         path,
-                    )?,
+                    )?
+                    && workspace_mutation_target_times_match(root, path, execution_window)?,
             )
         }
         WRITE_FILE_NAME => {
@@ -3042,13 +3046,17 @@ fn workspace_forced_case_passed(
                 root,
                 seed_extended_attributes,
                 Path::new(path),
-            )? && workspace_created_target_times_match(root, Path::new(path), execution_window)?)
+            )? && workspace_mutation_target_times_match(
+                root,
+                Path::new(path),
+                execution_window,
+            )?)
         }
         _ => Ok(false),
     }
 }
 
-fn workspace_created_target_times_match(
+fn workspace_mutation_target_times_match(
     root: &Path,
     target: &Path,
     execution_window: Option<FilesystemExecutionTimeWindow>,
@@ -3459,7 +3467,10 @@ fn filesystem_identity_matches_without_change_time(
 ) -> bool {
     match (actual, expected) {
         (Some(actual), Some(expected)) => {
-            actual.device == expected.device && actual.inode == expected.inode
+            actual.device == expected.device
+                && actual.inode == expected.inode
+                && actual.user_id == expected.user_id
+                && actual.group_id == expected.group_id
         }
         (None, None) => true,
         _ => false,
@@ -4593,6 +4604,9 @@ fn admit_git_metadata_file_mutation(
     let Some(expected) = expected.get_mut(path) else {
         return false;
     };
+    if !filesystem_ownership_matches(actual.identity.as_ref(), expected.identity.as_ref()) {
+        return false;
+    }
     expected.content.clone_from(&actual.content);
     expected.modified = actual.modified;
     expected.identity = actual.identity;
@@ -4685,7 +4699,7 @@ fn filesystem_ownership_matches(
         (Some(actual), Some(expected)) => {
             actual.user_id == expected.user_id && actual.group_id == expected.group_id
         }
-        (Some(_), None) => true,
+        (Some(_), None) | (None, None) => true,
         _ => false,
     }
 }
@@ -5539,7 +5553,9 @@ impl ToolExecutor for SharedFamilyExecutor {
             name.as_str(),
             APPLY_PATCH_NAME | EDIT_FILE_NAME | WRITE_FILE_NAME
         )
-        .then(SystemTime::now);
+        .then(current_filesystem_recorded_time)
+        .transpose()
+        .map_err(FamilyExecutorError::new)?;
         let receipt_binding = invocation.clone();
         let mut inner = self.inner.lock().await;
         let evidence = match &mut *inner {
@@ -5606,7 +5622,8 @@ impl ToolExecutor for SharedFamilyExecutor {
                 &name,
                 FilesystemExecutionTimeWindow {
                     started,
-                    finished: SystemTime::now(),
+                    finished: current_filesystem_recorded_time()
+                        .map_err(FamilyExecutorError::new)?,
                 },
             );
         }
@@ -6640,7 +6657,7 @@ fn failure_term_is_negated(clause: &[String], failure_index: usize) -> bool {
         .rposition(|word| {
             matches!(
                 word.as_str(),
-                "never" | "no" | "not" | "nothing" | "without"
+                "never" | "no" | "not" | "nothing" | "without" | "zero"
             )
         })
         .is_some_and(|negation| {
@@ -6887,6 +6904,14 @@ fn final_response_report_accepts_completion_with_no_errors() {
 fn final_response_report_accepts_error_free_completion() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_ERROR_FREE_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_completion_with_zero_errors() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ZERO_ERRORS_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
 }
@@ -11002,6 +11027,34 @@ fn forced_git_metadata_attribute_gate_rejects_index_drift() -> EvalResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn forced_git_metadata_mutation_gate_rejects_index_ownership_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let mut actual = git_metadata_top_level(suite.workspace.path())?;
+    let mut expected = actual.clone();
+    let index = Path::new(GIT_INDEX_PATH);
+    let changed_group_id = actual[index]
+        .identity
+        .expect("the Git index has a filesystem identity")
+        .group_id
+        .wrapping_add(1);
+    actual
+        .get_mut(index)
+        .expect("the Git index has a metadata snapshot")
+        .identity
+        .as_mut()
+        .expect("the Git index has a mutable filesystem identity")
+        .group_id = changed_group_id;
+
+    assert!(!admit_git_metadata_file_mutation(
+        &actual,
+        &mut expected,
+        index,
+    ));
+    Ok(())
+}
+
 #[test]
 fn forced_git_branch_switch_verifier_rejects_rewriting_the_base_branch() -> EvalResult {
     let suite = FamilySuite::git()?;
@@ -12785,7 +12838,7 @@ fn forced_workspace_write_verifier_accepts_the_private_creation_mode() -> EvalRe
         .as_str()
         .expect("the workspace write fixture has content");
     let target = suite.workspace.path().join(path);
-    let started = SystemTime::now();
+    let started = current_filesystem_recorded_time()?;
     fs::write(&target, content)?;
     fs::set_permissions(
         &target,
@@ -12795,7 +12848,7 @@ fn forced_workspace_write_verifier_accepts_the_private_creation_mode() -> EvalRe
         WRITE_FILE_NAME,
         FilesystemExecutionTimeWindow {
             started,
-            finished: SystemTime::now(),
+            finished: current_filesystem_recorded_time()?,
         },
     );
     let result = serde_json::json!({
@@ -12812,16 +12865,16 @@ fn forced_workspace_write_verifier_accepts_the_private_creation_mode() -> EvalRe
 
 #[cfg(unix)]
 #[test]
-fn workspace_created_target_time_gate_rejects_a_pre_execution_mtime() -> EvalResult {
+fn workspace_mutation_target_time_gate_rejects_a_pre_execution_mtime() -> EvalResult {
     let suite = FamilySuite::workspace()?;
     let target = Path::new("created-during-execution.txt");
-    let started = SystemTime::now();
+    let started = current_filesystem_recorded_time()?;
     fs::write(suite.workspace.path().join(target), WORKSPACE_ANSWER)?;
     let window = FilesystemExecutionTimeWindow {
         started,
-        finished: SystemTime::now(),
+        finished: current_filesystem_recorded_time()?,
     };
-    assert!(workspace_created_target_times_match(
+    assert!(workspace_mutation_target_times_match(
         suite.workspace.path(),
         target,
         Some(window),
@@ -12829,7 +12882,7 @@ fn workspace_created_target_time_gate_rejects_a_pre_execution_mtime() -> EvalRes
     fs::File::open(suite.workspace.path().join(target))?
         .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
 
-    assert!(!workspace_created_target_times_match(
+    assert!(!workspace_mutation_target_times_match(
         suite.workspace.path(),
         target,
         Some(window),
@@ -12853,6 +12906,21 @@ fn workspace_mutation_identity_gate_rejects_changed_target_ownership() -> EvalRe
         actual,
         &suite.workspace_seed_entry_identities,
         &[target],
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn identity_gate_without_change_time_rejects_changed_ownership() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let expected = suite.workspace_seed_entry_identities[Path::new("")];
+    let mut actual = expected;
+    actual.group_id = expected.group_id.wrapping_add(1);
+
+    assert!(!filesystem_identity_matches_without_change_time(
+        Some(actual),
+        Some(expected),
     ));
     Ok(())
 }
@@ -13762,10 +13830,18 @@ fn forced_workspace_edit_fixture_exercises_replace_all() -> EvalResult {
         .find(|case| case.name == EDIT_FILE_NAME)
         .expect("the workspace edit fixture exists");
     let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let started = current_filesystem_recorded_time()?;
     fs::write(
         suite.workspace.path().join(WORKSPACE_SEED_PATH),
         WORKSPACE_EDITED_SEED,
     )?;
+    suite.executor.record_filesystem_execution_window(
+        EDIT_FILE_NAME,
+        FilesystemExecutionTimeWindow {
+            started,
+            finished: current_filesystem_recorded_time()?,
+        },
+    );
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "replacements": EXPECTED_WORKSPACE_EDIT_REPLACEMENTS,
@@ -13786,12 +13862,20 @@ fn forced_workspace_edit_verifier_accepts_atomic_parent_mtime_change() -> EvalRe
         .iter()
         .find(|case| case.name == EDIT_FILE_NAME)
         .expect("the workspace edit fixture exists");
+    let started = current_filesystem_recorded_time()?;
     fs::write(
         suite.workspace.path().join(WORKSPACE_SEED_PATH),
         WORKSPACE_EDITED_SEED,
     )?;
     fs::File::open(suite.workspace.path())?
         .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    suite.executor.record_filesystem_execution_window(
+        EDIT_FILE_NAME,
+        FilesystemExecutionTimeWindow {
+            started,
+            finished: current_filesystem_recorded_time()?,
+        },
+    );
     let result = serde_json::json!({
         "path": WORKSPACE_SEED_PATH,
         "replacements": EXPECTED_WORKSPACE_EDIT_REPLACEMENTS,
@@ -13801,6 +13885,37 @@ fn forced_workspace_edit_verifier_accepts_atomic_parent_mtime_change() -> EvalRe
     .to_string();
 
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_workspace_edit_verifier_rejects_a_pre_execution_target_mtime() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == EDIT_FILE_NAME)
+        .expect("the workspace edit fixture exists");
+    let target = suite.workspace.path().join(WORKSPACE_SEED_PATH);
+    let started = current_filesystem_recorded_time()?;
+    fs::write(&target, WORKSPACE_EDITED_SEED)?;
+    suite.executor.record_filesystem_execution_window(
+        EDIT_FILE_NAME,
+        FilesystemExecutionTimeWindow {
+            started,
+            finished: current_filesystem_recorded_time()?,
+        },
+    );
+    fs::File::open(target)?.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "replacements": EXPECTED_WORKSPACE_EDIT_REPLACEMENTS,
+        "bytes_written": EXPECTED_WORKSPACE_EDIT_BYTES,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
@@ -15372,7 +15487,7 @@ fn workspace_natural_state_rejects_a_collateral_directory() -> EvalResult {
 fn workspace_natural_state_accepts_the_private_answer_mode() -> EvalResult {
     let suite = FamilySuite::workspace()?;
     let answer = suite.workspace.path().join(WORKSPACE_ANSWER_PATH);
-    let started = SystemTime::now();
+    let started = current_filesystem_recorded_time()?;
     fs::write(&answer, WORKSPACE_ANSWER)?;
     fs::set_permissions(
         &answer,
@@ -15382,7 +15497,7 @@ fn workspace_natural_state_accepts_the_private_answer_mode() -> EvalResult {
         WRITE_FILE_NAME,
         FilesystemExecutionTimeWindow {
             started,
-            finished: SystemTime::now(),
+            finished: current_filesystem_recorded_time()?,
         },
     );
     let snapshot = successful_workspace_natural_snapshot();
