@@ -1,7 +1,9 @@
 # Persistence protocol
 
-The runner connection authority head, durable loss epoch, and lease-offer fence
-were verified against this PR (`agent/runner-loss-epoch`).
+The runner connection authority head and durable loss epoch were verified
+against the parent slice (`agent/runner-loss-epoch`). Placement-relative
+lease-offer fencing was verified against this PR
+(`agent/runner-loss-propagation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -319,6 +321,18 @@ Representation rules, all enforced in the schema:
   unimplemented functionality.** No present adapter installs those transitions;
   their dedicated orchestration transactions will install these same checked
   records, and direct snapshot storage cannot stand in for those transactions.
+- Migration `202608080104` records the connection-loss epoch observed when each
+  placement selects a known enrollment and carries that baseline through later
+  loss or abandonment records. The value is derived while holding scheduler,
+  enrollment, and connection/loss authority in the runner total order; callers
+  cannot supply it. Initial pin carries forward an exact-identity selection's
+  baseline, while a capability-class request records its first selected runner
+  at pin. A loss that wins after exact selection cannot be hidden by
+  reconnecting. Lease insertion compares its pinned placement with the
+  enrollment's latest loss and remains fenced across successor physical
+  connections until a checked replacement installs a fresh baseline. This is the
+  implemented not-yet-projected placement fence; bounded session propagation
+  remains the committed unimplemented transaction described below.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -599,7 +613,7 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Fourteen explicit lock statements
+`crates/persistence/src/lock_inventory.rs`. Twenty-one explicit lock statements
 live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
@@ -635,7 +649,14 @@ live in the schema instead:
   placement, and execution-loss relationship; and
 - the turn-attempt and tool-round before-insert guards in that migration share
   one `FOR UPDATE` helper that serializes new continuation evidence against the
-  same session scheduler before either immutable row becomes visible.
+  same session scheduler before either immutable row becomes visible; and
+- the lease-offer connection-loss fence in migration `202608080103` takes
+  `FOR SHARE` on the selected enrollment and connection authority head, then on
+  the optional current loss head when the connection is terminal; and
+- the placement-loss baseline trigger in migration `202608080104` takes
+  `FOR UPDATE` on the session scheduler, then `FOR SHARE` on the selected
+  enrollment, connection authority head, and optional current loss head before
+  deriving the immutable baseline and before the placement row becomes visible.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here

@@ -344,6 +344,21 @@ pub(crate) const RUNNER_PLACEMENT_HEAD: &str = "SELECT record.*
               WHERE current_placement.session_id = $1
               FOR UPDATE OF current_placement";
 
+pub(crate) const RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER: &str = "SELECT enrollment_id
+               FROM runner_enrollment
+              WHERE runner_id = $1
+              FOR SHARE";
+
+pub(crate) const RUNNER_PLACEMENT_CONNECTION_AUTHORITY: &str = "SELECT connection_epoch
+               FROM runner_connection_authority_head
+              WHERE enrollment_id = $1
+              FOR SHARE";
+
+pub(crate) const RUNNER_PLACEMENT_CURRENT_LOSS: &str = "SELECT loss_epoch
+               FROM runner_current_connection_loss
+              WHERE enrollment_id = $1
+              FOR SHARE";
+
 pub(crate) const RUNNER_RETRY_REPLACEMENT_SCHEDULER: &str = "SELECT session_id
                FROM session_scheduler
               WHERE session_id = $1

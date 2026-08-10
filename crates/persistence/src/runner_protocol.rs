@@ -43,7 +43,8 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, ty
 use crate::lock_inventory::{
     RUNNER_CONNECTION_LOSS_HEAD, RUNNER_ENROLLMENT, RUNNER_GRANT,
     RUNNER_LEASE_ENROLLMENT_AUTHORITY, RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD,
-    RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD, RUNNER_REGISTRATION_HEAD,
+    RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_CONNECTION_AUTHORITY, RUNNER_PLACEMENT_CURRENT_LOSS,
+    RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER, RUNNER_PLACEMENT_HEAD, RUNNER_REGISTRATION_HEAD,
     RUNNER_RETRY_REPLACEMENT_SCHEDULER,
 };
 use crate::mapping::{
@@ -1513,6 +1514,7 @@ impl RunnerProtocolStore {
         authority: PlacementProjectionAuthority,
     ) -> Result<(), RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
+        lock_runner_placement_loss_baseline(&mut transaction, placement).await?;
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(placement.session().into_uuid())
             .fetch_optional(&mut *transaction)
@@ -1703,6 +1705,7 @@ impl RunnerProtocolStore {
             ));
         }
         let mut transaction = self.pool.begin().await?;
+        lock_runner_placement_loss_baseline(&mut transaction, &pin.placement).await?;
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(pin.placement.session().into_uuid())
             .fetch_optional(&mut *transaction)
@@ -5800,6 +5803,56 @@ fn pinned_placement(state: &SessionRunnerPlacementState) -> Option<&PinnedRunner
             None
         }
     }
+}
+
+fn placement_loss_fence_runner(placement: &SessionRunnerPlacement) -> Option<RunnerId> {
+    match placement.state() {
+        SessionRunnerPlacementState::Unpinned => match &placement.request().selector {
+            RunnerSelector::Identity(runner) => Some(*runner),
+            RunnerSelector::CapabilityClass(_) => None,
+        },
+        SessionRunnerPlacementState::Pinned(pinned) => Some(pinned.runner),
+        SessionRunnerPlacementState::RunnerLostBeforePin(lost) => Some(lost.runner()),
+        SessionRunnerPlacementState::RunnerLost(lost) => Some(lost.pinned().runner),
+        SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(lost)) => {
+            Some(lost.runner())
+        }
+        SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(lost)) => {
+            Some(lost.pinned().runner)
+        }
+    }
+}
+
+async fn lock_runner_placement_loss_baseline(
+    transaction: &mut Transaction<'_, Postgres>,
+    placement: &SessionRunnerPlacement,
+) -> Result<(), RunnerProtocolStoreError> {
+    let scheduler = sqlx::query_scalar::<_, Uuid>(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
+        .bind(placement.session().into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    if scheduler.is_none() {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let Some(runner) = placement_loss_fence_runner(placement) else {
+        return Ok(());
+    };
+    let enrollment = sqlx::query_scalar::<_, Uuid>(RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER)
+        .bind(runner.into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    let Some(enrollment) = enrollment else {
+        return Ok(());
+    };
+    sqlx::query_scalar::<_, Decimal>(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
+        .bind(enrollment)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    sqlx::query_scalar::<_, Decimal>(RUNNER_PLACEMENT_CURRENT_LOSS)
+        .bind(enrollment)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    Ok(())
 }
 
 async fn prospective_placement_reconstitution_history(

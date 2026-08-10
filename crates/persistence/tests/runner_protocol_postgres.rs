@@ -27,10 +27,10 @@ use signalbox_domain::{
     RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
-    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState, SubmitInput, ToolAdmissibleLoci,
+    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
@@ -95,6 +95,7 @@ const LOCK_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
 const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608080102;
+const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608080103;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -3093,6 +3094,55 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
     assert_eq!(loaded.loss_epoch().get(), 1);
     assert_eq!(loaded.connection_epoch().get(), 1);
     assert_eq!(loaded.connection_event_ordinal(), 2);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: upgrading a pinned placement preserves its durable lease
+/// and records the latest migrated loss as the compatibility baseline.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_placement_loss_fence_migration_backfills_pinned_state()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
+        .await?;
+    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the pre-upgrade terminal connection owns a loss epoch");
+    migrate(&pool).await?;
+    let baseline: (Uuid, Decimal) = sqlx::query_as(
+        "SELECT loss_fence_enrollment_id, observed_runner_loss_epoch
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'pinned'",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let loaded = store
+        .load_lease(
+            pin.lease.correlation().lease,
+            pin.lease.correlation().generation,
+        )
+        .await?
+        .expect("the pre-upgrade lease remains durable");
+
+    assert_eq!(baseline.0, expected_enrollment.enrollment().into_uuid());
+    assert_eq!(baseline.1, Decimal::from(loss.loss_epoch().get()));
+    assert_eq!(loaded, pin.lease);
     drop(pool);
     Ok(())
 }
@@ -8794,21 +8844,6 @@ async fn s32_inv009_inv044_runner_recovery_serializes_with_placement_advance()
     store.insert_enrollment(&successor).await?;
     store.register(&successor, advertisement()).await?;
     store.open_connection(successor.enrollment()).await?;
-    let mut replacement = pool.begin().await?;
-    append_pre_pin_replacement_without_advancing_head(
-        &mut replacement,
-        session,
-        successor.runner(),
-    )
-    .await?;
-    sqlx::query(
-        "UPDATE runner_current_session_placement
-            SET event_ordinal = event_ordinal + 1
-          WHERE session_id = $1",
-    )
-    .bind(session.into_uuid())
-    .execute(&mut *replacement)
-    .await?;
     let mut recovery = pool.begin().await?;
     sqlx::query(
         "UPDATE turn_attempt
@@ -8838,17 +8873,39 @@ async fn s32_inv009_inv044_runner_recovery_serializes_with_placement_advance()
     sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
         .execute(&mut *recovery)
         .await?;
-    let mut replacement_commit = tokio::spawn(async move { replacement.commit().await });
-    let blocked = tokio::time::timeout(Duration::from_millis(100), &mut replacement_commit).await;
+    let replacement_pool = pool.clone();
+    let replacement_runner = successor.runner();
+    let replacement_commit = tokio::spawn(async move {
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, async {
+            let mut replacement = replacement_pool.begin().await?;
+            append_pre_pin_replacement_without_advancing_head(
+                &mut replacement,
+                session,
+                replacement_runner,
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE runner_current_session_placement
+                    SET event_ordinal = event_ordinal + 1
+                  WHERE session_id = $1",
+            )
+            .bind(session.into_uuid())
+            .execute(&mut *replacement)
+            .await?;
+            replacement.commit().await
+        })
+        .await
+    });
+    let blocked = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1))
+        .await
+        .expect("placement scheduler-lock observation must remain bounded")?;
 
-    assert!(
-        blocked.is_err(),
-        "placement commit must wait on the scheduler lock: {blocked:?}"
-    );
+    assert!(blocked, "placement advance must wait on the scheduler lock");
     recovery.commit().await?;
     let rejected = replacement_commit
         .await
         .expect("the replacement commit task remains joinable")
+        .expect("the replacement commit must finish within its task-owned timeout")
         .expect_err("the stale placement advance cannot commit after runner recovery");
     assert_check_violation(rejected);
     drop(pool);
@@ -14280,11 +14337,11 @@ async fn s32_inv044_loss_epoch_rejects_connected_source() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// INV-043 / INV-044: a terminal connection fences later lease offers, while
-/// an explicitly opened successor connection restores live offer authority.
+/// INV-043 / INV-044: a terminal connection fences the placement's later lease
+/// offers even after the enrollment opens a successor physical connection.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s31_inv043_inv044_loss_fences_lease_until_successor_connection()
+async fn s31_inv043_inv044_loss_fences_placement_across_successor_connection()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
@@ -14305,14 +14362,284 @@ async fn s31_inv043_inv044_loss_fences_lease_until_successor_connection()
     store
         .open_connection(expected_enrollment.enrollment())
         .await?;
-    store.store_lease(&lease).await?;
+    let reconnect_rejected = store
+        .store_lease(&lease)
+        .await
+        .expect_err("reconnect cannot erase the placement's observed loss fence");
     let loaded = store
         .load_lease(lease.correlation().lease, lease.correlation().generation)
-        .await?
-        .expect("the successor connection admits the prepared lease");
+        .await?;
 
     assert_store_check_violation(rejected);
-    assert_eq!(loaded, lease);
+    assert_store_check_violation(reconnect_rejected);
+    assert_eq!(loaded, None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: an exact runner selected before connection loss cannot
+/// be pinned after reconnect without an explicit placement replacement.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_exact_selection_loss_rejects_post_reconnect_pin()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let session = placement.session();
+    store.store_placement(&placement, None, None).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the domain pin retains the pre-loss exact selection");
+    let rejected = store
+        .store_pin(&pin, &registration)
+        .await
+        .expect_err("the adapter rejects a pin whose exact selection predates loss");
+    let loaded = store
+        .load_placement(session)
+        .await?
+        .expect("the unpinned selection remains current");
+
+    assert_store_check_violation(rejected);
+    assert_eq!(loaded.placement().request(), pin.placement.request());
+    assert_eq!(loaded.placement().revision(), pin.placement.revision());
+    assert_eq!(
+        loaded.placement().state(),
+        &SessionRunnerPlacementState::Unpinned
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: an exact selection created after reconnect observes the
+/// prior loss epoch and may pin on the live successor connection.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_post_reconnect_selection_pins_with_fresh_loss_baseline()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its durable loss epoch");
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let session = placement.session();
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the post-reconnect exact selection can be pinned");
+    store.store_pin(&pin, &registration).await?;
+    let baseline: (Uuid, Decimal) = sqlx::query_as(
+        "SELECT loss_fence_enrollment_id, observed_runner_loss_epoch
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'pinned'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let loaded = store
+        .load_lease(
+            pin.lease.correlation().lease,
+            pin.lease.correlation().generation,
+        )
+        .await?
+        .expect("the fresh-baseline lease is durable");
+
+    assert_eq!(baseline.0, expected_enrollment.enrollment().into_uuid());
+    assert_eq!(baseline.1, Decimal::from(loss.loss_epoch().get()));
+    assert_eq!(loaded, pin.lease);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-043 / INV-044: placement callers cannot forge the adapter-derived loss
+/// baseline, even when the supplied enrollment and epoch exist durably.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_inv044_placement_loss_baseline_rejects_caller_input()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the supplied fixture epoch exists durably");
+    let rejected = sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, directory_selection_kind,
+             workspace_requirement_kind, requested_sandbox_profile,
+             permission_override_count, state_kind, pinned_tool_count,
+             loss_fence_enrollment_id, observed_runner_loss_epoch)
+         VALUES ($1, 1, 1, 'created', 'identity', $2, 'runner_default',
+                 'none', 'ambient', 0, 'unpinned', 0, $3, $4)",
+    )
+    .bind(uuid(SESSION))
+    .bind(expected_enrollment.runner().into_uuid())
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .execute(&pool)
+    .await
+    .expect_err("placement input cannot supply its own observed loss baseline");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-043 / INV-044: placement pin takes the scheduler before
+/// runner authority, so a loss that commits while pin waits is rechecked and
+/// rejects the stale exact selection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s31_inv009_inv043_inv044_connection_loss_serializes_exact_selection_pin()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let session = placement.session();
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the exact selection prepares its initial pin");
+    let mut scheduler = pool.begin().await?;
+    sqlx::query(
+        "SELECT session_id
+           FROM session_scheduler
+          WHERE session_id = $1
+          FOR UPDATE",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&mut *scheduler)
+    .await?;
+    let mut pin_store = Box::pin(store.store_pin(&pin, &registration));
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut pin_store)
+        .await
+        .expect_err("pin waits at the scheduler before runner authority");
+    tokio::time::timeout(
+        LOCK_COMPLETION_TIMEOUT,
+        store.transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        ),
+    )
+    .await
+    .expect("connection loss does not wait behind the session scheduler")?;
+    scheduler.commit().await?;
+    let rejected = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, pin_store)
+        .await
+        .expect("pin resumes after the scheduler lock is released")
+        .expect_err("the resumed pin observes the committed loss baseline");
+    let loaded = store
+        .load_placement(session)
+        .await?
+        .expect("the exact selection remains unpinned after loss wins");
+    let lost_connection = store
+        .load_connection(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection remains the durable head");
+
+    assert_eq!(lost_connection.state(), RunnerConnectionState::Lost);
+    assert_store_check_violation(rejected);
+    assert_eq!(
+        loaded.placement().state(),
+        &SessionRunnerPlacementState::Unpinned
+    );
     drop(pool);
     Ok(())
 }
