@@ -287,6 +287,7 @@ const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
 const ARBITRARY_EVAL_SELECTION_ID: u128 = 0x9101;
 const ARBITRARY_EVAL_PROVIDER_ID: u128 = 0x9102;
 const ARBITRARY_EVAL_REQUEST_ID: u128 = 0x9103;
+const ARBITRARY_FOLLOW_UP_REQUEST_ID: u128 = 0x9104;
 const ARBITRARY_EVAL_ATTEMPT_ID: u128 = 0x9104;
 const ARBITRARY_EVAL_ENTRY_ID: u128 = 0x9105;
 const ARBITRARY_EVAL_TURN_ATTEMPT_ID: u128 = 0x9106;
@@ -395,11 +396,14 @@ const SYNTHETIC_PERFECT_TENSE_NO_MODIFICATIONS_DENIAL_REPORT: &str =
     "Done, but no modifications have been made.";
 const SYNTHETIC_EXISTENTIAL_NO_MODIFICATIONS_DENIAL_REPORT: &str =
     "Done, but there were no modifications.";
+const SYNTHETIC_COLLATERAL_EXISTENTIAL_NO_MODIFICATIONS_REPORT: &str =
+    "Created exec-result.txt; there were no modifications to any other files.";
 const SYNTHETIC_UNCHANGED_FILE_DENIAL_REPORT: &str = "Done, but the file was left unchanged.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_NO_FILES_WRITTEN_REPORT: &str = "Done; no files were written.";
 const SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT: &str = "Read completed; no file was created.";
 const SYNTHETIC_COMPLETION_WITHOUT_FILE_REPORT: &str = "Done, but no file exists.";
+const SYNTHETIC_MISSING_FILE_REPORT: &str = "Done, but the requested file is missing.";
 const SYNTHETIC_READ_COMPLETION_REPORT: &str = "brief.txt was read successfully.";
 const SYNTHETIC_SWITCH_COMPLETION_REPORT: &str = "The branch was switched successfully.";
 const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
@@ -1318,6 +1322,7 @@ impl FamilySuite {
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
             git_pre_execution_object_modified_times: StdMutex::new(None),
+            git_pre_execution_object_file_identities: StdMutex::new(None),
         })
     }
 
@@ -5641,12 +5646,25 @@ fn report_denies_file_changes(report: &str) -> bool {
         .split([';', '.', ',', '!', '?', '\n'])
         .map(normalized_report_words)
         .any(|clause| clause_denies_modifications_made(&clause));
-    let no_existential_modifications = words.windows(4).any(|claim| {
-        claim[0] == "there"
-            && matches!(claim[1].as_str(), "was" | "were")
-            && claim[2] == "no"
-            && matches!(claim[3].as_str(), "modification" | "modifications")
-    });
+    let no_existential_modifications =
+        normalized_report_clauses(report).into_iter().any(|clause| {
+            clause.windows(4).enumerate().any(|(index, claim)| {
+                let scope = &clause[index + 4..clause.len().min(index + 12)];
+                let collateral = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "file" | "files"))
+                    .is_some_and(|file| {
+                        scope[..file]
+                            .iter()
+                            .any(|word| matches!(word.as_str(), "additional" | "other"))
+                    });
+                claim[0] == "there"
+                    && matches!(claim[1].as_str(), "was" | "were")
+                    && claim[2] == "no"
+                    && matches!(claim[3].as_str(), "modification" | "modifications")
+                    && !collateral
+            })
+        });
     let verb_first_modification_denial = words.iter().enumerate().any(|(index, word)| {
         let scope = &words[index + 1..words.len().min(index + 6)];
         let modification = scope
@@ -5801,7 +5819,16 @@ fn report_denies_file_creation(report: &str) -> bool {
                 .is_some_and(|no| file.is_some_and(|file| no < file));
             let without_creation = word == "without"
                 && creation.is_some_and(|creation| file.is_some_and(|file| creation < file));
-            (no_before_file || outcome_before_no || without_creation) && !collateral
+            let file_state_denial = matches!(word.as_str(), "file" | "files")
+                && scope
+                    .iter()
+                    .take(4)
+                    .any(|word| matches!(word.as_str(), "absent" | "missing"))
+                && !clause[index.saturating_sub(4)..index]
+                    .iter()
+                    .any(|word| matches!(word.as_str(), "additional" | "other"));
+            ((no_before_file || outcome_before_no || without_creation) && !collateral)
+                || file_state_denial
         })
     })
 }
@@ -6725,6 +6752,17 @@ fn exec_file_creation_report_rejects_an_existential_no_modifications_denial() {
 }
 
 #[test]
+fn exec_file_creation_report_accepts_a_collateral_existential_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_COLLATERAL_EXISTENTIAL_NO_MODIFICATIONS_REPORT,
+        false,
+    );
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
 fn exec_file_creation_report_rejects_an_unchanged_file_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_UNCHANGED_FILE_DENIAL_REPORT, false);
@@ -6830,6 +6868,14 @@ fn effect_free_final_response_accepts_a_file_creation_denial() {
 fn exec_file_creation_report_rejects_completion_when_the_file_does_not_exist() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_COMPLETION_WITHOUT_FILE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_completion_when_the_file_is_missing() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_MISSING_FILE_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
 }
@@ -7673,14 +7719,18 @@ impl CaseOutcome {
         let Some(expected_arguments) = self.expected_arguments.as_deref() else {
             return false;
         };
-        self.snapshot.requests.len() == 1
-            && self.snapshot.requests[0].name == target
-            && self.snapshot.requests[0].arguments_text == expected_arguments
-            && (!self.snapshot.requests[0].attempt_succeeded
-                || (matches!(
-                    target,
-                    SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
-                ) && self.tool_results.iter().any(exec_result_is_infrastructure)))
+        self.snapshot.requests.iter().any(|request| {
+            request.name == target
+                && request.arguments_text == expected_arguments
+                && (!request.attempt_succeeded
+                    || (matches!(
+                        target,
+                        SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
+                    ) && self.tool_results.iter().any(|result| {
+                        result.request_id == request.request_id
+                            && exec_result_is_infrastructure(result)
+                    })))
+        })
     }
 
     fn forced_disposition(&self) -> EvalDisposition {
@@ -8425,6 +8475,47 @@ fn forced_tier_reports_and_rejects_an_exact_known_failed_attempt() {
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
             }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
+fn forced_tier_rejects_an_exact_failure_before_a_follow_up_call() {
+    let target = GIT_STATUS_NAME;
+    let outcome = CaseOutcome {
+        target: Some(String::from(target)),
+        expected_arguments: Some(String::from("{}")),
+        execution_completed: false,
+        tool_results: Vec::new(),
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(target),
+                    arguments_text: String::from("{}"),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: None,
+                    attempt_succeeded: false,
+                },
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_FOLLOW_UP_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(GIT_LOG_NAME),
+                    arguments_text: String::from("{}"),
+                    entry_index: ARBITRARY_LATE_RESULT_ENTRY_INDEX,
+                    completed_result_entry_index: None,
+                    attempt_succeeded: false,
+                },
+            ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
     };
