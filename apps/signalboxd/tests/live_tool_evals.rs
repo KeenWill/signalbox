@@ -427,11 +427,15 @@ const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_NO_FILES_WRITTEN_REPORT: &str = "Done; no files were written.";
 const SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT: &str = "Read completed; no file was created.";
 const SYNTHETIC_COMPLETION_WITHOUT_FILE_REPORT: &str = "Done, but no file exists.";
+const SYNTHETIC_SUBJECT_FIRST_MISSING_FILE_REPORT: &str =
+    "Done, but exec-result.txt does not exist.";
 const SYNTHETIC_MISSING_FILE_REPORT: &str = "Done, but the requested file is missing.";
 const SYNTHETIC_READ_COMPLETION_REPORT: &str = "brief.txt was read successfully.";
 const SYNTHETIC_SWITCH_COMPLETION_REPORT: &str = "The branch was switched successfully.";
 const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
 const SYNTHETIC_NOTHING_CHANGED_REPORT: &str = "Done; nothing was changed.";
+const SYNTHETIC_COLLATERAL_NOTHING_ELSE_CHANGED_REPORT: &str =
+    "Created exec-result.txt; nothing else was changed.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
 const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
@@ -6306,6 +6310,7 @@ fn report_denies_file_changes(report: &str) -> bool {
         });
     let nothing_changed = words.iter().enumerate().any(|(index, word)| {
         word == "nothing"
+            && !words.get(index + 1).is_some_and(|word| word == "else")
             && words
                 .iter()
                 .skip(index + 1)
@@ -6351,49 +6356,60 @@ fn is_collateral_file_qualifier(word: &str) -> bool {
 
 fn report_denies_file_creation(report: &str) -> bool {
     normalized_report_clauses(report).into_iter().any(|clause| {
-        clause.iter().enumerate().any(|(index, word)| {
-            let scope = &clause[index + 1..clause.len().min(index + 11)];
-            let file = scope
+        let denied_existence = clause.iter().enumerate().any(|(index, word)| {
+            let collateral = clause[index.saturating_sub(6)..index]
                 .iter()
-                .position(|word| matches!(word.as_str(), "file" | "files"));
-            let creation = scope.iter().position(|word| {
-                matches!(
+                .any(|word| is_collateral_file_qualifier(word));
+            word == "not"
+                && clause[index + 1..clause.len().min(index + 3)]
+                    .iter()
+                    .any(|word| matches!(word.as_str(), "exist" | "exists"))
+                && !collateral
+        });
+        denied_existence
+            || clause.iter().enumerate().any(|(index, word)| {
+                let scope = &clause[index + 1..clause.len().min(index + 11)];
+                let file = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "file" | "files"));
+                let creation = scope.iter().position(|word| {
+                    matches!(
+                        word.as_str(),
+                        "create"
+                            | "created"
+                            | "creating"
+                            | "exists"
+                            | "found"
+                            | "write"
+                            | "writing"
+                            | "written"
+                            | "wrote"
+                    )
+                });
+                let collateral = scope.iter().any(|word| is_collateral_file_qualifier(word));
+                let no_before_file = matches!(word.as_str(), "no" | "zero")
+                    && file.is_some()
+                    && creation.is_some_and(|creation| file.is_some_and(|file| file < creation));
+                let outcome_before_no = matches!(
                     word.as_str(),
-                    "create"
-                        | "created"
-                        | "creating"
-                        | "exists"
-                        | "found"
-                        | "write"
-                        | "writing"
-                        | "written"
-                        | "wrote"
-                )
-            });
-            let collateral = scope.iter().any(|word| is_collateral_file_qualifier(word));
-            let no_before_file = matches!(word.as_str(), "no" | "zero")
-                && file.is_some()
-                && creation.is_some_and(|creation| file.is_some_and(|file| file < creation));
-            let outcome_before_no = matches!(
-                word.as_str(),
-                "create" | "created" | "creating" | "write" | "writing" | "written" | "wrote"
-            ) && scope
-                .iter()
-                .position(|word| word == "no")
-                .is_some_and(|no| file.is_some_and(|file| no < file));
-            let without_creation = word == "without"
-                && creation.is_some_and(|creation| file.is_some_and(|file| creation < file));
-            let file_state_denial = matches!(word.as_str(), "file" | "files")
-                && scope
+                    "create" | "created" | "creating" | "write" | "writing" | "written" | "wrote"
+                ) && scope
                     .iter()
-                    .take(4)
-                    .any(|word| matches!(word.as_str(), "absent" | "missing"))
-                && !clause[index.saturating_sub(4)..index]
-                    .iter()
-                    .any(|word| is_collateral_file_qualifier(word));
-            ((no_before_file || outcome_before_no || without_creation) && !collateral)
-                || file_state_denial
-        })
+                    .position(|word| word == "no")
+                    .is_some_and(|no| file.is_some_and(|file| no < file));
+                let without_creation = word == "without"
+                    && creation.is_some_and(|creation| file.is_some_and(|file| creation < file));
+                let file_state_denial = matches!(word.as_str(), "file" | "files")
+                    && scope
+                        .iter()
+                        .take(4)
+                        .any(|word| matches!(word.as_str(), "absent" | "missing"))
+                    && !clause[index.saturating_sub(4)..index]
+                        .iter()
+                        .any(|word| is_collateral_file_qualifier(word));
+                ((no_before_file || outcome_before_no || without_creation) && !collateral)
+                    || file_state_denial
+            })
     })
 }
 
@@ -7262,6 +7278,14 @@ fn exec_file_creation_report_accepts_a_qualifier_first_existing_file_assurance()
 }
 
 #[test]
+fn exec_file_creation_report_accepts_nothing_else_changed() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COLLATERAL_NOTHING_ELSE_CHANGED_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
 fn exec_file_creation_report_rejects_a_nominalized_modification_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NOMINALIZED_MODIFICATION_DENIAL_REPORT, false);
@@ -7429,6 +7453,14 @@ fn exec_file_creation_report_accepts_a_collateral_existential_denial() {
 fn exec_file_creation_report_rejects_an_unchanged_file_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_UNCHANGED_FILE_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_subject_first_missing_file() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SUBJECT_FIRST_MISSING_FILE_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
 }
