@@ -240,6 +240,53 @@ strings appear only as retained detail inside already-classified variants:
   terminal marker, stream protocol violation) and the partial facts observed
   before the loss.
 
+**Committed unimplemented functionality — provider non-acceptance evidence.** No
+present `TerminalEvidence` variant or `ProviderErrorEvidence` field proves that
+a provider rejected a request before accepting it, and no current adapter can
+authorize an availability successor. This proof is what separates the
+`successor` and `terminal` endings of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine);
+this page owns the evidence algebra that carries it. The implementing child must
+add a sealed typed proof alongside `ProviderError` for the exact
+quota-exhausted, rate-limited, and overloaded provider responses whose protocol
+semantics establish non-acceptance. Each adapter owns its exhaustive native
+mapping; the provider bridge preserves the proof without deriving it from
+`ProviderErrorKind`, status retryability, or native prose. Classification alone
+remains insufficient, and absence of the proof keeps the known failure terminal.
+This constraint adds no proof to the implemented evidence vocabulary above.
+
+The admitting condition is fixed here rather than left to that child, because
+the two readings differ in whether another provider call happens. A proof is
+admitted only when the adapter decoded its own documented error envelope and the
+decoded native token names one of the three causes in that adapter's exhaustive
+mapping — `rate_limit_error` or `overloaded_error` for Anthropic, and
+`rate_limit_exceeded`, `rate_limit_error`, or `insufficient_quota` for OpenAI.
+Every status-derived fallback carries no proof: a response whose body is absent,
+undecodable, or names a token the mapping does not cover keeps its
+status-classified kind and stays an ordinary terminal known failure. A native
+token that contradicts its status carries none either, and the existing
+credential-rejection precedence over a contradictory body is unchanged.
+
+The proof is further restricted to an error *response* — an error-status
+exchange whose body is that documented envelope, decoded before any stream
+began. An SSE error record never carries it, whatever native token it holds.
+Mid-stream and post-finish error records remain definitive `ProviderError`
+evidence exactly as specified below, but by the time one arrives the provider
+has demonstrably accepted the request and begun processing it: `message_start`,
+content, reported usage, or a finish token is already observed. Non-acceptance
+is precisely what such an exchange disproves, so attaching the proof there would
+authorize a second paid call for work the provider already did. An availability
+failure that arrives mid-stream therefore terminalizes the turn as any other
+known failure does, with no successor. Neither CLI adapter can supply the proof
+at all: each classifies from the rendered failure message by substring, which is
+exactly the native prose this contract already refuses as a derivation, and
+neither surfaces a structured native code its mapping could name. Admitting one
+under a CLI would need that CLI to expose a stable machine-readable
+discriminator first. The asymmetry is deliberate. An under-decoded rejection
+loses a substitution the deployment had configured, which costs one turn; a
+status-only or prose-derived inference that the provider did not act would
+authorize a second paid call on evidence the provider never gave.
+
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss
 in both direct HTTP adapters, never silently completed. A finish reason observed
@@ -670,6 +717,37 @@ unavailable; a descendant that deliberately leaves that group is outside the
 adapter's boundary. Host isolation owns containment beyond the created group —
 specifically the runner sandbox in build-out — and is not an adapter claim.
 
+**Committed unimplemented functionality — Codex file delivery.** The present
+adapter supports only its ambient credential home and keeps `OPENAI_API_KEY` and
+every other direct credential value outside the cleared child environment. The
+configuration grammar admits `file`, but the present composition rejects it as
+undelivered. Its implementing child must resolve the selected profile during
+preparation. The adapter admits only the exact `OPENAI_API_KEY` `env_key`; every
+forwarded or process-control name is invalid configuration. It adds the selected
+value as an operation-scoped child override after clearing the parent
+environment. The value must be absent from argv, logs, debug output, retained
+evidence, and every later spawn, and must seed the adapter's exact-value
+redaction before any provider-controlled output leaves the crate. This future
+override does not weaken ambient mode's existing exclusion test.
+
+**Committed unimplemented functionality — Codex OAuth redaction.** OAuth
+delivery gives the adapter a daemon-minted access token, the identity token
+issued with it, and the account metadata in a scratch credential home rather
+than through the child environment. Before anything is written or the child
+starts, its implementing slice must seed the exact-value redaction boundary with
+every value that
+[the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery)
+requires the redactor to be seeded with. That contract decides *which* values
+those are and why; this page owns *how* the adapter installs and applies the
+scrub. Each such value is seeded both as the raw token and as the JSON string
+representations whose escapes decode to that same token, because the adapter is
+the layer that sees both forms. Possible token prefixes are retained across
+stdout and stderr chunks, and all child-controlled text passes through that
+scrub before JSON decoding, truncation, debug rendering, observations, or
+durable evidence. Ambient-mode shape redaction remains defense in depth; it
+cannot replace exact-value redaction when preparation knows the token. Failure
+to install the scrub is a typed pre-spawn delivery failure.
+
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.
 The first `thread.started` establishes the exchange and its thread id becomes
@@ -1035,10 +1113,12 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   signal so a blocked read cannot hold a cancelled operation. Failures are
   reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
   secret bytes.
-- The production implementation is signalboxd's `FileCredentialAccess`: each
-  resolve rereads the key file named by `ANTHROPIC_API_KEY_FILE` or
-  `OPENAI_API_KEY_FILE` and feeds the production `AnthropicRuntime` or
-  `OpenAiRuntime`.
+- The production implementation is signalboxd's `FileCredentialAccess`. The
+  present pre-pool composition maps singleton provider environment paths. The
+  committed credential-pool child instead supplies the complete map of every
+  `file` profile reference to its catalog path, whatever direct HTTP adapter
+  consumes it. Each resolve rereads the mapped file and feeds the selected
+  runtime. No present composition implements that replacement.
 - The resolved value is scoped to the one prepared request as a
   sensitivity-marked HTTP header; execute performs no second lookup.
 - Provider-controlled text is credential-sanitized before leaving the adapter:
@@ -1049,7 +1129,11 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   a held-back trailing credential prefix so a secret split across provider
   chunks can never be emitted piecewise; when ordering forces a held prefix out,
   it is replaced with `[redacted]`. Why: fail closed — a possible secret prefix
-  is destroyed rather than delivered.
+  is destroyed rather than delivered. The guarantee is bounded to exactly these
+  representations — the exact value, its JSON-string-escaped form, and
+  chunk-split prefixes of it; a reflection the provider re-encodes in any other
+  form (base64, say) passes through unscrubbed, because no path here decodes one
+  before matching.
 - The Codex CLI adapter accepts only the configured non-secret
   `CredentialReference` and delegates resolution to the CLI's ambient
   subscription login on every fresh spawn. It never locates, reads, copies,
