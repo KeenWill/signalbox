@@ -823,10 +823,3 @@ BEGIN
     END IF;
 END;
 $function$;
-
-CREATE INDEX runner_credential_grant_policy_placement_idx
-    ON runner_credential_grant (
-        session_id,
-        lineage_origin_event_ordinal,
-        placement_event_ordinal DESC
-    );
