@@ -9488,6 +9488,55 @@ async fn s32_inv002_inv044_load_rejects_pre_pin_abandonment_without_loss_predece
     Ok(())
 }
 
+/// INV-002 / INV-044: pre-pin abandonment retains the complete authenticated
+/// lineage beneath its immediately preceding loss record.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv044_pre_pin_abandonment_requires_complete_loss_history()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    append_abandoned_projection(&pool, placement.session(), None).await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER runner_session_placement_record_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'created'",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         ENABLE TRIGGER runner_session_placement_record_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(placement.session())
+        .await
+        .expect_err("pre-pin abandonment cannot hide a missing placement origin");
+
+    assert_store_corruption(
+        corrupted,
+        RunnerProtocolCorruption::MissingCanonicalPlacement,
+    );
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_abandoned_pinned_placement_round_trips_retained_authority()
@@ -9581,6 +9630,48 @@ async fn s32_inv002_inv044_load_rejects_pinned_abandonment_with_cross_wired_regi
         .expect_err("pinned abandonment requires its loss registration snapshot");
 
     assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-002 / INV-044: pinned abandonment retains the complete authenticated
+/// lineage beneath its immediately preceding loss record.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv044_pinned_abandonment_requires_complete_loss_history()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    append_runner_lost_projection(&pool, pin.placement.session()).await?;
+    append_abandoned_projection(&pool, pin.placement.session(), None).await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER runner_session_placement_record_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'created'",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         ENABLE TRIGGER runner_session_placement_record_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(pin.placement.session())
+        .await
+        .expect_err("pinned abandonment cannot hide a missing placement origin");
+
+    assert_store_corruption(
+        corrupted,
+        RunnerProtocolCorruption::MissingCanonicalPlacement,
+    );
     drop(pool);
     Ok(())
 }
@@ -9907,6 +9998,95 @@ async fn s32_inv002_inv044_lost_pre_pin_successor_requires_complete_history()
         corrupted,
         RunnerProtocolCorruption::MissingCanonicalPlacement,
     );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-002 / INV-044: every historical pin reconstitutes against its own
+/// canonical validated registration rather than only the current successor's.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv044_runner_replacement_authenticates_historical_pin_registration()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let first_enrollment = enrollment();
+    store.insert_enrollment(&first_enrollment).await?;
+    let first_registration = store.register(&first_enrollment, advertisement()).await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(first_enrollment.runner()),
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &first_enrollment,
+            first_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the exact fixture directory is valid"),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the first registration pins the exact placement");
+    store.store_pin(&pin, &first_registration).await?;
+    let lost = pin
+        .placement
+        .mark_runner_lost()
+        .expect("the first pinned runner may be marked lost");
+    append_runner_lost_projection(&pool, lost.session()).await?;
+    let successor_enrollment = replacement_enrollment();
+    store.insert_enrollment(&successor_enrollment).await?;
+    let successor_registration = store
+        .register(&successor_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(successor_enrollment.enrollment())
+        .await?;
+    let replacement = lost
+        .replace_lost_runner(
+            exact_runner_request(successor_enrollment.runner()),
+            successor_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the exact successor directory is valid"),
+            None,
+            None,
+        )
+        .expect("the live successor replaces the lost exact placement");
+    store
+        .store_runner_replacement_projection_for_test(
+            &replacement.placement,
+            &successor_registration,
+            None,
+        )
+        .await?;
+    sqlx::query("ALTER TABLE runner_registration_tool DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_registration_tool
+            SET model_input_schema = $4
+          WHERE enrollment_id = $1
+            AND registration_revision = $2
+            AND tool_name = $3",
+    )
+    .bind(first_enrollment.enrollment().into_uuid())
+    .bind(Decimal::from(first_registration.revision().get()))
+    .bind(tool("inspect").as_str())
+    .bind(r#"{"different":0}"#)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_registration_tool ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let corrupted = store
+        .load_placement(replacement.placement.session())
+        .await
+        .expect_err("a successor cannot hide a noncanonical historical registration");
+
+    assert_store_domain_error(corrupted, RunnerDomainError::CorruptStoredFacts);
     drop(pool);
     Ok(())
 }
