@@ -2704,13 +2704,18 @@ storage — no present migration, repository operation, or reconstitution path
 supplies them — so a wire slice cannot project them until that storage child
 lands, and must then add a version-one shape together with its daemon and client
 consumers. That future slice must project a wait as an active state retaining
-the same turn and session slot, and must expose a completed successor chain
-without requiring a client to infer it from usage-row order. The
-runtime-and-storage child that first makes either wait reachable must include
-this coordinated wire slice; admitting `park` in static configuration alone does
-not make the state reachable. Until then, transcript snapshots continue to
-expose the existing per-call usage rows and final turn state only; no current
-client-visible claim is made for the committed storage evidence.
+the same turn and session slot. It commits nothing about a client-visible
+successor relation: whether the predecessor, cause, and successor chain are
+exposed, and how, is the open question at
+[model fallback and provenance](../open-questions.md#model-fallback-and-provenance),
+and this section states the wait compatibility constraint only. Requiring the
+chain here would close that question by implication rather than by the explicit
+decision that closing it requires. The runtime-and-storage child that first
+makes either wait reachable must include this coordinated wire slice; admitting
+`park` in static configuration alone does not make the state reachable. Until
+then, transcript snapshots continue to expose the existing per-call usage rows
+and final turn state only; no current client-visible claim is made for the
+committed storage evidence.
 
 ## Open edges
 

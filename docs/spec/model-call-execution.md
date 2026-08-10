@@ -704,9 +704,12 @@ member item carries the profile reference, the one closed exclusion kind
 `chain_exclusion`), its durable record generation or predecessor-observation
 correlation, and its optional reset. A member covered by several at once selects
 one kind by the widest-scope-first precedence, and reports a reset only when
-every exclusion then active for it reported one, exactly as
+every exclusion then active for it is of a kind that *expires* at the reset it
+reports — and then the latest of them — exactly as
 [process protocol](process-protocol.md#credential-pool-preparation-failure)
-requires. It carries no provider prose or credential value. The guarded
+requires. Reporting a reset is not sufficient, because a displacement or a
+quarantine can carry one while clearing only by another preparation or an
+operator command. It carries no provider prose or credential value. The guarded
 transition requires an active turn whose current attempt has no model call, ends
 that attempt `KnownFailure`, terminalizes the turn `Failed`, appends the
 ordinary `TurnFailed { turn }` marker to that attempt's source frontier, and

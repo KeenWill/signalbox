@@ -1808,12 +1808,20 @@ profile's durable action head `FOR UPDATE` — after its session scheduler lock,
 before any bounded-profile capacity row or policy cursor row, and in
 profile-reference byte order when it touches more than one — and rereads the
 current generation under that lock. The first commit mints the generation. A
-later commit for an exclusion already active at the same scope records its own
-observation correlation against that existing generation and mints no second
-one, so a repeated trigger is idempotent on the exclusion and can never make a
-uniqueness conflict block the terminal observation that requires it. An operator
-clear takes the same lock, which is what lets a clear and a concurrent
-re-observation agree on which generation is current.
+later commit for an exclusion already active at the same scope **and of the same
+origin** records its own observation correlation against that existing
+generation and mints no second one, so a repeated trigger is idempotent on the
+exclusion and can never make a uniqueness conflict block the terminal
+observation that requires it. Origin is part of the coalescing key because the
+clear protocol decides administrability from it — a policy-origin quarantine is
+clearable by operator command while an OAuth delivery-origin one requires
+re-provisioning
+([credential-exclusion administration](process-protocol.md#credential-exclusion-administration)).
+Coalescing across origins would produce one generation with two contradictory
+answers, so a delivery-origin failure against a profile already carrying an
+active policy-origin generation mints its own, and the two are cleared, and
+reported, separately. An operator clear takes the same lock, which is what lets
+a clear and a concurrent re-observation agree on which generation is current.
 
 Attaching a correlation also accumulates its reset evidence, because a
 reset-aware exclusion clears itself when its reported reset passes and a
