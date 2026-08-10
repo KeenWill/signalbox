@@ -1465,10 +1465,15 @@ impl RunnerProtocolStore {
                 .ok_or(RunnerProtocolStoreError::Domain(
                     RunnerDomainError::InvalidState,
                 ))?;
-                if connection.state() != RunnerConnectionState::Connected {
-                    return Err(RunnerProtocolStoreError::Domain(
-                        RunnerDomainError::InvalidState,
-                    ));
+                match connection.state() {
+                    RunnerConnectionState::Connected => {}
+                    RunnerConnectionState::Suspect
+                    | RunnerConnectionState::Shutdown
+                    | RunnerConnectionState::Lost => {
+                        return Err(RunnerProtocolStoreError::Domain(
+                            RunnerDomainError::InvalidState,
+                        ));
+                    }
                 }
             }
             let current: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
@@ -3641,7 +3646,7 @@ async fn decode_placement(
         SessionRunnerPlacementState::Unpinned
     } else if state_kind == "runner_lost_before_pin" {
         let runner = lost_runner.ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-        if loss_source.is_some() || placement_row_has_pinned_facts(row)? {
+        if placement_row_has_invalid_pre_pin_loss_facts(row)? {
             return Err(RunnerProtocolCorruption::InvalidEncoding.into());
         }
         SessionRunnerPlacementState::RunnerLostBeforePin(RunnerLostBeforePin::from_stored(runner))
@@ -3651,7 +3656,7 @@ async fn decode_placement(
             .is_none()
     {
         let runner = lost_runner.ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-        if loss_source.is_some() || placement_row_has_pinned_facts(row)? {
+        if placement_row_has_invalid_pre_pin_loss_facts(row)? {
             return Err(RunnerProtocolCorruption::InvalidEncoding.into());
         }
         SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(
@@ -3809,6 +3814,15 @@ fn placement_row_has_pinned_facts(row: &PgRow) -> Result<bool, RunnerProtocolSto
             .is_some())
 }
 
+fn placement_row_has_invalid_pre_pin_loss_facts(
+    row: &PgRow,
+) -> Result<bool, RunnerProtocolStoreError> {
+    Ok(row
+        .decode_column::<Option<String>>("loss_source_kind")?
+        .is_some()
+        || placement_row_has_pinned_facts(row)?)
+}
+
 async fn decode_placement_request(
     connection: &mut PgConnection,
     row: &PgRow,
@@ -3869,6 +3883,9 @@ async fn load_placement_reconstitution_history(
     if predecessor_kind != "runner_lost_before_pin" || predecessor_state != "runner_lost_before_pin"
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    if placement_row_has_invalid_pre_pin_loss_facts(&predecessor)? {
+        return Err(RunnerProtocolCorruption::InvalidEncoding.into());
     }
     let prior_revision = decode_generation(predecessor.decode_column("placement_revision")?)?;
     let lost_runner = predecessor
