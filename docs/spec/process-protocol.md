@@ -1,8 +1,8 @@
 # Process protocol
 
 The typed runner-state session event, daemon outbox projection, and
-authoritative transcript-snapshot runner projection were verified against this
-PR (`agent/runner-event-outbox-persistence`).
+authoritative session-summary and transcript-snapshot runner projections were
+verified against this PR (`agent/runner-event-outbox-persistence`).
 
 The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
@@ -986,12 +986,11 @@ In the server shapes below, notation such as `queued` or
 `"type":"terminal"` plus exactly the named members.
 
 A session summary contains `session_id`, `defaults_version`, `model_selection`,
-positive `placement_version`, and the complete current session `placement`.
-Every proposed runner-aware native-session listing projection adds the same
-required `runner` member, either null or a complete object carrying selector,
-the current or lost exact runner id when the state names one, placement
-revision, sandbox profile, credential-profile name, repository key, working
-directory, and state (`unpinned`, `pinned`, `runner_lost_before_pin`,
+positive `placement_version`, the complete current session `placement`, and a
+required `runner` member. The runner member is either null or a complete object
+carrying selector, the current or lost exact runner id when the state names one,
+placement revision, sandbox profile, credential-profile name, repository key,
+working directory, and state (`unpinned`, `pinned`, `runner_lost_before_pin`,
 `runner_lost`, or `runner_abandoned`). The credential-profile name, repository
 key, and working directory are each present or JSON null independently, because
 the composition axes they project are independent
