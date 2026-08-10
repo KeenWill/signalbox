@@ -148,6 +148,13 @@ REFUSED_VOLUME_LISTING = "Error response from daemon: volume listing is denied"
 
 REFUSED_CONTAINER_LISTING = "Error response from daemon: listing is denied by policy"
 
+# A SIGKILL leaves no trap to cancel the deadline, so the deadline outlives the
+# sweep and must decline to signal: by the time it wakes, the identifiers it
+# holds may belong to somebody else. The abandoned call therefore finishes, and
+# the next sweep reclaims what it left. Seeing it reaped would mean the deadline
+# signalled on behalf of a process that no longer existed.
+DECLINED_TO_SIGNAL = "the orphaned deadline signalled a group it could not still own"
+
 # Well above any run this suite asks for and well below the CI job's own
 # timeout: a sweep that stopped bounding its daemon calls would otherwise hang
 # the whole job for twenty minutes instead of failing here in a minute.
@@ -202,11 +209,18 @@ def container_start_sites() -> tuple[list[str], list[str]]:
             continue
         lines = text.splitlines()
         awaited = r"\.start\(\)\s*\.await"
-        universal = r"\b(?:Async|Sync)Runner::start\s*\("
         # A synchronous runner would call `.start()` without awaiting it, so
         # in a file that reaches for one every `.start()` counts. No file does
         # today; the alternative is a start form this scan cannot see.
         method = r"\.start\(\)" if "SyncRunner" in text else awaited
+        # Whatever the runner trait is called at this use site. An import may
+        # rename it, and `<Image as AsyncRunner>::start` qualifies it, so the
+        # spellings are collected from the file rather than assumed.
+        runners = {"(?:Async|Sync)Runner"} | {
+            re.escape(alias)
+            for alias in re.findall(r"\b(?:Async|Sync)Runner\s+as\s+(\w+)", text)
+        }
+        universal = r"\b(?:" + "|".join(sorted(runners)) + r")\s*>?\s*::\s*start\s*\("
         for found in re.finditer(f"{method}|{universal}", text):
             number = text.count("\n", 0, found.start()) + 1
             sites.append(f"{name}:{number}")
@@ -448,7 +462,7 @@ class SweepTestContainersTest(unittest.TestCase):
     def test_the_script_and_the_harness_agree_on_the_age_bound(self) -> None:
         script = SWEEP.read_text()
 
-        self.assertIn(f"\nolder_than_hours={DISPOSABLE_LIFETIME_HOURS}\n", script)
+        self.assertIn(f"\nreadonly DISPOSABLE_LIFETIME_HOURS={DISPOSABLE_LIFETIME_HOURS}\n", script)
 
     def test_every_test_container_start_marks_the_container_disposable(self) -> None:
         _, unmarked = container_start_sites()
@@ -854,6 +868,18 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertEqual(run.status, 129)
         self.assertEqual(run.survived, [], "the cancelled call kept talking to the daemon")
 
+    def test_a_sigkilled_sweep_leaves_its_deadline_signalling_nobody(self) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply", "--deadline-seconds", "2"],
+            hangs_on="inspect",
+            hang_seconds=5,
+            cancel_with=signal.SIGKILL,
+        )
+
+        self.assertEqual(run.status, -signal.SIGKILL)
+        self.assertEqual(run.survived, ["inspect"], DECLINED_TO_SIGNAL)
+
     def test_a_daemon_that_hangs_counting_volumes_still_reports_the_removals(
         self,
     ) -> None:
@@ -879,6 +905,26 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertEqual(run.removed, ["old111"])
         self.assertIn("removed 1 container(s)", run.stdout)
         self.assertIn("could not count dangling volumes", run.stderr)
+
+    def test_a_threshold_below_the_disposable_lifetime_is_refused(self) -> None:
+        run = run_sweep(
+            [aged("live111", 0.25, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--older-than-hours", str(DISPOSABLE_LIFETIME_HOURS - 1), "--apply"],
+        )
+
+        self.assertEqual(run.status, 2)
+        self.assertEqual(run.removed, [])
+        self.assertIn("must be at least", run.stderr)
+
+    def test_a_zero_threshold_that_would_take_every_live_container_is_refused(self) -> None:
+        run = run_sweep(
+            [aged("live111", 0.25, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--older-than-hours", "0", "--apply"],
+        )
+
+        self.assertEqual(run.status, 2)
+        self.assertEqual(run.removed, [])
+        self.assertIn("must be at least", run.stderr)
 
     def test_a_deadline_that_is_not_a_positive_number_is_refused(self) -> None:
         run = run_sweep([], arguments=["--deadline-seconds", "0"])

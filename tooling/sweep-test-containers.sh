@@ -70,9 +70,11 @@ readonly SIGNALLED_STATUS_FLOOR=128
 
 # Kept identical to
 # `signalbox_persistence::DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS`, which is
-# what anything holding a marked container longer than a test checks itself
-# against; `tooling/test_sweep_test_containers.py` fails when the two drift.
-older_than_hours=2
+# what anything holding a marked container checks itself against;
+# `tooling/test_sweep_test_containers.py` fails when the two drift.
+readonly DISPOSABLE_LIFETIME_HOURS=2
+
+older_than_hours="$DISPOSABLE_LIFETIME_HOURS"
 deadline_seconds=900
 apply=0
 
@@ -120,6 +122,19 @@ case "$older_than_hours" in
 	;;
 esac
 
+# The mark says only that a container is disposable, never that it is finished.
+# What separates an orphan from a container serving a running test is the age
+# bound, and the bound anything marking a container promised to stay under is
+# this one. Sweeping below it removes live databases — at zero, every marked
+# container the moment it starts — so a lower threshold is refused rather than
+# obeyed.
+if [ "$older_than_hours" -lt "$DISPOSABLE_LIFETIME_HOURS" ]; then
+	echo "sweep-test-containers: --older-than-hours must be at least" \
+		"${DISPOSABLE_LIFETIME_HOURS}, the age a marked container is allowed to" \
+		"reach while still in use; got: $older_than_hours" >&2
+	exit 2
+fi
+
 case "$deadline_seconds" in
 '' | 0 | *[!0-9]*)
 	echo "sweep-test-containers: --deadline-seconds must be a positive whole" \
@@ -133,13 +148,18 @@ if ! command -v docker >/dev/null 2>&1; then
 	exit 1
 fi
 
+readonly sweep_pid=$$
+
 scratch=""
 bounded_worker=""
 bounded_deadline=""
 
-# Installed before anything is launched, so no exit path can leave a deadline
-# process behind to signal a process identifier the kernel has since handed to
-# somebody else.
+# Reports the identifier of the process that owns `$1` right now, so a deadline
+# can tell being the sweep's child from having been reparented by its death.
+parent_of() {
+	ps -o ppid= -p "$1" 2>/dev/null | tr -d '[:space:]'
+}
+
 cleanup() {
 	if [ -n "$bounded_worker" ]; then
 		kill -s TERM -- -"$bounded_worker" >/dev/null 2>&1 || true
@@ -158,7 +178,9 @@ cleanup() {
 	return 0
 }
 
-# Every signal a supervisor, a terminal, or an operator ends this with, each
+# Installed before anything is launched, so no exit path can leave a deadline
+# process behind to signal an identifier the kernel has since handed to somebody
+# else. Every signal a supervisor, a terminal, or an operator ends this with, each
 # reported as the shell reports a signalled child. Handling only some of them
 # leaves the rest ignored — bash defers a trapped signal but discards nothing —
 # so an untrapped cancellation would strand the sweep and its bounded children
@@ -189,6 +211,19 @@ run_bounded() {
 	local worker=$!
 	(
 		sleep "$deadline_seconds"
+		# `cleanup` cancels this deadline on every exit the shell can observe,
+		# but a SIGKILL leaves no trap to run. Confirm this process and the
+		# worker are both still the sweep's own children before signalling:
+		# after a SIGKILL both are reparented, and by the time this wakes the
+		# kernel may have reissued either identifier to somebody else's process
+		# group. Declining to signal strands the abandoned call, which the next
+		# sweep reclaims; signalling a reused group would take work that was
+		# never ours.
+		# Bound first: `$BASHPID` inside a command substitution names that
+		# substitution's own shell, not this one.
+		local self=$BASHPID
+		[ "$(parent_of "$self")" = "$sweep_pid" ] || exit 0
+		[ "$(parent_of "$worker")" = "$sweep_pid" ] || exit 0
 		kill -s TERM -- -"$worker"
 	) >/dev/null 2>&1 &
 	local deadline=$!

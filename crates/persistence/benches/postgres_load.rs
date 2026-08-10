@@ -71,12 +71,6 @@ const MAX_POOL_SIZE: u32 = u32::MAX - SERVER_CONNECTION_HEADROOM;
 const MAX_CONCURRENCY: u32 = MAX_POOL_SIZE - 1;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const WARMUP_DURATION: Duration = Duration::from_secs(5);
-// Covers what a point spends before its warmup begins — starting the container,
-// creating the database, running the migrations — when checking the point
-// against the sweep's age bound. Deliberately generous: the bound it protects is
-// two hours, so margin costs nothing, while being wrong the other way costs a
-// benchmark its database mid-run.
-const POINT_SETUP_ALLOWANCE: Duration = Duration::from_secs(300);
 const IDENTITY_PREFIX: u128 = 0x5b00_0000_u128 << 96;
 // These synthetic fixtures provide stable, valid payloads; their wording has no
 // domain meaning.
@@ -242,21 +236,18 @@ fn parse_args() -> HarnessResult<ParsedArgs> {
     }
     // One point holds one disposable container from before the warmup until
     // after the offered load, and the orphan sweep removes marked containers
-    // past this age. The whole point lifetime is what has to clear the bound:
-    // measuring the offered load alone would accept a duration just under it
-    // and still let the container age past it mid-run.
-    let point_lifetime = Duration::from_secs(duration_seconds)
-        .saturating_add(WARMUP_DURATION)
-        .saturating_add(POINT_SETUP_ALLOWANCE);
+    // past this age. Refusing here fails the run before it starts a container
+    // rather than partway through; it cannot be the whole guard, because how
+    // long the container takes to become ready is not knowable yet, so the
+    // point re-checks against its measured setup once it has one.
+    let point_lifetime = Duration::from_secs(duration_seconds).saturating_add(WARMUP_DURATION);
     if outlives_the_disposable_container_sweep(point_lifetime) {
         return Err(error(format!(
             "--duration-seconds must leave the whole point under {}h, counting the {}s \
-             warmup and a {}s allowance for container start and migration: one \
-             disposable container serves the point, and tooling/sweep-test-containers.sh \
-             removes marked containers past that age",
+             warmup: one disposable container serves the point, and \
+             tooling/sweep-test-containers.sh removes marked containers past that age",
             DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS,
-            WARMUP_DURATION.as_secs(),
-            POINT_SETUP_ALLOWANCE.as_secs()
+            WARMUP_DURATION.as_secs()
         )));
     }
     let highest_concurrency = concurrencies
@@ -1140,8 +1131,32 @@ async fn main() -> HarnessResult<()> {
                     fsync.label(),
                     config.server_max_connections
                 );
+                let container_started = Instant::now();
                 let environment =
                     PostgresEnvironment::start(fsync, config.server_max_connections).await?;
+                // The parse-time check assumed how long setup takes; this one
+                // measures it. Whatever the image pull, the container start,
+                // the database creation, and the migrations actually cost is
+                // already spent by here, so the point only proceeds when the
+                // warmup and the offered load still fit under the age at which
+                // the sweep would remove this container out from under it.
+                let point_remaining = Duration::from_secs(
+                    DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS
+                        .saturating_mul(60)
+                        .saturating_mul(60),
+                )
+                .saturating_sub(container_started.elapsed());
+                if WARMUP_DURATION.saturating_add(config.duration) >= point_remaining {
+                    return Err(error(format!(
+                        "this point's container took {}s to become ready, leaving less than \
+                         the {}s warmup plus {}s offered load before \
+                         tooling/sweep-test-containers.sh would remove it mid-run; lower \
+                         --duration-seconds",
+                        container_started.elapsed().as_secs(),
+                        WARMUP_DURATION.as_secs(),
+                        config.duration.as_secs()
+                    )));
+                }
                 eprintln!(
                     "running scenario={} fsync={} concurrency={} warmup={}s duration={}s pool={}",
                     scenario.label(),
