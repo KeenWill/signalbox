@@ -1490,15 +1490,24 @@ protocol, owned by
 [the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery).
 This paragraph makes those decisions representable and takes none of them.
 Provisioning replaces the quarantined generation with a fresh authorization in
-one transaction. That transaction also decides account-level independence: it
-locks the profile rows of every co-member of every pool-policy revision the
-profile is pinned into, in profile-reference byte order, before it reads their
-stored account identities and until after its own commit, so two provisionings
-of one account can never both observe that identity unclaimed. The transaction
-that interns a pool-policy revision takes the same locks over the membership it
-is about to freeze, for the same reason and in the same order, so a revision and
-a provisioning cannot each observe the other's members as unclaimed. Which
-memberships are consulted, and what a collision does, are owned by
+one transaction. That transaction also decides account-level independence, and
+its lock *order* is what makes that decision total. It first locks the row of
+the profile it is provisioning; then, under that lock and never from a read
+taken before it, it discovers every pool-policy revision that profile is pinned
+into and locks the profile row of each co-member, in profile-reference byte
+order, holding all of them until after its own commit. Discovering the
+memberships before taking its own lock is precisely the hole: a profile
+currently in no revision would lock nothing at all, while a concurrent interning
+that first makes it a co-member would lock it, observe it unprovisioned, and
+commit — after which the provisioning could still store a co-member's account
+identity, and neither transaction would ever have seen the other. The
+transaction that interns a pool-policy revision locks the profile row of every
+member it is about to freeze, in the same order. The provisioned profile's own
+row is therefore common to both, so one of the two commits first and the other
+observes its result: an interning that loses sees the stored identity and
+refuses to intern, and a provisioning that loses rediscovers the new revision
+under its own lock and fails on the collision. Which memberships are consulted,
+and what a collision does, are owned by
 [the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery);
 this paragraph supplies only the lock span that makes two concurrent commits
 decide it the same way. Each generation stores the exact provisioning tuple it
@@ -1566,7 +1575,16 @@ to exist together in the same transaction. A delivery-layer quarantine instead
 correlates its typed pre-request failure. A session displacement stores its
 source turn and cannot apply within that turn. Clearing marks the exact
 generation inactive rather than deleting it, which supplies the replay and
-`already_cleared` contract.
+`already_cleared` contract. An accepted clear additionally publishes the durable
+member-availability update the scheduler consumes, in the same transaction that
+marks the generation inactive. Without that atomicity a clear that commits and
+then loses its daemon strands the wait it was meant to release: the row is
+inactive, no update was ever published, startup reconstitutes the stored wait
+without reclassifying it, and a restart alone is not a wake, so a turn whose
+only remaining wake was that exclusion holds its session slot indefinitely while
+the operator's replay reports `credential_exclusion_cleared`. A clear that
+changes no active generation publishes nothing, because nothing became
+available.
 
 Each attached correlation stores the reset that observation reported, as a
 required-nullable instant, and the generation stores the effective reset derived
@@ -1588,10 +1606,9 @@ active/cleared state an operator command touches.
 
 The turn-local fact is insert-only and never cleared. It is what the execution
 contract means when it says nothing readmits a failed member within its turn, so
-an operator clear during a parked turn marks the clearable state inactive, wakes
-a matching indefinite availability wait
-([credential availability](credential-availability.md#the-credential-availability-machine)),
-and still leaves the member excluded for the remainder of that turn — the clear
+an operator clear during a parked turn marks the clearable state inactive — with
+the availability update every accepted clear publishes, stated once above — and
+still leaves the member excluded for the remainder of that turn, so the clear
 takes effect from the next turn. It invents no provider evidence either way.
 Without the split there would be one row to both retain and clear, and a clear
 mid-turn would either readmit the failed profile or make the turn unable to

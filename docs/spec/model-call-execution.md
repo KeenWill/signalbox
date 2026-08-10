@@ -636,9 +636,17 @@ The chain is bounded by the pool. A member that produced a qualifying failure is
 excluded from the current availability-successor chain, so at most one call per
 member exists per chain and the longest possible chain is the pool's member
 count. A successful call ends that chain before any tool-round continuation is
-prepared. Releasing a parked wait also ends the exhausted chain; the resumed
-turn starts a fresh chain and recomputes admission. Every durable membership
-exclusion and profile quarantine is retained as well.
+prepared. A parked wait does **not** end it: the wait is part of the chain that
+entered it, and releasing the wait resumes that same chain and recomputes
+admission. That is forced by the release contract rather than chosen here — the
+wait-release origin carries the predecessor call and its non-acceptance proof
+exactly where this chain had already observed a qualifying failure, so a
+successor prepared at release is that failure's authorized successor, and the
+`wait-transition fail (after call)` ending exists for the release that finds the
+pool exhausted instead. A release that began a fresh chain could carry neither.
+The chain bound survives this because a qualifying failure excludes its member
+for the rest of the turn, not merely for the chain, so no wait can readmit one.
+Every durable membership exclusion and profile quarantine is retained as well.
 
 A member that produced a qualifying failure stays excluded for the rest of the
 turn, not merely for the chain that observed it. A release therefore never

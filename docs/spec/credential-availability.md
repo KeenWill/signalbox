@@ -131,10 +131,10 @@ would: `post-failure fail` at a fresh admission, and
 `wait-transition fail (after call)` at a release. Both name a chain that had
 issued a call, which this case always has — a predecessor chain exclusion is
 earned by a qualifying failure, so a snapshot made only of them proves the call
-that earned them. Third, **releasing a parked wait ends that chain and
-re-evaluates admission from current state**, and the two kinds of exclusion the
-wait carried are treated differently, because collapsing them deadlocks the wait
-it is meant to release.
+that earned them. Third, **releasing a parked wait resumes the chain that parked
+and re-evaluates admission from current state**, and the two kinds of exclusion
+the wait carried are treated differently, because collapsing them deadlocks the
+wait it is meant to release.
 
 A *predecessor chain exclusion* — one a qualifying failure in this turn earned —
 is insert-only and turn-local: nothing readmits that member for the remainder of
