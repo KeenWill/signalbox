@@ -14,6 +14,10 @@
 )]
 
 #[cfg(unix)]
+use std::ffi::OsStr;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -271,6 +275,10 @@ const SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN: u64 = 31;
 const SYNTHETIC_CARGO_DIAGNOSTIC_BACKWARDS_END_COLUMN: u64 = 3;
 const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
 const EXEC_NATURAL_OUTPUT: &str = "";
+#[cfg(target_os = "linux")]
+const WORKSPACE_UNEXPECTED_XATTR_NAME: &str = "user.signalbox_tool_eval";
+#[cfg(target_os = "linux")]
+const WORKSPACE_UNEXPECTED_XATTR_VALUE: &[u8] = b"unexpected synthetic metadata";
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
 const WEB_QUERY: &str = "Signalbox tool evaluation";
@@ -819,6 +827,7 @@ struct FamilySuite {
     workspace_seed_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     workspace_seed_modified_times: BTreeMap<PathBuf, SystemTime>,
     workspace_seed_entry_identities: BTreeMap<PathBuf, FilesystemIdentity>,
+    workspace_seed_extended_attributes: BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
     git_pre_execution_worktree_entries: StdMutex<Option<BTreeMap<PathBuf, WorkspaceEntrySnapshot>>>,
     git_pre_execution_worktree_modified_times: StdMutex<Option<BTreeMap<PathBuf, SystemTime>>>,
     git_pre_execution_worktree_entry_identities:
@@ -856,6 +865,8 @@ struct FilesystemIdentity {
     change_time_seconds: i64,
     change_time_nanoseconds: i64,
 }
+
+type ExtendedAttributeSnapshot = BTreeMap<Vec<u8>, Vec<u8>>;
 
 #[cfg(unix)]
 fn filesystem_identity(metadata: &fs::Metadata) -> Option<FilesystemIdentity> {
@@ -1168,6 +1179,7 @@ impl FamilySuite {
             workspace_seed_entries: BTreeMap::new(),
             workspace_seed_modified_times: BTreeMap::new(),
             workspace_seed_entry_identities: BTreeMap::new(),
+            workspace_seed_extended_attributes: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
@@ -1219,6 +1231,7 @@ impl FamilySuite {
         let workspace_seed_entries = workspace_entries(workspace.path())?;
         let workspace_seed_modified_times = workspace_modified_times(workspace.path())?;
         let workspace_seed_entry_identities = workspace_entry_identities(workspace.path())?;
+        let workspace_seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
         let reads = WorkspaceReadTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
         let mutations =
             WorkspaceMutationTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
@@ -1238,6 +1251,7 @@ impl FamilySuite {
             workspace_seed_entries,
             workspace_seed_modified_times,
             workspace_seed_entry_identities,
+            workspace_seed_extended_attributes,
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
@@ -1279,6 +1293,7 @@ impl FamilySuite {
             workspace_seed_entries: BTreeMap::new(),
             workspace_seed_modified_times: BTreeMap::new(),
             workspace_seed_entry_identities: BTreeMap::new(),
+            workspace_seed_extended_attributes: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
@@ -1299,6 +1314,7 @@ impl FamilySuite {
         let workspace_seed_entries = workspace_entries(workspace.path())?;
         let workspace_seed_modified_times = workspace_modified_times(workspace.path())?;
         let workspace_seed_entry_identities = workspace_entry_identities(workspace.path())?;
+        let workspace_seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
         let supervisor = std::env::var_os(EXEC_SUPERVISOR_VARIABLE)
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::other("the exec supervisor path is missing"))?;
@@ -1329,6 +1345,7 @@ impl FamilySuite {
             workspace_seed_entries,
             workspace_seed_modified_times,
             workspace_seed_entry_identities,
+            workspace_seed_extended_attributes,
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
@@ -1648,10 +1665,13 @@ impl FamilySuite {
                 )
             }
             EvalFamily::Workspace => workspace_forced_case_passed(
-                self.workspace.path(),
-                &self.workspace_seed_entries,
-                &self.workspace_seed_modified_times,
-                &self.workspace_seed_entry_identities,
+                WorkspaceForcedVerification {
+                    root: self.workspace.path(),
+                    seed_entries: &self.workspace_seed_entries,
+                    seed_modified_times: &self.workspace_seed_modified_times,
+                    seed_entry_identities: &self.workspace_seed_entry_identities,
+                    seed_extended_attributes: &self.workspace_seed_extended_attributes,
+                },
                 case.name,
                 &arguments,
                 &result,
@@ -1726,6 +1746,11 @@ impl FamilySuite {
         Ok(answer == Some(expected_answer)
             && actual == self.workspace_seed_entries
             && actual_modified_times == expected_modified_times
+            && workspace_extended_attributes_match_for_mutation(
+                self.workspace.path(),
+                &self.workspace_seed_extended_attributes,
+                Path::new(WORKSPACE_ANSWER_PATH),
+            )?
             && workspace_entry_identities_match_except(
                 self.workspace.path(),
                 &self.workspace_seed_entry_identities,
@@ -1952,6 +1977,53 @@ fn workspace_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemT
 
 fn workspace_entry_identities(root: &Path) -> EvalResult<BTreeMap<PathBuf, FilesystemIdentity>> {
     filesystem_entry_identities(root, None)
+}
+
+fn workspace_extended_attributes(
+    root: &Path,
+) -> EvalResult<BTreeMap<PathBuf, ExtendedAttributeSnapshot>> {
+    workspace_entries(root)?
+        .into_keys()
+        .map(|relative| {
+            let attributes = extended_attributes(&root.join(&relative))?;
+            Ok((relative, attributes))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn extended_attributes(path: &Path) -> EvalResult<ExtendedAttributeSnapshot> {
+    let mut names = Vec::new();
+    let required = rustix::fs::llistxattr(path, &mut names)?;
+    names.resize(required, 0);
+    let written = rustix::fs::llistxattr(path, &mut names)?;
+    if written != required {
+        return Err(io::Error::other("extended-attribute names changed during capture").into());
+    }
+    names.truncate(written);
+    names
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            let name = OsStr::from_bytes(name);
+            let mut value = Vec::new();
+            let required = rustix::fs::lgetxattr(path, name, &mut value)?;
+            value.resize(required, 0);
+            let written = rustix::fs::lgetxattr(path, name, &mut value)?;
+            if written != required {
+                return Err(
+                    io::Error::other("extended-attribute value changed during capture").into(),
+                );
+            }
+            value.truncate(written);
+            Ok((name.as_bytes().to_vec(), value))
+        })
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn extended_attributes(_path: &Path) -> EvalResult<ExtendedAttributeSnapshot> {
+    Ok(BTreeMap::new())
 }
 
 fn git_worktree_entry_identities(root: &Path) -> EvalResult<BTreeMap<PathBuf, FilesystemIdentity>> {
@@ -2609,15 +2681,27 @@ fn worktree_link_count(path: &Path) -> EvalResult<Option<u64>> {
     }
 }
 
+struct WorkspaceForcedVerification<'a> {
+    root: &'a Path,
+    seed_entries: &'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    seed_modified_times: &'a BTreeMap<PathBuf, SystemTime>,
+    seed_entry_identities: &'a BTreeMap<PathBuf, FilesystemIdentity>,
+    seed_extended_attributes: &'a BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+}
+
 fn workspace_forced_case_passed(
-    root: &Path,
-    seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
-    seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
-    seed_entry_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
+    verification: WorkspaceForcedVerification<'_>,
     name: &str,
     arguments: &serde_json::Value,
     result: &serde_json::Value,
 ) -> EvalResult<bool> {
+    let WorkspaceForcedVerification {
+        root,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+    } = verification;
     let expected_fields: &[&str] = match name {
         APPLY_PATCH_NAME => &["operations_applied", EVAL_RECEIPT_FIELD],
         EDIT_FILE_NAME => &["path", "replacements", "bytes_written", EVAL_RECEIPT_FIELD],
@@ -2775,7 +2859,8 @@ fn workspace_forced_case_passed(
         READ_FILE_NAME | LIST_DIRECTORY_NAME | GLOB_FILES_NAME | SEARCH_FILES_NAME => {
             Ok(workspace_entries(root)? == *seed_entries
                 && workspace_modified_times(root)? == *seed_modified_times
-                && workspace_entry_identities(root)? == *seed_entry_identities)
+                && workspace_entry_identities(root)? == *seed_entry_identities
+                && workspace_extended_attributes(root)? == *seed_extended_attributes)
         }
         APPLY_PATCH_NAME => Ok(workspace_modified_times_match_except(
             root,
@@ -2785,6 +2870,10 @@ fn workspace_forced_case_passed(
             root,
             seed_entry_identities,
             &[Path::new("patched.txt")],
+        )? && workspace_extended_attributes_match_for_mutation(
+            root,
+            seed_extended_attributes,
+            Path::new("patched.txt"),
         )?),
         EDIT_FILE_NAME => {
             let Some(path) = arguments["path"].as_str() else {
@@ -2800,6 +2889,11 @@ fn workspace_forced_case_passed(
                         root,
                         seed_entry_identities,
                         &[path],
+                    )?
+                    && workspace_extended_attributes_match_for_mutation(
+                        root,
+                        seed_extended_attributes,
+                        path,
                     )?,
             )
         }
@@ -2815,6 +2909,10 @@ fn workspace_forced_case_passed(
                 root,
                 seed_entry_identities,
                 &[Path::new(path)],
+            )? && workspace_extended_attributes_match_for_mutation(
+                root,
+                seed_extended_attributes,
+                Path::new(path),
             )?)
         }
         _ => Ok(false),
@@ -2845,6 +2943,16 @@ fn workspace_entry_identities_match_except(
         expected,
         allowed_paths,
     ))
+}
+
+fn workspace_extended_attributes_match_for_mutation(
+    root: &Path,
+    expected: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    target: &Path,
+) -> EvalResult<bool> {
+    let mut expected = expected.clone();
+    expected.entry(target.to_path_buf()).or_default();
+    Ok(workspace_extended_attributes(root)? == expected)
 }
 
 fn entry_identities_match_except(
@@ -12481,6 +12589,39 @@ fn forced_workspace_edit_verifier_rejects_a_mode_change() -> EvalResult {
     })
     .to_string();
 
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_workspace_edit_verifier_rejects_an_added_extended_attribute() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == EDIT_FILE_NAME)
+        .expect("the workspace edit fixture exists");
+    let relative = Path::new(WORKSPACE_SEED_PATH);
+    let path = suite.workspace.path().join(relative);
+    fs::write(&path, WORKSPACE_EDITED_SEED)?;
+    rustix::fs::setxattr(
+        &path,
+        WORKSPACE_UNEXPECTED_XATTR_NAME,
+        WORKSPACE_UNEXPECTED_XATTR_VALUE,
+        rustix::fs::XattrFlags::CREATE,
+    )?;
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "replacements": EXPECTED_WORKSPACE_EDIT_REPLACEMENTS,
+        "bytes_written": EXPECTED_WORKSPACE_EDIT_BYTES,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert_ne!(
+        workspace_extended_attributes(suite.workspace.path())?[relative],
+        suite.workspace_seed_extended_attributes[relative]
+    );
     assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
