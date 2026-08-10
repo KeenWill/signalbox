@@ -4142,10 +4142,13 @@ async fn authenticate_pinned_predecessor(
                     .decode_column::<Option<Uuid>>("lost_runner_id")?
                     .map(runner_id)
                     .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+                let grant_succeeds = runner_replacement_grant_is_successor(&predecessor, row)?
+                    && durable_grant_predecessor_matches_placement(connection, &predecessor, row)
+                        .await?;
                 if lost_runner != prior_pinned.runner
                     || (current_pinned.runner == lost_runner
                         && source != RunnerPlacementLossSource::Registration)
-                    || !runner_replacement_grant_is_successor(&predecessor, row)?
+                    || !grant_succeeds
                 {
                     return Err(RunnerProtocolCorruption::CrossWiredReference.into());
                 }
@@ -4199,7 +4202,15 @@ async fn authenticate_pinned_predecessor(
                         }
                         (None, None) | (None, Some(_)) | (Some(_), None) => false,
                     };
-                if same_request_axes && same_pinned_axes && same_registration && grant_advances {
+                let durable_grant_advances =
+                    durable_grant_predecessor_matches_placement(connection, &predecessor, row)
+                        .await?;
+                if same_request_axes
+                    && same_pinned_axes
+                    && same_registration
+                    && grant_advances
+                    && durable_grant_advances
+                {
                     current_row = Some(predecessor);
                     current_request = predecessor_request;
                     current_pinned = prior_pinned;
@@ -4276,6 +4287,59 @@ fn runner_replacement_grant_is_successor(
         }
         (Some(_), None) => false,
     })
+}
+
+async fn durable_grant_predecessor_matches_placement(
+    connection: &mut PgConnection,
+    predecessor: &PgRow,
+    successor: &PgRow,
+) -> Result<bool, RunnerProtocolStoreError> {
+    let predecessor_origin =
+        predecessor.decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?;
+    let predecessor_runner =
+        predecessor.decode_column::<Option<Uuid>>("credential_grant_runner_id")?;
+    let predecessor_revision =
+        predecessor.decode_column::<Option<Decimal>>("credential_grant_revision")?;
+    let successor_origin =
+        successor.decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?;
+    let successor_runner = successor.decode_column::<Option<Uuid>>("credential_grant_runner_id")?;
+    let successor_revision =
+        successor.decode_column::<Option<Decimal>>("credential_grant_revision")?;
+    let predecessor_identity = match (predecessor_origin, predecessor_runner, predecessor_revision)
+    {
+        (None, None, None) => None,
+        (Some(origin), Some(runner), Some(revision)) => Some((origin, runner, revision)),
+        _ => return Ok(false),
+    };
+    let successor_identity = match (successor_origin, successor_runner, successor_revision) {
+        (None, None, None) => return Ok(predecessor_identity.is_none()),
+        (Some(origin), Some(runner), Some(revision)) => (origin, runner, revision),
+        _ => return Ok(false),
+    };
+    let grant = sqlx::query(
+        "SELECT prior_runner_id, prior_grant_revision
+           FROM runner_credential_grant
+          WHERE session_id = $1
+            AND lineage_origin_event_ordinal = $2
+            AND runner_id = $3
+            AND grant_revision = $4",
+    )
+    .bind(successor.decode_column::<Uuid>("session_id")?)
+    .bind(successor_identity.0)
+    .bind(successor_identity.1)
+    .bind(successor_identity.2)
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+    let durable_predecessor = match (
+        grant.decode_column::<Option<Uuid>>("prior_runner_id")?,
+        grant.decode_column::<Option<Decimal>>("prior_grant_revision")?,
+    ) {
+        (None, None) => None,
+        (Some(runner), Some(revision)) => Some((successor_identity.0, runner, revision)),
+        _ => return Ok(false),
+    };
+    Ok(durable_predecessor == predecessor_identity)
 }
 
 async fn decode_pinned_placement(
