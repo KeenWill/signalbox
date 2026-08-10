@@ -7751,6 +7751,14 @@ async fn s32_inv029_inv044_stop_reloads_pure_attempt_from_terminal_history()
         "effect_free",
     )
     .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let resumable_loss = store
+        .load_lease_loss(facts.lease.correlation().lease, facts.lease.generation())
+        .await?
+        .expect("the execution-possible loss remains retryable before stop");
+    let reserved =
+        authorize_fixture_claimed_retry(&store, &resumable_loss, ToolEffectClass::EffectFree)
+            .await?;
     let command = DurableCommandId::from_uuid(uuid(0xa184));
     let result_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xa185));
     let terminal_frontier = ContextFrontierId::from_uuid(uuid(0xa186));
@@ -7814,7 +7822,14 @@ async fn s32_inv029_inv044_stop_reloads_pure_attempt_from_terminal_history()
     .bind(result_entry.into_uuid())
     .fetch_one(&pool)
     .await?;
+    let stopped_reservation = store
+        .load_claimed_retry_attempt_reservation(
+            facts.lease.correlation().lease,
+            facts.lease.generation(),
+        )
+        .await?;
 
+    assert_eq!(reserved.source(), &facts.lease.correlation());
     assert_eq!(lifecycle, "cancelled");
     assert_eq!(attempt.0, "terminal");
     assert_eq!(attempt.1, "known_failed");
@@ -7822,6 +7837,7 @@ async fn s32_inv029_inv044_stop_reloads_pure_attempt_from_terminal_history()
     assert_eq!(result.0, "tool_execution_result");
     assert_eq!(result.1, facts.interrupted_attempt.into_uuid());
     assert_eq!(result.2, facts.boundary.into_uuid());
+    assert_eq!(stopped_reservation, None);
     drop(pool);
     Ok(())
 }
