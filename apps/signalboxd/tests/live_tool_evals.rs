@@ -1274,6 +1274,7 @@ impl FamilySuite {
             }),
             workspace_seed_entries,
             workspace_seed_modified_times,
+            workspace_seed_file_identities: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
