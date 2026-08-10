@@ -2476,10 +2476,20 @@ impl SessionRunnerPlacement {
         mut self,
         runner: RunnerId,
     ) -> Result<Self, RunnerDomainError> {
-        if self.state != SessionRunnerPlacementState::Unpinned
-            || self.request.selector != RunnerSelector::Identity(runner)
-        {
-            return Err(RunnerDomainError::InvalidState);
+        match (&self.state, &self.request.selector) {
+            (SessionRunnerPlacementState::Unpinned, RunnerSelector::Identity(selected))
+                if *selected == runner => {}
+            (
+                SessionRunnerPlacementState::Unpinned,
+                RunnerSelector::Identity(_) | RunnerSelector::CapabilityClass(_),
+            )
+            | (
+                SessionRunnerPlacementState::Pinned(_)
+                | SessionRunnerPlacementState::RunnerLostBeforePin(_)
+                | SessionRunnerPlacementState::RunnerLost(_)
+                | SessionRunnerPlacementState::RunnerAbandoned(_),
+                _,
+            ) => return Err(RunnerDomainError::InvalidState),
         }
         self.state =
             SessionRunnerPlacementState::RunnerLostBeforePin(RunnerLostBeforePin { runner });
@@ -2522,8 +2532,11 @@ impl SessionRunnerPlacement {
         let SessionRunnerPlacementState::RunnerLostBeforePin(before) = self.state else {
             return Err(RunnerDomainError::InvalidState);
         };
-        if request.selector != RunnerSelector::Identity(registration.runner) {
-            return Err(RunnerDomainError::CorrelationMismatch);
+        match &request.selector {
+            RunnerSelector::Identity(runner) if *runner == registration.runner => {}
+            RunnerSelector::Identity(_) | RunnerSelector::CapabilityClass(_) => {
+                return Err(RunnerDomainError::CorrelationMismatch);
+            }
         }
         validate_placement_request(&request, registration)?;
         if registration.runner == before.runner {

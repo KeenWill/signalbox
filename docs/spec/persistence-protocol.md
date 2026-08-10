@@ -398,38 +398,40 @@ Representation rules, all enforced in the schema:
   no prepared, in-flight, or ambiguous physical attempt; retired claimed-retry
   predecessors are historical inventory and do not block that arm. A present
   interrupted attempt must be the round's sole current prepared, in-flight, or
-  ambiguous attempt. Lifecycle-side and placement-side checks lock the shared
-  session-scheduler row before evaluating the relationship, so a concurrent
-  placement advance cannot validate against a stale loss. The lifecycle
-  transition matrix admits the phase from an already-active running boundary
-  only after that exact live attempt has ended by yielding to a durable wait,
-  never directly from queued work, and restart reconstitutes it from those
-  correlated facts rather than from the stored discriminator. An interrupt
-  closing the wait extends the retained active tool round's exact yielded
-  frontier, or the turn's starting frontier when no tool round exists; the
-  authenticated interrupt-effect record rejects any other same-session frontier.
-  A retained round with no interrupted physical attempt appends its
-  proposal-ordered tool closures before the cancellation entry. When loss
-  interrupted an ambiguous physical attempt, the same stop instead commits the
-  existing tool-reconciliation terminal shape, so cancellation never erases or
-  reclassifies the ambiguity. Without this shape the loss transaction has
-  nowhere to store the phase and restart cannot rebuild it. The same migration
-  adds the optional interrupted-attempt fact to the exact placement-loss record,
-  and the runner persistence read boundary round-trips both nullable arms.
-  **Committed unimplemented functionality.** No present adapter produces the
-  phase: the dedicated runner-loss propagation transaction will install it under
-  the lock order below. Independently of that future writer, a present
-  interrupted-attempt fact on the placement-loss record is admitted only for one
-  of two exact lease-derived shapes: an in-flight retryable attempt whose loss
-  proves no execution or whose pure/idempotent effect permits successor
-  reissuance, or a terminal ambiguous side-effecting attempt whose execution may
-  have occurred. Both carry physical runner-lease lineage to the record's exact
-  lost runner and placement revision, and the same active runner-recovery
-  tool-round boundary names the attempt. Stopping the wait retires retryable
-  authority before releasing the active slot: no-execution and pure work become
-  known crash loss and cancel, while execution-possible idempotent work becomes
-  ambiguous and requires reconciliation. A same-session foreign or older
-  same-placement attempt therefore cannot survive placement readback.
+  ambiguous attempt. Lifecycle-side checks and reverse checks from placement
+  heads, physical and turn attempts, lease events, and lease heads lock the
+  shared session-scheduler row before evaluating the relationship, so a
+  concurrent placement, attempt, or lease advance cannot leave a wait validated
+  against stale loss evidence. The lifecycle transition matrix admits the phase
+  from an already-active running boundary only after that exact live attempt has
+  ended by yielding to a durable wait, never directly from queued work, and
+  restart reconstitutes it from those correlated facts rather than from the
+  stored discriminator. An interrupt closing the wait extends the retained
+  active tool round's exact yielded frontier, or the turn's starting frontier
+  when no tool round exists; the authenticated interrupt-effect record rejects
+  any other same-session frontier. A retained round with no interrupted physical
+  attempt appends its proposal-ordered tool closures before the cancellation
+  entry. When loss interrupted an ambiguous physical attempt, the same stop
+  instead commits the existing tool-reconciliation terminal shape, so
+  cancellation never erases or reclassifies the ambiguity. Without this shape
+  the loss transaction has nowhere to store the phase and restart cannot rebuild
+  it. The same migration adds the optional interrupted-attempt fact to the exact
+  placement-loss record, and the runner persistence read boundary round-trips
+  both nullable arms. **Committed unimplemented functionality.** No present
+  adapter produces the phase: the dedicated runner-loss propagation transaction
+  will install it under the lock order below. Independently of that future
+  writer, a present interrupted-attempt fact on the placement-loss record is
+  admitted only for one of two exact lease-derived shapes: an in-flight
+  retryable attempt whose loss proves no execution or whose pure/idempotent
+  effect permits successor reissuance, or a terminal ambiguous side-effecting
+  attempt whose execution may have occurred. Both carry physical runner-lease
+  lineage to the record's exact lost runner and placement revision, and the same
+  active runner-recovery tool-round boundary names the attempt. Stopping the
+  wait retires retryable authority before releasing the active slot:
+  no-execution and pure work become known crash loss and cancel, while
+  execution-possible idempotent work becomes ambiguous and requires
+  reconciliation. A same-session foreign or older same-placement attempt
+  therefore cannot survive placement readback.
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.
@@ -624,9 +626,10 @@ live in the schema instead:
 - the deferred approval-decision authority trigger in that migration takes
   `FOR UPDATE` on the `tool_request` row before it checks for a nonterminal
   judge call and validates the decision's frozen-posture authority; and
-- the runner-recovery completeness checker and placement-side recheck in
-  migration `202608080101` each take `FOR UPDATE` on the session scheduler row
-  before re-reading the active recovery lifecycle and placement relationship.
+- the runner-recovery completeness checker and its placement-, attempt-, and
+  lease-side rechecks in migration `202608080101` each take `FOR UPDATE` on the
+  session scheduler row before re-reading the active recovery lifecycle,
+  placement, and execution-loss relationship.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
