@@ -11066,6 +11066,59 @@ async fn s32_inv044_profile_replacement_preserves_workspace_origin_revision()
     Ok(())
 }
 
+/// INV-002 / INV-045: a profile replacement grant names the exact grant
+/// projected by its immediately preceding placement record.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv045_profile_replacement_authenticates_durable_grant_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_credential_grant
+            SET prior_runner_id = $3
+          WHERE session_id = $1 AND grant_revision = $2",
+    )
+    .bind(replacement.grant.grant.session().into_uuid())
+    .bind(Decimal::from(replacement.grant.grant.revision().get()))
+    .bind(uuid(REPLACEMENT_RUNNER))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let corrupted = store
+        .load_placement(replacement.placement.session())
+        .await
+        .expect_err("a profile replacement cannot cross-wire its durable grant predecessor");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv045_new_revoked_grant_round_trips_terminal_audit() -> Result<(), Box<dyn Error>> {
