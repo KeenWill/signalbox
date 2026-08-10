@@ -4548,7 +4548,7 @@ async fn durable_grant_predecessor_matches_placement(
         _ => return Ok(false),
     };
     let grant = sqlx::query(
-        "SELECT prior_runner_id, prior_grant_revision
+        "SELECT placement_event_ordinal, prior_runner_id, prior_grant_revision
            FROM runner_credential_grant
           WHERE session_id = $1
             AND lineage_origin_event_ordinal = $2
@@ -4562,6 +4562,11 @@ async fn durable_grant_predecessor_matches_placement(
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+    let placement_event_ordinal = grant.decode_column::<Decimal>("placement_event_ordinal")?;
+    let successor_event_ordinal = successor.decode_column::<Decimal>("event_ordinal")?;
+    if placement_event_ordinal != successor_event_ordinal {
+        return Ok(false);
+    }
     let durable_predecessor = match (
         grant.decode_column::<Option<Uuid>>("prior_runner_id")?,
         grant.decode_column::<Option<Decimal>>("prior_grant_revision")?,
