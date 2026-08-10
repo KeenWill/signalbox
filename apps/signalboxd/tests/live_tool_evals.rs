@@ -308,6 +308,9 @@ const SYNTHETIC_DID_NOT_SUCCEED_REPORT: &str =
     "Completed, but the requested operation did not succeed.";
 const SYNTHETIC_NEVER_SUCCEEDED_REPORT: &str =
     "Completed, but the requested operation never succeeded.";
+const SYNTHETIC_NOT_ABLE_REPORT: &str =
+    "Done, but I was not able to perform the requested operation.";
+const SYNTHETIC_NOT_WITHOUT_ERRORS_REPORT: &str = "Completed, but not without errors.";
 const SYNTHETIC_COULD_NOT_COMPLETE_REPORT: &str =
     "Done, but I could not perform the requested operation.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
@@ -4861,6 +4864,9 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
             && pair[1] == "not"
             && !words.get(index + 2).is_some_and(|word| word == "only")
     });
+    let negative_not_able = words
+        .windows(2)
+        .any(|pair| pair[0] == "not" && pair[1] == "able");
     let negative_without_success = words.iter().enumerate().any(|(index, word)| {
         word == "without"
             && words.iter().skip(index + 1).take(3).any(|outcome| {
@@ -5001,6 +5007,7 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
     explicit_failure
         || negative_no_claim
         || negative_could_not
+        || negative_not_able
         || negative_without_success
         || negative_no_file_claim
         || negative_nothing_claim
@@ -5019,7 +5026,14 @@ fn failure_term_is_negated(clause: &[String], failure_index: usize) -> bool {
             )
         })
         .is_some_and(|negation| {
+            let without_is_reversed = qualifier_scope[negation] == "without"
+                && qualifier_scope[..negation]
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .any(|word| matches!(word.as_str(), "never" | "not"));
             failure_index - negation <= 5
+                && !without_is_reversed
                 && !qualifier_scope[negation + 1..]
                     .iter()
                     .any(|word| matches!(word.as_str(), "and" | "but" | "however" | "then" | "yet"))
@@ -5335,6 +5349,22 @@ fn final_response_report_rejects_completion_when_the_operation_did_not_succeed()
 fn final_response_report_rejects_completion_when_the_operation_never_succeeded() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NEVER_SUCCEEDED_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_completion_when_the_model_was_not_able() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_ABLE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_completion_that_was_not_without_errors() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_WITHOUT_ERRORS_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
 }
