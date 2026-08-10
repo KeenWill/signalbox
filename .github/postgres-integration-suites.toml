@@ -68,8 +68,8 @@ name = "signalboxd"
 package = "signalboxd"
 features = []
 shards = 1
-# Subprocess entry points invoked only by their owning bounded-wait tests.
-skip = ["bridge_wait_"]
+# Subprocess entry points invoked only by their owning process tests.
+skip = ["bridge_build_direct_invocation_fixture", "bridge_wait_"]
 
 [[suite]]
 name = "terminal-client"

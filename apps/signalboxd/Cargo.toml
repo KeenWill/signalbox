@@ -30,7 +30,7 @@ reqwest = { version = "0.13.4", default-features = false, features = [
 rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }
 rustls = { version = "0.23.35", default-features = false, features = ["ring"] }
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = { version = "1.0.140", features = ["raw_value"] }
+serde_json = "1.0.140"
 sha2 = "0.11.0"
 signalbox-application = { path = "../../crates/application" }
 signalbox-conversation-import-claude-code = { path = "../../crates/conversation-import-claude-code" }
@@ -97,6 +97,7 @@ opentelemetry_sdk = { version = "0.32.0", default-features = false, features = [
     "trace",
 ] }
 sha1 = { version = "0.11.0", default-features = false }
+serde_json = { version = "1.0.140", features = ["raw_value"] }
 signalbox-test-bin = { path = "../../crates/test-bin" }
 testcontainers-modules = { version = "0.15.0", default-features = false, features = [
     "postgres",
