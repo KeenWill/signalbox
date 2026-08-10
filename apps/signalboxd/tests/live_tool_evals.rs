@@ -683,13 +683,13 @@ fn forced_case_completion_reported(
     execution_completed: bool,
     tracker: &OperationTracker,
 ) -> bool {
-    if case_name == EDIT_FILE_NAME {
-        return execution_completed
-            && tracker.final_response_reports_completion_with_file_mutation();
-    }
-    let file_creation_required = matches!(case_name, APPLY_PATCH_NAME | WRITE_FILE_NAME);
+    let required_effect = match case_name {
+        EDIT_FILE_NAME => RequiredFileEffect::Mutate,
+        APPLY_PATCH_NAME | WRITE_FILE_NAME => RequiredFileEffect::Create,
+        _ => RequiredFileEffect::None,
+    };
     execution_completed
-        && tracker.final_response_reports_completion_with_file_creation(file_creation_required)
+        && tracker.final_response_reports_completion_with_required_file_effect(required_effect)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1043,17 +1043,16 @@ impl FilesystemExecutionTimeWindow {
         (self.started..=self.finished).contains(&modified)
     }
 
-    fn contains_git_modified(self, modified: SystemTime) -> bool {
-        let Ok(started) = self.started.duration_since(UNIX_EPOCH) else {
-            return false;
-        };
-        let Ok(finished) = self.finished.duration_since(UNIX_EPOCH) else {
-            return false;
-        };
+    fn contains_git_modified(self, modified: SystemTime, identity: FilesystemIdentity) -> bool {
+        if self.contains_modified(modified) {
+            return true;
+        }
         let Ok(modified) = modified.duration_since(UNIX_EPOCH) else {
             return false;
         };
-        (started.as_secs()..=finished.as_secs()).contains(&modified.as_secs())
+        modified.subsec_nanos() == 0
+            && u64::try_from(identity.change_time_seconds).ok() == Some(modified.as_secs())
+            && self.contains_change_time(identity)
     }
 
     fn contains_change_time(self, identity: FilesystemIdentity) -> bool {
@@ -1072,6 +1071,53 @@ impl FilesystemExecutionTimeWindow {
         ((started.as_secs(), started.subsec_nanos())
             ..=(finished.as_secs(), finished.subsec_nanos()))
             .contains(&(seconds, nanoseconds))
+    }
+}
+
+#[test]
+fn filesystem_execution_window_rejects_a_precise_earlier_git_mtime_in_the_same_second() {
+    let window = FilesystemExecutionTimeWindow {
+        started: UNIX_EPOCH + Duration::new(1, 500),
+        finished: UNIX_EPOCH + Duration::new(1, 900),
+    };
+    let earlier = UNIX_EPOCH + Duration::new(1, 400);
+    let identity = synthetic_filesystem_identity(700);
+
+    assert!(!window.contains_git_modified(earlier, identity));
+}
+
+#[test]
+fn filesystem_execution_window_accepts_a_coarse_git_mtime_with_precise_ctime() {
+    let window = FilesystemExecutionTimeWindow {
+        started: UNIX_EPOCH + Duration::new(1, 500),
+        finished: UNIX_EPOCH + Duration::new(1, 900),
+    };
+    let coarse = UNIX_EPOCH + Duration::from_secs(1);
+    let identity = synthetic_filesystem_identity(700);
+
+    assert!(window.contains_git_modified(coarse, identity));
+}
+
+#[test]
+fn filesystem_execution_window_rejects_a_coarse_git_mtime_without_in_window_ctime() {
+    let window = FilesystemExecutionTimeWindow {
+        started: UNIX_EPOCH + Duration::new(1, 500),
+        finished: UNIX_EPOCH + Duration::new(1, 900),
+    };
+    let coarse = UNIX_EPOCH + Duration::from_secs(1);
+    let identity = synthetic_filesystem_identity(400);
+
+    assert!(!window.contains_git_modified(coarse, identity));
+}
+
+fn synthetic_filesystem_identity(change_time_nanoseconds: i64) -> FilesystemIdentity {
+    FilesystemIdentity {
+        device: 1,
+        inode: 1,
+        user_id: 1,
+        group_id: 1,
+        change_time_seconds: 1,
+        change_time_nanoseconds,
     }
 }
 
@@ -1909,7 +1955,7 @@ impl FamilySuite {
         match self.family {
             EvalFamily::Workspace => {
                 Ok(workspace_natural_result_payloads_passed(snapshot, tracker)
-                    && tracker.final_response_reports_completion_with_file_creation(true))
+                    && tracker.final_response_reports_completion_with_file_creation())
             }
             EvalFamily::Web => Ok(web_natural_result_payloads_passed(snapshot, tracker)
                 && tracker.final_response_reports(WEB_FETCH_BODY)),
@@ -3513,6 +3559,7 @@ fn filesystem_file_and_directory_modified_times(
 fn admit_modified_time_path_and_ancestors(
     actual: &BTreeMap<PathBuf, SystemTime>,
     expected: &mut BTreeMap<PathBuf, SystemTime>,
+    actual_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
     path: &Path,
     execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> bool {
@@ -3521,8 +3568,12 @@ fn admit_modified_time_path_and_ancestors(
         let Some(modified) = actual.get(candidate) else {
             return false;
         };
+        let Some(identity) = actual_identities.get(candidate) else {
+            return false;
+        };
         if expected.get(candidate) != Some(modified)
-            && !execution_window.is_some_and(|window| window.contains_git_modified(*modified))
+            && !execution_window
+                .is_some_and(|window| window.contains_git_modified(*modified, *identity))
         {
             return false;
         }
@@ -3679,6 +3730,7 @@ fn git_forced_reference_entries_match(
             if !admit_modified_time_path_and_ancestors(
                 &actual_modified_times,
                 &mut expected_modified_times,
+                &actual_entry_identities,
                 &path,
                 execution_window,
             ) || !admit_new_filesystem_identity_path_and_ancestors(
@@ -3702,6 +3754,7 @@ fn git_forced_reference_entries_match(
             if !admit_modified_time_path_and_ancestors(
                 &actual_modified_times,
                 &mut expected_modified_times,
+                &actual_entry_identities,
                 &base_path,
                 execution_window,
             ) || !admit_filesystem_identity_path(
@@ -4294,6 +4347,7 @@ fn admit_git_pack_publications(
         if !admit_modified_time_path_and_ancestors(
             inventory.actual_modified_times,
             inventory.expected_modified_times,
+            inventory.actual_entry_identities,
             &path,
             inventory.execution_window,
         ) || !admit_new_filesystem_identity_path_and_ancestors(
@@ -4363,6 +4417,7 @@ fn git_object_entry_inventory_matches(
         if !admit_modified_time_path_and_ancestors(
             &actual_modified_times,
             &mut expected_modified_times,
+            &actual_entry_identities,
             &relative,
             execution_window,
         ) {
@@ -4588,6 +4643,7 @@ fn git_reflog_updates_match(
         if !admit_modified_time_path_and_ancestors(
             &actual_modified_times,
             &mut expected_modified_times,
+            &actual_entry_identities,
             path,
             expectation.filesystem_execution_window,
         ) || !admit_filesystem_identity_path(
@@ -5659,6 +5715,7 @@ fn git_natural_reference_entries_match(
     if !admit_modified_time_path_and_ancestors(
         &actual_modified_times,
         &mut expected_modified_times,
+        &actual_entry_identities,
         &base_path,
         execution_window,
     ) || !admit_filesystem_identity_path(
@@ -6498,27 +6555,20 @@ impl OperationTracker {
     }
 
     fn final_response_reports_completion(&self) -> bool {
-        self.final_response_reports_completion_with_file_creation(false)
+        self.final_response_reports_completion_with_required_file_effect(RequiredFileEffect::None)
     }
 
-    fn final_response_reports_completion_with_file_creation(
-        &self,
-        file_creation_required: bool,
-    ) -> bool {
-        self.final_response_reports_completion_with_required_file_effect(
-            file_creation_required,
-            file_creation_required,
-        )
+    fn final_response_reports_completion_with_file_creation(&self) -> bool {
+        self.final_response_reports_completion_with_required_file_effect(RequiredFileEffect::Create)
     }
 
     fn final_response_reports_completion_with_file_mutation(&self) -> bool {
-        self.final_response_reports_completion_with_required_file_effect(false, true)
+        self.final_response_reports_completion_with_required_file_effect(RequiredFileEffect::Mutate)
     }
 
     fn final_response_reports_completion_with_required_file_effect(
         &self,
-        file_creation_required: bool,
-        file_mutation_required: bool,
+        required_effect: RequiredFileEffect,
     ) -> bool {
         let state = self
             .state
@@ -6532,12 +6582,14 @@ impl OperationTracker {
                 report = report.replace(&receipt, "");
             }
         }
+        let file_creation_required = required_effect == RequiredFileEffect::Create;
+        let file_mutation_required = required_effect != RequiredFileEffect::None;
         report_affirms_completion(&report, file_creation_required)
             && (!file_mutation_required || !report_denies_file_changes(&report))
     }
 
     fn final_response_reports_file_creation(&self) -> bool {
-        self.final_response_reports_completion_with_file_creation(true)
+        self.final_response_reports_completion_with_file_creation()
             && self
                 .state
                 .lock()
@@ -6563,6 +6615,13 @@ impl OperationTracker {
         report_affirms_completion_excepting_path(&report, path)
             && !report_denies_file_changes_excepting_path(&report, path)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequiredFileEffect {
+    None,
+    Create,
+    Mutate,
 }
 
 fn report_affirms_completion(report: &str, file_creation_required: bool) -> bool {
@@ -8188,7 +8247,7 @@ fn final_response_report_rejects_a_no_file_written_claim() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NO_FILE_WRITTEN_REPORT, false);
 
-    assert!(!tracker.final_response_reports_completion_with_file_creation(true));
+    assert!(!tracker.final_response_reports_completion_with_file_creation());
 }
 
 #[test]
@@ -8196,7 +8255,7 @@ fn final_response_report_rejects_a_no_files_written_claim() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NO_FILES_WRITTEN_REPORT, false);
 
-    assert!(!tracker.final_response_reports_completion_with_file_creation(true));
+    assert!(!tracker.final_response_reports_completion_with_file_creation());
 }
 
 #[test]
