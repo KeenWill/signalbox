@@ -2015,7 +2015,8 @@ finally:
     ) -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
         let known_targets = rustc_target_names(&invocation.invocation_directory);
-        let configured_target_dir = configured_cargo_target_dir(&current, &known_targets);
+        let configured_target_dir =
+            configured_cargo_target_dir(&current, &invocation.invocation_directory, &known_targets);
         let artifact_target_dir = cargo_target_dir_from_artifact(&current);
         let default_target_dir = bridge_build_target_dir(
             BridgeBuildTargetCandidates {
@@ -2246,22 +2247,19 @@ finally:
     #[track_caller]
     fn configured_cargo_target_dir(
         current: &Path,
+        invocation_directory: &Path,
         known_targets: &BTreeSet<OsString>,
     ) -> Option<PathBuf> {
         let configured = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR")?);
         let configured = if configured.is_absolute() {
             configured
         } else {
-            std::env::var_os("PWD")
-                .map(|directory| {
-                    resolved_or_executable_configured_target_dir(RelativeConfiguredTargetDirInput {
-                        current_executable: current,
-                        configured: &configured,
-                        invocation_directory: Path::new(&directory),
-                        known_targets,
-                    })
-                })
-                .unwrap_or(configured)
+            resolved_or_executable_configured_target_dir(RelativeConfiguredTargetDirInput {
+                current_executable: current,
+                configured: &configured,
+                invocation_directory,
+                known_targets,
+            })
         };
         let configured = configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
             current_executable: current,
@@ -2884,6 +2882,42 @@ finally:
             .expect("the synthetic Cargo test invocation is admitted");
 
         assert_eq!(invocation.invocation_directory, invocation_directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_target_dir_uses_the_captured_cargo_change_directory() {
+        let invocation_directory = tempfile::tempdir().expect("synthetic Cargo cwd exists");
+        let target_directory = invocation_directory.path().join("resolved-target");
+        let configured_target = Path::new("target-link");
+        fs::create_dir(&target_directory).expect("synthetic target directory exists");
+        std::os::unix::fs::symlink(
+            &target_directory,
+            invocation_directory.path().join(configured_target),
+        )
+        .expect("synthetic relative target link exists");
+        let executable = target_directory.join("debug/deps/daemon-tools-test");
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new(CARGO_UNSTABLE_OPTION),
+            OsStr::new(SYNTHETIC_CARGO_UNSTABLE_OPTION_VALUE),
+            OsStr::new(CARGO_CHANGE_DIRECTORY_OPTION),
+            invocation_directory.path().as_os_str(),
+            OsStr::new(CARGO_TEST_SUBCOMMAND),
+        ];
+        let invocation =
+            cargo_test_invocation_from_arguments(&arguments, invocation_directory.path())
+                .expect("the changed-directory Cargo test invocation is admitted");
+
+        assert_eq!(
+            resolved_relative_configured_target_dir(RelativeConfiguredTargetDirInput {
+                current_executable: &executable,
+                configured: configured_target,
+                invocation_directory: &invocation.invocation_directory,
+                known_targets: &BTreeSet::new(),
+            }),
+            Some(target_directory)
+        );
     }
 
     #[test]
