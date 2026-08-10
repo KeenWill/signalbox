@@ -3942,7 +3942,9 @@ async fn authenticate_abandonment_predecessor(
                 predecessor_request.permission_overrides,
             )
             .await?;
-            if pinned == *lost.pinned() {
+            let predecessor_registration = decode_pinned_registration_identity(&predecessor)?;
+            let abandonment_registration = decode_pinned_registration_identity(row)?;
+            if pinned == *lost.pinned() && predecessor_registration == abandonment_registration {
                 Ok(())
             } else {
                 Err(RunnerProtocolCorruption::CrossWiredReference.into())
@@ -3952,6 +3954,21 @@ async fn authenticate_abandonment_predecessor(
             Err(RunnerProtocolCorruption::CrossWiredReference.into())
         }
     }
+}
+
+fn decode_pinned_registration_identity(
+    row: &PgRow,
+) -> Result<(RunnerEnrollmentId, RunnerRegistrationRevision), RunnerProtocolStoreError> {
+    let enrollment = row
+        .decode_column::<Option<Uuid>>("registration_enrollment_id")?
+        .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+    let revision = row
+        .decode_column::<Option<Decimal>>("registration_revision")?
+        .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+    Ok((
+        runner_enrollment_id(enrollment),
+        decode_registration_revision(revision)?,
+    ))
 }
 
 fn placement_row_has_pinned_facts(row: &PgRow) -> Result<bool, RunnerProtocolStoreError> {
