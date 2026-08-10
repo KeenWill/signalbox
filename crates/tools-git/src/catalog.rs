@@ -7,7 +7,9 @@ use signalbox_application::{
 };
 use signalbox_domain::ToolExecutionErrorDetail;
 use signalbox_tool_contract::ToolContractCompileError;
-use signalbox_tools_workspace::{LocalWorkspaceFileSystem, WorkspaceFileSystem, WorkspaceRoot};
+use signalbox_tools_workspace::{
+    LocalWorkspaceFileSystem, WorkspaceFileSystem, WorkspaceRoot, WorkspaceRootIdentity,
+};
 
 use crate::construction::LocalGitToolsConstructionError;
 use crate::contracts::{LocalToolKind, kind_for_name};
@@ -47,6 +49,19 @@ impl GitObjectFormat {
             ObjectFormat::Sha256 => Self::Sha256,
         }
     }
+}
+
+/// The two directories one pinned repository authority holds.
+///
+/// Both identities were accepted by the layout validation on either side of the
+/// repository open, so they name the directories this suite is bound to rather
+/// than whatever a later independent resolution of the same pathname finds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PinnedRepositoryDirectories {
+    /// Worktree root the suite was constructed with.
+    pub root: WorkspaceRootIdentity,
+    /// The `.git` directory immediately inside that root.
+    pub administration: WorkspaceRootIdentity,
 }
 
 /// Seven local Git declarations and their injected-root executor.
@@ -122,6 +137,26 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitTools<FileSystem> {
     /// against another repository's width.
     pub const fn object_format(&self) -> GitObjectFormat {
         GitObjectFormat::from_library(self.executor.repository_authority.object_format)
+    }
+
+    /// Returns the worktree and administration directories this suite pinned.
+    ///
+    /// Exposed because a caller composing several suites has to record which
+    /// directories each one bound, and asking the pathname again afterwards
+    /// records whatever stands there then: a `.git` replaced between the
+    /// repository open and that later question would be recorded while this
+    /// executor stays bound to the repository it opened.
+    pub const fn pinned_directories(&self) -> PinnedRepositoryDirectories {
+        PinnedRepositoryDirectories {
+            root: WorkspaceRootIdentity {
+                device: self.executor.repository_identity.root.device,
+                inode: self.executor.repository_identity.root.inode,
+            },
+            administration: WorkspaceRootIdentity {
+                device: self.executor.repository_identity.git_directory.device,
+                inode: self.executor.repository_identity.git_directory.inode,
+            },
+        }
     }
 
     /// Separates immutable catalog and mutable executor composition roles.

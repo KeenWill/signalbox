@@ -615,34 +615,52 @@ session exists at startup. Every family in one composition resolves the same
 pathname, so the root's filesystem identity is captured on both sides of the
 composition and compared: a pathname that did not resolve to one directory
 throughout rejects the whole composition rather than leaving one family bound to
-a directory and another to its replacement. The composed executors are retained
-per session under a bound of eight, the least recently used idle entry released
-first, which is what keeps open descriptors and pinned repositories finite. A
-set a request is still holding is never released to make room, because releasing
-it would let that session's next request compose a second set beside the one
-already mutating its tree. The retained set may therefore exceed eight by the
-number of sessions executing a workspace-bound tool at that moment. That excess
-drains rather than persisting: each retention releases idle entries until the
-set is back under the bound, so one burst of concurrent sessions does not leave
-it permanently above.
+a directory and another to its replacement. The pair a composition records is
+the one its Git suite pinned, which that suite accepted on either side of its
+own repository open, rather than a further resolution of the pathname once the
+composition is built: an administration directory replaced between the
+repository open and that later resolution would otherwise be recorded while the
+Git executor stays bound to the repository it opened. The Git suite's worktree
+root is compared against the pathname every other family resolved, so a Git
+suite bound elsewhere rejects the composition. The composed executors are
+retained per session under a bound of eight, the least recently used idle entry
+released first, which is what keeps open descriptors and pinned repositories
+finite. A set a request is still holding is never released to make room, because
+releasing it would let that session's next request compose a second set beside
+the one already mutating its tree. The retained set may therefore exceed eight
+by the number of sessions executing a workspace-bound tool at that moment. That
+excess drains rather than persisting: each retention releases idle entries until
+the set is back under the bound, so one burst of concurrent sessions does not
+leave it permanently above.
 
 Isolation is checked against the directories rather than the pathname, since two
-pathnames can name one workspace: a composed root sharing its worktree or its
-`.git` directory with the configured root, or with one another session already
-bound, is refused. An accepted residual: a filesystem may reuse a device and
-inode pair after the directory that held them is removed, so a derived directory
-removed and recreated while its composition is not retained can present the
-identities the record names. Distinguishing that would require holding a
-descriptor for every session ever bound, which is the descriptor growth the
-retained bound exists to prevent. Failure to compose or bind a derived root — an
-unopenable directory, a rejected repository layout, a root replaced during
-composition or since the session bound it, a root shared with another session or
-with the configured root, or a repository whose object format disagrees with the
-one the process-lifetime catalog compiled — closes that tool request as a known
-failure whose sanitized detail names the closed reason. No second operator event
-is emitted for it: the tool loop's single failed-attempt admission site owns
-that telemetry, and the reason travels in the durable result. It never falls
-back to another root. The GitHub policy admits exactly
+pathnames can name one workspace: a composed root either of whose directories is
+either directory of the configured root or of one another session already bound
+is refused. Every pairing is compared rather than worktree against worktree and
+administration against administration alone, because one composition's worktree
+root can be the directory another administers — a nested repository exposed by a
+bind mount — and the first composition's mutation and execution tools would
+otherwise write the second's repository administration state. The configured
+composition is compared both as it pinned itself at startup and as its pathname
+resolves now, since it is the one binding no later request re-resolves: its
+worktree descriptor is pinned, but its mutation and execution tools reach `.git`
+through that descriptor by name, so a `.git` renamed and recreated under it is
+reachable from the configured root while the pinned pair still names the
+displaced one. A configured pathname that cannot be captured at all leaves the
+pinned pair as the only comparison. An accepted residual: a filesystem may reuse
+a device and inode pair after the directory that held them is removed, so a
+derived directory removed and recreated while its composition is not retained
+can present the identities the record names. Distinguishing that would require
+holding a descriptor for every session ever bound, which is the descriptor
+growth the retained bound exists to prevent. Failure to compose or bind a
+derived root — an unopenable directory, a rejected repository layout, a root
+replaced during composition or since the session bound it, a root shared with
+another session or with the configured root, or a repository whose object format
+disagrees with the one the process-lifetime catalog compiled — closes that tool
+request as a known failure whose sanitized detail names the closed reason. No
+second operator event is emitted for it: the tool loop's single failed-attempt
+admission site owns that telemetry, and the reason travels in the durable
+result. It never falls back to another root. The GitHub policy admits exactly
 `https://api.github.com:443` for authenticated requests. The code-host
 `change_request_ci_job_log` operation retains the tool-loop-owned exception for
 one credential-free download from its validated, pinned, bounded public HTTPS

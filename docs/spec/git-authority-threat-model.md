@@ -8,12 +8,6 @@ and filesystem laws, and its child slices add local operations, their typed tool
 surface, and explicitly approved repair writes. These paragraphs become verified
 only with that stack. Daemon catalog wiring is outside it.
 
-The scope sentence below was re-scoped from one deployment-wide root to one root
-per constructed suite by this PR (`agent/per-session-workspaces`). That
-re-scoping is a proposal pending review; the stated invariants are unchanged by
-it, and the mechanisms enforcing them apply per constructed suite exactly as
-they did to the single suite.
-
 The deployment injects a workspace root into each constructed suite, and the
 daemon composes one suite per session. The Git family may operate only on a
 direct main worktree whose `.git` directory is immediately inside the root its

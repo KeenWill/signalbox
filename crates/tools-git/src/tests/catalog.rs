@@ -1,5 +1,8 @@
 //! Catalog declaration and effect-class properties.
 
+use std::fs;
+use std::os::unix::fs::MetadataExt;
+
 use signalbox_application::ToolCatalog;
 use signalbox_domain::{NormalizedToolArguments, ToolEffectClass, ToolName, ToolPermissionDefault};
 use signalbox_tools_workspace::LocalWorkspaceFileSystem;
@@ -148,4 +151,24 @@ fn local_write_verbs_are_effecting() {
         LocalToolKind::BranchSwitch.effect(),
         ToolEffectClass::ExternalEffect
     );
+}
+
+/// A composition recording which directories a suite bound reads them from the
+/// suite rather than resolving the pathname a second time, so the pair names
+/// the worktree and the `.git` directory the layout validation accepted.
+#[test]
+fn pinned_directories_name_the_validated_worktree_and_administration_directory() {
+    let fixture = Fixture::new();
+    let suite = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
+        .expect("suite constructs");
+    let worktree = fs::symlink_metadata(fixture.root()).expect("the fixture worktree is present");
+    let administration = fs::symlink_metadata(fixture.root().join(".git"))
+        .expect("the fixture administration directory is present");
+
+    let pinned = suite.pinned_directories();
+
+    assert_eq!(pinned.root.device, worktree.dev());
+    assert_eq!(pinned.root.inode, worktree.ino());
+    assert_eq!(pinned.administration.device, administration.dev());
+    assert_eq!(pinned.administration.inode, administration.ino());
 }

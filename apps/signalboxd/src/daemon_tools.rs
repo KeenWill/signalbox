@@ -44,6 +44,7 @@ use signalbox_tools_exec::{
 };
 use signalbox_tools_git::{
     GitIdentity, GitObjectFormat, LOCAL_GIT_TOOL_NAMES, LocalGitExecutor, LocalGitTools,
+    PinnedRepositoryDirectories,
 };
 use signalbox_tools_github::{
     GITHUB_TOOL_NAMES, GitHubApiTransport, GitHubEgressPolicy, GitHubExecutor, GitHubTools,
@@ -67,6 +68,7 @@ use signalbox_tools_workspace::{
     WorkspaceMutationFileSystem, WorkspaceMutationPath, WorkspaceMutationSnapshot,
     WorkspaceMutationSnapshotError, WorkspaceMutationTools, WorkspaceReadExecutor,
     WorkspaceReadTools, WorkspaceResolveError, WorkspaceRoot, WorkspaceRootError,
+    WorkspaceRootIdentity,
 };
 use sqlx::PgPool;
 use tokio::sync::Mutex;
@@ -247,6 +249,12 @@ impl SessionWorkspaceRoots {
         }
     }
 
+    /// Returns the configured root every derivation is taken from.
+    #[must_use]
+    pub fn configured(&self) -> &Path {
+        &self.configured
+    }
+
     /// Returns the path the formula assigns one session, before asking whether
     /// a directory exists there.
     ///
@@ -275,10 +283,7 @@ impl SessionWorkspaceRoots {
             return SessionWorkspaceRoot::ConfiguredRoot;
         };
         match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_dir() => SessionWorkspaceRoot::Derived {
-                identity: ComposedRootIdentity::from_metadata(&metadata),
-                path,
-            },
+            Ok(metadata) if metadata.is_dir() => SessionWorkspaceRoot::Derived { path },
             Ok(_) => SessionWorkspaceRoot::Unresolvable,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 SessionWorkspaceRoot::ConfiguredRoot
@@ -292,13 +297,14 @@ impl SessionWorkspaceRoots {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionWorkspaceRoot {
     /// A directory exists at the session's derived path and binds it alone.
+    ///
+    /// The probe classifies and carries no identity: which directories a
+    /// session bound is a property of both the worktree and the administration
+    /// directory inside it, and a caller comparing a binding captures that pair
+    /// rather than the one directory a classification needed to stat.
     Derived {
         /// The derived absolute path.
         path: PathBuf,
-        /// Identity the pathname resolved to when it was probed, so a caller
-        /// can tell the directory a session bound from a replacement at the
-        /// same pathname without probing again.
-        identity: ComposedRootIdentity,
     },
     /// Nothing exists at the session's derived path, so an unbound session
     /// binds the configured root that every session bound before this
@@ -375,6 +381,31 @@ const fn decide_session_root(
     }
 }
 
+/// Whether a composition shares a directory with the configured composition.
+///
+/// The configured composition is built once at startup and is the one binding
+/// no later request re-resolves, so `pinned` names the directories it held then
+/// while `standing` names the ones its pathname resolves to now. Its worktree
+/// descriptor is pinned, but its mutation and execution tools reach `.git`
+/// through that descriptor by name, so a `.git` renamed and recreated under the
+/// configured root is reachable from it while `pinned` still names the old one.
+/// Both pairs are therefore refused. A configured pathname that cannot be
+/// captured at all leaves `pinned` as the only comparison, which is the one
+/// that was made before `standing` was consulted.
+const fn shares_a_directory_with_the_configured_root(
+    composed: ComposedWorkspaceIdentity,
+    pinned: ComposedWorkspaceIdentity,
+    standing: Option<ComposedWorkspaceIdentity>,
+) -> bool {
+    if composed.shares_a_directory_with(pinned) {
+        return true;
+    }
+    match standing {
+        Some(standing) => composed.shares_a_directory_with(standing),
+        None => false,
+    }
+}
+
 /// Whether a session other than `session` already bound the directory a
 /// composition just found.
 ///
@@ -408,6 +439,19 @@ impl ComposedRootIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
         }
+    }
+
+    /// Adopts one directory identity a composed suite pinned.
+    const fn from_pinned(identity: WorkspaceRootIdentity) -> Self {
+        Self {
+            device: identity.device,
+            inode: identity.inode,
+        }
+    }
+
+    /// Whether two identities name one directory.
+    const fn is_the_same_directory_as(self, other: Self) -> bool {
+        self.device == other.device && self.inode == other.inode
     }
 }
 
@@ -448,12 +492,36 @@ impl ComposedWorkspaceIdentity {
         })
     }
 
-    /// Whether these two composed workspaces are the same workspace, by either
-    /// directory.
+    /// Adopts the two directories a composed Git suite pinned.
+    ///
+    /// The Git suite accepted both identities on either side of its repository
+    /// open, so its pair is what this composition holds. Resolving the pathname
+    /// again once the suite is built would instead record whatever stands there
+    /// then: a `.git` replaced in between would be recorded while the Git
+    /// executor stays bound to the repository it opened, so a later collision
+    /// check would protect the replacement rather than the retained authority.
+    const fn from_pinned(directories: PinnedRepositoryDirectories) -> Self {
+        Self {
+            root: ComposedRootIdentity::from_pinned(directories.root),
+            administration: ComposedRootIdentity::from_pinned(directories.administration),
+        }
+    }
+
+    /// Whether these two composed workspaces share any directory, in any role.
+    ///
+    /// Every pairing is compared rather than only root-to-root and
+    /// administration-to-administration, because one composition's worktree
+    /// root can be the directory another composition administers — a nested
+    /// repository exposed by a bind mount, say. Comparing within roles alone
+    /// admits both, and the first composition's mutation and execution tools
+    /// then write the second composition's repository administration state.
     const fn shares_a_directory_with(self, other: Self) -> bool {
-        self.root.device == other.root.device && self.root.inode == other.root.inode
-            || self.administration.device == other.administration.device
-                && self.administration.inode == other.administration.inode
+        self.root.is_the_same_directory_as(other.root)
+            || self.root.is_the_same_directory_as(other.administration)
+            || self.administration.is_the_same_directory_as(other.root)
+            || self
+                .administration
+                .is_the_same_directory_as(other.administration)
     }
 }
 
@@ -532,6 +600,7 @@ where
         let local_git = LocalGitTools::try_new(filesystem, root, git_identity)
             .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
         let git_object_format = local_git.object_format();
+        let pinned_directories = local_git.pinned_directories();
         let sandboxed_exec = SandboxedExecTool::try_new(exec_runner.clone(), root)
             .map_err(|_| DaemonToolsConstructionError::Exec)?;
         let unsandboxed_exec = UnsandboxedExecTool::try_new(exec_runner.clone(), root)
@@ -544,7 +613,16 @@ where
         let (sandboxed_exec_catalog, sandboxed_exec) = sandboxed_exec.into_parts();
         let (unsandboxed_exec_catalog, unsandboxed_exec) = unsandboxed_exec.into_parts();
         let (cargo_diagnostics_catalog, cargo_diagnostics) = cargo_diagnostics.into_parts();
-        if composed_root_identity(root)? != opening_identity {
+        // The Git suite is the only family that pins a second directory, and it
+        // pinned the one it validated rather than the one this pathname names
+        // now, so the composition's recorded identity is taken from it. Its
+        // worktree root is still compared against the pathname every other
+        // family resolved, so a Git suite bound to another directory than the
+        // rest of the composition rejects it.
+        let workspace_identity = ComposedWorkspaceIdentity::from_pinned(pinned_directories);
+        if composed_root_identity(root)? != opening_identity
+            || workspace_identity.root != opening_identity
+        {
             return Err(DaemonToolsConstructionError::WorkspaceRootUnstable);
         }
         Ok(Self {
@@ -564,7 +642,7 @@ where
                 unsandboxed_exec,
                 cargo_diagnostics,
                 git_object_format,
-                workspace_identity: ComposedWorkspaceIdentity::capture(root)?,
+                workspace_identity,
             },
         })
     }
@@ -1587,14 +1665,23 @@ where
                 return Err(SessionWorkspaceFailure::UnresolvableRoot);
             }
             SessionRootDecision::ComposeDerived => {
-                let SessionWorkspaceRoot::Derived { path, identity } = &derived else {
+                let SessionWorkspaceRoot::Derived { path } = &derived else {
                     return Err(SessionWorkspaceFailure::UnresolvableRoot);
                 };
-                if recorded
-                    .and_then(RecordedSessionBinding::derived_identity)
-                    .is_some_and(|bound| bound.root != *identity)
-                {
-                    return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
+                // A recorded binding names both directories, and a retained
+                // composition is returned only once both still stand at the
+                // pathname. Revalidating the worktree root alone would hand
+                // back descriptors whose Git executor is pinned to an
+                // administration directory the pathname no longer names, which
+                // is provisioning that replaces only a workspace's `.git`. A
+                // pathname whose pair can no longer be captured at all — a
+                // removed `.git`, say — fails for the same reason.
+                if let Some(bound) = recorded.and_then(RecordedSessionBinding::derived_identity) {
+                    let standing = ComposedWorkspaceIdentity::capture(path)
+                        .map_err(|_| SessionWorkspaceFailure::ReplacedRootIdentity)?;
+                    if standing != bound {
+                        return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
+                    }
                 }
                 if let Some(retained) = state.retained.get(session) {
                     return Ok(retained);
@@ -1622,10 +1709,19 @@ where
         // each would pass composition on its own. The isolation this derivation
         // exists to establish is a property of the directories, not of the
         // pathname, so it is checked against what every other binding pinned.
-        if composed.shares_a_directory_with(self.configured.workspace_identity) {
+        if shares_a_directory_with_the_configured_root(
+            composed,
+            self.configured.workspace_identity,
+            ComposedWorkspaceIdentity::capture(self.roots.configured()).ok(),
+        ) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
         let mut state = self.state.lock().await;
+        // Every other derived binding revalidates its own pair before its next
+        // request dispatches, so a derived workspace whose directories changed
+        // fails that session closed rather than being reachable beside this
+        // one; the pairs recorded here are the ones those sessions can still
+        // use.
         if another_session_bound(&state.bindings, session, composed) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
@@ -2842,6 +2938,51 @@ mod tests {
             administration: FIXTURE_BOUND_IDENTITY.administration,
         };
 
+    /// A workspace whose worktree root is the directory
+    /// [`FIXTURE_BOUND_IDENTITY`] administers, which is what a nested
+    /// repository reached through a bind mount produces.
+    const FIXTURE_WORKTREE_OVER_BOUND_ADMINISTRATION_IDENTITY: ComposedWorkspaceIdentity =
+        ComposedWorkspaceIdentity {
+            root: FIXTURE_BOUND_IDENTITY.administration,
+            administration: ComposedRootIdentity {
+                device: 0x10,
+                inode: 0x50,
+            },
+        };
+
+    /// A workspace administering the directory [`FIXTURE_BOUND_IDENTITY`] uses
+    /// as its worktree root, the other way a nested repository collides.
+    const FIXTURE_ADMINISTRATION_OVER_BOUND_WORKTREE_IDENTITY: ComposedWorkspaceIdentity =
+        ComposedWorkspaceIdentity {
+            root: ComposedRootIdentity {
+                device: 0x10,
+                inode: 0x60,
+            },
+            administration: FIXTURE_BOUND_IDENTITY.root,
+        };
+
+    /// The pair the configured pathname names after its `.git` was renamed and
+    /// recreated, which leaves its worktree root alone.
+    const FIXTURE_CONFIGURED_STANDING_IDENTITY: ComposedWorkspaceIdentity =
+        ComposedWorkspaceIdentity {
+            root: FIXTURE_BOUND_IDENTITY.root,
+            administration: ComposedRootIdentity {
+                device: 0x10,
+                inode: 0x70,
+            },
+        };
+
+    /// A derived workspace exposing the `.git` directory the configured
+    /// pathname names now, sharing nothing with the pair it pinned at startup.
+    const FIXTURE_SHARES_CONFIGURED_STANDING_IDENTITY: ComposedWorkspaceIdentity =
+        ComposedWorkspaceIdentity {
+            root: ComposedRootIdentity {
+                device: 0x10,
+                inode: 0x80,
+            },
+            administration: FIXTURE_CONFIGURED_STANDING_IDENTITY.administration,
+        };
+
     /// The two sessions the per-session workspace tests give separate roots.
     /// Each value only needs to be distinct from the other.
     const FIRST_SESSION_IDENTITY: u128 = 0x5001;
@@ -2996,6 +3137,32 @@ mod tests {
     }
 
     #[track_caller]
+    fn known_failure_detail(evidence: ToolExecutorEvidence) -> String {
+        match evidence {
+            ToolExecutorEvidence::KnownFailed { detail } => detail
+                .expect("a session workspace failure carries sanitized detail")
+                .as_str()
+                .to_owned(),
+            ToolExecutorEvidence::CompletedText(text) => {
+                panic!("the workspace tool completed: {text}")
+            }
+            ToolExecutorEvidence::Ambiguous => panic!("the workspace tool was ambiguous"),
+        }
+    }
+
+    /// Replaces a bound workspace's `.git` directory, leaving its worktree root,
+    /// its pathname, and every file a read returns exactly where they were.
+    fn replace_administration_directory(root: &Path) {
+        let displaced = root
+            .parent()
+            .expect("a derived session root has a parent")
+            .join("displaced.git");
+        fs::rename(root.join(".git"), displaced)
+            .expect("the bound administration directory moves aside");
+        git2::Repository::init(root).expect("a replacement repository initializes");
+    }
+
+    #[track_caller]
     fn read_content(evidence: ToolExecutorEvidence) -> String {
         let decoded: serde_json::Value =
             serde_json::from_str(&completed_text(evidence)).expect("read_file evidence is JSON");
@@ -3069,17 +3236,57 @@ mod tests {
         provisioned_session_workspace(&configured, second, SECOND_SESSION_MARKER);
         let (catalog, executor) = offline_daemon_composition(&configured);
 
-        let first_read = daemon_evidence(
+        // Joined rather than awaited one after the other: the claim is about
+        // two sessions resolving and composing against one shared state, and
+        // awaiting the first to completion before the second is even started
+        // would leave that state uncontended throughout.
+        let (first_read, second_read) = tokio::join!(
+            daemon_evidence(
+                catalog.clone(),
+                executor.clone(),
+                first,
+                read_marker_proposal(),
+            ),
+            daemon_evidence(catalog, executor, second, read_marker_proposal()),
+        );
+
+        assert_eq!(read_content(first_read), FIRST_SESSION_MARKER);
+        assert_eq!(read_content(second_read), SECOND_SESSION_MARKER);
+    }
+
+    /// A session keeps reaching the derived root it bound only while both the
+    /// worktree and the `.git` directory inside it still stand. Provisioning
+    /// that replaces the administration directory alone leaves the worktree,
+    /// the pathname, and every file a read returns in place, and the session's
+    /// next request fails closed rather than being served from a retained
+    /// composition whose Git executor is pinned to the displaced repository.
+    #[tokio::test]
+    async fn a_replaced_administration_directory_fails_the_next_request() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+        let first = session(FIRST_SESSION_IDENTITY);
+        provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+        let derived = SessionWorkspaceRoots::new(&configured)
+            .derived_path(first)
+            .expect("the fixture configured root has a parent and a final component");
+        let (catalog, executor) = offline_daemon_composition(&configured);
+        let bound = daemon_evidence(
             catalog.clone(),
             executor.clone(),
             first,
             read_marker_proposal(),
         )
         .await;
-        let second_read = daemon_evidence(catalog, executor, second, read_marker_proposal()).await;
+        replace_administration_directory(&derived);
 
-        assert_eq!(read_content(first_read), FIRST_SESSION_MARKER);
-        assert_eq!(read_content(second_read), SECOND_SESSION_MARKER);
+        let after_replacement =
+            daemon_evidence(catalog, executor, first, read_marker_proposal()).await;
+
+        assert_eq!(read_content(bound), FIRST_SESSION_MARKER);
+        assert_eq!(
+            known_failure_detail(after_replacement),
+            SESSION_WORKSPACE_REPLACED_DETAIL
+        );
     }
 
     /// A write through one session's workspace tools reaches only that
@@ -3263,7 +3470,6 @@ mod tests {
             None,
             &SessionWorkspaceRoot::Derived {
                 path: PathBuf::from("/srv/signalbox/workspace.sessions/fixture"),
-                identity: FIXTURE_BOUND_IDENTITY.root,
             },
         );
 
@@ -3288,7 +3494,6 @@ mod tests {
             Some(RecordedSessionBinding::ConfiguredRoot),
             &SessionWorkspaceRoot::Derived {
                 path: PathBuf::from("/srv/signalbox/workspace.sessions/fixture"),
-                identity: FIXTURE_BOUND_IDENTITY.root,
             },
         );
 
@@ -3388,6 +3593,48 @@ mod tests {
         ));
     }
 
+    /// A worktree root that is the directory another session administers is one
+    /// workspace with it, so composing it is refused: this session's mutation
+    /// and execution tools would otherwise write that session's repository
+    /// administration state.
+    #[test]
+    fn a_worktree_over_another_session_administration_directory_is_refused() {
+        let first = session(FIRST_SESSION_IDENTITY);
+        let second = session(SECOND_SESSION_IDENTITY);
+        let bindings = BTreeMap::from([(
+            first,
+            RecordedSessionBinding::DerivedRoot {
+                identity: FIXTURE_BOUND_IDENTITY,
+            },
+        )]);
+
+        assert!(another_session_bound(
+            &bindings,
+            second,
+            FIXTURE_WORKTREE_OVER_BOUND_ADMINISTRATION_IDENTITY
+        ));
+    }
+
+    /// The same collision in the other role: administering the directory
+    /// another session uses as its worktree root is refused too.
+    #[test]
+    fn an_administration_directory_over_another_session_worktree_is_refused() {
+        let first = session(FIRST_SESSION_IDENTITY);
+        let second = session(SECOND_SESSION_IDENTITY);
+        let bindings = BTreeMap::from([(
+            first,
+            RecordedSessionBinding::DerivedRoot {
+                identity: FIXTURE_BOUND_IDENTITY,
+            },
+        )]);
+
+        assert!(another_session_bound(
+            &bindings,
+            second,
+            FIXTURE_ADMINISTRATION_OVER_BOUND_WORKTREE_IDENTITY
+        ));
+    }
+
     /// A workspace sharing neither directory with a bound one is admitted.
     #[test]
     fn a_workspace_sharing_no_directory_is_admitted() {
@@ -3419,6 +3666,41 @@ mod tests {
             &bindings,
             second,
             FIXTURE_BOUND_IDENTITY
+        ));
+    }
+
+    /// The configured composition pinned its pair at startup and no request
+    /// re-resolves it, so a derived root exposing the `.git` directory the
+    /// configured pathname names now is refused even though that directory is
+    /// not the one the configured composition recorded.
+    #[test]
+    fn a_derived_root_over_the_standing_configured_administration_directory_is_refused() {
+        assert!(shares_a_directory_with_the_configured_root(
+            FIXTURE_SHARES_CONFIGURED_STANDING_IDENTITY,
+            FIXTURE_BOUND_IDENTITY,
+            Some(FIXTURE_CONFIGURED_STANDING_IDENTITY),
+        ));
+    }
+
+    /// A derived root sharing the pair the configured composition pinned is
+    /// refused whatever its pathname names now.
+    #[test]
+    fn a_derived_root_over_the_pinned_configured_root_is_refused() {
+        assert!(shares_a_directory_with_the_configured_root(
+            FIXTURE_BOUND_IDENTITY,
+            FIXTURE_BOUND_IDENTITY,
+            Some(FIXTURE_CONFIGURED_STANDING_IDENTITY),
+        ));
+    }
+
+    /// A derived root sharing neither the pinned nor the standing configured
+    /// pair is admitted.
+    #[test]
+    fn a_derived_root_sharing_no_configured_directory_is_admitted() {
+        assert!(!shares_a_directory_with_the_configured_root(
+            FIXTURE_OTHER_IDENTITY,
+            FIXTURE_BOUND_IDENTITY,
+            Some(FIXTURE_CONFIGURED_STANDING_IDENTITY),
         ));
     }
 
