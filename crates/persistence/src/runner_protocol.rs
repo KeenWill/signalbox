@@ -4402,6 +4402,7 @@ async fn load_placement_reconstitution_history(
 ) -> Result<RunnerPlacementReconstitutionHistory, RunnerProtocolStoreError> {
     let revision = decode_generation(row.decode_column("placement_revision")?)?;
     let session = row.decode_column::<Uuid>("session_id")?;
+    let head_event_ordinal = decode_u64(row.decode_column("event_ordinal")?)?;
     let initial = sqlx::query(
         "SELECT *
            FROM runner_session_placement_record
@@ -4434,11 +4435,13 @@ async fn load_placement_reconstitution_history(
            FROM runner_session_placement_record
           WHERE session_id = $1
             AND placement_revision <= $2
+            AND event_ordinal <= $3
             AND event_kind = 'pre_pin_replaced'
           ORDER BY placement_revision, event_ordinal",
     )
     .bind(session)
     .bind(Decimal::from(revision.get()))
+    .bind(Decimal::from(head_event_ordinal))
     .fetch_all(&mut *connection)
     .await?;
     let expected_origins = usize::try_from(revision.get() - 1)
@@ -4469,11 +4472,14 @@ async fn load_placement_reconstitution_history(
             .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
         let predecessor = sqlx::query(
             "SELECT *
-               FROM runner_session_placement_record
-              WHERE session_id = $1 AND event_ordinal = $2",
+              FROM runner_session_placement_record
+              WHERE session_id = $1
+                AND event_ordinal = $2
+                AND event_ordinal < $3",
         )
         .bind(session)
         .bind(Decimal::from(predecessor_ordinal))
+        .bind(Decimal::from(head_event_ordinal))
         .fetch_optional(&mut *connection)
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
