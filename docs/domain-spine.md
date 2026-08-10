@@ -3000,7 +3000,8 @@ impl AcceptedInputSchedulingReconstitutionInput {
     pub fn with_preceding_non_accepted_terminal(
         self,
         session: SessionId,
-        turn: TurnId,
+        predecessor: TurnId,
+        successor: TurnId,
         terminal_frontier: ContextFrontierId,
         selected: DirectModelSelection,
     ) -> Self;
@@ -8428,6 +8429,7 @@ pub struct SessionRunnerPlacement { /* private */ }
 pub enum RunnerPlacementReconstitutionHistory {
     Initial,
     PrePinReplacement {
+        predecessor_history: Box<RunnerPlacementReconstitutionHistory>,
         prior_revision: RunnerGeneration,
         lost_runner: RunnerId,
         prior_request: Box<SessionRunnerPlacementRequest>,

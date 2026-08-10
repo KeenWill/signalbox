@@ -243,6 +243,7 @@ ALTER TABLE turn_lifecycle
     ADD COLUMN runner_recovery_runner_id uuid,
     ADD COLUMN runner_recovery_placement_revision numeric(20, 0),
     ADD COLUMN runner_recovery_tool_attempt_id uuid,
+    -- Supersedes 202608020018_session_delegation.sql.
     DROP CONSTRAINT turn_lifecycle_active_phase_closed;
 
 ALTER TABLE turn_lifecycle
@@ -274,6 +275,7 @@ BEGIN
         RAISE EXCEPTION 'turn-lifecycle legacy payload shape is missing';
     END IF;
     ALTER TABLE turn_lifecycle
+        -- Supersedes 202608020018_session_delegation.sql.
         DROP CONSTRAINT turn_lifecycle_state_payload_shape;
     EXECUTE format(
         'ALTER TABLE turn_lifecycle
@@ -815,6 +817,11 @@ EXECUTE FUNCTION guard_turn_runner_recovery_interrupt_effect();
 CREATE TRIGGER turn_runner_recovery_interrupt_effect_is_immutable
 AFTER UPDATE OR DELETE ON turn_runner_recovery_interrupt_effect
 FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER turn_runner_recovery_interrupt_effect_rejects_truncate
+BEFORE TRUNCATE ON turn_runner_recovery_interrupt_effect
+FOR EACH STATEMENT
 EXECUTE FUNCTION reject_immutable_record_change();
 
 CREATE OR REPLACE FUNCTION require_interrupt_submit_input_effect_correlation()

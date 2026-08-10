@@ -574,12 +574,14 @@ impl StoredSessionRunnerPlacement {
         SessionRunnerPlacement,
         Option<StoredValidatedRunnerRegistration>,
         Option<CredentialProfileGrant>,
+        Option<ToolAttemptId>,
     ) {
         (
             self.event_ordinal,
             self.placement,
             self.registration,
             self.grant,
+            self.interrupted_tool_attempt,
         )
     }
 }
@@ -2089,6 +2091,22 @@ impl RunnerProtocolStore {
             }
         };
         let mut transaction = self.pool.begin().await?;
+        let scheduler_exists = sqlx::query_scalar::<_, Uuid>(
+            "SELECT session_id
+               FROM session_scheduler
+              WHERE session_id = $1
+              FOR UPDATE",
+        )
+        .bind(retired.session().into_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some();
+        if !scheduler_exists {
+            transaction.rollback().await?;
+            return Err(RunnerProtocolStoreError::Corruption(
+                RunnerProtocolCorruption::CrossWiredReference,
+            ));
+        }
         let retired_rows = sqlx::query(
             "UPDATE tool_attempt
                 SET state_kind = 'terminal',
@@ -3864,60 +3882,76 @@ async fn load_placement_reconstitution_history(
         "SELECT *
            FROM runner_session_placement_record
           WHERE session_id = $1
-            AND placement_revision = $2
+            AND placement_revision <= $2
             AND event_kind = 'pre_pin_replaced'
-          ORDER BY event_ordinal",
+          ORDER BY placement_revision, event_ordinal",
     )
     .bind(session)
     .bind(Decimal::from(revision.get()))
     .fetch_all(&mut *connection)
     .await?;
-    let [origin] = origins.as_slice() else {
+    let expected_origins = usize::try_from(revision.get() - 1)
+        .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
+    if origins.len() != expected_origins {
         return Err(RunnerProtocolCorruption::MissingCanonicalPlacement.into());
-    };
-    let origin_state: String = origin.decode_column("state_kind")?;
-    if origin_state != "unpinned" {
-        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
-    if placement_row_has_invalid_unpinned_facts(origin)? {
-        return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+    let mut history = RunnerPlacementReconstitutionHistory::Initial;
+    for (index, origin) in origins.iter().enumerate() {
+        let current_revision = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(2))
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        if decode_generation(origin.decode_column("placement_revision")?)?.get() != current_revision
+        {
+            return Err(RunnerProtocolCorruption::MissingCanonicalPlacement.into());
+        }
+        let origin_state: String = origin.decode_column("state_kind")?;
+        if origin_state != "unpinned" {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        if placement_row_has_invalid_unpinned_facts(origin)? {
+            return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+        }
+        let origin_ordinal = decode_u64(origin.decode_column("event_ordinal")?)?;
+        let predecessor_ordinal = origin_ordinal
+            .checked_sub(1)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let predecessor = sqlx::query(
+            "SELECT *
+               FROM runner_session_placement_record
+              WHERE session_id = $1 AND event_ordinal = $2",
+        )
+        .bind(session)
+        .bind(Decimal::from(predecessor_ordinal))
+        .fetch_optional(&mut *connection)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+        let predecessor_kind: String = predecessor.decode_column("event_kind")?;
+        let predecessor_state: String = predecessor.decode_column("state_kind")?;
+        if predecessor_kind != "runner_lost_before_pin"
+            || predecessor_state != "runner_lost_before_pin"
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        if placement_row_has_invalid_pre_pin_loss_facts(&predecessor)? {
+            return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+        }
+        let prior_revision = decode_generation(predecessor.decode_column("placement_revision")?)?;
+        let lost_runner = predecessor
+            .decode_column::<Option<Uuid>>("lost_runner_id")?
+            .map(runner_id)
+            .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+        let prior_request = decode_placement_request(connection, &predecessor).await?;
+        let replacement_request = decode_placement_request(connection, origin).await?;
+        history = RunnerPlacementReconstitutionHistory::PrePinReplacement {
+            predecessor_history: Box::new(history),
+            prior_revision,
+            lost_runner,
+            prior_request: Box::new(prior_request),
+            replacement_request: Box::new(replacement_request),
+        };
     }
-    let origin_ordinal = decode_u64(origin.decode_column("event_ordinal")?)?;
-    let predecessor_ordinal = origin_ordinal
-        .checked_sub(1)
-        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
-    let predecessor = sqlx::query(
-        "SELECT *
-           FROM runner_session_placement_record
-          WHERE session_id = $1 AND event_ordinal = $2",
-    )
-    .bind(session)
-    .bind(Decimal::from(predecessor_ordinal))
-    .fetch_optional(&mut *connection)
-    .await?
-    .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
-    let predecessor_kind: String = predecessor.decode_column("event_kind")?;
-    let predecessor_state: String = predecessor.decode_column("state_kind")?;
-    if predecessor_kind != "runner_lost_before_pin" || predecessor_state != "runner_lost_before_pin"
-    {
-        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
-    }
-    if placement_row_has_invalid_pre_pin_loss_facts(&predecessor)? {
-        return Err(RunnerProtocolCorruption::InvalidEncoding.into());
-    }
-    let prior_revision = decode_generation(predecessor.decode_column("placement_revision")?)?;
-    let lost_runner = predecessor
-        .decode_column::<Option<Uuid>>("lost_runner_id")?
-        .map(runner_id)
-        .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-    let prior_request = decode_placement_request(connection, &predecessor).await?;
-    let replacement_request = decode_placement_request(connection, origin).await?;
-    Ok(RunnerPlacementReconstitutionHistory::PrePinReplacement {
-        prior_revision,
-        lost_runner,
-        prior_request: Box::new(prior_request),
-        replacement_request: Box::new(replacement_request),
-    })
+    Ok(history)
 }
 
 fn decode_provisioned_workspace(
@@ -4576,6 +4610,9 @@ async fn prospective_placement_reconstitution_history(
         .map(runner_id)
         .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
     Ok(RunnerPlacementReconstitutionHistory::PrePinReplacement {
+        predecessor_history: Box::new(
+            load_placement_reconstitution_history(connection, prior).await?,
+        ),
         prior_revision,
         lost_runner,
         prior_request: Box::new(decode_placement_request(connection, prior).await?),
