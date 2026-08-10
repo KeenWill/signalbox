@@ -276,9 +276,9 @@ const SYNTHETIC_CARGO_DIAGNOSTIC_BACKWARDS_END_COLUMN: u64 = 3;
 const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
 const EXEC_NATURAL_OUTPUT: &str = "";
 #[cfg(target_os = "linux")]
-const WORKSPACE_UNEXPECTED_XATTR_NAME: &str = "user.signalbox_tool_eval";
+const SYNTHETIC_UNEXPECTED_XATTR_NAME: &str = "user.signalbox_tool_eval";
 #[cfg(target_os = "linux")]
-const WORKSPACE_UNEXPECTED_XATTR_VALUE: &[u8] = b"unexpected synthetic metadata";
+const SYNTHETIC_UNEXPECTED_XATTR_VALUE: &[u8] = b"unexpected synthetic metadata";
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
 const WEB_QUERY: &str = "Signalbox tool evaluation";
@@ -835,6 +835,8 @@ struct FamilySuite {
     git_pre_execution_worktree_modified_times: StdMutex<Option<BTreeMap<PathBuf, SystemTime>>>,
     git_pre_execution_worktree_entry_identities:
         StdMutex<Option<BTreeMap<PathBuf, FilesystemIdentity>>>,
+    git_pre_execution_worktree_extended_attributes:
+        StdMutex<Option<BTreeMap<PathBuf, ExtendedAttributeSnapshot>>>,
     git_pre_execution_index_entries: StdMutex<Option<Vec<GitIndexCompleteEntrySnapshot>>>,
     git_pre_execution_metadata_root_modified_time: StdMutex<Option<SystemTime>>,
     git_pre_execution_metadata_root_identity: StdMutex<Option<FilesystemIdentity>>,
@@ -893,6 +895,7 @@ struct GitFixtureSnapshot {
     worktree_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     worktree_modified_times: BTreeMap<PathBuf, SystemTime>,
     worktree_entry_identities: BTreeMap<PathBuf, FilesystemIdentity>,
+    worktree_extended_attributes: BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
     metadata_root_kind: GitMetadataEntryKind,
     metadata_root_mode: Option<u32>,
     metadata_root_modified_time: Option<SystemTime>,
@@ -1186,6 +1189,7 @@ impl FamilySuite {
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
+            git_pre_execution_worktree_extended_attributes: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
             git_pre_execution_metadata_root_identity: StdMutex::new(None),
@@ -1258,6 +1262,7 @@ impl FamilySuite {
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
+            git_pre_execution_worktree_extended_attributes: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
             git_pre_execution_metadata_root_identity: StdMutex::new(None),
@@ -1300,6 +1305,7 @@ impl FamilySuite {
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
+            git_pre_execution_worktree_extended_attributes: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
             git_pre_execution_metadata_root_identity: StdMutex::new(None),
@@ -1352,6 +1358,7 @@ impl FamilySuite {
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
+            git_pre_execution_worktree_extended_attributes: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
             git_pre_execution_metadata_root_identity: StdMutex::new(None),
@@ -1481,6 +1488,11 @@ impl FamilySuite {
                 .expect("Git pre-execution worktree-identity lock is available") =
                 Some(git_worktree_entry_identities(self.workspace.path())?);
             *self
+                .git_pre_execution_worktree_extended_attributes
+                .lock()
+                .expect("Git pre-execution worktree-attribute lock is available") =
+                Some(git_worktree_extended_attributes(self.workspace.path())?);
+            *self
                 .git_pre_execution_index_entries
                 .lock()
                 .expect("Git pre-execution index lock is available") = Some(
@@ -1606,6 +1618,10 @@ impl FamilySuite {
                     .git_pre_execution_worktree_entry_identities
                     .lock()
                     .expect("Git pre-execution worktree-identity lock is available");
+                let pre_execution_worktree_extended_attributes = self
+                    .git_pre_execution_worktree_extended_attributes
+                    .lock()
+                    .expect("Git pre-execution worktree-attribute lock is available");
                 let pre_execution_index_entries = self
                     .git_pre_execution_index_entries
                     .lock()
@@ -1649,6 +1665,8 @@ impl FamilySuite {
                             pre_execution_worktree_modified_times.as_ref(),
                         pre_execution_worktree_entry_identities:
                             pre_execution_worktree_entry_identities.as_ref(),
+                        pre_execution_worktree_extended_attributes:
+                            pre_execution_worktree_extended_attributes.as_ref(),
                         pre_execution_index_entries: pre_execution_index_entries.as_deref(),
                         pre_execution_metadata_root_modified_time:
                             *pre_execution_metadata_root_modified_time,
@@ -1985,7 +2003,20 @@ fn workspace_entry_identities(root: &Path) -> EvalResult<BTreeMap<PathBuf, Files
 fn workspace_extended_attributes(
     root: &Path,
 ) -> EvalResult<BTreeMap<PathBuf, ExtendedAttributeSnapshot>> {
-    workspace_entries(root)?
+    filesystem_extended_attributes(root, None)
+}
+
+fn git_worktree_extended_attributes(
+    root: &Path,
+) -> EvalResult<BTreeMap<PathBuf, ExtendedAttributeSnapshot>> {
+    filesystem_extended_attributes(root, Some(Path::new(".git")))
+}
+
+fn filesystem_extended_attributes(
+    root: &Path,
+    ignored_root_entry: Option<&Path>,
+) -> EvalResult<BTreeMap<PathBuf, ExtendedAttributeSnapshot>> {
+    filesystem_entries(root, ignored_root_entry)?
         .into_keys()
         .map(|relative| {
             let attributes = extended_attributes(&root.join(&relative))?;
@@ -2092,6 +2123,8 @@ struct GitForcedVerification<'a> {
     pre_execution_worktree_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
     pre_execution_worktree_modified_times: Option<&'a BTreeMap<PathBuf, SystemTime>>,
     pre_execution_worktree_entry_identities: Option<&'a BTreeMap<PathBuf, FilesystemIdentity>>,
+    pre_execution_worktree_extended_attributes:
+        Option<&'a BTreeMap<PathBuf, ExtendedAttributeSnapshot>>,
     pre_execution_index_entries: Option<&'a [GitIndexCompleteEntrySnapshot]>,
     pre_execution_metadata_root_modified_time: Option<SystemTime>,
     pre_execution_metadata_root_identity: Option<FilesystemIdentity>,
@@ -2117,6 +2150,7 @@ fn git_forced_case_passed(
         pre_execution_worktree_entries,
         pre_execution_worktree_modified_times,
         pre_execution_worktree_entry_identities,
+        pre_execution_worktree_extended_attributes,
         pre_execution_index_entries,
         pre_execution_metadata_root_modified_time,
         pre_execution_metadata_root_identity,
@@ -2405,6 +2439,11 @@ fn git_forced_case_passed(
             name,
             seed_fixture,
             pre_execution_worktree_entry_identities,
+        )?
+        && git_forced_worktree_extended_attributes_match(
+            root,
+            seed_fixture,
+            pre_execution_worktree_extended_attributes,
         )?)
 }
 
@@ -3428,6 +3467,7 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         worktree_entries: git_worktree_entries(root)?,
         worktree_modified_times: git_worktree_modified_times(root)?,
         worktree_entry_identities: git_worktree_entry_identities(root)?,
+        worktree_extended_attributes: git_worktree_extended_attributes(root)?,
         metadata_root_kind: git_metadata_root_kind(root)?,
         metadata_root_mode: worktree_mode(repository.path())?,
         metadata_root_modified_time: Some(git_metadata_root_modified_time(root)?),
@@ -4517,6 +4557,17 @@ fn git_forced_worktree_entry_identities_match(
     Ok(actual == expected)
 }
 
+fn git_forced_worktree_extended_attributes_match(
+    root: &Path,
+    seed_fixture: &GitFixtureSnapshot,
+    pre_execution: Option<&BTreeMap<PathBuf, ExtendedAttributeSnapshot>>,
+) -> EvalResult<bool> {
+    let expected = pre_execution
+        .cloned()
+        .unwrap_or_else(|| seed_fixture.worktree_extended_attributes.clone());
+    Ok(git_worktree_extended_attributes(root)? == expected)
+}
+
 fn git_forced_worktree_matches(
     root: &Path,
     case_name: &str,
@@ -4880,6 +4931,8 @@ fn git_natural_state_passed_in_window(
         &seed_fixture.worktree_entry_identities,
         &[Path::new(GIT_NATURAL_PATH)],
     );
+    let complete_worktree_attribute_inventory_matches =
+        git_worktree_extended_attributes(root)? == seed_fixture.worktree_extended_attributes;
     let metadata_top_level_matches = git_natural_metadata_top_level_matches(root, seed_fixture)?;
     Ok(head_remains_on_seeded_branch
         && seeded_branch_advanced
@@ -4903,6 +4956,7 @@ fn git_natural_state_passed_in_window(
         && complete_worktree_inventory_matches
         && complete_worktree_time_inventory_matches
         && complete_worktree_identity_inventory_matches
+        && complete_worktree_attribute_inventory_matches
         && metadata_top_level_matches)
 }
 
@@ -10671,6 +10725,43 @@ fn forced_git_branch_switch_verifier_rejects_a_head_only_update() -> EvalResult 
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_git_branch_switch_attribute_gate_rejects_target_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_BRANCH_SWITCH_NAME)?;
+    let pre_execution = suite
+        .git_pre_execution_worktree_extended_attributes
+        .lock()
+        .expect("Git pre-execution worktree-attribute lock is available");
+    let relative = Path::new(GIT_SEED_PATH);
+    let target = suite.workspace.path().join(relative);
+    assert!(git_forced_worktree_extended_attributes_match(
+        suite.workspace.path(),
+        &suite.git_seed_fixture,
+        pre_execution.as_ref(),
+    )?);
+    rustix::fs::setxattr(
+        &target,
+        SYNTHETIC_UNEXPECTED_XATTR_NAME,
+        SYNTHETIC_UNEXPECTED_XATTR_VALUE,
+        rustix::fs::XattrFlags::CREATE,
+    )?;
+
+    assert_ne!(
+        git_worktree_extended_attributes(suite.workspace.path())?[relative],
+        pre_execution
+            .as_ref()
+            .expect("the Git branch-switch fixture has a captured attribute inventory")[relative]
+    );
+    assert!(!git_forced_worktree_extended_attributes_match(
+        suite.workspace.path(),
+        &suite.git_seed_fixture,
+        pre_execution.as_ref(),
+    )?);
+    Ok(())
+}
+
 #[test]
 fn forced_git_branch_switch_verifier_rejects_rewriting_the_base_branch() -> EvalResult {
     let suite = FamilySuite::git()?;
@@ -12657,8 +12748,8 @@ fn forced_workspace_edit_verifier_rejects_an_added_extended_attribute() -> EvalR
     fs::write(&path, WORKSPACE_EDITED_SEED)?;
     rustix::fs::setxattr(
         &path,
-        WORKSPACE_UNEXPECTED_XATTR_NAME,
-        WORKSPACE_UNEXPECTED_XATTR_VALUE,
+        SYNTHETIC_UNEXPECTED_XATTR_NAME,
+        SYNTHETIC_UNEXPECTED_XATTR_VALUE,
         rustix::fs::XattrFlags::CREATE,
     )?;
     let result = serde_json::json!({
