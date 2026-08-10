@@ -201,6 +201,9 @@ const SESSION_WORKSPACE_DIRECTORY_SUFFIX: &str = ".sessions";
 /// recently used entry is dropped when a further session arrives.
 const MAX_RETAINED_SESSION_WORKSPACES: usize = 8;
 
+/// Administration directory the Git family requires immediately inside a root.
+const GIT_ADMINISTRATION_DIRECTORY: &str = ".git";
+
 const SESSION_WORKSPACE_COMPOSITION_DETAIL: &str = "session workspace could not be composed";
 
 const SESSION_WORKSPACE_OBJECT_FORMAT_DETAIL: &str =
@@ -272,7 +275,10 @@ impl SessionWorkspaceRoots {
             return SessionWorkspaceRoot::ConfiguredRoot;
         };
         match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_dir() => SessionWorkspaceRoot::Derived { path },
+            Ok(metadata) if metadata.is_dir() => SessionWorkspaceRoot::Derived {
+                identity: ComposedRootIdentity::from_metadata(&metadata),
+                path,
+            },
             Ok(_) => SessionWorkspaceRoot::Unresolvable,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 SessionWorkspaceRoot::ConfiguredRoot
@@ -289,6 +295,10 @@ pub enum SessionWorkspaceRoot {
     Derived {
         /// The derived absolute path.
         path: PathBuf,
+        /// Identity the pathname resolved to when it was probed, so a caller
+        /// can tell the directory a session bound from a replacement at the
+        /// same pathname without probing again.
+        identity: ComposedRootIdentity,
     },
     /// Nothing exists at the session's derived path, so an unbound session
     /// binds the configured root that every session bound before this
@@ -316,14 +326,15 @@ enum RecordedSessionBinding {
     /// retained so a directory replaced at the same pathname is refused rather
     /// than composed as though it were the same workspace.
     DerivedRoot {
-        /// Identity of the directory this session bound.
-        identity: ComposedRootIdentity,
+        /// Identities of the worktree and administration directories this
+        /// session bound.
+        identity: ComposedWorkspaceIdentity,
     },
 }
 
 impl RecordedSessionBinding {
     /// Returns the identity this binding pinned, if it pinned a derived root.
-    const fn derived_identity(self) -> Option<ComposedRootIdentity> {
+    const fn derived_identity(self) -> Option<ComposedWorkspaceIdentity> {
         match self {
             Self::ConfiguredRoot => None,
             Self::DerivedRoot { identity } => Some(identity),
@@ -372,18 +383,32 @@ const fn decide_session_root(
 fn another_session_bound(
     bindings: &BTreeMap<SessionId, RecordedSessionBinding>,
     session: SessionId,
-    composed: ComposedRootIdentity,
+    composed: ComposedWorkspaceIdentity,
 ) -> bool {
-    bindings
-        .iter()
-        .any(|(bound, binding)| *bound != session && binding.derived_identity() == Some(composed))
+    bindings.iter().any(|(bound, binding)| {
+        *bound != session
+            && binding
+                .derived_identity()
+                .is_some_and(|bound_identity| bound_identity.shares_a_directory_with(composed))
+    })
 }
 
-/// Filesystem identity of one root pathname.
+/// Filesystem identity of one directory.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ComposedRootIdentity {
-    device: u64,
-    inode: u64,
+pub struct ComposedRootIdentity {
+    /// Device the directory lives on.
+    pub device: u64,
+    /// Inode number within that device.
+    pub inode: u64,
+}
+
+impl ComposedRootIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
 }
 
 /// Captures the identity the root pathname resolves to right now.
@@ -395,10 +420,41 @@ fn composed_root_identity(
     if !metadata.is_dir() {
         return Err(DaemonToolsConstructionError::WorkspaceRootUnstable);
     }
-    Ok(ComposedRootIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
+    Ok(ComposedRootIdentity::from_metadata(&metadata))
+}
+
+/// The two directories one composed workspace binds.
+///
+/// Two roots can be distinct directories and still share one repository — two
+/// bind mounts over one checkout, say — so isolation is a property of both the
+/// worktree and the administration directory, not of the worktree alone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ComposedWorkspaceIdentity {
+    /// Identity of the worktree root itself.
+    pub root: ComposedRootIdentity,
+    /// Identity of the `.git` directory immediately inside that root.
+    pub administration: ComposedRootIdentity,
+}
+
+impl ComposedWorkspaceIdentity {
+    /// Captures both identities one composed workspace root binds.
+    ///
+    /// The administration directory is `.git` immediately inside the root,
+    /// which the Git family has already required by the time this is captured.
+    fn capture(root: &Path) -> Result<Self, DaemonToolsConstructionError> {
+        Ok(Self {
+            root: composed_root_identity(root)?,
+            administration: composed_root_identity(&root.join(GIT_ADMINISTRATION_DIRECTORY))?,
+        })
+    }
+
+    /// Whether these two composed workspaces are the same workspace, by either
+    /// directory.
+    const fn shares_a_directory_with(self, other: Self) -> bool {
+        self.root.device == other.root.device && self.root.inode == other.root.inode
+            || self.administration.device == other.administration.device
+                && self.administration.inode == other.administration.inode
+    }
 }
 
 /// The six executors one workspace root binds.
@@ -410,7 +466,7 @@ struct WorkspaceBoundExecutors<FileSystem: WorkspaceMutationFileSystem, ExecRunn
     unsandboxed_exec: ExecExecutor<UnsandboxedCommandRunner<ExecRunner>>,
     cargo_diagnostics: CargoDiagnosticsExecutor<ExecRunner>,
     git_object_format: GitObjectFormat,
-    root_identity: ComposedRootIdentity,
+    workspace_identity: ComposedWorkspaceIdentity,
 }
 
 impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
@@ -425,7 +481,7 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
             unsandboxed_exec: self.unsandboxed_exec.clone(),
             cargo_diagnostics: self.cargo_diagnostics.clone(),
             git_object_format: self.git_object_format,
-            root_identity: self.root_identity,
+            workspace_identity: self.workspace_identity,
         }
     }
 }
@@ -508,7 +564,7 @@ where
                 unsandboxed_exec,
                 cargo_diagnostics,
                 git_object_format,
-                root_identity: opening_identity,
+                workspace_identity: ComposedWorkspaceIdentity::capture(root)?,
             },
         })
     }
@@ -1368,6 +1424,28 @@ impl<Executors: Clone + RetainedInFlight> RetainedSessionWorkspaces<Executors> {
         }
     }
 
+    /// Releases idle entries until the set is back under the bound, or until
+    /// none is releasable.
+    ///
+    /// Releasing one entry per retention would leave the set permanently above
+    /// the bound after a burst of concurrent sessions, since each later
+    /// retention released one and inserted one. The excess an in-flight request
+    /// forces is temporary only if it drains once those requests return.
+    fn release_idle_overflow(&mut self) {
+        while self.retained.len() >= MAX_RETAINED_SESSION_WORKSPACES {
+            let releasable = self
+                .retained
+                .iter()
+                .filter(|(_, retained)| !retained.executors.is_in_flight())
+                .min_by_key(|(_, retained)| retained.last_used)
+                .map(|(session, _)| *session);
+            let Some(releasable) = releasable else {
+                return;
+            };
+            self.retained.remove(&releasable);
+        }
+    }
+
     fn take_use(&mut self) -> u64 {
         let use_order = self.next_use;
         self.next_use = self.next_use.saturating_add(1);
@@ -1397,17 +1475,7 @@ impl<Executors: Clone + RetainedInFlight> RetainedSessionWorkspaces<Executors> {
         if let Some(already_retained) = self.get(session) {
             return already_retained;
         }
-        if self.retained.len() >= MAX_RETAINED_SESSION_WORKSPACES {
-            let evicted = self
-                .retained
-                .iter()
-                .filter(|(_, retained)| !retained.executors.is_in_flight())
-                .min_by_key(|(_, retained)| retained.last_used)
-                .map(|(session, _)| *session);
-            if let Some(evicted) = evicted {
-                self.retained.remove(&evicted);
-            }
-        }
+        self.release_idle_overflow();
         let last_used = self.take_use();
         self.retained.insert(
             session,
@@ -1489,20 +1557,16 @@ where
         &mut self,
         session: SessionId,
     ) -> Result<WorkspaceBoundExecutors<FileSystem, ExecRunner>, SessionWorkspaceFailure> {
-        // The retained executors are consulted first so a live session never
-        // pays the derivation probe again, and the recorded binding is read
-        // under the same lock so an evicted session still binds what it bound.
-        let recorded = {
-            let mut state = self.state.lock().await;
-            if let Some(retained) = state.retained.get(session) {
-                return Ok(retained);
-            }
-            state.bindings.get(&session).copied()
-        };
+        // The derivation is probed before the retained executors are consulted,
+        // not after. A retained set is a set of descriptors pinned to one
+        // directory, and returning it without asking what the pathname names
+        // now would let a session keep reading and writing a tree the
+        // deployment has already removed or replaced.
         let derived = self.roots.resolve(session);
+        let mut state = self.state.lock().await;
+        let recorded = state.bindings.get(&session).copied();
         let path = match decide_session_root(recorded, &derived) {
             SessionRootDecision::ConfiguredRoot => {
-                let mut state = self.state.lock().await;
                 // First writer wins. A concurrent first request for this
                 // session may have recorded a derived binding while this one
                 // was probing, and honouring that record is what makes the
@@ -1522,13 +1586,23 @@ where
             SessionRootDecision::Unresolvable => {
                 return Err(SessionWorkspaceFailure::UnresolvableRoot);
             }
-            SessionRootDecision::ComposeDerived => match derived {
-                SessionWorkspaceRoot::Derived { path } => path,
-                SessionWorkspaceRoot::ConfiguredRoot | SessionWorkspaceRoot::Unresolvable => {
+            SessionRootDecision::ComposeDerived => {
+                let SessionWorkspaceRoot::Derived { path, identity } = &derived else {
                     return Err(SessionWorkspaceFailure::UnresolvableRoot);
+                };
+                if recorded
+                    .and_then(RecordedSessionBinding::derived_identity)
+                    .is_some_and(|bound| bound.root != *identity)
+                {
+                    return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
                 }
-            },
+                if let Some(retained) = state.retained.get(session) {
+                    return Ok(retained);
+                }
+                path.clone()
+            }
         };
+        drop(state);
         let filesystem = FileSystem::pin_further_root(&path).map_err(|_| {
             SessionWorkspaceFailure::Composition(DaemonToolsConstructionError::WorkspaceRead)
         })?;
@@ -1542,13 +1616,13 @@ where
         if families.executors.git_object_format != self.configured.git_object_format {
             return Err(SessionWorkspaceFailure::ObjectFormatDisagreement);
         }
-        let composed = families.executors.root_identity;
-        // Two pathnames can name one directory — a bind mount, or a derived
-        // path exposing the configured root — and each would pass composition
-        // on its own. The isolation this derivation exists to establish is a
-        // property of the directory, not of the pathname, so it is checked
-        // against the identity every other binding pinned.
-        if composed == self.configured.root_identity {
+        let composed = families.executors.workspace_identity;
+        // Two pathnames can name one workspace — a bind mount, a derived path
+        // exposing the configured root, or two roots over one repository — and
+        // each would pass composition on its own. The isolation this derivation
+        // exists to establish is a property of the directories, not of the
+        // pathname, so it is checked against what every other binding pinned.
+        if composed.shares_a_directory_with(self.configured.workspace_identity) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
         let mut state = self.state.lock().await;
@@ -2732,12 +2806,41 @@ mod tests {
         );
     }
 
-    /// A directory identity a recorded binding pinned. Both members only need
+    /// A workspace identity a recorded binding pinned. Every member only needs
     /// to be some value a real `stat` could report.
-    const FIXTURE_BOUND_IDENTITY: ComposedRootIdentity = ComposedRootIdentity {
-        device: 0x10,
-        inode: 0x20,
+    const FIXTURE_BOUND_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdentity {
+        root: ComposedRootIdentity {
+            device: 0x10,
+            inode: 0x20,
+        },
+        administration: ComposedRootIdentity {
+            device: 0x10,
+            inode: 0x21,
+        },
     };
+
+    /// A workspace sharing neither directory with [`FIXTURE_BOUND_IDENTITY`].
+    const FIXTURE_OTHER_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdentity {
+        root: ComposedRootIdentity {
+            device: 0x10,
+            inode: 0x30,
+        },
+        administration: ComposedRootIdentity {
+            device: 0x10,
+            inode: 0x31,
+        },
+    };
+
+    /// A distinct worktree over the directory [`FIXTURE_BOUND_IDENTITY`]
+    /// administers, which is what two bind mounts over one repository produce.
+    const FIXTURE_SHARED_ADMINISTRATION_IDENTITY: ComposedWorkspaceIdentity =
+        ComposedWorkspaceIdentity {
+            root: ComposedRootIdentity {
+                device: 0x10,
+                inode: 0x40,
+            },
+            administration: FIXTURE_BOUND_IDENTITY.administration,
+        };
 
     /// The two sessions the per-session workspace tests give separate roots.
     /// Each value only needs to be distinct from the other.
@@ -2947,7 +3050,10 @@ mod tests {
 
         let resolved = roots.resolve(first);
 
-        assert_eq!(resolved, SessionWorkspaceRoot::Derived { path: expected });
+        let SessionWorkspaceRoot::Derived { path, .. } = resolved else {
+            panic!("a provisioned session resolves to its derived root");
+        };
+        assert_eq!(path, expected);
     }
 
     /// One composition serves two concurrent sessions from two roots: each
@@ -3157,6 +3263,7 @@ mod tests {
             None,
             &SessionWorkspaceRoot::Derived {
                 path: PathBuf::from("/srv/signalbox/workspace.sessions/fixture"),
+                identity: FIXTURE_BOUND_IDENTITY.root,
             },
         );
 
@@ -3181,6 +3288,7 @@ mod tests {
             Some(RecordedSessionBinding::ConfiguredRoot),
             &SessionWorkspaceRoot::Derived {
                 path: PathBuf::from("/srv/signalbox/workspace.sessions/fixture"),
+                identity: FIXTURE_BOUND_IDENTITY.root,
             },
         );
 
@@ -3260,6 +3368,45 @@ mod tests {
         ));
     }
 
+    /// Two worktrees over one repository are one workspace, even though their
+    /// root directories differ, so the second is refused.
+    #[test]
+    fn a_repository_another_session_bound_is_refused() {
+        let first = session(FIRST_SESSION_IDENTITY);
+        let second = session(SECOND_SESSION_IDENTITY);
+        let bindings = BTreeMap::from([(
+            first,
+            RecordedSessionBinding::DerivedRoot {
+                identity: FIXTURE_BOUND_IDENTITY,
+            },
+        )]);
+
+        assert!(another_session_bound(
+            &bindings,
+            second,
+            FIXTURE_SHARED_ADMINISTRATION_IDENTITY
+        ));
+    }
+
+    /// A workspace sharing neither directory with a bound one is admitted.
+    #[test]
+    fn a_workspace_sharing_no_directory_is_admitted() {
+        let first = session(FIRST_SESSION_IDENTITY);
+        let second = session(SECOND_SESSION_IDENTITY);
+        let bindings = BTreeMap::from([(
+            first,
+            RecordedSessionBinding::DerivedRoot {
+                identity: FIXTURE_BOUND_IDENTITY,
+            },
+        )]);
+
+        assert!(!another_session_bound(
+            &bindings,
+            second,
+            FIXTURE_OTHER_IDENTITY
+        ));
+    }
+
     /// A session bound to the configured root pins no derived directory, so it
     /// never makes another session's derived root read as shared.
     #[test]
@@ -3329,6 +3476,53 @@ mod tests {
         assert_eq!(retained.get(in_flight), Some(in_flight_retained));
         assert_eq!(retained.get(idle), None);
         assert_eq!(retained.get(overflowing), Some(overflowing_retained));
+    }
+
+    /// A burst of concurrent sessions may push the retained set above the
+    /// bound, but the excess drains once those requests return rather than
+    /// persisting one entry per later retention.
+    #[test]
+    fn idle_overflow_drains_back_to_the_bound() {
+        const IN_FLIGHT_MARKER: u32 = 1;
+        const IDLE_MARKER: u32 = 2;
+        let mut retained = RetainedSessionWorkspaces::new();
+        retain_in_flight_over_the_bound(
+            &mut retained,
+            RetainedFixture::in_flight(IN_FLIGHT_MARKER),
+        );
+        let overflowed = retained.retained.len();
+
+        release_every_retained_request(&mut retained);
+        retained.retain(
+            session(FILLER_SESSION_IDENTITY_BASE - 1),
+            RetainedFixture::idle(IDLE_MARKER),
+        );
+
+        assert!(overflowed > MAX_RETAINED_SESSION_WORKSPACES);
+        assert_eq!(retained.retained.len(), MAX_RETAINED_SESSION_WORKSPACES);
+    }
+
+    /// Retains more in-flight sessions than the bound admits.
+    ///
+    /// The iteration lives here rather than in a test body, which stays
+    /// straight-line: the claim under test is what happens once those requests
+    /// return, not how the overflow was produced.
+    fn retain_in_flight_over_the_bound(
+        retained: &mut RetainedSessionWorkspaces<RetainedFixture>,
+        in_flight: RetainedFixture,
+    ) {
+        for offset in 0..MAX_RETAINED_SESSION_WORKSPACES + 4 {
+            let identity = FILLER_SESSION_IDENTITY_BASE + offset as u128;
+            retained.retain(session(identity), in_flight);
+        }
+    }
+
+    /// Marks every retained fixture idle, standing in for the in-flight
+    /// requests returning and releasing their handles.
+    fn release_every_retained_request(retained: &mut RetainedSessionWorkspaces<RetainedFixture>) {
+        for entry in retained.retained.values_mut() {
+            entry.executors.request_state = FixtureRequestState::Idle;
+        }
     }
 
     /// A composed set is in flight exactly while a handle outside the retained

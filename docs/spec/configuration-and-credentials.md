@@ -590,10 +590,24 @@ workspace-root-bound tool and does not change for the process's lifetime. A
 session that bound the configured root is not moved onto a directory provisioned
 later, and a session that bound a derived root is never returned to the
 configured root by that directory's removal: its next request fails closed
-instead. The record holds one session identity and one discriminant, so it is
-kept apart from the descriptor-holding composition and is never evicted. A
-daemon restart clears it, after which a removed directory again reads as
-unprovisioned.
+instead. The first record written wins, so two concurrent first requests for one
+session converge on one root rather than the later one overwriting the earlier.
+
+A derived record names the filesystem identities of the worktree and of the
+`.git` directory inside it, not only the fact that a derived root was bound, so
+a different directory standing at the same pathname is refused rather than
+resumed as though it were the same workspace. Two identities rather than one
+because a workspace is a worktree and a repository: two roots exposing one
+`.git` are one workspace even where the roots differ. Every request revalidates
+the pathname against that record before dispatching, including a request served
+from a retained composition, so a removed or replaced directory fails the next
+request rather than being reached through a descriptor pinned to the directory
+it replaced.
+
+The record holds one session identity, one discriminant, and those identities,
+so it is kept apart from the descriptor-holding composition and is never
+evicted. A daemon restart clears it, after which a removed directory again reads
+as unprovisioned.
 
 A derived root is opened, layout-checked, and supervisor-bound the first time
 that session invokes a workspace-root-bound tool, not at startup, because no
@@ -607,11 +621,20 @@ first, which is what keeps open descriptors and pinned repositories finite. A
 set a request is still holding is never released to make room, because releasing
 it would let that session's next request compose a second set beside the one
 already mutating its tree. The retained set may therefore exceed eight by the
-number of sessions executing a workspace-bound tool at that moment, and returns
-to the bound as those requests return. Isolation is checked against the
-directory rather than the pathname, since two pathnames can name one directory:
-a composed root whose identity is the configured root's, or one another session
-already bound, is refused. Failure to compose or bind a derived root — an
+number of sessions executing a workspace-bound tool at that moment. That excess
+drains rather than persisting: each retention releases idle entries until the
+set is back under the bound, so one burst of concurrent sessions does not leave
+it permanently above.
+
+Isolation is checked against the directories rather than the pathname, since two
+pathnames can name one workspace: a composed root sharing its worktree or its
+`.git` directory with the configured root, or with one another session already
+bound, is refused. An accepted residual: a filesystem may reuse a device and
+inode pair after the directory that held them is removed, so a derived directory
+removed and recreated while its composition is not retained can present the
+identities the record names. Distinguishing that would require holding a
+descriptor for every session ever bound, which is the descriptor growth the
+retained bound exists to prevent. Failure to compose or bind a derived root — an
 unopenable directory, a rejected repository layout, a root replaced during
 composition or since the session bound it, a root shared with another session or
 with the configured root, or a repository whose object format disagrees with the
