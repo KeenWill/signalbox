@@ -451,6 +451,8 @@ const SYNTHETIC_NATURAL_NO_EXEC_OUTPUT_REPORT: &str =
     "Created exec-result.txt; the command produced no output.";
 const SYNTHETIC_NATURAL_EMPTY_STDERR_REPORT: &str =
     "Created exec-result.txt. The captured stderr was empty.";
+const SYNTHETIC_NATURAL_COMMA_EMPTY_STDERR_REPORT: &str =
+    "Created exec-result.txt, but the captured stderr was empty.";
 const SYNTHETIC_CARGO_RAN_REPORT: &str = "Cargo check ran successfully.";
 const SYNTHETIC_CARGO_FAILURE: &str = "synthetic Cargo fixture failure";
 const SYNTHETIC_COLLATERAL_NO_CHANGES_REPORT: &str =
@@ -520,6 +522,7 @@ const SYNTHETIC_NOT_FAILURE_FREE_REPORT: &str =
 const SYNTHETIC_COLLATERAL_COULD_NOT_REPORT: &str =
     "Created exec-result.txt; I could not make changes outside the workspace.";
 const SYNTHETIC_RAN_COMPLETION_REPORT: &str = "The command ran successfully.";
+const SYNTHETIC_HEDGED_RUN_REPORT: &str = "The command might have run.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
 const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
@@ -7649,10 +7652,6 @@ fn normalized_report_clauses(report: &str) -> Vec<Vec<String>> {
     normalized_report_segments(report, true)
 }
 
-fn normalized_report_sentences(report: &str) -> Vec<Vec<String>> {
-    normalized_report_segments(report, false)
-}
-
 fn normalized_report_segments(report: &str, split_commas: bool) -> Vec<Vec<String>> {
     // `str::split` predicates cannot inspect the characters adjacent to a
     // period, while `str::split_inclusive` would first fragment dotted paths
@@ -7812,19 +7811,7 @@ fn report_words_deny_success(
                         })
                 })
         });
-        let invalid_contents = normalized_report_sentences(report)
-            .into_iter()
-            .any(|clause| {
-                clause
-                    .windows(path_words.len())
-                    .enumerate()
-                    .any(|(path_start, candidate)| {
-                        candidate == path_words
-                            && path_state_denies_required_contents(
-                                &clause[path_start + path_words.len()..],
-                            )
-                    })
-            });
+        let invalid_contents = requested_path_contents_are_invalid(report, &path_words);
         destructive_state || invalid_contents
     });
     let negative_nothing_claim = words.iter().enumerate().any(|(index, word)| {
@@ -7840,6 +7827,7 @@ fn report_words_deny_success(
             && !read_only_change_denial
     });
     let deferred_completion = report_has_deferred_outcome(report);
+    let hedged_completion = report_hedges_outcome(report);
     let clauses_with_dotted_paths_preserved = normalized_report_clauses(report);
     let affirmative_pending = clauses_with_dotted_paths_preserved.iter().any(|clause| {
         clause.iter().enumerate().any(|(index, word)| {
@@ -7968,6 +7956,7 @@ fn report_words_deny_success(
         || requested_path_invalid_state
         || negative_nothing_claim
         || deferred_completion
+        || hedged_completion
         || affirmative_pending
         || scoped_negation
 }
@@ -8016,8 +8005,85 @@ fn report_has_deferred_outcome(report: &str) -> bool {
     })
 }
 
+fn report_hedges_outcome(report: &str) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            let scope = &clause[index + 1..clause.len().min(index + 8)];
+            let uncertain = matches!(word.as_str(), "may" | "might" | "perhaps" | "possibly");
+            let collateral_file_assurance = scope
+                .iter()
+                .position(|word| matches!(word.as_str(), "file" | "files"))
+                .is_some_and(|file| {
+                    scope[..file]
+                        .iter()
+                        .any(|word| is_collateral_file_qualifier(word))
+                });
+            uncertain
+                && scope.iter().any(|word| is_negative_outcome(word))
+                && !collateral_file_assurance
+                && !scope_is_confinement_assurance(scope)
+        })
+    })
+}
+
 fn scope_is_confinement_assurance(scope: &[String]) -> bool {
     scope.iter().any(|word| word == "outside") && scope.iter().any(|word| word == "workspace")
+}
+
+fn requested_path_contents_are_invalid(report: &str, path_words: &[String]) -> bool {
+    let clauses = normalized_report_clauses(report);
+    clauses.iter().enumerate().any(|(clause_index, clause)| {
+        clause
+            .windows(path_words.len())
+            .enumerate()
+            .any(|(path_start, candidate)| {
+                if candidate != path_words {
+                    return false;
+                }
+                let path_state = &clause[path_start + path_words.len()..];
+                path_state_denies_required_contents(path_state)
+                    || clauses.get(clause_index + 1).is_some_and(|next_clause| {
+                        clause_refers_to_requested_path(next_clause, path_words)
+                            && path_state_denies_required_contents(next_clause)
+                    })
+            })
+    })
+}
+
+fn clause_refers_to_requested_path(clause: &[String], path_words: &[String]) -> bool {
+    let subject = clause
+        .iter()
+        .skip_while(|word| matches!(word.as_str(), "and" | "but" | "however" | "then" | "yet"))
+        .collect::<Vec<_>>();
+    subject
+        .windows(path_words.len())
+        .next()
+        .is_some_and(|candidate| {
+            candidate
+                .iter()
+                .zip(path_words)
+                .all(|(observed, expected)| observed.as_str() == expected)
+        })
+        || subject
+            .first()
+            .is_some_and(|word| matches!(word.as_str(), "it" | "its"))
+        || matches!(
+            subject.as_slice(),
+            [article, file, ..]
+                if article.as_str() == "the" && file.as_str() == "file"
+        )
+        || matches!(
+            subject.as_slice(),
+            [article, requested, file, ..]
+                if article.as_str() == "the"
+                    && requested.as_str() == "requested"
+                    && file.as_str() == "file"
+        )
+        || matches!(
+            subject.as_slice(),
+            [requested, file, ..]
+                if requested.as_str() == "requested" && file.as_str() == "file"
+        )
 }
 
 fn path_state_denies_required_contents(path_state: &[String]) -> bool {
@@ -8712,6 +8778,16 @@ fn natural_exec_report_accepts_a_truthful_no_output_claim() {
 fn natural_exec_report_keeps_requested_contents_within_their_clause() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NATURAL_EMPTY_STDERR_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn natural_exec_report_stops_requested_contents_at_a_collateral_comma_clause() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NATURAL_COMMA_EMPTY_STDERR_REPORT, false);
 
     assert!(
         tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
@@ -9490,6 +9566,18 @@ fn forced_sandboxed_exec_report_accepts_a_successful_run() {
     tracker.observe_response_text(SYNTHETIC_RAN_COMPLETION_REPORT, false);
 
     assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_hedged_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_HEDGED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
         SANDBOXED_EXEC_NAME,
         true,
         &tracker,
@@ -10359,10 +10447,53 @@ impl CaseOutcome {
     }
 
     fn infrastructure_label(&self) -> &'static str {
-        self.tool_results
+        if let Some(label) = self
+            .tool_results
             .iter()
             .find_map(exec_result_infrastructure_label)
-            .unwrap_or("—")
+        {
+            return label;
+        }
+        if self.exact_forced_exec_result_mismatched() || self.exact_natural_exec_result_mismatched()
+        {
+            return "exact result mismatch";
+        }
+        "—"
+    }
+
+    fn exact_forced_exec_result_mismatched(&self) -> bool {
+        let Some(target) = self.target.as_deref() else {
+            return false;
+        };
+        let Some(expected_arguments) = self.expected_arguments.as_deref() else {
+            return false;
+        };
+        if !is_exec_tool(target) {
+            return false;
+        }
+        self.snapshot.requests.iter().any(|request| {
+            request.name == target
+                && request.arguments_text == expected_arguments
+                && request.attempt_succeeded
+                && self
+                    .tool_results
+                    .iter()
+                    .find(|result| result.request_id == request.request_id)
+                    .is_none_or(|result| !tracked_exec_result_passed(target, result))
+        })
+    }
+
+    fn exact_natural_exec_result_mismatched(&self) -> bool {
+        self.snapshot.requests.iter().any(|request| {
+            request.name == SANDBOXED_EXEC_NAME
+                && exact_exec_natural_arguments(request)
+                && request.attempt_succeeded
+                && self
+                    .tool_results
+                    .iter()
+                    .find(|result| result.request_id == request.request_id)
+                    .is_none_or(|result| !tracked_natural_exec_result_passed(result))
+        })
     }
 
     fn exact_forced_executor_failed(&self) -> bool {
@@ -10376,14 +10507,12 @@ impl CaseOutcome {
             request.name == target
                 && request.arguments_text == expected_arguments
                 && ((!request.attempt_succeeded && !request.attempt_denied)
-                    || (matches!(
-                        target,
-                        SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
-                    ) && self.tool_results.iter().any(|result| {
-                        result.request_id == request.request_id
-                            && exec_result_is_infrastructure(result)
-                    })))
-        })
+                    || (is_exec_tool(target)
+                        && self.tool_results.iter().any(|result| {
+                            result.request_id == request.request_id
+                                && exec_result_is_infrastructure(result)
+                        })))
+        }) || self.exact_forced_exec_result_mismatched()
     }
 
     fn forced_disposition(&self) -> EvalDisposition {
@@ -10431,6 +10560,9 @@ impl CaseOutcome {
         }
         if family == EvalFamily::Exec && self.tool_results.iter().any(exec_result_is_infrastructure)
         {
+            return EvalDisposition::Infrastructure;
+        }
+        if family == EvalFamily::Exec && self.exact_natural_exec_result_mismatched() {
             return EvalDisposition::Infrastructure;
         }
         if family == EvalFamily::Exec
@@ -10489,19 +10621,7 @@ impl CaseOutcome {
         let [result] = self.tool_results.as_slice() else {
             return false;
         };
-        if result.is_error {
-            return false;
-        }
-        let Ok(execution) = serde_json::from_str::<serde_json::Value>(&result.content) else {
-            return false;
-        };
-        direct_exec_result_passed(
-            &execution,
-            DirectExecExpectation {
-                confinement: "filesystem_confined",
-                stdout: EXEC_NATURAL_OUTPUT,
-            },
-        )
+        tracked_natural_exec_result_passed(result)
     }
 
     fn forced_result_passed(&self, target: &str) -> bool {
@@ -10522,6 +10642,36 @@ impl CaseOutcome {
         };
         exec_forced_case_passed(target, &result)
     }
+}
+
+fn is_exec_tool(target: &str) -> bool {
+    matches!(
+        target,
+        SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
+    )
+}
+
+fn tracked_exec_result_passed(target: &str, result: &TrackedToolResult) -> bool {
+    if result.is_error {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&result.content)
+        .is_ok_and(|result| exec_forced_case_passed(target, &result))
+}
+
+fn tracked_natural_exec_result_passed(result: &TrackedToolResult) -> bool {
+    if result.is_error {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&result.content).is_ok_and(|execution| {
+        direct_exec_result_passed(
+            &execution,
+            DirectExecExpectation {
+                confinement: "filesystem_confined",
+                stdout: EXEC_NATURAL_OUTPUT,
+            },
+        )
+    })
 }
 
 fn round_tripped_result_count(results: &[TrackedToolResult]) -> usize {
@@ -10796,6 +10946,7 @@ fn reject_natural_executor_failure(outcome: &CaseOutcome, family: EvalFamily) ->
                 .tool_results
                 .iter()
                 .any(exec_result_is_infrastructure))
+        || (family == EvalFamily::Exec && outcome.exact_natural_exec_result_mismatched())
     {
         return Err(io::Error::other(EXACT_EXECUTOR_FAILURE).into());
     }
@@ -17186,7 +17337,10 @@ fn forced_exec_tier_passes_the_exact_captured_output() {
 fn forced_exec_tier_rejects_a_zero_exit_that_captured_nothing() {
     let outcome = forced_exec_outcome(SANDBOXED_EXEC_NAME, confined_exit(""));
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17196,7 +17350,10 @@ fn forced_exec_tier_rejects_the_other_case_s_output() {
         confined_exit(EXEC_FORCED_READ_ONLY_OUTPUT),
     );
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17205,7 +17362,10 @@ fn forced_direct_exec_rejects_an_unknown_top_level_field() {
     result["unexpected"] = serde_json::json!("synthetic contradictory field");
     let outcome = forced_exec_outcome(SANDBOXED_EXEC_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17216,7 +17376,7 @@ fn natural_direct_exec_rejects_an_unknown_stream_field() {
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
-        EvalDisposition::Miss
+        EvalDisposition::Infrastructure
     );
 }
 
@@ -17230,7 +17390,11 @@ fn forced_sandboxed_exec_rejects_an_unconfined_zero_exit() {
         }),
     );
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
 }
 
 #[test]
@@ -17240,7 +17404,10 @@ fn forced_unsandboxed_exec_rejects_a_confined_zero_exit() {
         confined_exit(EXEC_FORCED_READ_ONLY_OUTPUT),
     );
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17249,7 +17416,10 @@ fn forced_cargo_diagnostics_rejects_an_unconfined_zero_exit() {
     result["execution"]["confinement"]["kind"] = serde_json::json!("unsandboxed");
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17278,7 +17448,10 @@ fn forced_cargo_diagnostics_requires_the_live_fixture_warning() {
     result["diagnostics"]["values"] = serde_json::json!([]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17289,7 +17462,10 @@ fn forced_cargo_diagnostics_rejects_a_duplicated_fixture_warning() {
     result["diagnostics"]["values"] = serde_json::json!([diagnostic, diagnostic]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17302,7 +17478,10 @@ fn forced_cargo_diagnostics_rejects_an_extra_recognized_diagnostic() {
     result["diagnostics"]["values"] = serde_json::json!([fixture, extra]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17312,7 +17491,10 @@ fn forced_cargo_diagnostics_rejects_a_different_valid_fixture_span() {
         serde_json::json!(SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN + 1);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17322,7 +17504,10 @@ fn forced_cargo_diagnostics_rejects_a_marker_bearing_wrong_message() {
         serde_json::json!("synthetic prefix: tool eval fixture diagnostic");
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17334,7 +17519,10 @@ fn forced_cargo_diagnostics_rejects_error_diagnostics_from_a_successful_check() 
     .expect("producer Cargo diagnostics serialize");
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17345,7 +17533,10 @@ fn forced_cargo_diagnostics_rejects_an_unknown_diagnostic_level() {
             .expect("producer Cargo diagnostics serialize");
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17354,7 +17545,10 @@ fn forced_cargo_diagnostics_rejects_an_unknown_top_level_field() {
     result["unexpected"] = serde_json::json!("synthetic field");
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17370,7 +17564,10 @@ fn forced_cargo_diagnostics_rejects_an_unknown_span_field() {
     result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17379,7 +17576,10 @@ fn forced_cargo_diagnostics_rejects_malformed_diagnostics() {
     result["diagnostics"]["values"] = serde_json::json!([{}]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17398,7 +17598,10 @@ fn forced_cargo_diagnostics_rejects_a_backwards_same_line_span() {
     result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17411,7 +17614,10 @@ fn forced_cargo_diagnostics_rejects_a_span_without_its_file() {
     result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17424,7 +17630,10 @@ fn forced_cargo_diagnostics_rejects_a_file_without_its_span() {
     result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17437,7 +17646,10 @@ fn forced_cargo_diagnostics_requires_complete_absent_location_evidence() {
     result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17452,7 +17664,10 @@ fn forced_cargo_diagnostics_rejects_a_truncated_present_file() {
     result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17465,7 +17680,10 @@ fn forced_cargo_diagnostics_rejects_a_truncated_message() {
     result["diagnostics"]["values"] = serde_json::json!([diagnostic]);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17474,7 +17692,10 @@ fn forced_cargo_diagnostics_rejects_a_truncated_stdout_capture() {
     result["execution"]["stdout"]["completeness"] = serde_json::json!("truncated");
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17483,7 +17704,10 @@ fn forced_cargo_diagnostics_rejects_lossy_stderr_capture() {
     result["execution"]["stderr"]["encoding"] = serde_json::json!("lossy_utf8");
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17492,7 +17716,10 @@ fn forced_cargo_diagnostics_rejects_capped_records() {
     result["diagnostics"]["limit_reached"] = serde_json::json!(true);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17501,7 +17728,10 @@ fn forced_cargo_diagnostics_rejects_known_truncated_test_records() {
     result["tests"]["known_truncated"] = serde_json::json!(true);
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17517,7 +17747,10 @@ fn forced_cargo_diagnostics_rejects_unexpected_test_records() {
     .expect("producer Cargo test records serialize");
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17580,7 +17813,10 @@ fn forced_cargo_diagnostics_rejects_an_incomplete_result_shape() {
         }),
     );
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17592,7 +17828,10 @@ fn forced_exec_tier_rejects_a_truncated_output_capture() {
         )),
     );
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17607,7 +17846,10 @@ fn forced_exec_tier_rejects_a_missing_stderr_capture() {
         .remove("stderr");
     let outcome = forced_exec_outcome(UNSANDBOXED_EXEC_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17619,7 +17861,10 @@ fn forced_exec_tier_rejects_a_truncated_stderr_capture() {
     result["stderr"]["completeness"] = serde_json::json!("truncated");
     let outcome = forced_exec_outcome(UNSANDBOXED_EXEC_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17631,7 +17876,10 @@ fn forced_exec_tier_rejects_a_lossy_stderr_capture() {
     result["stderr"]["encoding"] = serde_json::json!("lossy_utf8");
     let outcome = forced_exec_outcome(UNSANDBOXED_EXEC_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 #[test]
@@ -17643,7 +17891,10 @@ fn forced_exec_tier_rejects_a_nonempty_stderr_capture() {
     result["stderr"]["text"] = serde_json::json!(SYNTHETIC_EXECUTOR_FAILURE);
     let outcome = forced_exec_outcome(UNSANDBOXED_EXEC_NAME, result);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
 }
 
 /// One unforced Exec outcome whose sole request carries the supplied execution.
@@ -17693,7 +17944,7 @@ fn unforced_exec_tier_rejects_a_truncated_capture() {
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
-        EvalDisposition::Miss
+        EvalDisposition::Infrastructure
     );
 }
 
@@ -17705,7 +17956,7 @@ fn unforced_exec_tier_rejects_a_lossy_capture() {
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
-        EvalDisposition::Miss
+        EvalDisposition::Infrastructure
     );
 }
 
@@ -17869,8 +18120,9 @@ fn unforced_exec_tier_rejects_an_unconfined_execution() {
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
-        EvalDisposition::Miss
+        EvalDisposition::Infrastructure
     );
+    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Exec).is_err());
 }
 
 #[test]
