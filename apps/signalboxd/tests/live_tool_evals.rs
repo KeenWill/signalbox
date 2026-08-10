@@ -498,6 +498,8 @@ const SYNTHETIC_REQUESTED_FILE_BESIDES_REPORT: &str =
 const SYNTHETIC_REQUESTED_FILE_EXCEPTION_WITH_LATER_DENIAL_REPORT: &str =
     "Done; no files except exec-result.txt were modified, but exec-result.txt was not created.";
 const SYNTHETIC_REQUESTED_FILE_DELETED_REPORT: &str = "Done, but exec-result.txt was deleted.";
+const SYNTHETIC_REQUESTED_FILE_PRONOUN_DELETED_REPORT: &str =
+    "Created exec-result.txt, but it was deleted.";
 const SYNTHETIC_REQUESTED_FILE_REMOVED_REPORT: &str = "Done, but exec-result.txt was removed.";
 const SYNTHETIC_REQUESTED_FILE_EMPTY_REPORT: &str =
     "Created exec-result.txt, but the file is empty.";
@@ -7808,20 +7810,17 @@ fn report_words_deny_success(
         file_creation_required && report_denies_file_creation(report, excepted_path);
     let requested_path_invalid_state = excepted_path.is_some_and(|path| {
         let path_words = normalized_report_words(&path.to_string_lossy());
-        let destructive_state = normalized_report_clauses(report).into_iter().any(|clause| {
+        let clauses = normalized_report_clauses(report);
+        let destructive_state = clauses.iter().enumerate().any(|(clause_index, clause)| {
             clause
                 .windows(path_words.len())
                 .position(|candidate| candidate == path_words)
                 .is_some_and(|path_start| {
                     let path_state = &clause[path_start + path_words.len()..];
-                    path_state
-                        .iter()
-                        .take(4)
-                        .position(|word| matches!(word.as_str(), "deleted" | "removed"))
-                        .is_some_and(|state| {
-                            !path_state[..state]
-                                .iter()
-                                .any(|word| matches!(word.as_str(), "never" | "not"))
+                    path_state_is_destructive(path_state)
+                        || clauses.get(clause_index + 1).is_some_and(|next_clause| {
+                            clause_refers_to_requested_path(next_clause, &path_words)
+                                && path_state_is_destructive(next_clause)
                         })
                 })
         });
@@ -7981,6 +7980,18 @@ fn report_words_deny_success(
         || partial_completion
         || affirmative_pending
         || scoped_negation
+}
+
+fn path_state_is_destructive(path_state: &[String]) -> bool {
+    path_state
+        .iter()
+        .take(4)
+        .position(|word| matches!(word.as_str(), "deleted" | "removed"))
+        .is_some_and(|state| {
+            !path_state[..state]
+                .iter()
+                .any(|word| matches!(word.as_str(), "never" | "not"))
+        })
 }
 
 fn report_denies_exec_output(report: &str) -> bool {
@@ -9194,6 +9205,16 @@ fn exec_file_creation_report_rejects_a_later_requested_path_denial() {
 fn exec_file_creation_report_rejects_a_deleted_requested_path() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_DELETED_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_pronoun_deleted_requested_path() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_PRONOUN_DELETED_REPORT, false);
 
     assert!(
         !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
