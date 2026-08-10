@@ -5599,11 +5599,9 @@ impl RunnerWorkingDirectory {
 
     /// Admits nonempty, NUL-free text within the exact byte bound.
     pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
-        if value.is_empty() || value.len() > Self::MAX_UTF8_BYTES || value.contains('\0') {
-            Err(CanonicalValueError::RunnerWorkingDirectory)
-        } else {
-            Ok(Self(value))
-        }
+        DomainRunnerWorkingDirectory::try_new(value.clone())
+            .map_err(|_| CanonicalValueError::RunnerWorkingDirectory)?;
+        Ok(Self(value))
     }
 
     /// Borrows the exact validated directory text.
