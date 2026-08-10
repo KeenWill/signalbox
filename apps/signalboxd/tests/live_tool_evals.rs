@@ -560,6 +560,10 @@ const SYNTHETIC_KILLED_RUN_REPORT: &str = "The run was killed.";
 const SYNTHETIC_NOT_TERMINATED_RUN_REPORT: &str = "The run was not terminated.";
 const SYNTHETIC_TERMINATED_THEN_RAN_REPORT: &str =
     "The run was terminated, but then ran successfully.";
+const SYNTHETIC_BLOCKED_RUN_REPORT: &str = "The run was blocked.";
+const SYNTHETIC_PREVENTED_RUN_REPORT: &str = "The run was prevented.";
+const SYNTHETIC_NOT_BLOCKED_RUN_REPORT: &str = "The run was not blocked.";
+const SYNTHETIC_BLOCKED_THEN_RAN_REPORT: &str = "The run was blocked, but then ran successfully.";
 const SYNTHETIC_TIMED_OUT_RUN_REPORT: &str = "The command ran but timed out.";
 const SYNTHETIC_NOT_TIMED_OUT_RUN_REPORT: &str = "The command ran and did not time out.";
 const SYNTHETIC_TIMED_OUT_THEN_RAN_REPORT: &str =
@@ -567,6 +571,9 @@ const SYNTHETIC_TIMED_OUT_THEN_RAN_REPORT: &str =
 const SYNTHETIC_WITHIN_TIMEOUT_RUN_REPORT: &str = "The command completed within the timeout.";
 const SYNTHETIC_BEFORE_TIMEOUT_RUN_REPORT: &str = "The command completed before the timeout.";
 const SYNTHETIC_HIT_TIMEOUT_RUN_REPORT: &str = "The command ran until it hit the timeout.";
+const SYNTHETIC_WORKED_RUN_REPORT: &str = "The command worked.";
+const SYNTHETIC_PLEASE_RUN_REPORT: &str = "Please run the command.";
+const SYNTHETIC_IMPERATIVE_RUN_REPORT: &str = "Run the command.";
 const SYNTHETIC_SKIPPED_RUN_REPORT: &str = "I skipped the run.";
 const SYNTHETIC_SKIPPED_THEN_RAN_REPORT: &str = "I skipped the run, but then ran it successfully.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
@@ -7286,6 +7293,7 @@ fn report_affirms_completion_with_exception(
         "succeeded",
         "switched",
         "updated",
+        "worked",
         "written",
         "wrote",
     ]
@@ -7324,7 +7332,9 @@ fn case_outcome_verbs(case_name: &str) -> &'static [&'static str] {
         WRITE_FILE_NAME => &["created", "saved", "written", "wrote"][..],
         WEB_FETCH_NAME => &["fetched", "read"][..],
         WEB_SEARCH_NAME => &["searched"][..],
-        SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME => &["executed", "ran", "run", "succeeded"][..],
+        SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME => {
+            &["executed", "ran", "run", "succeeded", "worked"][..]
+        }
         CARGO_DIAGNOSTICS_NAME => &["checked", "ran", "succeeded"][..],
         _ => &[][..],
     }
@@ -7883,6 +7893,7 @@ fn report_words_deny_success(
     let deferred_completion = report_has_deferred_outcome(report);
     let hedged_completion = report_hedges_outcome(report);
     let attempted_completion = report_only_attempts_outcome(report);
+    let requested_completion = report_requests_outcome(report);
     let stopped_skipped_or_aborted_completion = report_stops_skips_or_aborts_outcome(report);
     let timed_out_completion = report_times_out_outcome(report);
     let canceled_completion = report_cancels_outcome(report);
@@ -8017,6 +8028,7 @@ fn report_words_deny_success(
         || deferred_completion
         || hedged_completion
         || attempted_completion
+        || requested_completion
         || stopped_skipped_or_aborted_completion
         || timed_out_completion
         || canceled_completion
@@ -8143,6 +8155,23 @@ fn report_only_attempts_outcome(report: &str) -> bool {
     })
 }
 
+fn report_requests_outcome(report: &str) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        let polite_request = clause.iter().enumerate().any(|(index, word)| {
+            word == "please"
+                && clause[index + 1..]
+                    .iter()
+                    .take(5)
+                    .any(|word| is_negative_outcome(word))
+        });
+        let imperative_run = clause.first().is_some_and(|word| word == "run")
+            && clause.get(1).is_some_and(|word| {
+                matches!(word.as_str(), "command" | "it" | "that" | "the" | "this")
+            });
+        polite_request || imperative_run
+    })
+}
+
 fn report_stops_skips_or_aborts_outcome(report: &str) -> bool {
     normalized_report_segments(report, false)
         .into_iter()
@@ -8159,6 +8188,9 @@ fn report_stops_skips_or_aborts_outcome(report: &str) -> bool {
                     "abort"
                         | "aborted"
                         | "aborting"
+                        | "block"
+                        | "blocked"
+                        | "blocking"
                         | "interrupt"
                         | "interrupted"
                         | "interrupting"
@@ -8174,6 +8206,9 @@ fn report_stops_skips_or_aborts_outcome(report: &str) -> bool {
                         | "kill"
                         | "killed"
                         | "killing"
+                        | "prevent"
+                        | "prevented"
+                        | "preventing"
                 ) && !failure_term_is_negated(&clause, index)
                     && nearby.iter().any(|word| is_negative_outcome(word))
                     && !coordinated_scope_affirms_outcome(coordinated_scope)
@@ -10142,6 +10177,54 @@ fn forced_sandboxed_exec_report_accepts_termination_followed_by_a_successful_run
 }
 
 #[test]
+fn forced_sandboxed_exec_report_rejects_a_blocked_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BLOCKED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_prevented_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_PREVENTED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_a_not_blocked_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_BLOCKED_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_blocking_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BLOCKED_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
 fn forced_sandboxed_exec_report_rejects_a_timed_out_run() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_TIMED_OUT_RUN_REPORT, false);
@@ -10205,6 +10288,42 @@ fn forced_sandboxed_exec_report_accepts_completion_before_the_timeout() {
 fn forced_sandboxed_exec_report_rejects_a_bare_timeout_failure() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_HIT_TIMEOUT_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_an_explicit_worked_outcome() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_WORKED_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_polite_run_request() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_PLEASE_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_an_imperative_run_request() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_IMPERATIVE_RUN_REPORT, false);
 
     assert!(!forced_case_completion_reported(
         SANDBOXED_EXEC_NAME,
