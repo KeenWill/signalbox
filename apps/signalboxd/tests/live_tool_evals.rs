@@ -564,6 +564,9 @@ const SYNTHETIC_TIMED_OUT_RUN_REPORT: &str = "The command ran but timed out.";
 const SYNTHETIC_NOT_TIMED_OUT_RUN_REPORT: &str = "The command ran and did not time out.";
 const SYNTHETIC_TIMED_OUT_THEN_RAN_REPORT: &str =
     "The command timed out, but then ran successfully.";
+const SYNTHETIC_WITHIN_TIMEOUT_RUN_REPORT: &str = "The command completed within the timeout.";
+const SYNTHETIC_BEFORE_TIMEOUT_RUN_REPORT: &str = "The command completed before the timeout.";
+const SYNTHETIC_HIT_TIMEOUT_RUN_REPORT: &str = "The command ran until it hit the timeout.";
 const SYNTHETIC_SKIPPED_RUN_REPORT: &str = "I skipped the run.";
 const SYNTHETIC_SKIPPED_THEN_RAN_REPORT: &str = "I skipped the run, but then ran it successfully.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
@@ -8190,12 +8193,27 @@ fn report_times_out_outcome(report: &str) -> bool {
                 let coordinated_scope =
                     boundary.map_or(&[][..], |boundary| &following[boundary + 1..]);
                 let nearby = &clause[index.saturating_sub(4)..clause.len().min(index + 5)];
-                let timeout_predicate = matches!(word.as_str(), "timeout" | "timeouts")
+                let predicate_prefix = &clause[index.saturating_sub(4)..index];
+                let bare_timeout_failure = matches!(word.as_str(), "timeout" | "timeouts")
+                    && predicate_prefix.iter().any(|word| {
+                        matches!(
+                            word.as_str(),
+                            "encounter"
+                                | "encountered"
+                                | "exceed"
+                                | "exceeded"
+                                | "hit"
+                                | "hits"
+                                | "reach"
+                                | "reached"
+                        )
+                    });
+                let timeout_predicate = bare_timeout_failure
                     || (matches!(word.as_str(), "time" | "timed" | "timing")
                         && following.first().is_some_and(|word| word == "out"));
                 timeout_predicate
                     && !failure_term_is_negated(&clause, index)
-                    && nearby.iter().any(|word| is_negative_outcome(word))
+                    && (bare_timeout_failure || nearby.iter().any(|word| is_negative_outcome(word)))
                     && !coordinated_scope_affirms_outcome(coordinated_scope)
             })
         })
@@ -10153,6 +10171,42 @@ fn forced_sandboxed_exec_report_accepts_timeout_followed_by_a_successful_run() {
     tracker.observe_response_text(SYNTHETIC_TIMED_OUT_THEN_RAN_REPORT, false);
 
     assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_completion_within_the_timeout() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_WITHIN_TIMEOUT_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_completion_before_the_timeout() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_BEFORE_TIMEOUT_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_bare_timeout_failure() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_HIT_TIMEOUT_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
         SANDBOXED_EXEC_NAME,
         true,
         &tracker,
