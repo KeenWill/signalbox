@@ -1434,20 +1434,35 @@ An operator-invoked command therefore requests a device authorization from the
 configured endpoint, relays the returned user code and verification URI to the
 operator, polls the configured token endpoint under the same
 one-POST-per-attempt and no-redirect rules the refresh path uses, and on success
-harvests the refresh token and non-secret account metadata into one transaction.
-No scratch credential home is involved, because no child runs: the CLI enters
-the picture only at dispatch, when it is handed a minted access token.
-Provisioning depends on no other login for that account: it authorizes through
-its own configured client and stores what it harvests, reading nothing an
-operator's CLI already holds. Whether it *disturbs* one is the authorization
-server's to decide and not something this contract can promise — a server that
-issues one grant per client and account, or that revokes an earlier grant on a
-new authorization, will invalidate an operator's existing login, and the
-exchange gives the daemon no way to detect or prevent that. Deleting the
-profile's stored authorization likewise ends the daemon's own grant and whatever
-else that server ties to it. Where grant independence matters, it is a property
-of the configured authorization server that the operator must establish, not one
-this delivery provides.
+harvests the refresh token, the identity token, and non-secret account metadata
+into one transaction.
+
+The identity token is stored durably, with the refresh token and under the same
+protections, and this is stated because dispatch requires one on every
+invocation while a refresh happens about once per access-token lifetime — so
+publishing it only as a refresh result would leave the first preparation after
+any restart with no source for it. Every refresh that returns a new identity
+token replaces the stored one in the same commit that replaces the refresh
+token; a refresh that returns none leaves the stored one in place, since a
+provider that omits it on refresh has not invalidated it. Provisioning that
+returns none is a typed provisioning failure and stores nothing: an
+authorization that cannot supply the account header the CLI requires is not
+usable for this delivery, and failing at provisioning is where an operator can
+still act on it. It is bearer material for the same account, so it is never
+written anywhere the refresh token would not be, and it seeds the redactor with
+every other value placed in the scratch home. No scratch credential home is
+involved, because no child runs: the CLI enters the picture only at dispatch,
+when it is handed a minted access token. Provisioning depends on no other login
+for that account: it authorizes through its own configured client and stores
+what it harvests, reading nothing an operator's CLI already holds. Whether it
+*disturbs* one is the authorization server's to decide and not something this
+contract can promise — a server that issues one grant per client and account, or
+that revokes an earlier grant on a new authorization, will invalidate an
+operator's existing login, and the exchange gives the daemon no way to detect or
+prevent that. Deleting the profile's stored authorization likewise ends the
+daemon's own grant and whatever else that server ties to it. Where grant
+independence matters, it is a property of the configured authorization server
+that the operator must establish, not one this delivery provides.
 
 A stored authorization is bound to the tuple it was minted under. Provisioning
 persists, in the same transaction as the token generation, the exact
@@ -1573,14 +1588,14 @@ adapter's exact-value redactor with **every token it is about to place in the
 scratch home** — the access token, the identity token, and any further bearer
 value that shape requires — not the access token alone. The identity token is
 bearer material for the same account and the CLI reflects it, so seeding only
-one of them leaks the other through provider-controlled output. The redactor
-covers each raw token and the JSON string representations whose escapes decode
-to that same token, retains possible token prefixes across stdout and stderr
-chunk boundaries, and runs before parsing, truncation, debug rendering,
-observations, or durable evidence. The ambient shape scrub remains a second
-defense, never a substitute for the daemon-known value. A path that cannot
-install this redaction fails preparation before writing the scratch home or
-spawning the CLI.
+one of them leaks the other through provider-controlled output. How the adapter
+installs and applies that scrub — the representations it covers, its behaviour
+across output chunk boundaries, and where it sits relative to parsing and
+persistence — is owned by
+[the Codex CLI provider adapter](runtime-substrate.md#codex-cli-provider-adapter)
+and is not stated here. A path that cannot install it fails preparation before
+writing the scratch home or spawning the CLI, which is this contract's
+obligation rather than the adapter's.
 
 A daemon-minted access token can expire while a long invocation is still
 running, and that is not an authorization failure. The daemon minted the token
