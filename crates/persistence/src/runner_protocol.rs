@@ -1462,7 +1462,9 @@ impl RunnerProtocolStore {
                     registration.registration().enrollment(),
                 )
                 .await?
-                .ok_or(RunnerProtocolCorruption::MissingCanonicalConnection)?;
+                .ok_or(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::InvalidState,
+                ))?;
                 if connection.state() != RunnerConnectionState::Connected {
                     return Err(RunnerProtocolStoreError::Domain(
                         RunnerDomainError::InvalidState,
@@ -3639,7 +3641,7 @@ async fn decode_placement(
         SessionRunnerPlacementState::Unpinned
     } else if state_kind == "runner_lost_before_pin" {
         let runner = lost_runner.ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-        if loss_source.is_some() {
+        if loss_source.is_some() || placement_row_has_pinned_facts(row)? {
             return Err(RunnerProtocolCorruption::InvalidEncoding.into());
         }
         SessionRunnerPlacementState::RunnerLostBeforePin(RunnerLostBeforePin::from_stored(runner))
@@ -3649,7 +3651,7 @@ async fn decode_placement(
             .is_none()
     {
         let runner = lost_runner.ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-        if loss_source.is_some() {
+        if loss_source.is_some() || placement_row_has_pinned_facts(row)? {
             return Err(RunnerProtocolCorruption::InvalidEncoding.into());
         }
         SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(
@@ -3744,6 +3746,67 @@ async fn decode_placement(
         profileless_tombstone,
     )
     .map_err(RunnerProtocolStoreError::Domain)
+}
+
+fn placement_row_has_pinned_facts(row: &PgRow) -> Result<bool, RunnerProtocolStoreError> {
+    Ok(row
+        .decode_column::<Option<Uuid>>("pinned_runner_id")?
+        .is_some()
+        || row
+            .decode_column::<Option<String>>("pinned_working_directory")?
+            .is_some()
+        || row
+            .decode_column::<Option<String>>("pinned_credential_profile_name")?
+            .is_some()
+        || row
+            .decode_column::<Option<Uuid>>("registration_enrollment_id")?
+            .is_some()
+        || row
+            .decode_column::<Option<Decimal>>("registration_revision")?
+            .is_some()
+        || decode_u64(row.decode_column::<Decimal>("pinned_tool_count")?)? != 0
+        || row
+            .decode_column::<Option<String>>("workspace_repository_key")?
+            .is_some()
+        || row
+            .decode_column::<Option<String>>("workspace_working_directory")?
+            .is_some()
+        || row
+            .decode_column::<Option<Uuid>>("workspace_manifest_id")?
+            .is_some()
+        || row
+            .decode_column::<Option<Decimal>>("workspace_placement_revision")?
+            .is_some()
+        || row
+            .decode_column::<Option<String>>("workspace_clone_url_digest")?
+            .is_some()
+        || row
+            .decode_column::<Option<String>>("workspace_credential_profile_name")?
+            .is_some()
+        || row
+            .decode_column::<Option<String>>("workspace_sandbox_profile")?
+            .is_some()
+        || row
+            .decode_column::<Option<String>>("workspace_relative_path")?
+            .is_some()
+        || row
+            .decode_column::<Option<String>>("workspace_recovery_kind")?
+            .is_some()
+        || row
+            .decode_column::<Option<String>>("workspace_branch_name")?
+            .is_some()
+        || row
+            .decode_column::<Option<String>>("workspace_revision")?
+            .is_some()
+        || row
+            .decode_column::<Option<Uuid>>("credential_grant_runner_id")?
+            .is_some()
+        || row
+            .decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?
+            .is_some()
+        || row
+            .decode_column::<Option<Decimal>>("credential_grant_revision")?
+            .is_some())
 }
 
 async fn decode_placement_request(
