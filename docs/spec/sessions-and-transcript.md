@@ -863,11 +863,11 @@ credential-pool implementing child adds a third `TurnFailed` producer for the
 `pre-call fail` and `wait-transition fail (no call)` endings of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine):
 an active turn exhausts its frozen pool before any model call is prepared and
-that policy selects `on_pool_exhausted = "fail"`. Its single transaction ends
-the current attempt `KnownFailure`, appends the marker after the attempt's
-starting frontier, terminalizes the turn `Failed`, and emits both the ordinary
-`turn_failed` update and the typed `turn_credential_pool_exhausted` event. The
-sealed failure and complete member evidence are owned by
+that exhaustion selects no wait. Its single transaction ends the current attempt
+`KnownFailure`, appends the marker after the attempt's starting frontier,
+terminalizes the turn `Failed`, and emits both the ordinary `turn_failed` update
+and the typed `turn_credential_pool_exhausted` event. The sealed failure and
+complete member evidence are owned by
 [model-call execution](model-call-execution.md#availability-successor-calls). No
 present transcript writer can produce this shape.
 

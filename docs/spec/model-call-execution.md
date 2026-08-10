@@ -666,10 +666,11 @@ the turn takes the exhaustion path below rather than calling a failed member
 again.
 
 When no member remains admissible, which ending the attempt reaches is decided
-by the pool's `on_pool_exhausted` value together with whether this
-**availability chain** has already issued a call — the chain and not the turn,
-since a later tool round opens a fresh chain against a turn that has already
-issued calls. All four such endings, and every projection of each, are stated
+by whether the exhaustion selects a wait — which `fail` never does and `park`
+does only while some exclusion a wake can clear remains — together with whether
+this **availability chain** has already issued a call, the chain and not the
+turn, since a later tool round opens a fresh chain against a turn that has
+already issued calls. Every such ending, and every projection of each, is stated
 once by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine).
 
@@ -721,10 +722,13 @@ cannot change the action applied to its result.
 
 Each successor durably records the predecessor call it follows and the cause
 that authorized it, so a chain reads as evidence rather than as two calls that
-happen to share a turn. A goal-mode turn that exhausts its pool under `fail`
+happen to share a turn. A goal-mode turn whose pool exhaustion selects no wait
 blocks with the ordinary `execution_failure` reason ([goal-mode](goal-mode.md));
-under `park` it remains the current goal turn and appends nothing, because no
-terminal disposition exists yet.
+one that selects a wait remains the current goal turn and appends nothing,
+because no terminal disposition exists yet. The discriminator is wait selection
+and not the configured value, so a `park` pool whose members this turn's own
+chain exclusions have all removed blocks like any other failure rather than
+staying current forever.
 
 ## Provider observation classification
 

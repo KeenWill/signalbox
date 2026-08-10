@@ -864,12 +864,12 @@ acknowledged work is configuration-independent (INV-034).
 A `[[credential_profiles]]` entry accepts exactly `name`, `adapter`,
 `billing_kind`, and `delivery`, plus whichever fields the selected delivery
 owns, and rejects every other key as unknown
-(`apps/signalboxd/src/credential_pools.rs:43`). Which adapter a profile
+(`apps/signalboxd/src/credential_pools.rs:54`). Which adapter a profile
 authenticates is the profile's own `adapter`, and the secret reaches the
 provider through the delivery this section describes rather than through a
 process environment variable. Startup rejects a document whose two `codex_cli`
 mappings prefer different profiles, as `ConflictingAdapterCredentialProfiles`
-(`apps/signalboxd/src/configuration.rs:750`): the Codex runtime still carries
+(`apps/signalboxd/src/configuration.rs:755`): the Codex runtime still carries
 one credential reference, so two families preferring different profiles cannot
 both be served. That limitation is Codex-only. Claude receives the complete
 adapter-scoped catalog and resolves each operation's pinned reference, and the
@@ -897,20 +897,28 @@ no contract here says how the secret would reach that provider: `ambient`,
 separate questions — the deliveries this build refuses despite defining them are
 enumerated below.
 
-Each `[[credential_profiles]]` entry is one flat TOML table: `delivery` is a
-required TOML string discriminant, common fields are exactly `name`, `adapter`,
-`billing_kind`, and `delivery`, and the selected variant admits only its fields
-below. A field owned by another variant is unknown and rejected.
+A profile's closed `delivery` states how its secret reaches the provider. Four
+are admitted, and which adapters each admits is stated by that delivery's own
+section below rather than by a matrix here. An `(adapter, delivery)` pair is
+admitted exactly when that delivery's section admits the adapter **and** names
+the route the secret takes to it; startup rejects every other pair. Stating the
+admission once per delivery, beside the route that justifies it, is what keeps
+the two from drifting apart — a matrix would have to be edited in two places
+whenever an adapter gained a delivery, and it is the route an implementer
+actually needs. Each `[[credential_profiles]]` entry is one flat TOML table:
+`delivery` is a required TOML string discriminant, common fields are exactly
+`name`, `adapter`, `billing_kind`, and `delivery`, and the selected variant
+admits only its fields below. A field owned by another variant is unknown and
+rejected.
 
-Admitting a delivery in the grammar and supplying a surface for it are separate
-questions, and this build answers them differently. `ambient` is delivered for
-both CLI adapters, and `file` is delivered for `anthropic`, `openai`, and
-`claude_cli`; those are the deliveries described immediately below. The grammar
-also admits `codex_cli` `file`, `codex_home`, and `oauth`, and parsing validates
-each of their fields in full and then rejects the profile as
-`UndeliveredCredentialDelivery` (`apps/signalboxd/src/credential_pools.rs:154`),
-so such a document fails startup rather than running with an inert setting.
-Their contracts are stated under
+Admitting a pair and supplying a surface for it stay separate questions, and
+this build answers them differently: `ambient` is delivered for both CLI
+adapters and `file` for `anthropic`, `openai`, and `claude_cli`, while the
+`codex_cli` spelling of `file`, `codex_home`, and `oauth` are admitted by their
+sections and then rejected as `UndeliveredCredentialDelivery`
+(`apps/signalboxd/src/credential_pools.rs:214`), so such a document fails
+startup rather than running with an inert setting. Their contracts are stated
+under
 [undelivered deliveries](#committed-unimplemented-functionality--undelivered-deliveries)
 below.
 
@@ -1015,13 +1023,18 @@ because `file` is the delivery that replaced its retired `OPENAI_API_KEY_FILE`
 channel, so leaving its header path to be inferred would leave that adapter with
 no stated replacement at all. A direct-HTTP adapter rejects `env_key` because it
 does not use a child environment. A CLI adapter requires the one credential
-variable its adapter contract names — `ANTHROPIC_API_KEY` for `claude_cli` — and
-rejects every other value, including forwarded and process-control names such as
-`HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `PATH`. The `codex_cli` spelling
-of this delivery, which would supply the value to the fresh process under
-`env_key` as `OPENAI_API_KEY`, is validated and then rejected;
+variable its adapter contract names — `ANTHROPIC_API_KEY` for `claude_cli` and
+`OPENAI_API_KEY` for `codex_cli` — and rejects every other value, including
+forwarded and process-control names such as `HOME`, `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, and `PATH`. A CLI adapter whose contract names no such variable
+admits no `file` profile at all, and startup rejects the pair: the route is the
+admission here, so there is nothing to validate `env_key` against until that
+adapter's contract names its variable. Both CLI adapters this build provides do
+name one, so the pair is admitted for each; whether a *surface* honors it is the
+separate question, and the `codex_cli` spelling is validated and then rejected
+as undelivered, with
 [undelivered deliveries](#committed-unimplemented-functionality--undelivered-deliveries)
-owns its contract.
+owning its contract.
 
 Claude file delivery receives the complete adapter-scoped catalog of declared
 `claude_cli` file-profile references and resolves the operation's selected
@@ -1375,26 +1388,27 @@ An exhausted wait carries the complete policy-member exclusion snapshot
 described below. A contended wait carries that same frozen policy identity,
 every durable exclusion that removed a member, and the complete nonempty set of
 otherwise-admissible bounded members with their exact invocation-reservation
-identities. A contended wait also carries the earliest unelapsed reset among
-those durable exclusions as its deadline, exactly as an exhausted wait does, and
-the scheduler makes it eligible when that deadline passes. Without it a turn
-contending on a bounded member would stay parked past the moment an excluded
-member became admissible again — visibly so for a reset whose passage produces
-no separate durable availability update. Only exclusions a wake can clear
-contribute to that deadline: a predecessor chain exclusion earned in this turn
-is turn-local, so no reset readmits its member before the turn ends, and
-counting its reported reset would wake the wait only to re-park it and leave a
-now-past deadline that makes it immediately eligible again. A contended wait
-none of whose remaining exclusions can be cleared by time has no deadline, and
-its bounded members' completions remain its wake. A member's admission first
-locks the shared capacity rows for every bounded profile the preparation may
-select, in profile-reference byte order. The rows are profile-scoped rather than
-session- or pool-scoped, so concurrent sessions and distinct pools serialize
-against the same bound without a lock-order cycle. Under those locks the
-transaction counts live reservations, chooses the member, and acquires its
-`pending_spawn` reservation together with the call's `Prepared` record. The
-durable constraint that backs the bound, and the reason it is scoped to
-admissions rather than to states, are owned by
+identities. A contended wait also carries a deadline over those durable
+exclusions, computed by exactly the same per-member rule the machine states for
+an exhausted wait, and the scheduler makes it eligible when that deadline
+passes. Without it a turn contending on a bounded member would stay parked past
+the moment an excluded member became admissible again — visibly so for a reset
+whose passage produces no separate durable availability update. Which exclusion
+kinds contribute a reset at all, and how one member's resets combine before the
+earliest across members is taken, are the machine's
+([credential availability](credential-availability.md#the-credential-availability-machine));
+this page states only that the contended form carries the same deadline as the
+exhausted one and never a differently computed one. A contended wait no member
+of which can become admissible by time passage has no deadline, and its bounded
+members' completions remain its wake. A member's admission first locks the
+shared capacity rows for every bounded profile the preparation may select, in
+profile-reference byte order. The rows are profile-scoped rather than session-
+or pool-scoped, so concurrent sessions and distinct pools serialize against the
+same bound without a lock-order cycle. Under those locks the transaction counts
+live reservations, chooses the member, and acquires its `pending_spawn`
+reservation together with the call's `Prepared` record. The durable constraint
+that backs the bound, and the reason it is scoped to admissions rather than to
+states, are owned by
 [persistence protocol](persistence-protocol.md#lock-protocol). That bound is
 read from the profile's current registration and is never frozen into a pool
 policy, because `max_concurrent_invocations` guards a live refresh race the
@@ -1760,7 +1774,7 @@ restore.
 This build maps a model family to exactly one credential pool. Each
 `[[adapter_mappings]]` entry accepts exactly `model_family`, `adapter`, and
 `credential_pool` and rejects every other key
-(`apps/signalboxd/src/configuration.rs:701`). The pool must name one declared
+(`apps/signalboxd/src/configuration.rs:706`). The pool must name one declared
 `[[credential_pools]]` entry whose adapter agrees with the mapping's.
 
 Selection is deliberately degenerate in this build, and it happens once per
@@ -1801,8 +1815,9 @@ protocol's 8 MiB frame limit even under worst-case JSON escaping. Each
 - `on_pool_exhausted` — one closed value, `park` or `fail`. This grammar admits
   the value and nothing more; what each one does is owned by
   [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-  where `park` selects between the two wait endings and `fail` between the two
-  failure endings.
+  where the value acts only by selecting whether an exhaustion parks: `fail`
+  never parks, and `park` parks only while an exclusion a wake can clear
+  remains.
 - `headroom_reserve_percent` — an optional pool-wide integer from 0 through 99.
 - the five closed trigger keys `on_quota_exhausted`, `on_rate_limited`,
   `on_overloaded`, `on_credential_rejected`, and `on_headroom_low`, each
@@ -2340,7 +2355,7 @@ deployment-side rules that code cannot enforce are stated in
   model adapter receives the complete catalog of that adapter's `file` profiles,
   built from the profile catalog at startup — the direct HTTP adapters at
   `apps/signalboxd/src/main.rs:1070`, and Claude CLI at
-  `apps/signalboxd/src/configuration.rs:1449` — while web search and code-host
+  `apps/signalboxd/src/configuration.rs:1454` — while web search and code-host
   operations each receive a singleton map under their fixed integration
   constant.
 

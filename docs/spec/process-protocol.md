@@ -319,8 +319,13 @@ and rejects it. The implementing stack must add an authorized
 one closed `target` object:
 
 - `profile_quarantine { profile, record_generation }` names one profile-wide
-  quarantine of **policy origin** — one a pool trigger such as `on_rate_limited`
-  or `on_overloaded` minted — for a profile of any delivery, `oauth` included;
+  quarantine the clear mutation admits, for a profile of any delivery, `oauth`
+  included: one a pool trigger such as `on_rate_limited` or `on_overloaded`
+  minted, and one a failed `codex_home` identity walk minted, whose store is
+  repaired outside the daemon. It does not name an OAuth-refresh quarantine,
+  which that mutation rejects and the listing therefore omits. The union carries
+  exactly what can be cleared, so a record the mutation accepts always has a
+  request and response representation and a record it rejects has none;
 - `membership_exclusion { pool_policy_id, profile, record_generation }` names
   one `avoid_new_sessions` exclusion; and
 - `session_displacement { session_id, pool_policy_id, profile, record_generation }`
@@ -2659,8 +2664,13 @@ outranks a `session_displacement` covering one session, which outranks a
 `chain_exclusion` covering one successor chain within one turn. Two producers
 therefore cannot describe one exhaustion differently. `reset_at_unix_ms` is
 present only when every exclusion active for that member at the failure commit
-reported a reset, and is then the latest of them; any exclusion with no reset
-makes it null. A wake can consequently never be scheduled while an indefinite
+is of a kind that *expires* at the reset it reports, and is then the latest of
+them; any exclusion with no reset, and any whose kind clears by something other
+than time passing, makes it null. Reporting a reset is not sufficient, by the
+same rule and for the same reason the wait deadline uses
+([credential availability](credential-availability.md#the-credential-availability-machine))
+— publishing a time no wake honors would promise a client a recovery moment that
+never arrives. A wake can consequently never be scheduled while an indefinite
 condition still bars the member. The narrower correlations the selected item
 omits are not lost: each remains an active durable record that
 [credential-exclusion administration](#credential-exclusion-administration)
