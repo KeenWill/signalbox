@@ -643,7 +643,7 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_turn_runner_recovery_complete();
 
-CREATE FUNCTION lock_scheduler_before_turn_attempt_insert()
+CREATE FUNCTION lock_scheduler_before_runner_recovery_dependency_insert()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -663,7 +663,12 @@ $$;
 CREATE TRIGGER turn_attempt_00_locks_scheduler_before_insert
 BEFORE INSERT ON turn_attempt
 FOR EACH ROW
-EXECUTE FUNCTION lock_scheduler_before_turn_attempt_insert();
+EXECUTE FUNCTION lock_scheduler_before_runner_recovery_dependency_insert();
+
+CREATE TRIGGER tool_round_00_locks_scheduler_before_insert
+BEFORE INSERT ON tool_round
+FOR EACH ROW
+EXECUTE FUNCTION lock_scheduler_before_runner_recovery_dependency_insert();
 
 CREATE FUNCTION recheck_session_turn_runner_recovery()
 RETURNS trigger
