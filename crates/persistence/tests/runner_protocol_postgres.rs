@@ -7091,6 +7091,108 @@ async fn s32_inv009_inv044_late_tool_round_rechecks_nullable_runner_wait()
     Ok(())
 }
 
+/// INV-009 / INV-044: a tool-round writer takes the scheduler rendezvous
+/// before inserting a round that would invalidate a nullable runner wait.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_serializes_tool_round_inserts()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let mut recovery = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL, active_tool_round_call_id = NULL,
+                runner_recovery_runner_id = $1,
+                runner_recovery_placement_revision = $2
+          WHERE turn_id = $3 AND session_id = $4",
+    )
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *recovery)
+    .await?;
+    recovery.commit().await?;
+    let producing_call = ModelCallId::from_uuid(uuid(0xa182));
+    let request = ToolRequestId::from_uuid(uuid(0xa183));
+    let boundary = ContextFrontierId::from_uuid(uuid(0xa184));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        request,
+        boundary,
+    )
+    .await?;
+    sqlx::query("ALTER TABLE tool_round DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM tool_round WHERE producing_model_call_id = $1")
+        .bind(producing_call.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE tool_round ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let mut stop = pool.begin().await?;
+    sqlx::query(
+        "SELECT session_id
+           FROM session_scheduler
+          WHERE session_id = $1
+          FOR UPDATE",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&mut *stop)
+    .await?;
+    let mut late_round = Box::pin(
+        sqlx::query(
+            "INSERT INTO tool_round
+                (producing_model_call_id, session_id, turn_id, boundary_kind,
+                 boundary_frontier_id, response_part_count, request_count)
+             VALUES ($1, $2, $3, 'continuing', $4, 1, 1)",
+        )
+        .bind(producing_call.into_uuid())
+        .bind(session.into_uuid())
+        .bind(turn.into_uuid())
+        .bind(boundary.into_uuid())
+        .execute(&pool),
+    );
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut late_round)
+        .await
+        .expect_err("tool-round insertion must wait for the scheduler rendezvous");
+    stop.rollback().await?;
+    let rejected = tokio::time::timeout(Duration::from_secs(10), &mut late_round)
+        .await
+        .expect("tool-round admission finishes after the scheduler is released")
+        .expect_err("the hidden runner-wait boundary still rejects the tool round");
+
+    assert_check_violation(rejected);
+    drop(late_round);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-009 / INV-044: a nullable runner-recovery wait cannot hide a live
 /// physical attempt in its retained tool round.
 #[tokio::test]
