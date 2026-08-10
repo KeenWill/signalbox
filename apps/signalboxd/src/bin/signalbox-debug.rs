@@ -35,10 +35,9 @@ use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
-    ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
-    create_session::CreateSessionRepository, local_test_connection_options, migrate,
-    model_execution::PostgresModelCallRepository, start_eligible_turn::StartEligibleTurnRepository,
-    submit_input::SubmitInputRepository,
+    SessionCredentialPin, SessionModelCredential, create_session::CreateSessionRepository,
+    local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
+    start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
 };
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSignal, FatalExecutionSupervisor, FileCredentialAccess,
@@ -416,10 +415,11 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                         "scripted-test",
                     )])
                     .map_err(|_| DebugDriverError::Configuration)?,
-                    // The scripted provider routes no real family, so it carries an
-                    // empty catalog rather than borrowing the Anthropic one.
-                    ModelCredentialFamilyCatalog::try_new([])
-                        .map_err(|_| DebugDriverError::Configuration)?,
+                    // The scripted provider routes no real family. It carries no
+                    // catalog at all rather than an empty one: an empty catalog
+                    // resolves no family and fails the call as corruption, while
+                    // `None` is what selects the fallback reference.
+                    None,
                     DebugProviderRuntime::Scripted(
                         AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
                     ),
@@ -457,7 +457,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                     configuration.target_catalog(),
                     credential_reference,
                     configuration.session_credential_pin(),
-                    configuration.credential_family_catalog(),
+                    Some(configuration.credential_family_catalog()),
                     DebugProviderRuntime::Anthropic(provider),
                 )
             }
@@ -528,8 +528,11 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
     // serving target resolves the base family's profile while the runtime
     // switches families, so the call would authenticate — and bill — against
     // an account the route did not select.
-    let repository = PostgresModelCallRepository::new(pool.clone(), targets, credential_reference)
-        .with_session_credentials(credential_families);
+    let repository = PostgresModelCallRepository::new(pool.clone(), targets, credential_reference);
+    let repository = match credential_families {
+        Some(families) => repository.with_session_credentials(families),
+        None => repository,
+    };
     let activation = StartEligibleTurnService::new(
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),
