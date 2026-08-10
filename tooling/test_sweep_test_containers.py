@@ -16,6 +16,7 @@ import datetime as dt
 import os
 import re
 import stat
+import signal
 import subprocess
 import tempfile
 import time
@@ -32,6 +33,10 @@ import os, sys, time
 command = sys.argv[1]
 
 if os.environ.get("FAKE_DOCKER_HANGS_ON") == command:
+    started = os.environ.get("FAKE_DOCKER_START_LOG")
+    if started:
+        with open(started, "a") as log:
+            print(command, file=log)
     time.sleep(float(os.environ.get("FAKE_DOCKER_HANG_SECONDS", "3600")))
     survival = os.environ.get("FAKE_DOCKER_SURVIVAL_LOG")
     if survival:
@@ -266,6 +271,36 @@ class SweepRun:
         return [value for flag, value in pairs if flag == "--filter"]
 
 
+def cancel_a_hung_sweep(
+    arguments: list[str],
+    environment: dict[str, str],
+    start_log: Path,
+    signal_number: int,
+) -> subprocess.CompletedProcess[str]:
+    """Signal a sweep that is waiting on a hung daemon call, outside test bodies.
+
+    The signal is sent only once the fake has recorded that the call it hangs on
+    has begun, so the cancellation always lands while the sweep is blocked
+    rather than racing its startup.
+    """
+    process = subprocess.Popen(
+        [str(SWEEP), *arguments],
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    began = time.monotonic()
+    while not start_log.exists() and time.monotonic() - began < SWEEP_TIMEOUT_SECONDS:
+        time.sleep(0.02)
+    assert start_log.exists(), "the sweep never reached the call it should hang on"
+    process.send_signal(signal_number)
+    stdout, stderr = process.communicate(timeout=SWEEP_TIMEOUT_SECONDS)
+    return subprocess.CompletedProcess(
+        process.args, process.returncode, stdout=stdout, stderr=stderr
+    )
+
+
 def run_sweep(
     inventory: list[tuple[str, str]],
     *,
@@ -273,6 +308,7 @@ def run_sweep(
     daemon_reachable: bool = True,
     hangs_on: str | None = None,
     hang_seconds: float | None = None,
+    cancel_with: int | None = None,
     listing_refused: str | None = None,
     volume_listing_refused: str | None = None,
     dangling_volumes: int = 0,
@@ -339,7 +375,9 @@ def run_sweep(
         if not daemon_reachable:
             environment["FAKE_DOCKER_DOWN"] = "1"
         survival_log = scratch_path / "survived.txt"
+        start_log = scratch_path / "started.txt"
         environment["FAKE_DOCKER_SURVIVAL_LOG"] = str(survival_log)
+        environment["FAKE_DOCKER_START_LOG"] = str(start_log)
         environment.pop("FAKE_DOCKER_HANG_SECONDS", None)
         if hangs_on is not None:
             environment["FAKE_DOCKER_HANGS_ON"] = hangs_on
@@ -353,6 +391,13 @@ def run_sweep(
             environment["FAKE_DOCKER_INSPECT_REFUSED"] = inspection_refused
         if inspection_fails_silently:
             environment["FAKE_DOCKER_INSPECT_SILENTLY_FAILS"] = "1"
+        if cancel_with is not None:
+            completed = cancel_a_hung_sweep(arguments, environment, start_log, cancel_with)
+            time.sleep((hang_seconds or 0) + 1)
+            removed = removal_log.read_text().split() if removal_log.exists() else []
+            listing = listing_log.read_text().split("\n") if listing_log.exists() else []
+            survived = survival_log.read_text().split() if survival_log.exists() else []
+            return SweepRun(completed, removed, listing, survived)
         try:
             completed = subprocess.run(
                 [str(SWEEP), *arguments],
@@ -760,6 +805,54 @@ class SweepTestContainersTest(unittest.TestCase):
 
         self.assertEqual(run.status, 1)
         self.assertEqual(run.survived, [], "the abandoned call kept talking to the daemon")
+
+    def test_a_hung_sweep_cancelled_with_sigterm_reaps_its_daemon_call(self) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            hangs_on="inspect",
+            hang_seconds=4,
+            cancel_with=signal.SIGTERM,
+        )
+
+        self.assertEqual(run.status, 143)
+        self.assertEqual(run.survived, [], "the cancelled call kept talking to the daemon")
+
+    def test_a_hung_sweep_cancelled_with_sigquit_reaps_its_daemon_call(self) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            hangs_on="inspect",
+            hang_seconds=4,
+            cancel_with=signal.SIGQUIT,
+        )
+
+        self.assertEqual(run.status, 131)
+        self.assertEqual(run.survived, [], "the cancelled call kept talking to the daemon")
+
+    def test_a_hung_sweep_cancelled_with_sigint_reaps_its_daemon_call(self) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            hangs_on="inspect",
+            hang_seconds=4,
+            cancel_with=signal.SIGINT,
+        )
+
+        self.assertEqual(run.status, 130)
+        self.assertEqual(run.survived, [], "the cancelled call kept talking to the daemon")
+
+    def test_a_hung_sweep_cancelled_with_sighup_reaps_its_daemon_call(self) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            hangs_on="inspect",
+            hang_seconds=4,
+            cancel_with=signal.SIGHUP,
+        )
+
+        self.assertEqual(run.status, 129)
+        self.assertEqual(run.survived, [], "the cancelled call kept talking to the daemon")
 
     def test_a_daemon_that_hangs_counting_volumes_still_reports_the_removals(
         self,

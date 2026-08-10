@@ -158,8 +158,16 @@ cleanup() {
 	return 0
 }
 
+# Every signal a supervisor, a terminal, or an operator ends this with, each
+# reported as the shell reports a signalled child. Handling only some of them
+# leaves the rest ignored — bash defers a trapped signal but discards nothing —
+# so an untrapped cancellation would strand the sweep and its bounded children
+# on a hung daemon call until the deadline.
 trap cleanup EXIT
-trap 'cleanup; exit 143' INT TERM
+trap 'cleanup; exit 129' HUP
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 131' QUIT
+trap 'cleanup; exit 143' TERM
 
 scratch="$(mktemp -d)"
 readonly OUTPUT="$scratch/output"
