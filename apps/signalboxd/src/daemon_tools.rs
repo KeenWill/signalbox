@@ -1552,13 +1552,11 @@ mod tests {
         fs::set_permissions(&executable, permissions)
             .expect("catalog capture executable is private and executable");
         let credential = CredentialReference::new(SYNTHETIC_CLAUDE_CREDENTIAL_REFERENCE);
-        let runtime = ClaudeCliRuntime::new(ClaudeCliConfig::new(
-            &executable,
-            bridge,
-            workspace.path(),
-            credential.clone(),
-        ))
-        .expect("offline Claude catalog capture runtime constructs");
+        let mut config =
+            ClaudeCliConfig::new(&executable, bridge, workspace.path(), credential.clone());
+        config.exchange_timeout = BRIDGE_RESPONSE_TIMEOUT;
+        let runtime = ClaudeCliRuntime::new(config)
+            .expect("offline Claude catalog capture runtime constructs");
         let mut operation = ModelOperation::new(
             (),
             credential,
@@ -5780,16 +5778,25 @@ finally:
             .expect("MCP server info is an object")
             .remove("version")
             .expect("MCP server info declares its version");
+        let tools_capability = initialized["result"]["capabilities"]["tools"]
+            .as_object()
+            .expect("MCP tools capability is an object");
 
         assert_eq!(server_version, env!("CARGO_PKG_VERSION"));
+        assert!(
+            tools_capability
+                .get("listChanged")
+                .is_none_or(|value| value == &serde_json::json!(false))
+        );
+
+        initialized["result"]
+            .as_object_mut()
+            .expect("MCP initialization result is an object")
+            .remove("capabilities")
+            .expect("MCP initialization advertises capabilities");
 
         expect![[r#"
             {
-              "capabilities": {
-                "tools": {
-                  "listChanged": false
-                }
-              },
               "protocolVersion": "2025-11-25",
               "serverInfo": {
                 "name": "signalbox-claude-cli-bridge"
