@@ -6320,6 +6320,83 @@ async fn s32_inv009_inv044_runner_recovery_rejects_stale_tool_round_boundary()
     Ok(())
 }
 
+/// INV-009 / INV-044: a nullable runner-recovery wait can retain only a
+/// continuing tool round, never a round already closed by turn end.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_nullable_runner_wait_rejects_closed_tool_round_boundary()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(0xa16e));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        ToolRequestId::from_uuid(uuid(0xa16f)),
+        ContextFrontierId::from_uuid(uuid(0xa170)),
+    )
+    .await?;
+    sqlx::query("ALTER TABLE tool_round DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_round
+            SET boundary_kind = 'closed_by_turn_end'
+          WHERE producing_model_call_id = $1",
+    )
+    .bind(producing_call.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_round ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(turn_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL, active_tool_round_call_id = $1,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3
+          WHERE turn_id = $4 AND session_id = $5",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *malformed)
+    .await?;
+    let rejected = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *malformed)
+        .await
+        .expect_err("runner recovery cannot retain a closed tool round");
+
+    assert_check_violation(rejected);
+    malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
 /// INV-009 / INV-044: a nullable runner-recovery wait cannot erase the
 /// continuing tool-round boundary produced by its yielded chain-tip attempt.
 #[tokio::test]
@@ -10245,6 +10322,49 @@ async fn s32_inv044_worktree_pin_requires_provisioned_facts() -> Result<(), Box<
     .expect_err("a pinned worktree placement requires both provisioned facts");
 
     assert_check_violation(missing_workspace);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv029_inv043_claimed_retry_reservation_rejects_terminal_source()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the exact first lease fence claims");
+    store.store_lease(&claimed).await?;
+    let loss = claimed
+        .lose()
+        .expect("claimed pure work may enter durable retry classification");
+    store_fixture_retryable_loss(&store, &pool, &loss).await?;
+    let replacement = loss
+        .retry()
+        .expect("the durable loss carries checked retry authority")
+        .prepare_claimed_attempt(
+            claimed_batch_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::EffectFree),
+            ToolAttemptId::from_uuid(uuid(RETRY_PHYSICAL_ATTEMPT.attempt)),
+        )
+        .expect("the owning batch produces the exact replacement attempt");
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let rejected = store
+        .store_claimed_retry_attempt_authority(&loss, &replacement)
+        .await
+        .expect_err("a stopped source attempt cannot reserve retry authority");
+    let reservation_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM runner_claimed_retry_attempt_authority
+          WHERE source_lease_id = $1 AND source_generation = $2",
+    )
+    .bind(pin.lease.correlation().lease.into_uuid())
+    .bind(Decimal::from(pin.lease.generation().get()))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    assert_eq!(reservation_count, 0);
     drop(pool);
     Ok(())
 }

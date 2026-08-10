@@ -435,6 +435,11 @@ BEGIN
             NOT EXISTS (
                 SELECT 1
                   FROM model_call AS active_call
+                  JOIN tool_round AS active_round
+                    ON active_round.producing_model_call_id =
+                        active_call.model_call_id
+                   AND active_round.turn_id = active_call.turn_id
+                   AND active_round.session_id = active_call.session_id
                   JOIN turn_attempt AS yielded_attempt
                     ON yielded_attempt.turn_attempt_id =
                         active_call.turn_attempt_id
@@ -444,6 +449,7 @@ BEGIN
                         lifecycle.active_tool_round_call_id
                    AND active_call.turn_id = checked_turn_id
                    AND active_call.session_id = checked_session_id
+                   AND active_round.boundary_kind = 'continuing'
                    AND yielded_attempt.state_kind = 'ended'
                    AND yielded_attempt.end_variant = 'without_stop'
                    AND yielded_attempt.end_disposition =

@@ -1936,6 +1936,65 @@ impl RunnerProtocolStore {
         }
         let replacement = replacement.replacement();
         let mut transaction = self.pool.begin().await?;
+        let scheduler_exists = sqlx::query_scalar::<_, Uuid>(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
+            .bind(source.dispatch.session().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .is_some();
+        if !scheduler_exists {
+            transaction.rollback().await?;
+            return Err(RunnerProtocolStoreError::Corruption(
+                RunnerProtocolCorruption::CrossWiredReference,
+            ));
+        }
+        let source_is_live: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM tool_attempt AS attempt
+                   JOIN runner_lease_generation AS lease
+                     ON lease.attempt_id = attempt.attempt_id
+                    AND lease.session_id = attempt.session_id
+                   JOIN runner_current_lease_event AS lease_head
+                     ON lease_head.lease_id = lease.lease_id
+                    AND lease_head.generation = lease.generation
+                   JOIN runner_lease_event AS lease_event
+                     ON lease_event.lease_id = lease_head.lease_id
+                    AND lease_event.generation = lease_head.generation
+                    AND lease_event.event_ordinal = lease_head.event_ordinal
+                  WHERE attempt.attempt_id = $1
+                    AND attempt.session_id = $2
+                    AND attempt.turn_id = $3
+                    AND attempt.issuing_turn_attempt_id = $4
+                    AND attempt.request_id = $5
+                    AND attempt.dispatch_generation = $6
+                    AND attempt.state_kind = 'in_flight'
+                    AND lease.lease_id = $7
+                    AND lease.generation = $8
+                    AND lease.runner_id = $9
+                    AND lease.tool_name = $10
+                    AND lease_event.state_kind IN (
+                        'lost_execution_possible', 'lost_claimed'
+                    )
+             )",
+        )
+        .bind(source.dispatch.attempt().into_uuid())
+        .bind(source.dispatch.session().into_uuid())
+        .bind(source.dispatch.turn().into_uuid())
+        .bind(source.dispatch.issuing_attempt().into_uuid())
+        .bind(source.dispatch.request().into_uuid())
+        .bind(Decimal::from(source.dispatch.generation().as_u64()))
+        .bind(source.lease.into_uuid())
+        .bind(Decimal::from(source.generation.get()))
+        .bind(source.runner.into_uuid())
+        .bind(source.tool.as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !source_is_live {
+            transaction.rollback().await?;
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
         let inserted = sqlx::query(
             "INSERT INTO runner_claimed_retry_attempt_authority
                 (source_lease_id, source_generation,
