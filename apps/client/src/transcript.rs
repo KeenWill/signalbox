@@ -6,8 +6,9 @@ use std::{
 #[cfg(test)]
 use signalbox_process_protocol::ProtocolVersion;
 use signalbox_process_protocol::{
-    CanonicalUuid, ContentFragment, ModelCallTokenUsage, ServerFrame, ServerMessage,
-    TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
+    CanonicalUuid, ContentFragment, ModelCallTokenUsage, RunnerProjection, ServerFrame,
+    ServerMessage, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
+    encode_server_line,
 };
 
 use crate::{connection::Connection, error::ClientError};
@@ -15,12 +16,17 @@ use crate::{connection::Connection, error::ClientError};
 #[derive(Debug)]
 pub(crate) struct TranscriptSnapshot {
     cursor: u64,
+    runner: Option<RunnerProjection>,
     spool: File,
 }
 
 impl TranscriptSnapshot {
     pub(crate) const fn cursor(&self) -> u64 {
         self.cursor
+    }
+
+    pub(crate) const fn runner(&self) -> Option<&RunnerProjection> {
+        self.runner.as_ref()
     }
 
     pub(crate) fn replay(&mut self) -> Result<SnapshotReplay<'_>, ClientError> {
@@ -97,7 +103,11 @@ impl TranscriptSnapshot {
             append_frame(&mut spool, &frame)?;
         }
         spool.flush()?;
-        Ok(Self { cursor, spool })
+        Ok(Self {
+            cursor,
+            runner: None,
+            spool,
+        })
     }
 }
 
@@ -188,12 +198,12 @@ pub(crate) async fn read_snapshot(
     connection: &mut Connection,
     expected_session: CanonicalUuid,
 ) -> Result<TranscriptSnapshot, ClientError> {
-    let (session_id, cursor) = match connection.message().await? {
-        ServerMessage::TranscriptSnapshotStart { session_id, cursor }
-            if session_id == expected_session =>
-        {
-            (session_id, cursor.value())
-        }
+    let (session_id, cursor, runner) = match connection.message().await? {
+        ServerMessage::TranscriptSnapshotStart {
+            session_id,
+            cursor,
+            runner,
+        } if session_id == expected_session => (session_id, cursor.value(), runner),
         ServerMessage::Error {
             code,
             message,
@@ -322,7 +332,11 @@ pub(crate) async fn read_snapshot(
                 && ending_entry_count.value() == entry_count =>
             {
                 spool.flush()?;
-                return Ok(TranscriptSnapshot { cursor, spool });
+                return Ok(TranscriptSnapshot {
+                    cursor,
+                    runner,
+                    spool,
+                });
             }
             ServerMessage::Error {
                 code,
