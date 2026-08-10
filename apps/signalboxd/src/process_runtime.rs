@@ -118,10 +118,10 @@ use signalbox_persistence::{
         ProcessImportedContentKind, ProcessImportedSourceSpeaker,
         ProcessModelCallRecoveryPrecondition, ProcessModelCallUsageProvenance,
         ProcessModelSelection, ProcessProviderModelCallFailureCause, ProcessReadError,
-        ProcessReadRepository, ProcessReconciliationOperation, ProcessRunnerProjection,
-        ProcessRunnerProjectionState, ProcessSessionDefaultsRead, ProcessTranscriptEntry,
-        ProcessTranscriptItem, ProcessTranscriptModelCallUsage, ProcessTranscriptTurn,
-        ProcessTurnState,
+        ProcessReadRepository, ProcessReconciliationOperation, ProcessRunnerConnectionHealth,
+        ProcessRunnerProjection, ProcessRunnerProjectionState, ProcessSessionDefaultsRead,
+        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptModelCallUsage,
+        ProcessTranscriptTurn, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRejectionOnlyOutcome,
@@ -173,6 +173,7 @@ use signalbox_process_protocol::{
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
     RunnerCapabilityClass as WireRunnerCapabilityClass,
+    RunnerConnectionHealth as WireRunnerConnectionHealth,
     RunnerCredentialProfileName as WireRunnerCredentialProfileName,
     RunnerPlacementRevision as WireRunnerPlacementRevision,
     RunnerProjection as WireRunnerProjection,
@@ -10725,6 +10726,12 @@ fn wire_runner_projection(
         ProcessRunnerProjectionState::RunnerLost => WireRunnerProjectionState::RunnerLost,
         ProcessRunnerProjectionState::RunnerAbandoned => WireRunnerProjectionState::RunnerAbandoned,
     };
+    let connection_health = projection.connection_health().map(|health| match health {
+        ProcessRunnerConnectionHealth::Connected => WireRunnerConnectionHealth::Connected,
+        ProcessRunnerConnectionHealth::Suspect => WireRunnerConnectionHealth::Suspect,
+        ProcessRunnerConnectionHealth::Shutdown => WireRunnerConnectionHealth::Shutdown,
+        ProcessRunnerConnectionHealth::Lost => WireRunnerConnectionHealth::Lost,
+    });
     WireRunnerProjection::try_new(
         selector,
         projection
@@ -10748,6 +10755,7 @@ fn wire_runner_projection(
             .map(|directory| WireRunnerWorkingDirectory::try_new(directory.as_str().to_owned()))
             .transpose()
             .map_err(|_| SnapshotSpoolError::EncodeInvariant)?,
+        connection_health,
         state,
     )
     .map_err(|_| SnapshotSpoolError::EncodeInvariant)

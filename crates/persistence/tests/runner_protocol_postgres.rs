@@ -48,7 +48,9 @@ use signalbox_persistence::{
         RunnerStateTransitionOutboxTestEvent, RunnerStateTransitionOutboxTestSource,
         append_runner_state_transition_for_test,
     },
-    process_read::{ProcessReadRepository, ProcessRunnerProjectionState},
+    process_read::{
+        ProcessReadRepository, ProcessRunnerConnectionHealth, ProcessRunnerProjectionState,
+    },
     runner_protocol::{
         RunnerConnectionEpoch, RunnerConnectionTransition, RunnerProtocolCorruption,
         RunnerProtocolStore, RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
@@ -5634,6 +5636,40 @@ async fn s32_inv044_transcript_snapshot_authenticates_current_pre_pin_runner_los
     assert_eq!(
         projection.state(),
         ProcessRunnerProjectionState::RunnerLostBeforePin
+    );
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_transcript_snapshot_authenticates_current_runner_suspicion()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin) = stored_pin_fixture(&pool).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::HeartbeatMissed,
+        )
+        .await?;
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(pin.placement.session())
+        .await?
+        .expect("the pinned fixture session has a transcript snapshot");
+    let projection = snapshot
+        .runner()
+        .expect("the runner-placed session projects its current placement");
+
+    assert_eq!(projection.state(), ProcessRunnerProjectionState::Pinned);
+    assert_eq!(projection.runner(), Some(pin.lease.runner()));
+    assert_eq!(
+        projection.connection_health(),
+        Some(ProcessRunnerConnectionHealth::Suspect)
     );
     drop(pool);
     Ok(())

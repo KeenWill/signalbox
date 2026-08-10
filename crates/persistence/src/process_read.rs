@@ -62,6 +62,19 @@ pub enum ProcessRunnerProjectionState {
     RunnerAbandoned,
 }
 
+/// Closed current connection health in one process-facing runner projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessRunnerConnectionHealth {
+    /// The runner connection is currently healthy.
+    Connected,
+    /// The connection is inside its missed-heartbeat recovery window.
+    Suspect,
+    /// The connection closed through orderly shutdown.
+    Shutdown,
+    /// The connection reached terminal loss.
+    Lost,
+}
+
 /// Complete current runner placement from one repeatable-read snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessRunnerProjection {
@@ -72,6 +85,7 @@ pub struct ProcessRunnerProjection {
     credential_profile: Option<CredentialProfileName>,
     repository: Option<WorkspaceRepositoryKey>,
     working_directory: Option<RunnerWorkingDirectory>,
+    connection_health: Option<ProcessRunnerConnectionHealth>,
     state: ProcessRunnerProjectionState,
 }
 
@@ -109,6 +123,11 @@ impl ProcessRunnerProjection {
     /// Borrows the independently nullable exact requested directory.
     pub const fn working_directory(&self) -> Option<&RunnerWorkingDirectory> {
         self.working_directory.as_ref()
+    }
+
+    /// Returns current connection health exactly while the placement is pinned.
+    pub const fn connection_health(&self) -> Option<ProcessRunnerConnectionHealth> {
+        self.connection_health
     }
 
     /// Returns the exact current placement state.
@@ -2115,11 +2134,19 @@ async fn load_process_runner_projection(
                 placement.requested_sandbox_profile,
                 placement.placement_revision, placement.state_kind,
                 placement.pinned_runner_id, placement.lost_runner_id,
-                placement.loss_source_kind
+                placement.loss_source_kind,
+                connection.state_kind AS connection_state_kind
            FROM runner_current_session_placement AS current_placement
            JOIN runner_session_placement_record AS placement
              ON placement.session_id = current_placement.session_id
             AND placement.event_ordinal = current_placement.event_ordinal
+           LEFT JOIN LATERAL (
+                SELECT state_kind
+                  FROM runner_connection_event
+                 WHERE enrollment_id = placement.registration_enrollment_id
+                 ORDER BY connection_epoch DESC, event_ordinal DESC
+                 LIMIT 1
+           ) AS connection ON placement.state_kind = 'pinned'
           WHERE current_placement.session_id = $1",
     )
     .bind(session.into_uuid())
@@ -2194,6 +2221,7 @@ async fn load_process_runner_projection(
         .try_get::<Option<Uuid>, _>("lost_runner_id")?
         .map(RunnerId::from_uuid);
     let loss_source: Option<String> = row.try_get("loss_source_kind")?;
+    let connection_state: Option<String> = row.try_get("connection_state_kind")?;
     let (runner, state) = match (
         state_kind.as_str(),
         pinned_runner,
@@ -2223,6 +2251,28 @@ async fn load_process_runner_projection(
         }
         _ => return Err(ProcessReadCorruption::Inconsistent("runner placement state").into()),
     };
+    let connection_health = match (state, connection_state.as_deref()) {
+        (ProcessRunnerProjectionState::Pinned, Some("connected")) => {
+            Some(ProcessRunnerConnectionHealth::Connected)
+        }
+        (ProcessRunnerProjectionState::Pinned, Some("suspect")) => {
+            Some(ProcessRunnerConnectionHealth::Suspect)
+        }
+        (ProcessRunnerProjectionState::Pinned, Some("shutdown")) => {
+            Some(ProcessRunnerConnectionHealth::Shutdown)
+        }
+        (ProcessRunnerProjectionState::Pinned, Some("lost")) => {
+            Some(ProcessRunnerConnectionHealth::Lost)
+        }
+        (
+            ProcessRunnerProjectionState::Unpinned
+            | ProcessRunnerProjectionState::RunnerLostBeforePin
+            | ProcessRunnerProjectionState::RunnerLost
+            | ProcessRunnerProjectionState::RunnerAbandoned,
+            None,
+        ) => None,
+        _ => return Err(ProcessReadCorruption::Inconsistent("runner connection health").into()),
+    };
 
     Ok(Some(ProcessRunnerProjection {
         selector,
@@ -2232,6 +2282,7 @@ async fn load_process_runner_projection(
         credential_profile,
         repository,
         working_directory,
+        connection_health,
         state,
     }))
 }
