@@ -1647,10 +1647,12 @@ impl RunnerProtocolStore {
         if event_ordinal != maximum_event_ordinal {
             return Err(RunnerProtocolCorruption::CrossWiredReference.into());
         }
+        let grant_policies = load_grant_policy_index(transaction.as_mut(), &row).await?;
         let registration =
             load_placement_registration(transaction.as_mut(), &row, &self.catalog).await?;
         let grant = if registration.is_some() {
-            load_grant_for_placement(transaction.as_mut(), &row, &self.catalog).await?
+            load_grant_for_placement(transaction.as_mut(), &row, &self.catalog, &grant_policies)
+                .await?
         } else {
             None
         };
@@ -1663,6 +1665,7 @@ impl RunnerProtocolStore {
             transaction.as_mut(),
             &row,
             &self.catalog,
+            &grant_policies,
             registration
                 .as_ref()
                 .map(StoredValidatedRunnerRegistration::registration),
@@ -1676,6 +1679,37 @@ impl RunnerProtocolStore {
             registration,
             grant,
         }))
+    }
+
+    /// Returns the authenticated policy event for the current grant in
+    /// PostgreSQL integration tests.
+    #[cfg(feature = "postgres-integration")]
+    pub async fn load_current_grant_policy_event_for_test(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<Decimal>, RunnerProtocolStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let row = sqlx::query(
+            "SELECT record.*
+               FROM runner_current_session_placement AS current_placement
+               JOIN runner_session_placement_record AS record
+                 ON record.session_id = current_placement.session_id
+                AND record.event_ordinal = current_placement.event_ordinal
+              WHERE current_placement.session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .fetch_optional(transaction.as_mut())
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let policies = load_grant_policy_index(transaction.as_mut(), &row).await?;
+        let policy_event = decode_stored_grant_identity(&row)?
+            .map(|_| policies.policy_event_for(&row))
+            .transpose()?;
+        transaction.commit().await?;
+        Ok(policy_event)
     }
 
     /// Appends the terminal revocation audit event for one current grant.
@@ -3496,6 +3530,7 @@ async fn decode_placement(
     connection: &mut PgConnection,
     row: &PgRow,
     catalog: &RunnerCatalog,
+    grant_policies: &GrantPolicyIndex,
     registration: Option<&ValidatedRunnerRegistration>,
     profileless_tombstone: Option<&CredentialProfileGrant>,
 ) -> Result<SessionRunnerPlacement, RunnerProtocolStoreError> {
@@ -3584,9 +3619,19 @@ async fn decode_placement(
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
     };
-    authenticate_pinned_predecessor(connection, row, catalog, &request, &state).await?;
-    authenticate_loss_predecessor(connection, row, catalog, &request, &state).await?;
-    authenticate_abandonment_predecessor(connection, row, catalog, &request, &state).await?;
+    authenticate_pinned_predecessor(connection, row, catalog, grant_policies, &request, &state)
+        .await?;
+    authenticate_loss_predecessor(connection, row, catalog, grant_policies, &request, &state)
+        .await?;
+    authenticate_abandonment_predecessor(
+        connection,
+        row,
+        catalog,
+        grant_policies,
+        &request,
+        &state,
+    )
+    .await?;
     let history = match &state {
         SessionRunnerPlacementState::Unpinned
         | SessionRunnerPlacementState::RunnerLostBeforePin(_)
@@ -3618,6 +3663,7 @@ async fn authenticate_loss_predecessor(
     connection: &mut PgConnection,
     row: &PgRow,
     catalog: &RunnerCatalog,
+    grant_policies: &GrantPolicyIndex,
     request: &SessionRunnerPlacementRequest,
     state: &SessionRunnerPlacementState,
 ) -> Result<(), RunnerProtocolStoreError> {
@@ -3636,6 +3682,7 @@ async fn authenticate_loss_predecessor(
         connection,
         &predecessor,
         catalog,
+        grant_policies,
         &predecessor_request,
         &SessionRunnerPlacementState::Pinned(pinned),
     )
@@ -3750,6 +3797,7 @@ async fn authenticate_pinned_predecessor(
     connection: &mut PgConnection,
     initial_row: &PgRow,
     catalog: &RunnerCatalog,
+    grant_policies: &GrantPolicyIndex,
     request: &SessionRunnerPlacementRequest,
     state: &SessionRunnerPlacementState,
 ) -> Result<(), RunnerProtocolStoreError> {
@@ -3765,6 +3813,7 @@ async fn authenticate_pinned_predecessor(
             connection,
             row,
             catalog,
+            grant_policies,
             &current_request,
             &current_pinned,
         )
@@ -3934,6 +3983,7 @@ async fn authenticate_pinned_registration(
     connection: &mut PgConnection,
     row: &PgRow,
     catalog: &RunnerCatalog,
+    grant_policies: &GrantPolicyIndex,
     request: &SessionRunnerPlacementRequest,
     pinned: &PinnedRunnerPlacement,
 ) -> Result<(), RunnerProtocolStoreError> {
@@ -3941,7 +3991,7 @@ async fn authenticate_pinned_registration(
     let registration = load_placement_registration(connection, row, catalog)
         .await?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
-    let grant = load_grant_for_placement(connection, row, catalog).await?;
+    let grant = load_grant_for_placement(connection, row, catalog, grant_policies).await?;
     let pinned_profile = row.decode_column::<Option<String>>("pinned_credential_profile_name")?;
     let profileless_tombstone = grant
         .as_ref()
@@ -4156,6 +4206,7 @@ async fn authenticate_abandonment_predecessor(
     connection: &mut PgConnection,
     row: &PgRow,
     catalog: &RunnerCatalog,
+    grant_policies: &GrantPolicyIndex,
     request: &SessionRunnerPlacementRequest,
     state: &SessionRunnerPlacementState,
 ) -> Result<(), RunnerProtocolStoreError> {
@@ -4240,6 +4291,7 @@ async fn authenticate_abandonment_predecessor(
                 connection,
                 &prior_row,
                 catalog,
+                grant_policies,
                 &prior_request,
                 &SessionRunnerPlacementState::Pinned(prior_pinned),
             )
@@ -4572,10 +4624,122 @@ fn decode_grant_lineage(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct StoredGrantIdentity {
+    lineage_origin: Decimal,
+    runner: Uuid,
+    revision: Decimal,
+}
+
+#[derive(Default)]
+struct GrantPolicyIndex {
+    events: BTreeMap<StoredGrantIdentity, Decimal>,
+}
+
+impl GrantPolicyIndex {
+    fn policy_event_for(&self, placement: &PgRow) -> Result<Decimal, RunnerProtocolStoreError> {
+        let identity = decode_stored_grant_identity(placement)?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+        self.events
+            .get(&identity)
+            .copied()
+            .ok_or_else(|| RunnerProtocolCorruption::MissingCanonicalGrant.into())
+    }
+}
+
+fn decode_stored_grant_identity(
+    placement: &PgRow,
+) -> Result<Option<StoredGrantIdentity>, RunnerProtocolStoreError> {
+    let lineage_origin =
+        placement.decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?;
+    let runner = placement.decode_column::<Option<Uuid>>("credential_grant_runner_id")?;
+    let revision = placement.decode_column::<Option<Decimal>>("credential_grant_revision")?;
+    match (lineage_origin, runner, revision) {
+        (None, None, None) => Ok(None),
+        (Some(lineage_origin), Some(runner), Some(revision)) => Ok(Some(StoredGrantIdentity {
+            lineage_origin,
+            runner,
+            revision,
+        })),
+        _ => Err(RunnerProtocolCorruption::CrossWiredReference.into()),
+    }
+}
+
+/// Loads one grant's exact predecessor closure once, excluding unrelated
+/// grants that merely share its lineage origin. Placement-history
+/// authentication reuses the resulting policy map instead of recursively
+/// revisiting the chain for every historical pin.
+async fn load_grant_policy_index(
+    connection: &mut PgConnection,
+    placement: &PgRow,
+) -> Result<GrantPolicyIndex, RunnerProtocolStoreError> {
+    let Some(current) = decode_stored_grant_identity(placement)? else {
+        return Ok(GrantPolicyIndex::default());
+    };
+    let session = placement.decode_column::<Uuid>("session_id")?;
+    let rows = sqlx::query(
+        "WITH RECURSIVE grant_line AS (
+             SELECT grant_record.*
+               FROM runner_credential_grant AS grant_record
+              WHERE grant_record.session_id = $1
+                AND grant_record.lineage_origin_event_ordinal = $2
+                AND grant_record.runner_id = $3
+                AND grant_record.grant_revision = $4
+             UNION
+             SELECT predecessor.*
+               FROM grant_line AS successor
+               JOIN runner_credential_grant AS predecessor
+                 ON predecessor.session_id = successor.session_id
+                AND predecessor.lineage_origin_event_ordinal =
+                    successor.lineage_origin_event_ordinal
+                AND predecessor.runner_id = successor.prior_runner_id
+                AND predecessor.grant_revision = successor.prior_grant_revision
+         )
+         SELECT grant_line.lineage_origin_event_ordinal,
+                grant_line.runner_id,
+                grant_line.grant_revision,
+                grant_line.placement_event_ordinal,
+                policy_placement.pinned_credential_profile_name IS NOT NULL
+                    AS defines_policy
+           FROM grant_line
+           JOIN runner_session_placement_record AS policy_placement
+             ON policy_placement.session_id = grant_line.session_id
+            AND policy_placement.event_ordinal = grant_line.placement_event_ordinal
+          ORDER BY grant_line.placement_event_ordinal",
+    )
+    .bind(session)
+    .bind(current.lineage_origin)
+    .bind(current.runner)
+    .bind(current.revision)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut events = BTreeMap::new();
+    let mut inherited_policy = None;
+    for row in rows {
+        let identity = StoredGrantIdentity {
+            lineage_origin: row.decode_column("lineage_origin_event_ordinal")?,
+            runner: row.decode_column("runner_id")?,
+            revision: row.decode_column("grant_revision")?,
+        };
+        let placement_event = row.decode_column::<Decimal>("placement_event_ordinal")?;
+        if row.decode_column::<bool>("defines_policy")? {
+            inherited_policy = Some(placement_event);
+        }
+        let policy_event =
+            inherited_policy.ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+        events.insert(identity, policy_event);
+    }
+    if !events.contains_key(&current) {
+        return Err(RunnerProtocolCorruption::MissingCanonicalGrant.into());
+    }
+    Ok(GrantPolicyIndex { events })
+}
+
 async fn load_grant_for_placement(
     connection: &mut PgConnection,
     placement: &PgRow,
     catalog: &RunnerCatalog,
+    grant_policies: &GrantPolicyIndex,
 ) -> Result<Option<CredentialProfileGrant>, RunnerProtocolStoreError> {
     let origin =
         placement.decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?;
@@ -4617,7 +4781,6 @@ async fn load_grant_for_placement(
     .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
     let profile = row.decode_column::<String>("credential_profile_name")?;
     let revoked = decode_stored_grant_revocation(row.decode_column::<bool>("revoked")?);
-    let placement_event = placement.decode_column::<Decimal>("event_ordinal")?;
     let pinned_profile =
         placement.decode_column::<Option<String>>("pinned_credential_profile_name")?;
     if pinned_profile
@@ -4626,29 +4789,7 @@ async fn load_grant_for_placement(
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
-    // The outer placement-history walk authenticates every adjacent durable
-    // grant predecessor once. Policy selection therefore needs only the latest
-    // profiled grant no later than this placement, using the lineage/event
-    // index instead of recursively revisiting the predecessor chain here.
-    let policy_event: Decimal = sqlx::query_scalar(
-        "SELECT grant_record.placement_event_ordinal
-           FROM runner_credential_grant AS grant_record
-           JOIN runner_session_placement_record AS policy_placement
-             ON policy_placement.session_id = grant_record.session_id
-            AND policy_placement.event_ordinal = grant_record.placement_event_ordinal
-          WHERE grant_record.session_id = $1
-            AND grant_record.lineage_origin_event_ordinal = $2
-            AND grant_record.placement_event_ordinal <= $3
-            AND policy_placement.pinned_credential_profile_name IS NOT NULL
-          ORDER BY grant_record.placement_event_ordinal DESC
-          LIMIT 1",
-    )
-    .bind(session.into_uuid())
-    .bind(origin)
-    .bind(placement_event)
-    .fetch_optional(&mut *connection)
-    .await?
-    .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
+    let policy_event = grant_policies.policy_event_for(placement)?;
     let policy_placement = sqlx::query(
         "SELECT *
            FROM runner_session_placement_record
