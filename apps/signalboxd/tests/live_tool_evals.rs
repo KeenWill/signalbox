@@ -463,6 +463,7 @@ const SYNTHETIC_HISTORICAL_MISSING_FILE_REPORT: &str =
     "Created exec-result.txt; the file was missing before I created it.";
 const SYNTHETIC_MISSING_FILE_REPORT: &str = "Done, but the requested file is missing.";
 const SYNTHETIC_READ_COMPLETION_REPORT: &str = "brief.txt was read successfully.";
+const SYNTHETIC_READ_RESULT_REPORT: &str = "I read the tool result.";
 const SYNTHETIC_SWITCH_COMPLETION_REPORT: &str = "The branch was switched successfully.";
 const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
 const SYNTHETIC_NOTHING_CHANGED_REPORT: &str = "Done; nothing was changed.";
@@ -717,6 +718,7 @@ fn forced_case_completion_reported(
     };
     execution_completed
         && tracker.final_response_reports_completion_with_required_file_effect(required_effect)
+        && tracker.final_response_reports_case_outcome(case_name)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -889,6 +891,7 @@ struct FamilySuite {
     workspace_seed_modified_times: BTreeMap<PathBuf, SystemTime>,
     workspace_seed_entry_identities: BTreeMap<PathBuf, FilesystemIdentity>,
     workspace_seed_extended_attributes: BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    workspace_seed_inode_flags: BTreeMap<PathBuf, u32>,
     git_pre_execution_worktree_entries: StdMutex<Option<BTreeMap<PathBuf, WorkspaceEntrySnapshot>>>,
     git_pre_execution_worktree_modified_times: StdMutex<Option<BTreeMap<PathBuf, SystemTime>>>,
     git_pre_execution_worktree_entry_identities:
@@ -1355,6 +1358,7 @@ impl FamilySuite {
             workspace_seed_modified_times: BTreeMap::new(),
             workspace_seed_entry_identities: BTreeMap::new(),
             workspace_seed_extended_attributes: BTreeMap::new(),
+            workspace_seed_inode_flags: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
@@ -1409,6 +1413,7 @@ impl FamilySuite {
         let workspace_seed_modified_times = workspace_modified_times(workspace.path())?;
         let workspace_seed_entry_identities = workspace_entry_identities(workspace.path())?;
         let workspace_seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+        let workspace_seed_inode_flags = workspace_inode_flags(workspace.path())?;
         let reads = WorkspaceReadTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
         let mutations =
             WorkspaceMutationTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
@@ -1429,6 +1434,7 @@ impl FamilySuite {
             workspace_seed_modified_times,
             workspace_seed_entry_identities,
             workspace_seed_extended_attributes,
+            workspace_seed_inode_flags,
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
@@ -1473,6 +1479,7 @@ impl FamilySuite {
             workspace_seed_modified_times: BTreeMap::new(),
             workspace_seed_entry_identities: BTreeMap::new(),
             workspace_seed_extended_attributes: BTreeMap::new(),
+            workspace_seed_inode_flags: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
@@ -1496,6 +1503,7 @@ impl FamilySuite {
         let workspace_seed_modified_times = workspace_modified_times(workspace.path())?;
         let workspace_seed_entry_identities = workspace_entry_identities(workspace.path())?;
         let workspace_seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+        let workspace_seed_inode_flags = workspace_inode_flags(workspace.path())?;
         let supervisor = std::env::var_os(EXEC_SUPERVISOR_VARIABLE)
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::other("the exec supervisor path is missing"))?;
@@ -1527,6 +1535,7 @@ impl FamilySuite {
             workspace_seed_modified_times,
             workspace_seed_entry_identities,
             workspace_seed_extended_attributes,
+            workspace_seed_inode_flags,
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
@@ -1887,6 +1896,7 @@ impl FamilySuite {
                     seed_modified_times: &self.workspace_seed_modified_times,
                     seed_entry_identities: &self.workspace_seed_entry_identities,
                     seed_extended_attributes: &self.workspace_seed_extended_attributes,
+                    seed_inode_flags: &self.workspace_seed_inode_flags,
                     execution_window: self.executor.filesystem_execution_window(case.name),
                 },
                 case.name,
@@ -2005,6 +2015,11 @@ impl FamilySuite {
             && workspace_extended_attributes_match_for_mutation(
                 self.workspace.path(),
                 &self.workspace_seed_extended_attributes,
+                Path::new(WORKSPACE_ANSWER_PATH),
+            )?
+            && workspace_inode_flags_match_for_mutation(
+                self.workspace.path(),
+                &self.workspace_seed_inode_flags,
                 Path::new(WORKSPACE_ANSWER_PATH),
             )?
             && workspace_entry_identities_match_except(
@@ -3136,6 +3151,7 @@ struct WorkspaceForcedVerification<'a> {
     seed_modified_times: &'a BTreeMap<PathBuf, SystemTime>,
     seed_entry_identities: &'a BTreeMap<PathBuf, FilesystemIdentity>,
     seed_extended_attributes: &'a BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    seed_inode_flags: &'a BTreeMap<PathBuf, u32>,
     execution_window: Option<FilesystemExecutionTimeWindow>,
 }
 
@@ -3151,6 +3167,7 @@ fn workspace_forced_case_passed(
         seed_modified_times,
         seed_entry_identities,
         seed_extended_attributes,
+        seed_inode_flags,
         execution_window,
     } = verification;
     let expected_fields: &[&str] = match name {
@@ -3311,7 +3328,8 @@ fn workspace_forced_case_passed(
             Ok(workspace_entries(root)? == *seed_entries
                 && workspace_modified_times(root)? == *seed_modified_times
                 && workspace_entry_identities(root)? == *seed_entry_identities
-                && workspace_extended_attributes(root)? == *seed_extended_attributes)
+                && workspace_extended_attributes(root)? == *seed_extended_attributes
+                && workspace_inode_flags(root)? == *seed_inode_flags)
         }
         APPLY_PATCH_NAME => {
             Ok(workspace_modified_times_match_except(
@@ -3325,6 +3343,10 @@ fn workspace_forced_case_passed(
             )? && workspace_extended_attributes_match_for_mutation(
                 root,
                 seed_extended_attributes,
+                Path::new("patched.txt"),
+            )? && workspace_inode_flags_match_for_mutation(
+                root,
+                seed_inode_flags,
                 Path::new("patched.txt"),
             )? && workspace_mutation_entry_times_match(
                 root,
@@ -3352,6 +3374,7 @@ fn workspace_forced_case_passed(
                         seed_extended_attributes,
                         path,
                     )?
+                    && workspace_inode_flags_match_for_mutation(root, seed_inode_flags, path)?
                     && workspace_mutation_entry_times_match(root, path, execution_window)?
                     && workspace_mutation_entry_times_match(root, parent, execution_window)?,
             )
@@ -3371,6 +3394,10 @@ fn workspace_forced_case_passed(
             )? && workspace_extended_attributes_match_for_mutation(
                 root,
                 seed_extended_attributes,
+                Path::new(path),
+            )? && workspace_inode_flags_match_for_mutation(
+                root,
+                seed_inode_flags,
                 Path::new(path),
             )? && workspace_mutation_entry_times_match(root, Path::new(path), execution_window)?
                 && workspace_mutation_entry_times_match(root, Path::new(""), execution_window)?)
@@ -3427,6 +3454,56 @@ fn workspace_extended_attributes_match_for_mutation(
     let mut expected = expected.clone();
     expected.entry(target.to_path_buf()).or_default();
     Ok(workspace_extended_attributes(root)? == expected)
+}
+
+#[cfg(target_os = "linux")]
+fn workspace_inode_flags(root: &Path) -> EvalResult<BTreeMap<PathBuf, u32>> {
+    workspace_entries(root)?
+        .into_iter()
+        .filter_map(|(path, entry)| {
+            matches!(entry, WorkspaceEntrySnapshot::File { .. }).then_some(path)
+        })
+        .map(|path| {
+            let file = fs::File::open(root.join(&path))?;
+            Ok((path, rustix::fs::ioctl_getflags(file)?.bits()))
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn workspace_inode_flags(root: &Path) -> EvalResult<BTreeMap<PathBuf, u32>> {
+    let _ = root;
+    Ok(BTreeMap::new())
+}
+
+fn workspace_inode_flags_match_for_mutation(
+    root: &Path,
+    expected: &BTreeMap<PathBuf, u32>,
+    target: &Path,
+) -> EvalResult<bool> {
+    Ok(inode_flag_snapshots_match_for_mutation(
+        workspace_inode_flags(root)?,
+        expected,
+        target,
+    ))
+}
+
+fn inode_flag_snapshots_match_for_mutation(
+    actual: BTreeMap<PathBuf, u32>,
+    expected: &BTreeMap<PathBuf, u32>,
+    target: &Path,
+) -> bool {
+    if expected.is_empty() {
+        return actual.is_empty();
+    }
+    let mut expected = expected.clone();
+    if !expected.contains_key(target) {
+        let Some(default_flags) = expected.get(Path::new(WORKSPACE_SEED_PATH)).copied() else {
+            return false;
+        };
+        expected.insert(target.to_path_buf(), default_flags);
+    }
+    actual == expected
 }
 
 fn entry_identities_match_except(
@@ -7018,6 +7095,15 @@ impl OperationTracker {
         report_affirms_completion_excepting_path(&report, path)
             && !report_denies_file_changes_excepting_path(&report, path)
     }
+
+    fn final_response_reports_case_outcome(&self, case_name: &str) -> bool {
+        self.state
+            .lock()
+            .expect("operation-tracker lock is available")
+            .final_response_text
+            .as_deref()
+            .is_some_and(|report| report_affirms_case_outcome(report, case_name))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7066,6 +7152,36 @@ fn report_affirms_completion_with_exception(
     .any(|word| words.iter().any(|observed| observed == *word));
     has_completion
         && !report_words_deny_success(report, &words, file_creation_required, excepted_path)
+}
+
+fn report_affirms_case_outcome(report: &str, case_name: &str) -> bool {
+    let words = normalized_report_words(report);
+    let generic_completion = words
+        .iter()
+        .any(|word| matches!(word.as_str(), "completed" | "done" | "finished"));
+    let case_outcome = match case_name {
+        GIT_BRANCH_CREATE_NAME => &["created"][..],
+        GIT_BRANCH_SWITCH_NAME => &["switched"][..],
+        GIT_CREATE_COMMIT_NAME => &["commit", "committed"][..],
+        GIT_DIFF_NAME => &["diffed"][..],
+        GIT_LOG_NAME => &["listed", "read"][..],
+        GIT_STAGE_NAME => &["staged"][..],
+        GIT_STATUS_NAME => &["listed", "read"][..],
+        APPLY_PATCH_NAME => &["applied", "created", "updated", "written"][..],
+        EDIT_FILE_NAME => &["edited", "saved", "updated", "written"][..],
+        GLOB_FILES_NAME => &["listed", "matched"][..],
+        LIST_DIRECTORY_NAME => &["listed"][..],
+        READ_FILE_NAME => &["read"][..],
+        SEARCH_FILES_NAME => &["matched", "searched"][..],
+        WRITE_FILE_NAME => &["created", "saved", "written", "wrote"][..],
+        WEB_FETCH_NAME => &["fetched", "read"][..],
+        WEB_SEARCH_NAME => &["searched"][..],
+        _ => &[][..],
+    };
+    generic_completion
+        || case_outcome
+            .iter()
+            .any(|outcome| words.iter().any(|word| word == outcome))
 }
 
 fn report_denies_success(report: &str, file_creation_required: bool) -> bool {
@@ -7899,6 +8015,30 @@ fn forced_case_completion_rejects_a_receipt_only_answer() {
         READ_FILE_NAME,
         true,
         &tracker
+    ));
+}
+
+#[test]
+fn forced_commit_completion_rejects_a_read_only_report() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_READ_RESULT_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        GIT_CREATE_COMMIT_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_read_completion_accepts_a_read_report() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_READ_RESULT_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        READ_FILE_NAME,
+        true,
+        &tracker,
     ));
 }
 
@@ -17515,6 +17655,44 @@ fn workspace_natural_state_accepts_the_private_answer_mode() -> EvalResult {
     let snapshot = successful_workspace_natural_snapshot();
 
     assert!(suite.natural_state_passed(&snapshot)?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn workspace_existing_mutation_target_rejects_inode_flag_drift() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let target = Path::new(WORKSPACE_SEED_PATH);
+    let file = fs::File::open(suite.workspace.path().join(target))?;
+    let flags = rustix::fs::ioctl_getflags(&file)?;
+    rustix::fs::ioctl_setflags(&file, flags | rustix::fs::IFlags::NOATIME)?;
+
+    assert!(!workspace_inode_flags_match_for_mutation(
+        suite.workspace.path(),
+        &suite.workspace_seed_inode_flags,
+        target,
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn workspace_created_mutation_target_rejects_inode_flag_drift() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let target = Path::new("written.txt");
+    fs::write(
+        suite.workspace.path().join(target),
+        "synthetic created file\n",
+    )?;
+    let file = fs::File::open(suite.workspace.path().join(target))?;
+    let flags = rustix::fs::ioctl_getflags(&file)?;
+    rustix::fs::ioctl_setflags(&file, flags | rustix::fs::IFlags::NOATIME)?;
+
+    assert!(!workspace_inode_flags_match_for_mutation(
+        suite.workspace.path(),
+        &suite.workspace_seed_inode_flags,
+        target,
+    )?);
     Ok(())
 }
 
