@@ -4105,9 +4105,20 @@ finally:
     #[test]
     fn bridge_build_rejects_an_ambiguous_directly_invoked_test_binary() {
         let current = std::env::current_exe().expect("test executable path is available");
+        let artifact_layout = tempfile::tempdir().expect("synthetic artifact layout exists");
+        let ambiguous_artifact_directory = artifact_layout.path().join("target/debug/deps");
+        fs::create_dir_all(&ambiguous_artifact_directory)
+            .expect("ambiguous Cargo artifact directory exists");
+        let ambiguous_artifact = ambiguous_artifact_directory.join(
+            current
+                .file_name()
+                .expect("test executable path has a file name"),
+        );
+        fs::copy(&current, &ambiguous_artifact)
+            .expect("test executable is copied into the ambiguous artifact layout");
         let invocation_directory =
             tempfile::tempdir().expect("synthetic direct invocation directory exists");
-        let output = Command::new(current)
+        let output = Command::new(ambiguous_artifact)
             .arg("daemon_tools::tests::bridge_build_direct_invocation_fixture")
             .args(["--exact", "--ignored"])
             .current_dir(invocation_directory.path())
