@@ -623,6 +623,12 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_turn_runner_recovery_complete();
 
+CREATE CONSTRAINT TRIGGER turn_attempt_rechecks_turn_runner_recovery
+AFTER INSERT OR UPDATE OR DELETE ON turn_attempt
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_turn_runner_recovery_complete();
+
 CREATE FUNCTION recheck_session_turn_runner_recovery()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -631,7 +637,16 @@ DECLARE
     checked_session_id uuid;
     checked_turn_id uuid;
 BEGIN
-    IF TG_OP = 'DELETE' THEN
+    IF TG_TABLE_NAME IN ('runner_lease_event', 'runner_current_lease_event') THEN
+        SELECT session_id INTO checked_session_id
+          FROM runner_lease_generation
+         WHERE lease_id = COALESCE(NEW.lease_id, OLD.lease_id)
+           AND generation = COALESCE(NEW.generation, OLD.generation);
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'runner recovery lease recheck lacks its generation'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF TG_OP = 'DELETE' THEN
         checked_session_id := OLD.session_id;
     ELSE
         checked_session_id := NEW.session_id;
@@ -664,6 +679,18 @@ $$;
 
 CREATE CONSTRAINT TRIGGER runner_placement_rechecks_turn_recovery
 AFTER INSERT OR UPDATE OR DELETE ON runner_current_session_placement
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION recheck_session_turn_runner_recovery();
+
+CREATE CONSTRAINT TRIGGER runner_lease_event_rechecks_turn_recovery
+AFTER INSERT OR UPDATE OR DELETE ON runner_lease_event
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION recheck_session_turn_runner_recovery();
+
+CREATE CONSTRAINT TRIGGER runner_current_lease_event_rechecks_turn_recovery
+AFTER INSERT OR UPDATE OR DELETE ON runner_current_lease_event
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION recheck_session_turn_runner_recovery();
