@@ -5,7 +5,9 @@ against the parent slice (`agent/runner-loss-epoch`). Placement-relative
 lease-offer fencing was verified against this PR
 (`agent/runner-loss-propagation`). The bounded runner-loss propagation cursor
 and ordered page read were verified against this PR
-(`agent/runner-loss-session-propagation`).
+(`agent/runner-loss-session-propagation`). The atomic per-session runner-loss
+propagation transaction and cursor completion were verified against this PR
+(`agent/runner-loss-session-transaction`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -319,10 +321,11 @@ Representation rules, all enforced in the schema:
   predecessor instead of inferring history from a revision. The generic
   placement snapshot writer refuses loss, either replacement, and abandonment
   because those transitions require connection/loss, durable-command, scheduler,
-  and outbox authority outside the placement aggregate. **Committed
-  unimplemented functionality.** No present adapter installs those transitions;
-  their dedicated orchestration transactions will install these same checked
-  records, and direct snapshot storage cannot stand in for those transactions.
+  and outbox authority outside the placement aggregate. The connection-loss
+  propagation adapter installs only loss transitions under those authorities;
+  replacement and abandonment remain **committed unimplemented functionality**
+  for their dedicated orchestration transactions. Direct snapshot storage cannot
+  stand in for any of those transactions.
 - Migration `202608080104` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,
@@ -333,8 +336,8 @@ Representation rules, all enforced in the schema:
   reconnecting. Lease insertion compares its pinned placement with the
   enrollment's latest loss and remains fenced across successor physical
   connections until a checked replacement installs a fresh baseline. This is the
-  implemented not-yet-projected placement fence; bounded session propagation
-  remains the committed unimplemented transaction described below.
+  implemented placement fence consumed by the bounded session-propagation
+  transaction described below.
 - Migration `202608080105` gives every new durable connection-loss epoch a
   pending propagation cursor in the same transaction and backfills older loss
   epochs as completed because migration `202608080104` already absorbed them
@@ -342,10 +345,17 @@ Representation rules, all enforced in the schema:
   exact loss source and returns at most 64 current pinned or exact-identity
   unpinned placements whose baselines precede that loss, ordered strictly after
   the durable session-identity cursor. Cursor advancement is monotonic, cannot
-  pass an affected current placement, and cannot complete while one remains. The
-  cursor and ordered page are implemented; the per-session transaction that
-  changes placement, lease, turn, release, and runner-event state remains the
-  committed unimplemented propagation step below.
+  pass an affected current placement, and cannot complete while one remains. A
+  per-session transaction locks the scheduler, authenticates the exact loss and
+  cursor, then atomically changes placement, any current lease and physical
+  attempt, an active runner-boundary turn, the runner-state outbox, and the
+  cursor. An offered lease records no execution; a claimed pure or idempotent
+  lease remains retryable in flight; a claimed side-effecting lease becomes
+  terminal ambiguous. A separate checked operation completes an exhausted
+  cursor. **Committed unimplemented functionality.** No present daemon service
+  pages the durable losses, invokes these operations, or retires an
+  unacknowledged workspace release; those orchestration steps remain outside the
+  persistence adapter.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -444,24 +454,23 @@ Representation rules, all enforced in the schema:
   reclassifies the ambiguity. Without this shape the loss transaction has
   nowhere to store the phase and restart cannot rebuild it. The same migration
   adds the optional interrupted-attempt fact to the exact placement-loss record,
-  and the runner persistence read boundary round-trips both nullable arms.
-  **Committed unimplemented functionality.** No present adapter produces the
-  phase: the dedicated runner-loss propagation transaction will install it under
-  the lock order below. Independently of that future writer, a present
-  interrupted-attempt fact on the placement-loss record is admitted only for one
-  of two exact lease-derived shapes: an in-flight retryable attempt whose loss
-  proves no execution or whose pure/idempotent effect permits successor
-  reissuance, or a terminal ambiguous side-effecting attempt whose execution may
-  have occurred. Both carry physical runner-lease lineage to the record's exact
-  lost runner and placement revision, and the same active runner-recovery
-  tool-round boundary names the attempt. Stopping the wait retires retryable
-  authority before releasing the active slot. The claimed-retry reservation
-  writer takes that same scheduler lock and rechecks that the exact
-  lease-derived source attempt remains in flight, so stale authority loaded
-  before the stop cannot be reserved afterward. No-execution and pure work
-  become known crash loss and cancel, while execution-possible idempotent work
-  becomes ambiguous and requires reconciliation. A same-session foreign or older
-  same-placement attempt therefore cannot survive placement readback.
+  and the runner persistence read boundary round-trips both nullable arms. The
+  runner-loss propagation transaction produces this phase under the lock order
+  below. Independently of that writer, a present interrupted-attempt fact on the
+  placement-loss record is admitted only for one of two exact lease-derived
+  shapes: an in-flight retryable attempt whose loss proves no execution or whose
+  pure/idempotent effect permits successor reissuance, or a terminal ambiguous
+  side-effecting attempt whose execution may have occurred. Both carry physical
+  runner-lease lineage to the record's exact lost runner and placement revision,
+  and the same active runner-recovery tool-round boundary names the attempt.
+  Stopping the wait retires retryable authority before releasing the active
+  slot. The claimed-retry reservation writer takes that same scheduler lock and
+  rechecks that the exact lease-derived source attempt remains in flight, so
+  stale authority loaded before the stop cannot be reserved afterward.
+  No-execution and pure work become known crash loss and cancel, while
+  execution-possible idempotent work becomes ambiguous and requires
+  reconciliation. A same-session foreign or older same-placement attempt
+  therefore cannot survive placement readback.
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.

@@ -317,6 +317,19 @@ pub(crate) const RUNNER_CONNECTION_LOSS_HEAD: &str = "SELECT loss_epoch
               WHERE enrollment_id = $1
               FOR UPDATE";
 
+pub(crate) const RUNNER_CONNECTION_LOSS_PROPAGATION: &str = "SELECT
+                    propagation.propagated_through_session_id,
+                    propagation.state_kind,
+                    loss.connection_epoch,
+                    loss.connection_event_ordinal
+               FROM runner_connection_loss_propagation AS propagation
+               JOIN runner_connection_loss_epoch AS loss
+                 ON loss.enrollment_id = propagation.enrollment_id
+                AND loss.loss_epoch = propagation.loss_epoch
+              WHERE propagation.enrollment_id = $1
+                AND propagation.loss_epoch = $2
+              FOR UPDATE OF propagation";
+
 pub(crate) const RUNNER_LEASE_GRANT_AUTHORITY: &str = "SELECT grant_record.credential_profile_name
                FROM runner_current_credential_grant_audit AS current_audit
                JOIN runner_credential_grant AS grant_record
