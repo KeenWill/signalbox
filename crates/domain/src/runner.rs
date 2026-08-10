@@ -2827,8 +2827,12 @@ fn reconstitute_pinned_placement(
         }
         (None, None, None) => true,
         (None, Some(lineage), Some(tombstone)) => {
+            let tombstone_is_revoked = match tombstone.state {
+                CredentialProfileGrantState::Active => false,
+                CredentialProfileGrantState::Revoked => true,
+            };
             tombstone.session == placement.session
-                && tombstone.state == CredentialProfileGrantState::Revoked
+                && tombstone_is_revoked
                 && tombstone.lineage() == lineage
                 && lineage.revision <= placement.revision
         }

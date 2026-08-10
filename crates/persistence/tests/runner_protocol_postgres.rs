@@ -9483,6 +9483,41 @@ async fn s32_inv002_inv044_load_rejects_pinned_abandonment_without_loss_predeces
     Ok(())
 }
 
+/// INV-002 / INV-044: pinned abandonment reconstitution authenticates the
+/// retained registration against the exact loss predecessor.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv044_load_rejects_pinned_abandonment_with_cross_wired_registration()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    append_runner_lost_projection(&pool, pin.placement.session()).await?;
+    append_abandoned_projection(&pool, pin.placement.session(), None).await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER ALL",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET registration_enrollment_id = $2
+          WHERE session_id = $1 AND event_kind = 'runner_lost'",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .bind(uuid(REPLACEMENT_ENROLLMENT))
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(pin.placement.session())
+        .await
+        .expect_err("pinned abandonment requires its loss registration snapshot");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_generic_store_rejects_abandonment_without_scheduler_authority()
