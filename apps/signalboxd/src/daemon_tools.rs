@@ -1828,6 +1828,12 @@ mod tests {
         known_targets: &'a BTreeSet<OsString>,
     }
 
+    struct ConfiguredCargoTargetDirLookup<'a> {
+        current_executable: &'a Path,
+        invocation_directory: &'a Path,
+        known_targets: &'a BTreeSet<OsString>,
+    }
+
     struct RelativeConfiguredTargetDirInput<'a> {
         current_executable: &'a Path,
         configured: &'a Path,
@@ -1895,6 +1901,7 @@ mod tests {
     const CARGO_RELEASE_SHORT_OPTION: &str = "-r";
     const CARGO_IGNORE_RUST_VERSION_OPTION: &str = "--ignore-rust-version";
     const MCP_JSON_RPC_VERSION: &str = "2.0";
+    const MCP_INVALID_PARAMS_ERROR_CODE: i64 = -32602;
     const SYNTHETIC_WRONG_JSON_RPC_VERSION: &str = "1.0";
     #[cfg(target_os = "linux")]
     const PROC_FILESYSTEM_ROOT: &str = "/proc";
@@ -1933,6 +1940,10 @@ mod tests {
     const SYNTHETIC_CAPTURED_CATALOG_PATH: &str = "catalog with a \"quote\".json";
     #[cfg(target_os = "linux")]
     const SYNTHETIC_MCP_BRIDGE_PATH: &str = "synthetic-claude-mcp-bridge";
+    #[cfg(target_os = "linux")]
+    const SYNTHETIC_COMPILER_WRAPPER_PATH: &str = "./synthetic-compiler-wrapper";
+    #[cfg(target_os = "linux")]
+    const SYNTHETIC_COMPILER_WRAPPER_SCRIPT: &str = "#!/bin/sh\nexec \"$@\"\n";
     #[cfg(target_os = "linux")]
     const CLAUDE_CATALOG_CAPTURE_SCRIPT: &str = r#"#!/bin/sh
 set -eu
@@ -2015,8 +2026,11 @@ finally:
     ) -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
         let known_targets = rustc_target_names(&invocation.invocation_directory);
-        let configured_target_dir =
-            configured_cargo_target_dir(&current, &invocation.invocation_directory, &known_targets);
+        let configured_target_dir = configured_cargo_target_dir(ConfiguredCargoTargetDirLookup {
+            current_executable: &current,
+            invocation_directory: &invocation.invocation_directory,
+            known_targets: &known_targets,
+        });
         let artifact_target_dir = cargo_target_dir_from_artifact(&current);
         let default_target_dir = bridge_build_target_dir(
             BridgeBuildTargetCandidates {
@@ -2077,16 +2091,14 @@ finally:
     #[track_caller]
     fn cargo_test_invocation_from_running_artifact() -> CargoTestInvocation {
         let current = std::env::current_exe().expect("test executable path is available");
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("signalboxd manifest has a workspace root");
-        cargo_test_invocation_from_artifact(&current, workspace)
+        let invocation_directory =
+            std::env::current_dir().expect("direct test invocation directory is available");
+        cargo_test_invocation_from_artifact(&current, &invocation_directory)
     }
 
     fn cargo_test_invocation_from_artifact(
         current_executable: &Path,
-        workspace: &Path,
+        invocation_directory: &Path,
     ) -> CargoTestInvocation {
         let profile_directory = current_executable
             .parent()
@@ -2105,7 +2117,7 @@ finally:
             config_overrides: Vec::new(),
             unstable_flags: Vec::new(),
             ignore_rust_version: false,
-            invocation_directory: workspace.to_path_buf(),
+            invocation_directory: invocation_directory.to_path_buf(),
         }
     }
 
@@ -2245,31 +2257,27 @@ finally:
     }
 
     #[track_caller]
-    fn configured_cargo_target_dir(
-        current: &Path,
-        invocation_directory: &Path,
-        known_targets: &BTreeSet<OsString>,
-    ) -> Option<PathBuf> {
+    fn configured_cargo_target_dir(input: ConfiguredCargoTargetDirLookup<'_>) -> Option<PathBuf> {
         let configured = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR")?);
         let configured = if configured.is_absolute() {
             configured
         } else {
             resolved_or_executable_configured_target_dir(RelativeConfiguredTargetDirInput {
-                current_executable: current,
+                current_executable: input.current_executable,
                 configured: &configured,
-                invocation_directory,
-                known_targets,
+                invocation_directory: input.invocation_directory,
+                known_targets: input.known_targets,
             })
         };
         let configured = configured_cargo_target_dir_for(ConfiguredCargoTargetDirInput {
-            current_executable: current,
+            current_executable: input.current_executable,
             configured: &configured,
-            known_targets,
+            known_targets: input.known_targets,
         });
         admitted_configured_target_dir(AdmittedConfiguredTargetDirInput {
-            current_executable: current,
+            current_executable: input.current_executable,
             configured_target_dir: &configured,
-            known_targets,
+            known_targets: input.known_targets,
         })
     }
 
@@ -3998,9 +4006,20 @@ finally:
     #[test]
     fn bridge_build_supports_a_directly_invoked_test_binary() {
         let current = std::env::current_exe().expect("test executable path is available");
+        let invocation_directory =
+            tempfile::tempdir().expect("synthetic direct invocation directory exists");
+        let compiler_wrapper = invocation_directory
+            .path()
+            .join(SYNTHETIC_COMPILER_WRAPPER_PATH);
+        fs::write(&compiler_wrapper, SYNTHETIC_COMPILER_WRAPPER_SCRIPT)
+            .expect("synthetic compiler wrapper is written");
+        fs::set_permissions(&compiler_wrapper, fs::Permissions::from_mode(0o700))
+            .expect("synthetic compiler wrapper is executable");
         let status = Command::new(current)
             .arg("daemon_tools::tests::bridge_build_direct_invocation_fixture")
             .args(["--exact", "--ignored"])
+            .current_dir(invocation_directory.path())
+            .env("RUSTC_WRAPPER", SYNTHETIC_COMPILER_WRAPPER_PATH)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -5685,8 +5704,11 @@ finally:
         let rejected = fixture.request_initialize(MCP_UNSUPPORTED_PROTOCOL_VERSION);
         fixture.finish();
 
-        expect![[r#"{"code":-32602,"message":"unsupported MCP protocol version"}"#]]
-            .assert_eq(&rejected["error"].to_string());
+        assert!(rejected["error"].is_object());
+        assert_eq!(
+            rejected["error"]["code"],
+            serde_json::json!(MCP_INVALID_PARAMS_ERROR_CODE)
+        );
     }
 
     #[cfg(target_os = "linux")]
