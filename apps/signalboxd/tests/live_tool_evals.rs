@@ -80,11 +80,11 @@ use signalbox_tools_exec::{
     BwrapAvailability, CARGO_DIAGNOSTICS_NAME, CaptureCompleteness, CargoDiagnostic,
     CargoDiagnosticRecords, CargoDiagnosticSpan, CargoDiagnosticsCommand,
     CargoDiagnosticsExecution, CargoDiagnosticsExecutor, CargoDiagnosticsResult,
-    CargoDiagnosticsStream, CargoDiagnosticsTool, CargoEvidenceProvenance, CargoTestOutcome,
-    CargoTestRecords, CargoTestResult, ExecExecutor, ExecResult, ExecutionConfinement,
-    OutputCapture, OutputEncoding, ProcessOutcome, ProcessSpawnFailure, ProcessSupervisionFailure,
-    SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner,
-    UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
+    CargoDiagnosticsStream, CargoDiagnosticsTool, CargoEvidenceProvenance, CargoFailureDetail,
+    CargoTestOutcome, CargoTestRecords, CargoTestResult, ExecExecutor, ExecResult,
+    ExecutionConfinement, OutputCapture, OutputEncoding, ProcessOutcome, ProcessSpawnFailure,
+    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool,
+    TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
 use signalbox_tools_git::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
@@ -447,6 +447,9 @@ const SYNTHETIC_NO_EXECUTION_ISSUES_REPORT: &str =
 const SYNTHETIC_NO_EXECUTION_PROBLEMS_REPORT: &str =
     "Created exec-result.txt with no execution problems.";
 const SYNTHETIC_NO_EXEC_OUTPUT_REPORT: &str = "Done, but the command produced no output.";
+const SYNTHETIC_NATURAL_NO_EXEC_OUTPUT_REPORT: &str =
+    "Created exec-result.txt; the command produced no output.";
+const SYNTHETIC_CARGO_FAILURE: &str = "synthetic Cargo fixture failure";
 const SYNTHETIC_COLLATERAL_NO_CHANGES_REPORT: &str =
     "Created exec-result.txt; no changes were made to any other files.";
 const SYNTHETIC_COLLATERAL_NO_MODIFICATIONS_REPORT: &str =
@@ -747,9 +750,11 @@ fn forced_case_completion_reported(
         APPLY_PATCH_NAME | WRITE_FILE_NAME => RequiredFileEffect::Create,
         _ => RequiredFileEffect::None,
     };
+    let output_required = matches!(case_name, SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME);
     execution_completed
         && tracker.final_response_reports_completion_with_required_file_effect(required_effect)
         && tracker.final_response_reports_case_outcome(case_name)
+        && (!output_required || !tracker.final_response_denies_exec_output())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7180,6 +7185,15 @@ impl OperationTracker {
             .as_deref()
             .is_some_and(|report| report_affirms_case_outcome(report, case_name))
     }
+
+    fn final_response_denies_exec_output(&self) -> bool {
+        self.state
+            .lock()
+            .expect("operation-tracker lock is available")
+            .final_response_text
+            .as_deref()
+            .is_some_and(report_denies_exec_output)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7739,7 +7753,6 @@ fn report_words_deny_success(
         "commit",
         "completion",
         "match",
-        "output",
         "result",
         "success",
         "successful",
@@ -7941,6 +7954,14 @@ fn report_words_deny_success(
         || deferred_completion
         || affirmative_pending
         || scoped_negation
+}
+
+fn report_denies_exec_output(report: &str) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        clause
+            .windows(2)
+            .any(|claim| claim[0] == "no" && claim[1] == "output")
+    })
 }
 
 fn report_has_deferred_outcome(report: &str) -> bool {
@@ -8650,11 +8671,25 @@ fn final_response_report_accepts_negated_execution_problems() {
 }
 
 #[test]
-fn final_response_report_rejects_a_denial_of_exec_output() {
+fn forced_exec_report_rejects_a_denial_of_required_output() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NO_EXEC_OUTPUT_REPORT, false);
 
-    assert!(!tracker.final_response_reports_completion());
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn natural_exec_report_accepts_a_truthful_no_output_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NATURAL_NO_EXEC_OUTPUT_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
 }
 
 #[test]
@@ -10475,6 +10510,12 @@ fn exec_result_infrastructure_label(result: &TrackedToolResult) -> Option<&'stat
     {
         return Some("preparation failure");
     }
+    if execution
+        .get("cargo_failure")
+        .is_some_and(|failure| !failure.is_null())
+    {
+        return Some("Cargo failure");
+    }
     match execution["confinement"]["kind"].as_str() {
         Some("sandbox_refused") => return Some("sandbox refused"),
         Some("sandbox_setup_failed") => return Some("sandbox setup failed"),
@@ -10483,6 +10524,14 @@ fn exec_result_infrastructure_label(result: &TrackedToolResult) -> Option<&'stat
     match execution["outcome"]["kind"].as_str() {
         Some("spawn_failed") => Some("spawn failed"),
         Some("supervision_failed") => Some("supervision failed"),
+        Some("timed_out") => Some("timed out"),
+        Some("exited")
+            if execution["outcome"]["code"]
+                .as_i64()
+                .is_some_and(|code| code != 0) =>
+        {
+            Some("nonzero exit")
+        }
         _ => None,
     }
 }
@@ -16774,12 +16823,32 @@ fn report_round_trip_count_excludes_an_unacknowledged_result() {
 }
 
 #[test]
-fn forced_exec_tier_rejects_a_nonzero_process_result() {
+fn forced_exec_tier_reports_a_nonzero_process_result_as_infrastructure() {
     let mut execution = confined_exit(EXEC_FORCED_SANDBOXED_OUTPUT);
     execution["outcome"]["code"] = serde_json::json!(1);
     let outcome = forced_exec_outcome(SANDBOXED_EXEC_NAME, execution);
 
-    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert_eq!(outcome.infrastructure_label(), "nonzero exit");
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
+fn forced_exec_tier_reports_a_timeout_as_infrastructure() {
+    let outcome = forced_exec_outcome(
+        SANDBOXED_EXEC_NAME,
+        direct_exec_result(DirectExecEvidence::timed_out()),
+    );
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert_eq!(outcome.infrastructure_label(), "timed out");
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
 }
 
 #[test]
@@ -17438,6 +17507,33 @@ fn forced_cargo_diagnostics_reports_sandbox_setup_failure_as_infrastructure() {
 }
 
 #[test]
+fn forced_cargo_diagnostics_reports_a_cargo_failure_as_infrastructure() {
+    let stream = CargoDiagnosticsStream {
+        completeness: CaptureCompleteness::Complete,
+        encoding: OutputEncoding::Utf8,
+    };
+    let result = cargo_diagnostics_result(CargoDiagnosticsExecution {
+        confinement: ExecutionConfinement::FilesystemConfined,
+        outcome: ProcessOutcome::Exited { code: Some(1) },
+        stdout: stream,
+        stderr: stream,
+        cargo_failure: Some(CargoFailureDetail {
+            message: String::from(SYNTHETIC_CARGO_FAILURE),
+            message_completeness: CaptureCompleteness::Complete,
+        }),
+        preparation_failure: None,
+    });
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert_eq!(outcome.infrastructure_label(), "Cargo failure");
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
 fn forced_cargo_diagnostics_rejects_an_incomplete_result_shape() {
     let outcome = forced_exec_outcome(
         CARGO_DIAGNOSTICS_NAME,
@@ -17576,23 +17672,25 @@ fn unforced_exec_tier_rejects_a_lossy_capture() {
 }
 
 #[test]
-fn unforced_exec_tier_rejects_a_timed_out_process() {
+fn unforced_exec_tier_reports_a_timed_out_process_as_infrastructure() {
     let outcome = natural_exec_outcome(direct_exec_result(DirectExecEvidence::timed_out()));
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
-        EvalDisposition::Miss
+        EvalDisposition::Infrastructure
     );
+    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Exec).is_err());
 }
 
 #[test]
-fn unforced_exec_tier_rejects_a_nonzero_exit() {
+fn unforced_exec_tier_reports_a_nonzero_exit_as_infrastructure() {
     let outcome = natural_exec_outcome(direct_exec_result(DirectExecEvidence::nonzero_exit()));
 
     assert_eq!(
         outcome.natural_loop_disposition(EvalFamily::Exec),
-        EvalDisposition::Miss
+        EvalDisposition::Infrastructure
     );
+    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Exec).is_err());
 }
 
 #[test]
