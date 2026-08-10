@@ -385,6 +385,7 @@ const SYNTHETIC_COLLATERAL_NOMINALIZED_MODIFICATION_DENIAL_REPORT: &str =
 const SYNTHETIC_COLLATERAL_INVERTED_MODIFICATION_DENIAL_REPORT: &str =
     "Created exec-result.txt; I made no modifications to any other files.";
 const SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT: &str = "Done, but no changes were made.";
+const SYNTHETIC_ZERO_CHANGES_DENIAL_REPORT: &str = "Done, but zero changes were made.";
 const SYNTHETIC_COLLATERAL_NO_CHANGES_REPORT: &str =
     "Created exec-result.txt; no changes were made to any other files.";
 const SYNTHETIC_COLLATERAL_NO_MODIFICATIONS_REPORT: &str =
@@ -1327,6 +1328,7 @@ impl FamilySuite {
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
+            git_pre_execution_metadata_root_identity: StdMutex::new(None),
             git_pre_execution_metadata_top_level: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
@@ -1822,9 +1824,16 @@ fn cargo_diagnostics_workspace_matches_seed(
     let seed_times_preserved = seed_modified_times.iter().all(|(path, modified)| {
         path.as_os_str().is_empty() || actual_modified_times.get(path) == Some(modified)
     });
-    let seed_entry_identities_preserved = seed_entry_identities
-        .iter()
-        .all(|(path, identity)| actual_entry_identities.get(path) == Some(identity));
+    let seed_entry_identities_preserved = seed_entry_identities.iter().all(|(path, identity)| {
+        if path.as_os_str().is_empty() {
+            filesystem_identity_matches_without_change_time(
+                actual_entry_identities.get(path).copied(),
+                Some(*identity),
+            )
+        } else {
+            actual_entry_identities.get(path) == Some(identity)
+        }
+    });
     Ok(seed_entries_preserved
         && additions_are_target_only
         && seed_times_preserved
@@ -5740,7 +5749,7 @@ fn report_denies_file_changes(report: &str) -> bool {
                             .iter()
                             .any(|word| matches!(word.as_str(), "additional" | "other"))
                     });
-                word == "no" && change && !collateral
+                matches!(word.as_str(), "no" | "zero") && change && !collateral
             })
         });
     let no_file_change = report
@@ -6828,6 +6837,14 @@ fn exec_file_creation_report_rejects_a_bare_no_changes_denial() {
 }
 
 #[test]
+fn exec_file_creation_report_rejects_a_zero_changes_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ZERO_CHANGES_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
 fn exec_file_creation_report_accepts_a_collateral_no_changes_claim() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_COLLATERAL_NO_CHANGES_REPORT, false);
@@ -7293,6 +7310,7 @@ struct RequestSnapshot {
     name: String,
     arguments_text: String,
     attempt_succeeded: bool,
+    attempt_denied: bool,
 }
 
 impl RequestSnapshot {
@@ -7330,6 +7348,28 @@ impl CaseSnapshot {
         };
         let completed_results = completed_tool_result_entry_indices(transcript.entries());
         let successful_requests = completed_results.keys().copied().collect::<BTreeSet<_>>();
+        let denied_requests = transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ProcessTranscriptEntry::ToolDenied { request, .. } => Some(request.into_uuid()),
+                ProcessTranscriptEntry::AssistantToolUse { .. }
+                | ProcessTranscriptEntry::DelegatedTask { .. }
+                | ProcessTranscriptEntry::DelegationMessage { .. }
+                | ProcessTranscriptEntry::DelegationResult { .. }
+                | ProcessTranscriptEntry::ModelIdentityChanged { .. }
+                | ProcessTranscriptEntry::ContextSummary { .. }
+                | ProcessTranscriptEntry::User { .. }
+                | ProcessTranscriptEntry::Assistant { .. }
+                | ProcessTranscriptEntry::ToolExecutionResult { .. }
+                | ProcessTranscriptEntry::ToolClosed { .. }
+                | ProcessTranscriptEntry::TurnFailed { .. }
+                | ProcessTranscriptEntry::TurnCompleted { .. }
+                | ProcessTranscriptEntry::TurnCancelled { .. }
+                | ProcessTranscriptEntry::ImportedText { .. }
+                | ProcessTranscriptEntry::Imported { .. } => None,
+            })
+            .collect::<BTreeSet<_>>();
         let requests = transcript
             .entries()
             .iter()
@@ -7352,6 +7392,7 @@ impl CaseSnapshot {
                     name: name.clone(),
                     arguments_text: arguments.clone(),
                     attempt_succeeded: successful_requests.contains(&request.into_uuid()),
+                    attempt_denied: denied_requests.contains(&request.into_uuid()),
                 }),
                 ProcessTranscriptEntry::AssistantToolUse { .. }
                 | ProcessTranscriptEntry::DelegatedTask { .. }
@@ -7849,7 +7890,7 @@ impl CaseOutcome {
         self.snapshot.requests.iter().any(|request| {
             request.name == target
                 && request.arguments_text == expected_arguments
-                && (!request.attempt_succeeded
+                && ((!request.attempt_succeeded && !request.attempt_denied)
                     || (matches!(
                         target,
                         SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
@@ -8500,6 +8541,7 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8526,6 +8568,7 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8557,6 +8600,7 @@ fn forced_tier_reports_and_rejects_an_exact_known_failed_attempt() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8588,6 +8632,7 @@ fn forced_tier_rejects_an_exact_failure_before_a_follow_up_call() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: None,
                     attempt_succeeded: false,
+                    attempt_denied: false,
                 },
                 RequestSnapshot {
                     request_id: Uuid::from_u128(ARBITRARY_FOLLOW_UP_REQUEST_ID),
@@ -8597,6 +8642,7 @@ fn forced_tier_rejects_an_exact_failure_before_a_follow_up_call() {
                     entry_index: ARBITRARY_LATE_RESULT_ENTRY_INDEX,
                     completed_result_entry_index: None,
                     attempt_succeeded: false,
+                    attempt_denied: false,
                 },
             ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -8632,6 +8678,7 @@ fn unforced_exec_tier_reports_a_normalized_exact_failure_as_infrastructure() -> 
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8666,6 +8713,7 @@ fn unforced_web_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8699,6 +8747,7 @@ fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8733,6 +8782,7 @@ fn unforced_git_tier_reports_a_premature_commit_failure_as_a_miss() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8767,6 +8817,7 @@ fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
+                    attempt_denied: false,
                 },
                 RequestSnapshot {
                     request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -8776,6 +8827,7 @@ fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: None,
                     attempt_succeeded: false,
+                    attempt_denied: false,
                 },
             ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -8801,6 +8853,7 @@ fn unforced_git_tier_keeps_a_duplicate_commit_failure_as_a_miss() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -8810,6 +8863,7 @@ fn unforced_git_tier_keeps_a_duplicate_commit_failure_as_a_miss() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_ATTEMPT_ID),
@@ -8819,6 +8873,7 @@ fn unforced_git_tier_keeps_a_duplicate_commit_failure_as_a_miss() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -8853,6 +8908,7 @@ fn unforced_workspace_tier_reports_infrastructure_for_an_exact_known_failed_atte
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -8887,6 +8943,7 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
+                    attempt_denied: false,
                 },
                 RequestSnapshot {
                     request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -8896,6 +8953,7 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: None,
                     attempt_succeeded: false,
+                    attempt_denied: false,
                 },
             ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -8975,6 +9033,7 @@ fn successful_request(
         entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
         completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
         attempt_succeeded: true,
+        attempt_denied: false,
     }
 }
 
@@ -8987,6 +9046,7 @@ fn denied_unsandboxed_request(request_id: Uuid) -> RequestSnapshot {
         entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
         completed_result_entry_index: None,
         attempt_succeeded: false,
+        attempt_denied: true,
     }
 }
 
@@ -9001,6 +9061,7 @@ fn failed_request_snapshot(name: &str, arguments: serde_json::Value) -> CaseSnap
             entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
             completed_result_entry_index: None,
             attempt_succeeded: false,
+            attempt_denied: false,
         }],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
     }
@@ -9109,6 +9170,7 @@ fn unforced_workspace_tier_requires_each_request_result_to_round_trip() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
+                    attempt_denied: false,
                 },
                 RequestSnapshot {
                     request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -9122,6 +9184,7 @@ fn unforced_workspace_tier_requires_each_request_result_to_round_trip() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
+                    attempt_denied: false,
                 },
             ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -9156,6 +9219,7 @@ fn unforced_git_tier_requires_both_task_tools() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -13272,6 +13336,7 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -13452,6 +13517,7 @@ fn unforced_exec_tier_rejects_an_additional_tool_call() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
+                    attempt_denied: false,
                 },
                 RequestSnapshot {
                     request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -13461,6 +13527,7 @@ fn unforced_exec_tier_rejects_an_additional_tool_call() {
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
+                    attempt_denied: false,
                 },
             ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -13496,6 +13563,7 @@ fn forced_exec_outcome(target: &'static str, execution: serde_json::Value) -> Ca
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -14170,6 +14238,7 @@ fn natural_exec_outcome(execution: serde_json::Value) -> CaseOutcome {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             }],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
@@ -14335,6 +14404,31 @@ fn forced_sandboxed_exec_setup_failure_fails_the_job() {
 }
 
 #[test]
+fn forced_exec_denied_exact_retry_remains_a_report_only_miss() {
+    let mut outcome = forced_exec_outcome(
+        UNSANDBOXED_EXEC_NAME,
+        zero_exit_with_confinement(ZeroExitEvidence {
+            confinement: ExecutionConfinement::Unsandboxed,
+            stdout: EXEC_FORCED_READ_ONLY_OUTPUT,
+        }),
+    );
+    let fixture = forced_exec_fixture(UNSANDBOXED_EXEC_NAME);
+    outcome.snapshot.requests.push(RequestSnapshot {
+        request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+        producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+        name: String::from(UNSANDBOXED_EXEC_NAME),
+        arguments_text: String::from(fixture.expected_arguments),
+        entry_index: ARBITRARY_LATE_RESULT_ENTRY_INDEX,
+        completed_result_entry_index: None,
+        attempt_succeeded: false,
+        attempt_denied: true,
+    });
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+    assert!(reject_forced_executor_failures(&[outcome]).is_ok());
+}
+
+#[test]
 fn unforced_exec_tier_rejects_an_unconfined_execution() {
     let outcome = natural_exec_outcome(zero_exit_with_confinement(ZeroExitEvidence {
         confinement: ExecutionConfinement::Unsandboxed,
@@ -14393,6 +14487,7 @@ fn successful_workspace_natural_snapshot() -> CaseSnapshot {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -14406,6 +14501,7 @@ fn successful_workspace_natural_snapshot() -> CaseSnapshot {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14462,6 +14558,7 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -14471,6 +14568,7 @@ fn workspace_natural_state_requires_the_read_before_the_write() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14496,6 +14594,7 @@ fn workspace_natural_state_requires_the_read_to_cover_the_full_brief() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -14509,6 +14608,7 @@ fn workspace_natural_state_requires_the_read_to_cover_the_full_brief() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14530,6 +14630,7 @@ fn workspace_natural_state_requires_a_later_model_call_for_the_write() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -14543,6 +14644,7 @@ fn workspace_natural_state_requires_a_later_model_call_for_the_write() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14572,6 +14674,7 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -14585,6 +14688,7 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_ATTEMPT_ID),
@@ -14599,6 +14703,7 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -14828,6 +14933,7 @@ fn successful_git_natural_snapshot() -> EvalResult<CaseSnapshot> {
                 entry_index: GIT_NATURAL_STAGE_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(GIT_NATURAL_STAGE_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -14839,6 +14945,7 @@ fn successful_git_natural_snapshot() -> EvalResult<CaseSnapshot> {
                 entry_index: GIT_NATURAL_COMMIT_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(GIT_NATURAL_COMMIT_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -15295,6 +15402,7 @@ fn git_natural_state_requires_a_later_model_call_for_the_commit() -> EvalResult 
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -15306,6 +15414,7 @@ fn git_natural_state_requires_a_later_model_call_for_the_commit() -> EvalResult 
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -15330,6 +15439,7 @@ fn git_natural_state_requires_the_stage_result_before_the_commit_call() -> EvalR
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_LATE_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -15341,6 +15451,7 @@ fn git_natural_state_requires_the_stage_result_before_the_commit_call() -> EvalR
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -15365,6 +15476,7 @@ fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalRe
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -15376,6 +15488,7 @@ fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalRe
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -15387,6 +15500,7 @@ fn git_natural_requests_reject_extra_staging_after_the_target_commit() -> EvalRe
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -15410,6 +15524,7 @@ fn successful_web_natural_snapshot() -> EvalResult<CaseSnapshot> {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -15421,6 +15536,7 @@ fn successful_web_natural_snapshot() -> EvalResult<CaseSnapshot> {
                 entry_index: ARBITRARY_LATE_RESULT_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_LATE_RESULT_ENTRY_INDEX + 1),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -15527,6 +15643,7 @@ fn web_natural_state_requires_a_later_model_call_for_the_fetch() -> EvalResult {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -15538,6 +15655,7 @@ fn web_natural_state_requires_a_later_model_call_for_the_fetch() -> EvalResult {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -15562,6 +15680,7 @@ fn web_natural_state_requires_the_search_result_before_the_fetch_call() -> EvalR
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_LATE_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -15573,6 +15692,7 @@ fn web_natural_state_requires_the_search_result_before_the_fetch_call() -> EvalR
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -15595,6 +15715,7 @@ fn web_natural_state_requires_the_exact_query() -> EvalResult {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -15604,6 +15725,7 @@ fn web_natural_state_requires_the_exact_query() -> EvalResult {
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
@@ -15628,6 +15750,7 @@ fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResul
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
@@ -15639,6 +15762,7 @@ fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResul
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
             RequestSnapshot {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -15650,6 +15774,7 @@ fn web_natural_state_accepts_a_valid_pair_after_a_premature_fetch() -> EvalResul
                 entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                 completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                 attempt_succeeded: true,
+                attempt_denied: false,
             },
         ],
         model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
