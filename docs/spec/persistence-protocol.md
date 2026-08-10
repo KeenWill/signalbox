@@ -1651,20 +1651,22 @@ cannot exist without that complete predecessor proof. A credential-availability
 wait must atomically retain the active turn slot and store a closed
 `exhausted`/`contended` discriminator plus the immutable pool-policy identity.
 The exhausted form stores every policy member's exclusion evidence and optional
-reset plus the optional earliest-reset deadline. The contended form stores every
-durable exclusion in the selection snapshot, the complete nonempty set of
-otherwise-admissible bounded members with their exact invocation-reservation
-identities, and the same optional earliest-reset deadline over those durable
-exclusions. A reservation identity is the whole of that evidence: it is
-allocated once with the reservation row, never reused, and never versioned, so
-reconstitution compares identities alone and needs no separate generation. One
-shared capacity row per bounded profile serializes reservation admission across
-sessions and pools. Preparation locks all candidate capacity rows in
-profile-reference byte order, counts their live reservation rows under those
-locks, and inserts the selected reservation with the `Prepared` call. Every
-`codex_home` invocation inserts a reservation regardless of whether its profile
-currently declares a bound; the bound decides only whether preparation takes
-that capacity lock and counts, so an unbounded profile records the same
+reset plus the optional deadline the machine derives from them. The contended
+form stores every durable exclusion in the selection snapshot, the complete
+nonempty set of otherwise-admissible bounded members with their exact
+invocation-reservation identities, and a deadline over those durable exclusions
+derived by that same rule. These shapes store the derived value and its inputs;
+the derivation is the machine's alone, so no page but that one states which
+exclusion kinds contribute a reset. A reservation identity is the whole of that
+evidence: it is allocated once with the reservation row, never reused, and never
+versioned, so reconstitution compares identities alone and needs no separate
+generation. One shared capacity row per bounded profile serializes reservation
+admission across sessions and pools. Preparation locks all candidate capacity
+rows in profile-reference byte order, counts their live reservation rows under
+those locks, and inserts the selected reservation with the `Prepared` call.
+Every `codex_home` invocation inserts a reservation regardless of whether its
+profile currently declares a bound; the bound decides only whether preparation
+takes that capacity lock and counts, so an unbounded profile records the same
 supervision evidence without serializing. A deferred constraint rejects any
 commit that *raises* a profile's live reservation count to a value above the
 bound the profile's current registration declares; a commit that leaves that
@@ -1697,15 +1699,19 @@ under those locks and stores whatever that row requires: where a bounded member
 still holds the pool it atomically rewrites its own wait's evidence to the live
 reservation identities now holding the bound and stays parked; where every
 formerly bounded member has become durably excluded, contention is over and the
-pool's `on_pool_exhausted` value decides, so the wait is rewritten to the
-exhausted form under `park` and **no wait is stored at all under `fail`**, which
-instead terminalizes the turn with the cause that table gives its row. Storage
-never keeps a turn parked under a policy that says to fail it. Because the
-rewrite holds the capacity rows of every bounded member it names, a concurrent
-completion cannot release one of them between the read and the commit. A
-deferred constraint therefore never has to reject a losing waiter's call, and no
-stored wait names a released reservation or misses the only wake that concerned
-it. Entering either wait ends the call-free current attempt as
+machine's wait-selection rule decides, so the wait is rewritten to the exhausted
+form exactly where an exclusion a wake can clear remains and **no wait is stored
+at all otherwise**, which instead terminalizes the turn with the cause that
+table gives its row. Deriving it from the surviving exclusions rather than from
+the configured value is what stops a `park` pool whose members are all excluded
+by this turn's own chain exclusions from being rewritten into a wait no wake
+could ever release. Storage never keeps a turn parked under a policy that says
+to fail it, and never parks one nothing could wake. Because the rewrite holds
+the capacity rows of every bounded member it names, a concurrent completion
+cannot release one of them between the read and the commit. A deferred
+constraint therefore never has to reject a losing waiter's call, and no stored
+wait names a released reservation or misses the only wake that concerned it.
+Entering either wait ends the call-free current attempt as
 `WithoutStop(YieldedToDurableWait)` in the same transaction. Release atomically
 consumes the wait and creates its fresh `Prepared` successor attempt;
 `stop_turn` instead atomically consumes it, creates the fresh

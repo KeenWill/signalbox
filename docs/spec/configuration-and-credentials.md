@@ -879,23 +879,18 @@ such as `max_concurrent_invocations` at all. The whole of this section is the
 contract its implementing children satisfy.
 
 A profile's closed `delivery` will state how its secret reaches the provider.
-Four are admitted. Which of them a given adapter accepts is **not** a table
-stated here: an `(adapter, delivery)` pair is admitted exactly when that
-adapter's own delivery contract defines how the secret reaches its provider, and
-startup rejects every pair no such contract defines. Stating it as a permission
-rather than a matrix is deliberate — the matrix would have to be edited in two
-places every time an adapter gained a delivery, and the contract is the thing an
-implementer actually needs. At this tier the defined contracts are the Codex
-`codex_home` and `oauth` deliveries on this page; `ambient` is defined for the
-CLI adapters that take a non-secret reference. Every other pair — including
-`file` for a CLI adapter, which needs an `env_key` and a materialized store no
-contract here yet describes — is therefore rejected until its adapter's contract
-lands with the child that implements it. Recording the rejection rather than an
-aspirational matrix is what keeps this page from promising a pair no code could
-serve. Each `[[credential_profiles]]` entry is one flat TOML table: `delivery`
-is a required TOML string discriminant, common fields are exactly `name`,
-`adapter`, `billing_kind`, and `delivery`, and the selected variant admits only
-its fields below. A field owned by another variant is unknown and rejected.
+Four are admitted, and which adapters each admits is stated by that delivery's
+own section below rather than by a matrix here. An `(adapter, delivery)` pair is
+admitted exactly when that delivery's section admits the adapter **and** names
+the route the secret takes to it; startup rejects every other pair. Stating the
+admission once per delivery, beside the route that justifies it, is what keeps
+the two from drifting apart — a matrix would have to be edited in two places
+whenever an adapter gained a delivery, and it is the route an implementer
+actually needs. Each `[[credential_profiles]]` entry is one flat TOML table:
+`delivery` is a required TOML string discriminant, common fields are exactly
+`name`, `adapter`, `billing_kind`, and `delivery`, and the selected variant
+admits only its fields below. A field owned by another variant is unknown and
+rejected.
 
 #### Distinct members are distinct authorizations
 
@@ -996,8 +991,13 @@ direct-HTTP adapter rejects `env_key` because it does not use a child
 environment. A CLI adapter requires the one credential variable its adapter
 contract names — `OPENAI_API_KEY` for `codex_cli` — and rejects every other
 value, including forwarded and process-control names such as `HOME`,
-`CODEX_HOME`, and `PATH`. This is the delivery for every credential that has an
-external source of truth — provider API keys, and any long-lived bearer token a
+`CODEX_HOME`, and `PATH`. A CLI adapter whose contract names no such variable
+admits no `file` profile at all, and startup rejects the pair: the route is the
+admission here, so there is nothing to validate `env_key` against until that
+adapter's contract names its variable. That is a gap in the adapter contract
+rather than a hole in this grammar, and it closes when the adapter naming its
+variable lands. This is the delivery for every credential that has an external
+source of truth — provider API keys, and any long-lived bearer token a
 provider's own tooling mints for unattended use. Before comparing paths, startup
 lexically normalizes each absolute path by removing redundant separators and `.`
 components and folding each `..` component without permitting it to cross the
@@ -1310,26 +1310,27 @@ An exhausted wait carries the complete policy-member exclusion snapshot
 described below. A contended wait carries that same frozen policy identity,
 every durable exclusion that removed a member, and the complete nonempty set of
 otherwise-admissible bounded members with their exact invocation-reservation
-identities. A contended wait also carries the earliest unelapsed reset among
-those durable exclusions as its deadline, exactly as an exhausted wait does, and
-the scheduler makes it eligible when that deadline passes. Without it a turn
-contending on a bounded member would stay parked past the moment an excluded
-member became admissible again — visibly so for a reset whose passage produces
-no separate durable availability update. Only exclusions a wake can clear
-contribute to that deadline: a predecessor chain exclusion earned in this turn
-is turn-local, so no reset readmits its member before the turn ends, and
-counting its reported reset would wake the wait only to re-park it and leave a
-now-past deadline that makes it immediately eligible again. A contended wait
-none of whose remaining exclusions can be cleared by time has no deadline, and
-its bounded members' completions remain its wake. A member's admission first
-locks the shared capacity rows for every bounded profile the preparation may
-select, in profile-reference byte order. The rows are profile-scoped rather than
-session- or pool-scoped, so concurrent sessions and distinct pools serialize
-against the same bound without a lock-order cycle. Under those locks the
-transaction counts live reservations, chooses the member, and acquires its
-`pending_spawn` reservation together with the call's `Prepared` record. The
-durable constraint that backs the bound, and the reason it is scoped to
-admissions rather than to states, are owned by
+identities. A contended wait also carries a deadline over those durable
+exclusions, computed by exactly the same per-member rule the machine states for
+an exhausted wait, and the scheduler makes it eligible when that deadline
+passes. Without it a turn contending on a bounded member would stay parked past
+the moment an excluded member became admissible again — visibly so for a reset
+whose passage produces no separate durable availability update. Which exclusion
+kinds contribute a reset at all, and how one member's resets combine before the
+earliest across members is taken, are the machine's
+([credential availability](credential-availability.md#the-credential-availability-machine));
+this page states only that the contended form carries the same deadline as the
+exhausted one and never a differently computed one. A contended wait no member
+of which can become admissible by time passage has no deadline, and its bounded
+members' completions remain its wake. A member's admission first locks the
+shared capacity rows for every bounded profile the preparation may select, in
+profile-reference byte order. The rows are profile-scoped rather than session-
+or pool-scoped, so concurrent sessions and distinct pools serialize against the
+same bound without a lock-order cycle. Under those locks the transaction counts
+live reservations, chooses the member, and acquires its `pending_spawn`
+reservation together with the call's `Prepared` record. The durable constraint
+that backs the bound, and the reason it is scoped to admissions rather than to
+states, are owned by
 [persistence protocol](persistence-protocol.md#lock-protocol). That bound is
 read from the profile's current registration and is never frozen into a pool
 policy, because `max_concurrent_invocations` guards a live refresh race the
@@ -1715,8 +1716,9 @@ protocol's 8 MiB frame limit even under worst-case JSON escaping. Each
 - `on_pool_exhausted` — one closed value, `park` or `fail`. This grammar admits
   the value and nothing more; what each one does is owned by
   [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-  where `park` selects between the two wait endings and `fail` between the two
-  failure endings.
+  where the value acts only by selecting whether an exhaustion parks: `fail`
+  never parks, and `park` parks only while an exclusion a wake can clear
+  remains.
 - `headroom_reserve_percent` — an optional pool-wide integer from 0 through 99.
 - the five closed trigger keys `on_quota_exhausted`, `on_rate_limited`,
   `on_overloaded`, `on_credential_rejected`, and `on_headroom_low`, each

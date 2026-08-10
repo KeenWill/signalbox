@@ -98,8 +98,10 @@ and no present runtime can enter it. Its implementing child must add a distinct
 active phase with a closed `exhausted`/`contended` cause that retains the
 session slot and durably binds the frozen pool-policy snapshot. The exhausted
 form carries every policy member's exclusion evidence and optional reset, plus
-the earliest reset as its optional deadline. The contended form carries every
-durable exclusion in the selection snapshot and the complete nonempty set of
+the optional deadline the machine computes from them — this page carries the
+field, never its formula, since only the machine decides which exclusion kinds
+expire at a reset they report. The contended form carries every durable
+exclusion in the selection snapshot and the complete nonempty set of
 otherwise-admissible bounded members with exact invocation-reservation
 identities. Startup may reconstitute either only from that complete evidence.
 Which ending a selection attempt reaches — and therefore whether a wait is

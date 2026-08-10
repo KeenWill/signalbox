@@ -327,8 +327,19 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertNotIn("machine-owner-link", failure_categories(failures))
 
-    def test_label_rendering_is_out_of_scope(self) -> None:
-        """A resolving link is a citation whatever its label renders.
+    def _assert_label_still_cites(self, label: str) -> None:
+        """Assert one label spelling still counts as a citation."""
+        self._write_machine_owner(
+            "This page owns the evidence algebra of "
+            f"[{label}](credential-availability.md).\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertNotIn("machine-owner-link", failure_categories(failures))
+
+    def test_empty_label_is_still_a_citation(self) -> None:
+        """Label rendering is out of scope; the destination decides.
 
         This pins a scope decision, not an oversight. Four waves produced four
         findings in one family — a construct that resolves but renders no
@@ -338,18 +349,13 @@ class DocsConsistencyTests(unittest.TestCase):
         of the shapes occurs in the tracked corpus. The guarded failure is a
         page that stops citing its owner, which no label can cause.
         """
-        for label in ("", "**  **", "<span></span>"):
-            with self.subTest(label=label):
-                self._write_machine_owner(
-                    "This page owns the evidence algebra of "
-                    f"[{label}](credential-availability.md).\n"
-                )
+        self._assert_label_still_cites("")
 
-                failures = run_checks(self.root)
+    def test_formatting_only_label_is_still_a_citation(self) -> None:
+        self._assert_label_still_cites("**  **")
 
-                self.assertNotIn(
-                    "machine-owner-link", failure_categories(failures)
-                )
+    def test_raw_html_label_is_still_a_citation(self) -> None:
+        self._assert_label_still_cites("<span></span>")
 
     def test_image_destination_is_not_a_citation(self) -> None:
         """An image renders a fetch, not a navigation.
