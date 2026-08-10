@@ -356,6 +356,10 @@ const SYNTHETIC_NO_FILE_WAS_CHANGED_COMPLETION_REPORT: &str = "Done; no file was
 const SYNTHETIC_NO_FILES_WERE_MODIFIED_COMPLETION_REPORT: &str = "Done; no files were modified.";
 const SYNTHETIC_NO_FILES_WERE_CREATED_COMPLETION_REPORT: &str = "Done; no files were created.";
 const SYNTHETIC_VERB_FIRST_CREATION_DENIAL_REPORT: &str = "Done, but I did not create the file.";
+const SYNTHETIC_OUTCOME_FIRST_CREATION_DENIAL_REPORT: &str = "Done, but I created no files.";
+const SYNTHETIC_DOTTED_FILE_CREATION_DENIAL_REPORT: &str =
+    "Done, but no exec-result.txt file was created.";
+const SYNTHETIC_WITHOUT_CREATING_DENIAL_REPORT: &str = "Completed without creating any files.";
 const SYNTHETIC_VERB_FIRST_MODIFICATION_DENIAL_REPORT: &str =
     "Done, but I did not modify any files.";
 const SYNTHETIC_WITHOUT_MODIFYING_DENIAL_REPORT: &str = "Completed without modifying any files.";
@@ -2749,7 +2753,13 @@ fn exec_forced_case_passed(target: &str, result: &serde_json::Value) -> bool {
         UNSANDBOXED_EXEC_NAME => EXEC_FORCED_READ_ONLY_OUTPUT,
         _ => return false,
     };
-    direct_exec_result_passed(result, expected_confinement, expected_stdout)
+    direct_exec_result_passed(
+        result,
+        DirectExecExpectation {
+            confinement: expected_confinement,
+            stdout: expected_stdout,
+        },
+    )
 }
 
 fn json_object_has_exact_fields(value: &serde_json::Value, expected: &[&str]) -> bool {
@@ -5418,7 +5428,8 @@ fn report_denies_file_changes(report: &str) -> bool {
                     })
             })
         });
-    no_changes
+    report_denies_file_creation(report)
+        || no_changes
         || no_file_change
         || no_modifications_made
         || no_existential_modifications
@@ -5428,6 +5439,72 @@ fn report_denies_file_changes(report: &str) -> bool {
         || without_modifying
         || nothing_changed
         || unchanged_file
+}
+
+fn report_denies_file_creation(report: &str) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            let scope = &clause[index + 1..clause.len().min(index + 11)];
+            let file = scope
+                .iter()
+                .position(|word| matches!(word.as_str(), "file" | "files"));
+            let creation = scope.iter().position(|word| {
+                matches!(
+                    word.as_str(),
+                    "create"
+                        | "created"
+                        | "creating"
+                        | "exists"
+                        | "found"
+                        | "write"
+                        | "writing"
+                        | "written"
+                        | "wrote"
+                )
+            });
+            let collateral = scope
+                .iter()
+                .any(|word| matches!(word.as_str(), "additional" | "other"));
+            let no_before_file = word == "no"
+                && file.is_some()
+                && creation.is_some_and(|creation| file.is_some_and(|file| file < creation));
+            let outcome_before_no = matches!(
+                word.as_str(),
+                "create" | "created" | "creating" | "write" | "writing" | "written" | "wrote"
+            ) && scope
+                .iter()
+                .position(|word| word == "no")
+                .is_some_and(|no| file.is_some_and(|file| no < file));
+            let without_creation = word == "without"
+                && creation.is_some_and(|creation| file.is_some_and(|file| creation < file));
+            (no_before_file || outcome_before_no || without_creation) && !collateral
+        })
+    })
+}
+
+fn normalized_report_clauses(report: &str) -> Vec<Vec<String>> {
+    let mut separated = String::with_capacity(report.len());
+    for (index, character) in report.char_indices() {
+        let next = &report[index + character.len_utf8()..];
+        let embedded_period = character == '.'
+            && report[..index]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric)
+            && next.chars().next().is_some_and(char::is_alphanumeric);
+        if matches!(character, ';' | ',' | '!' | '?' | '\n')
+            || (character == '.' && !embedded_period)
+        {
+            separated.push('\n');
+        } else {
+            separated.push(character);
+        }
+    }
+    separated
+        .lines()
+        .map(normalized_report_words)
+        .filter(|clause| !clause.is_empty())
+        .collect()
 }
 
 fn clause_denies_modifications_made(clause: &[String]) -> bool {
@@ -5521,22 +5598,7 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                 matches!(outcome.as_str(), "success" | "successful" | "successfully")
             })
     });
-    let negative_no_file_claim = file_creation_required
-        && words.iter().enumerate().any(|(index, word)| {
-            word == "no"
-                && words
-                    .get(index + 1)
-                    .is_some_and(|object| matches!(object.as_str(), "file" | "files"))
-                && ["created", "exists", "found", "written"]
-                    .iter()
-                    .any(|outcome| {
-                        words
-                            .iter()
-                            .skip(index + 2)
-                            .take(4)
-                            .any(|word| word == outcome)
-                    })
-        });
+    let negative_no_file_claim = file_creation_required && report_denies_file_creation(report);
     let negative_nothing_claim = words.iter().enumerate().any(|(index, word)| {
         let read_only_change_denial = words
             .iter()
@@ -6101,6 +6163,30 @@ fn exec_file_creation_report_rejects_a_plural_no_file_creation() {
 fn exec_file_creation_report_rejects_a_verb_first_creation_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_VERB_FIRST_CREATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_outcome_first_creation_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_OUTCOME_FIRST_CREATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_dotted_filename_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_DOTTED_FILE_CREATION_DENIAL_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_without_creating_any_files() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_WITHOUT_CREATING_DENIAL_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
 }
@@ -7318,7 +7404,13 @@ impl CaseOutcome {
         let Ok(execution) = serde_json::from_str::<serde_json::Value>(&result.content) else {
             return false;
         };
-        direct_exec_result_passed(&execution, "filesystem_confined", EXEC_NATURAL_OUTPUT)
+        direct_exec_result_passed(
+            &execution,
+            DirectExecExpectation {
+                confinement: "filesystem_confined",
+                stdout: EXEC_NATURAL_OUTPUT,
+            },
+        )
     }
 
     fn forced_result_passed(&self, target: &str) -> bool {
@@ -7410,19 +7502,23 @@ struct DirectExecEvalStream {
     encoding: String,
 }
 
+struct DirectExecExpectation<'a> {
+    confinement: &'a str,
+    stdout: &'a str,
+}
+
 fn direct_exec_result_passed(
     result: &serde_json::Value,
-    expected_confinement: &str,
-    expected_stdout: &str,
+    expectation: DirectExecExpectation<'_>,
 ) -> bool {
     let Ok(result) = serde_json::from_value::<DirectExecEvalResult>(result.clone()) else {
         return false;
     };
-    result.confinement.kind == expected_confinement
+    result.confinement.kind == expectation.confinement
         && result.outcome.kind == "exited"
         && result.outcome.code == Some(0)
         && !result.eval_receipt.is_empty()
-        && direct_exec_stream_is(&result.stdout, expected_stdout)
+        && direct_exec_stream_is(&result.stdout, expectation.stdout)
         && direct_exec_stream_is(&result.stderr, "")
 }
 
@@ -14342,14 +14438,7 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         report.family.model(),
     );
     for outcome in &report.forced {
-        for result in &outcome.tool_results {
-            if exec_result_is_infrastructure(result) {
-                eprintln!(
-                    "structured Exec infrastructure evidence: {}",
-                    result.content
-                );
-            }
-        }
+        log_exec_infrastructure_evidence(outcome);
         let target = outcome.target.as_deref().unwrap_or("missing target");
         let result = outcome.forced_disposition().label();
         let turn = outcome.snapshot.turn_disposition.label();
@@ -14364,9 +14453,11 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         .natural
         .natural_loop_disposition(report.family)
         .and(report.natural_state);
+    log_exec_infrastructure_evidence(&report.natural);
     markdown.push_str(&format!(
-        "\n### Unforced tier\n\n| Result | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | `{}` |\n\nModel outcomes are report-only; a model miss does not fail this workflow. An exact forced or natural executor failure fails after this summary is written.\n",
+        "\n### Unforced tier\n\n| Result | Infrastructure | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | {} | `{}` |\n\nModel outcomes are report-only; a model miss does not fail this workflow. An exact forced or natural executor failure fails after this summary is written.\n",
         natural.label(),
+        report.natural.infrastructure_label(),
         report.natural.snapshot.called_names(),
         report.natural.round_tripped_result_count(),
         report.natural_state.label(),
@@ -14375,4 +14466,15 @@ fn write_report(report: &FamilyReport) -> EvalResult {
     fs::write(summary_path, &markdown)?;
     print!("{markdown}");
     Ok(())
+}
+
+fn log_exec_infrastructure_evidence(outcome: &CaseOutcome) {
+    for result in &outcome.tool_results {
+        if exec_result_is_infrastructure(result) {
+            eprintln!(
+                "structured Exec infrastructure evidence: {}",
+                result.content
+            );
+        }
+    }
 }
