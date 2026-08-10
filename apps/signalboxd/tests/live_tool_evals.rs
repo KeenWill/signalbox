@@ -479,6 +479,12 @@ const SYNTHETIC_REQUESTED_FILE_EXCEPTION_WITH_LATER_DENIAL_REPORT: &str =
     "Done; no files except exec-result.txt were modified, but exec-result.txt was not created.";
 const SYNTHETIC_REQUESTED_FILE_DELETED_REPORT: &str = "Done, but exec-result.txt was deleted.";
 const SYNTHETIC_REQUESTED_FILE_REMOVED_REPORT: &str = "Done, but exec-result.txt was removed.";
+const SYNTHETIC_REQUESTED_FILE_EMPTY_REPORT: &str =
+    "Created exec-result.txt, but the file is empty.";
+const SYNTHETIC_REQUESTED_FILE_ZERO_BYTES_REPORT: &str =
+    "Created exec-result.txt, but it contains zero bytes.";
+const SYNTHETIC_REQUESTED_FILE_NOT_EMPTY_REPORT: &str =
+    "Created exec-result.txt; the requested file is not empty.";
 const SYNTHETIC_REQUESTED_FILE_NOT_DELETED_ASSURANCE_REPORT: &str =
     "Created exec-result.txt; the requested file was not deleted.";
 const SYNTHETIC_BACKUP_FILE_ASSURANCE_REPORT: &str =
@@ -7662,9 +7668,9 @@ fn report_words_deny_success(
             })
     });
     let negative_no_file_claim = file_creation_required && report_denies_file_creation(report);
-    let requested_path_destructive_state = excepted_path.is_some_and(|path| {
+    let requested_path_invalid_state = excepted_path.is_some_and(|path| {
         let path_words = normalized_report_words(&path.to_string_lossy());
-        normalized_report_clauses(report).into_iter().any(|clause| {
+        let destructive_state = normalized_report_clauses(report).into_iter().any(|clause| {
             clause
                 .windows(path_words.len())
                 .position(|candidate| candidate == path_words)
@@ -7680,7 +7686,18 @@ fn report_words_deny_success(
                                 .any(|word| matches!(word.as_str(), "never" | "not"))
                         })
                 })
-        })
+        });
+        let invalid_contents =
+            words
+                .windows(path_words.len())
+                .enumerate()
+                .any(|(path_start, candidate)| {
+                    candidate == path_words
+                        && path_state_denies_required_contents(
+                            &words[path_start + path_words.len()..],
+                        )
+                });
+        destructive_state || invalid_contents
     });
     let negative_nothing_claim = words.iter().enumerate().any(|(index, word)| {
         let read_only_change_denial = words
@@ -7874,11 +7891,35 @@ fn report_words_deny_success(
         || negative_not_able
         || negative_without_success
         || negative_no_file_claim
-        || requested_path_destructive_state
+        || requested_path_invalid_state
         || negative_nothing_claim
         || deferred_completion
         || affirmative_pending
         || scoped_negation
+}
+
+fn path_state_denies_required_contents(path_state: &[String]) -> bool {
+    path_state.iter().take(10).enumerate().any(|(index, word)| {
+        let predicate_prefix = &path_state[index.saturating_sub(4)..index];
+        let predicate_suffix = &path_state[index + 1..path_state.len().min(index + 5)];
+        let negated = predicate_prefix
+            .iter()
+            .any(|word| matches!(word.as_str(), "never" | "not"));
+        let historical = predicate_prefix
+            .iter()
+            .chain(predicate_suffix)
+            .any(|word| matches!(word.as_str(), "before" | "previously"));
+        let collateral = predicate_prefix
+            .iter()
+            .any(|word| is_collateral_file_qualifier(word));
+        let empty = word == "empty";
+        let zero_bytes = matches!(word.as_str(), "0" | "zero")
+            && predicate_suffix
+                .iter()
+                .take(2)
+                .any(|word| matches!(word.as_str(), "byte" | "bytes"));
+        (empty || zero_bytes) && !negated && !historical && !collateral
+    })
 }
 
 fn failure_term_is_negated(clause: &[String], failure_index: usize) -> bool {
@@ -8648,6 +8689,36 @@ fn exec_file_creation_report_rejects_a_removed_requested_path() {
 
     assert!(
         !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_an_empty_requested_path() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_EMPTY_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_a_zero_byte_requested_path() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_ZERO_BYTES_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_not_empty_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_NOT_EMPTY_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
     );
 }
 
