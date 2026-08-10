@@ -1623,7 +1623,12 @@ impl RunnerProtocolStore {
     ) -> Result<Option<StoredSessionRunnerPlacement>, RunnerProtocolStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
         let row = sqlx::query(
-            "SELECT record.*
+            "SELECT record.*,
+                    (
+                        SELECT max(history.event_ordinal)
+                          FROM runner_session_placement_record AS history
+                         WHERE history.session_id = record.session_id
+                    ) AS maximum_event_ordinal
                FROM runner_current_session_placement AS current_placement
                JOIN runner_session_placement_record AS record
                  ON record.session_id = current_placement.session_id
@@ -1638,6 +1643,10 @@ impl RunnerProtocolStore {
             return Ok(None);
         };
         let event_ordinal = decode_u64(row.decode_column("event_ordinal")?)?;
+        let maximum_event_ordinal = decode_u64(row.decode_column("maximum_event_ordinal")?)?;
+        if event_ordinal != maximum_event_ordinal {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
         let registration =
             load_placement_registration(transaction.as_mut(), &row, &self.catalog).await?;
         let grant = if registration.is_some() {
@@ -3829,13 +3838,20 @@ async fn authenticate_pinned_predecessor(
                     .decode_column::<Option<Uuid>>("lost_runner_id")?
                     .map(runner_id)
                     .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-                let grant_succeeds = runner_replacement_grant_is_successor(&predecessor, row)?
-                    && durable_grant_predecessor_matches_placement(connection, &predecessor, row)
+                let durable_grant =
+                    durable_grant_predecessor_matches_placement(connection, &predecessor, row)
                         .await?;
+                let grant_succeeds = runner_replacement_grant_is_successor(&predecessor, row)?
+                    && durable_grant.matches;
+                let workspace_is_fresh = current_pinned
+                    .workspace
+                    .as_ref()
+                    .is_none_or(|workspace| workspace.placement_revision == revision);
                 if lost_runner != prior_pinned.runner
                     || (current_pinned.runner == lost_runner
                         && source != RunnerPlacementLossSource::Registration)
                     || !grant_succeeds
+                    || !workspace_is_fresh
                 {
                     return Err(RunnerProtocolCorruption::CrossWiredReference.into());
                 }
@@ -3889,14 +3905,15 @@ async fn authenticate_pinned_predecessor(
                         }
                         (None, None) | (None, Some(_)) | (Some(_), None) => false,
                     };
-                let durable_grant_advances =
+                let durable_grant =
                     durable_grant_predecessor_matches_placement(connection, &predecessor, row)
                         .await?;
                 if same_request_axes
                     && same_pinned_axes
                     && same_registration
                     && grant_advances
-                    && durable_grant_advances
+                    && durable_grant.matches
+                    && !durable_grant.predecessor_revoked
                 {
                     current_row = Some(predecessor);
                     current_request = predecessor_request;
@@ -3976,11 +3993,16 @@ fn runner_replacement_grant_is_successor(
     })
 }
 
+struct DurableGrantPredecessorEvidence {
+    matches: bool,
+    predecessor_revoked: bool,
+}
+
 async fn durable_grant_predecessor_matches_placement(
     connection: &mut PgConnection,
     predecessor: &PgRow,
     successor: &PgRow,
-) -> Result<bool, RunnerProtocolStoreError> {
+) -> Result<DurableGrantPredecessorEvidence, RunnerProtocolStoreError> {
     let predecessor_origin =
         predecessor.decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?;
     let predecessor_runner =
@@ -3996,20 +4018,47 @@ async fn durable_grant_predecessor_matches_placement(
     {
         (None, None, None) => None,
         (Some(origin), Some(runner), Some(revision)) => Some((origin, runner, revision)),
-        _ => return Ok(false),
+        _ => {
+            return Ok(DurableGrantPredecessorEvidence {
+                matches: false,
+                predecessor_revoked: false,
+            });
+        }
     };
     let successor_identity = match (successor_origin, successor_runner, successor_revision) {
-        (None, None, None) => return Ok(predecessor_identity.is_none()),
+        (None, None, None) => {
+            return Ok(DurableGrantPredecessorEvidence {
+                matches: predecessor_identity.is_none(),
+                predecessor_revoked: false,
+            });
+        }
         (Some(origin), Some(runner), Some(revision)) => (origin, runner, revision),
-        _ => return Ok(false),
+        _ => {
+            return Ok(DurableGrantPredecessorEvidence {
+                matches: false,
+                predecessor_revoked: false,
+            });
+        }
     };
     let grant = sqlx::query(
-        "SELECT placement_event_ordinal, prior_runner_id, prior_grant_revision
-           FROM runner_credential_grant
-          WHERE session_id = $1
-            AND lineage_origin_event_ordinal = $2
-            AND runner_id = $3
-            AND grant_revision = $4",
+        "SELECT grant_record.placement_event_ordinal,
+                grant_record.prior_runner_id,
+                grant_record.prior_grant_revision,
+                EXISTS (
+                    SELECT 1
+                      FROM runner_credential_grant_audit AS audit
+                     WHERE audit.session_id = grant_record.session_id
+                       AND audit.lineage_origin_event_ordinal =
+                            grant_record.lineage_origin_event_ordinal
+                       AND audit.runner_id = grant_record.prior_runner_id
+                       AND audit.grant_revision = grant_record.prior_grant_revision
+                       AND audit.event_kind = 'revoked'
+                ) AS predecessor_revoked
+           FROM runner_credential_grant AS grant_record
+          WHERE grant_record.session_id = $1
+            AND grant_record.lineage_origin_event_ordinal = $2
+            AND grant_record.runner_id = $3
+            AND grant_record.grant_revision = $4",
     )
     .bind(successor.decode_column::<Uuid>("session_id")?)
     .bind(successor_identity.0)
@@ -4021,17 +4070,29 @@ async fn durable_grant_predecessor_matches_placement(
     let placement_event_ordinal = grant.decode_column::<Decimal>("placement_event_ordinal")?;
     let successor_event_ordinal = successor.decode_column::<Decimal>("event_ordinal")?;
     if placement_event_ordinal != successor_event_ordinal {
-        return Ok(false);
+        return Ok(DurableGrantPredecessorEvidence {
+            matches: false,
+            predecessor_revoked: false,
+        });
     }
+    let predecessor_revoked = grant.decode_column::<bool>("predecessor_revoked")?;
     let durable_predecessor = match (
         grant.decode_column::<Option<Uuid>>("prior_runner_id")?,
         grant.decode_column::<Option<Decimal>>("prior_grant_revision")?,
     ) {
         (None, None) => None,
         (Some(runner), Some(revision)) => Some((successor_identity.0, runner, revision)),
-        _ => return Ok(false),
+        _ => {
+            return Ok(DurableGrantPredecessorEvidence {
+                matches: false,
+                predecessor_revoked,
+            });
+        }
     };
-    Ok(durable_predecessor == predecessor_identity)
+    Ok(DurableGrantPredecessorEvidence {
+        matches: durable_predecessor == predecessor_identity,
+        predecessor_revoked,
+    })
 }
 
 async fn decode_pinned_placement(
@@ -4556,6 +4617,7 @@ async fn load_grant_for_placement(
     .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
     let profile = row.decode_column::<String>("credential_profile_name")?;
     let revoked = decode_stored_grant_revocation(row.decode_column::<bool>("revoked")?);
+    let placement_event = placement.decode_column::<Decimal>("event_ordinal")?;
     let pinned_profile =
         placement.decode_column::<Option<String>>("pinned_credential_profile_name")?;
     if pinned_profile
@@ -4564,37 +4626,26 @@ async fn load_grant_for_placement(
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
+    // The outer placement-history walk authenticates every adjacent durable
+    // grant predecessor once. Policy selection therefore needs only the latest
+    // profiled grant no later than this placement, using the lineage/event
+    // index instead of recursively revisiting the predecessor chain here.
     let policy_event: Decimal = sqlx::query_scalar(
-        "WITH RECURSIVE grant_line AS (
-             SELECT grant_record.*
-               FROM runner_credential_grant AS grant_record
-              WHERE grant_record.session_id = $1
-                AND grant_record.lineage_origin_event_ordinal = $2
-                AND grant_record.runner_id = $3
-                AND grant_record.grant_revision = $4
-             UNION ALL
-             SELECT predecessor.*
-               FROM grant_line AS successor
-               JOIN runner_credential_grant AS predecessor
-                 ON predecessor.session_id = successor.session_id
-                AND predecessor.lineage_origin_event_ordinal =
-                    successor.lineage_origin_event_ordinal
-                AND predecessor.runner_id = successor.prior_runner_id
-                AND predecessor.grant_revision = successor.prior_grant_revision
-         )
-         SELECT grant_line.placement_event_ordinal
-           FROM grant_line
+        "SELECT grant_record.placement_event_ordinal
+           FROM runner_credential_grant AS grant_record
            JOIN runner_session_placement_record AS policy_placement
-             ON policy_placement.session_id = grant_line.session_id
-            AND policy_placement.event_ordinal = grant_line.placement_event_ordinal
-          WHERE policy_placement.pinned_credential_profile_name IS NOT NULL
-          ORDER BY grant_line.grant_revision DESC
+             ON policy_placement.session_id = grant_record.session_id
+            AND policy_placement.event_ordinal = grant_record.placement_event_ordinal
+          WHERE grant_record.session_id = $1
+            AND grant_record.lineage_origin_event_ordinal = $2
+            AND grant_record.placement_event_ordinal <= $3
+            AND policy_placement.pinned_credential_profile_name IS NOT NULL
+          ORDER BY grant_record.placement_event_ordinal DESC
           LIMIT 1",
     )
     .bind(session.into_uuid())
     .bind(origin)
-    .bind(runner)
-    .bind(Decimal::from(revision.get()))
+    .bind(placement_event)
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?;
