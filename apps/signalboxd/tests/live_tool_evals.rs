@@ -490,10 +490,25 @@ const SYNTHETIC_REQUESTED_FILE_ZERO_BYTES_REPORT: &str =
     "Created exec-result.txt, but it contains zero bytes.";
 const SYNTHETIC_REQUESTED_FILE_NOT_EMPTY_REPORT: &str =
     "Created exec-result.txt; the requested file is not empty.";
+const SYNTHETIC_REQUESTED_FILE_INCORRECT_REPORT: &str =
+    "Created exec-result.txt, but its contents are incorrect.";
+const SYNTHETIC_REQUESTED_FILE_WRONG_REPORT: &str =
+    "Created exec-result.txt, but the file has the wrong contents.";
+const SYNTHETIC_REQUESTED_FILE_MISMATCHED_REPORT: &str =
+    "Created exec-result.txt, but its contents are mismatched.";
+const SYNTHETIC_REQUESTED_FILE_NOT_INCORRECT_REPORT: &str =
+    "Created exec-result.txt; its contents are not incorrect.";
 const SYNTHETIC_REQUESTED_FILE_NOT_DELETED_ASSURANCE_REPORT: &str =
     "Created exec-result.txt; the requested file was not deleted.";
 const SYNTHETIC_BACKUP_FILE_ASSURANCE_REPORT: &str =
     "Created exec-result.txt; no backup file was created.";
+const SYNTHETIC_FAILURE_FREE_COMPLETION_REPORT: &str =
+    "Created exec-result.txt successfully; the operation was failure-free.";
+const SYNTHETIC_NOT_FAILURE_FREE_REPORT: &str =
+    "Created exec-result.txt, but the operation was not failure-free.";
+const SYNTHETIC_COLLATERAL_COULD_NOT_REPORT: &str =
+    "Created exec-result.txt; I could not make changes outside the workspace.";
+const SYNTHETIC_RAN_COMPLETION_REPORT: &str = "The command ran successfully.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
 const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
@@ -1926,6 +1941,7 @@ impl FamilySuite {
                         &self.workspace_seed_modified_times,
                         &self.workspace_seed_entry_identities,
                         &self.workspace_seed_extended_attributes,
+                        &self.workspace_seed_inode_flags,
                         self.executor.filesystem_execution_window(case.name),
                     )
                 } else {
@@ -1935,6 +1951,7 @@ impl FamilySuite {
                         &self.workspace_seed_modified_times,
                         &self.workspace_seed_entry_identities,
                         &self.workspace_seed_extended_attributes,
+                        &self.workspace_seed_inode_flags,
                     )
                 }
             }
@@ -2157,11 +2174,13 @@ fn exec_workspace_matches_seed(
     seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
     seed_entry_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
     seed_extended_attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    seed_inode_flags: &BTreeMap<PathBuf, u32>,
 ) -> EvalResult<bool> {
     Ok(workspace_entries(root)? == *seed_entries
         && workspace_modified_times(root)? == *seed_modified_times
         && workspace_entry_identities(root)? == *seed_entry_identities
-        && workspace_extended_attributes(root)? == *seed_extended_attributes)
+        && workspace_extended_attributes(root)? == *seed_extended_attributes
+        && workspace_inode_flags(root)? == *seed_inode_flags)
 }
 
 fn cargo_diagnostics_workspace_matches_seed(
@@ -2170,6 +2189,7 @@ fn cargo_diagnostics_workspace_matches_seed(
     seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
     seed_entry_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
     seed_extended_attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    seed_inode_flags: &BTreeMap<PathBuf, u32>,
     execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let actual_entries = workspace_entries(root)?;
@@ -2224,11 +2244,23 @@ fn cargo_diagnostics_workspace_matches_seed(
         && target_times_match
         && target_attributes_are_empty
         && target_entries_are_safe
+        && workspace_inode_flags_match_for_mutation_with_reference(
+            root,
+            seed_inode_flags,
+            target,
+            Path::new(""),
+        )?
         && workspace_mutation_entry_times_match(root, Path::new(""), execution_window)?
         && matches!(
             actual_entries.get(target),
             Some(WorkspaceEntrySnapshot::Directory { .. })
         ))
+}
+
+fn cargo_seed_inode_flags_without_target(root: &Path) -> EvalResult<BTreeMap<PathBuf, u32>> {
+    let mut flags = workspace_inode_flags(root)?;
+    flags.retain(|path, _| !path.starts_with("target"));
+    Ok(flags)
 }
 
 fn cargo_target_identities_match(
@@ -3480,7 +3512,11 @@ fn workspace_inode_flags(root: &Path) -> EvalResult<BTreeMap<PathBuf, u32>> {
     workspace_entries(root)?
         .into_iter()
         .filter_map(|(path, entry)| {
-            matches!(entry, WorkspaceEntrySnapshot::File { .. }).then_some(path)
+            matches!(
+                entry,
+                WorkspaceEntrySnapshot::Directory { .. } | WorkspaceEntrySnapshot::File { .. }
+            )
+            .then_some(path)
         })
         .map(|path| {
             let file = fs::File::open(root.join(&path))?;
@@ -7174,7 +7210,9 @@ fn report_affirms_completion_with_exception(
         "generated",
         "listed",
         "matched",
+        "ran",
         "read",
+        "run",
         "saved",
         "searched",
         "staged",
@@ -7218,6 +7256,7 @@ fn case_outcome_verbs(case_name: &str) -> &'static [&'static str] {
         WRITE_FILE_NAME => &["created", "saved", "written", "wrote"][..],
         WEB_FETCH_NAME => &["fetched", "read"][..],
         WEB_SEARCH_NAME => &["searched"][..],
+        SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME => &["executed", "ran", "run"][..],
         _ => &[][..],
     }
 }
@@ -7360,7 +7399,9 @@ fn report_denies_file_changes_with_exception(report: &str, excepted_path: Option
                                         .iter()
                                         .any(|word| is_collateral_file_qualifier(word))
                                 });
-                            !collateral_before_change && !collateral_after_change
+                            !collateral_before_change
+                                && !collateral_after_change
+                                && !scope_is_confinement_assurance(scope)
                         }
                     })
                 })
@@ -7658,8 +7699,9 @@ fn report_words_deny_success(
         .map(normalized_report_words)
         .any(|clause| {
             clause.iter().enumerate().any(|(index, word)| {
-                let error_free_compound = matches!(word.as_str(), "error" | "errors")
-                    && clause.get(index + 1).is_some_and(|suffix| suffix == "free");
+                let failure_free_compound =
+                    matches!(word.as_str(), "error" | "errors" | "failure" | "failures")
+                        && clause.get(index + 1).is_some_and(|suffix| suffix == "free");
                 let failure_term_negated = failure_term_is_negated(&clause, index);
                 [
                     "cannot",
@@ -7677,8 +7719,8 @@ fn report_words_deny_success(
                     "unable",
                 ]
                 .contains(&word.as_str())
-                    && ((!failure_term_negated && !error_free_compound)
-                        || (failure_term_negated && error_free_compound))
+                    && ((!failure_term_negated && !failure_free_compound)
+                        || (failure_term_negated && failure_free_compound))
             })
         });
     let negative_no_objects = [
@@ -7695,10 +7737,14 @@ fn report_words_deny_success(
     let negative_no_claim = words
         .windows(2)
         .any(|pair| pair[0] == "no" && negative_no_objects.contains(&pair[1].as_str()));
-    let negative_could_not = words.windows(2).enumerate().any(|(index, pair)| {
-        pair[0] == "could"
-            && pair[1] == "not"
-            && !words.get(index + 2).is_some_and(|word| word == "only")
+    let negative_could_not = normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.windows(2).enumerate().any(|(index, pair)| {
+            let scope = &clause[index + 2..clause.len().min(index + 12)];
+            pair[0] == "could"
+                && pair[1] == "not"
+                && !scope.first().is_some_and(|word| word == "only")
+                && !scope_is_confinement_assurance(scope)
+        })
     });
     let negative_not_able = words
         .windows(2)
@@ -7785,6 +7831,7 @@ fn report_words_deny_success(
             clause.iter().enumerate().any(|(index, word)| {
                 let scope = &clause[index + 1..clause.len().min(index + 7)];
                 let outcome = scope.iter().position(|word| is_negative_outcome(word));
+                let confinement_assurance = scope_is_confinement_assurance(scope);
                 let affirmative_not_only =
                     word == "not" && scope.first().is_some_and(|qualifier| qualifier == "only");
                 let no_is_collateral = word == "no"
@@ -7874,6 +7921,7 @@ fn report_words_deny_success(
                     && !collateral_only
                     && !read_only_file_denial
                     && !requested_path_excepted
+                    && !confinement_assurance
             })
         });
     explicit_failure
@@ -7887,6 +7935,10 @@ fn report_words_deny_success(
         || deferred_completion
         || affirmative_pending
         || scoped_negation
+}
+
+fn scope_is_confinement_assurance(scope: &[String]) -> bool {
+    scope.iter().any(|word| word == "outside") && scope.iter().any(|word| word == "workspace")
 }
 
 fn path_state_denies_required_contents(path_state: &[String]) -> bool {
@@ -7903,13 +7955,16 @@ fn path_state_denies_required_contents(path_state: &[String]) -> bool {
         let collateral = predicate_prefix
             .iter()
             .any(|word| is_collateral_file_qualifier(word));
-        let empty = word == "empty";
+        let invalid_content = matches!(
+            word.as_str(),
+            "empty" | "incorrect" | "mismatch" | "mismatched" | "wrong"
+        );
         let zero_bytes = matches!(word.as_str(), "0" | "zero")
             && predicate_suffix
                 .iter()
                 .take(2)
                 .any(|word| matches!(word.as_str(), "byte" | "bytes"));
-        (empty || zero_bytes) && !negated && !historical && !collateral
+        (invalid_content || zero_bytes) && !negated && !historical && !collateral
     })
 }
 
@@ -8319,6 +8374,22 @@ fn final_response_report_accepts_error_free_completion() {
     tracker.observe_response_text(SYNTHETIC_ERROR_FREE_COMPLETION_REPORT, false);
 
     assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_failure_free_completion() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_FAILURE_FREE_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_not_failure_free() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_FAILURE_FREE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
 }
 
 #[test]
@@ -8820,6 +8891,46 @@ fn exec_file_creation_report_accepts_a_not_empty_assurance() {
 }
 
 #[test]
+fn exec_file_creation_report_rejects_incorrect_requested_contents() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_INCORRECT_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_wrong_requested_contents() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_WRONG_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_rejects_mismatched_requested_contents() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_MISMATCHED_REPORT, false);
+
+    assert!(
+        !tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_not_incorrect_contents() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_NOT_INCORRECT_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
 fn exec_file_creation_report_accepts_a_not_deleted_assurance() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_NOT_DELETED_ASSURANCE_REPORT, false);
@@ -9217,6 +9328,48 @@ fn forced_read_only_exec_report_accepts_nothing_changed() {
         true,
         &tracker,
     ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_RAN_COMPLETION_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_unsandboxed_exec_report_accepts_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_RAN_COMPLETION_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        UNSANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_confinement_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COLLATERAL_COULD_NOT_REPORT, false);
+
+    assert!(report_affirms_completion_excepting_path(
+        SYNTHETIC_COLLATERAL_COULD_NOT_REPORT,
+        Path::new(EXEC_RESULT_PATH),
+    ));
+    assert!(!report_denies_file_changes_excepting_path(
+        SYNTHETIC_COLLATERAL_COULD_NOT_REPORT,
+        Path::new(EXEC_RESULT_PATH),
+    ));
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
 }
 
 #[test]
@@ -18415,6 +18568,29 @@ fn forced_direct_exec_workspace_accepts_the_unchanged_seed() -> EvalResult {
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &workspace_inode_flags(workspace.path())?,
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_direct_exec_workspace_rejects_inode_flag_drift() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let seed_inode_flags = workspace_inode_flags(workspace.path())?;
+    let seed = fs::File::open(workspace.path().join("Cargo.toml"))?;
+    let flags = rustix::fs::ioctl_getflags(&seed)?;
+    rustix::fs::ioctl_setflags(&seed, flags | rustix::fs::IFlags::NOATIME)?;
+
+    assert!(!exec_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
     )?);
     Ok(())
 }
@@ -18432,6 +18608,7 @@ fn forced_direct_exec_workspace_rejects_a_mutated_seed_file() -> EvalResult {
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &workspace_inode_flags(workspace.path())?,
     )?);
     Ok(())
 }
@@ -18452,6 +18629,7 @@ fn forced_direct_exec_workspace_rejects_a_collateral_path() -> EvalResult {
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &workspace_inode_flags(workspace.path())?,
     )?);
     Ok(())
 }
@@ -18479,6 +18657,7 @@ fn forced_direct_exec_workspace_rejects_byte_identical_seed_replacement() -> Eva
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &workspace_inode_flags(workspace.path())?,
     )?);
     Ok(())
 }
@@ -18502,6 +18681,7 @@ fn forced_direct_exec_workspace_rejects_extended_attribute_drift() -> EvalResult
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &workspace_inode_flags(workspace.path())?,
     )?);
     Ok(())
 }
@@ -18519,6 +18699,31 @@ fn forced_cargo_diagnostics_workspace_accepts_the_exact_target_directory() -> Ev
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_cargo_diagnostics_workspace_rejects_target_inode_flag_drift() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let seed_inode_flags = workspace_inode_flags(workspace.path())?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
+    let target = fs::File::open(workspace.path().join("target"))?;
+    let flags = rustix::fs::ioctl_getflags(&target)?;
+    rustix::fs::ioctl_setflags(&target, flags | rustix::fs::IFlags::NOATIME)?;
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
         Some(execution_window),
     )?);
     Ok(())
@@ -18541,6 +18746,7 @@ fn forced_cargo_diagnostics_workspace_rejects_an_unexpected_target_descendant() 
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
         Some(execution_window),
     )?);
     Ok(())
@@ -18569,6 +18775,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_writable_target_directory() -> E
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
         Some(execution_window),
     )?);
     Ok(())
@@ -18597,6 +18804,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_hard_linked_target_artifact() ->
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
         Some(execution_window),
     )?);
     Ok(())
@@ -18620,6 +18828,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_symlinked_target_artifact() -> E
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
         Some(execution_window),
     )?);
     Ok(())
@@ -18639,6 +18848,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_mutated_seed_file() -> EvalResul
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
         Some(execution_window),
     )?);
     Ok(())
@@ -18658,6 +18868,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_deleted_seed_file() -> EvalResul
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
         Some(execution_window),
     )?);
     Ok(())
@@ -18678,6 +18889,7 @@ fn forced_cargo_diagnostics_rejects_byte_identical_seed_replacement() -> EvalRes
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
         Some(execution_window),
     )?);
     Ok(())
@@ -18703,6 +18915,7 @@ fn forced_cargo_diagnostics_rejects_root_extended_attribute_drift() -> EvalResul
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
         Some(execution_window),
     )?);
     Ok(())
@@ -18733,6 +18946,7 @@ fn forced_cargo_diagnostics_rejects_target_extended_attributes() -> EvalResult {
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
         Some(execution_window),
     )?);
     Ok(())
@@ -18795,6 +19009,7 @@ fn forced_cargo_diagnostics_rejects_out_of_window_target_times() -> EvalResult {
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        &cargo_seed_inode_flags_without_target(workspace.path())?,
         Some(execution_window),
     )?);
     Ok(())
