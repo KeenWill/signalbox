@@ -382,38 +382,40 @@ cleared. For a fresh command, the existence of a newer active generation *at the
 target's own exact scope* returns `stale_generation` before the named older
 generation is considered for `already_cleared`; an operator can therefore never
 mistake clearing historical evidence for clearing the current exclusion at that
-scope. The comparison is confined to that scope — the profile for
-`profile_quarantine`, the pool policy and profile for `membership_exclusion`,
-and the session, pool policy, and profile for `session_displacement` — because a
-newer generation elsewhere describes a different exclusion the operator did not
-name. Without that confinement a still-active target the listing API returned
-could not be cleared until every unrelated newer exclusion was cleared first,
-and a profile taking continuous triggers in another pool could block the
-requested repair indefinitely. A chain target whose named predecessor correlates
-with no retained record for that profile and scope, or whose retained record
-does not exactly match the named correlation, is `unknown_credential_exclusion`
-— as is any other target with no such record. An exact retained record that an
-earlier command already marked inactive is not unknown: it follows the
-`already_cleared` path below, so the idempotent repair returns one answer rather
-than depending on which command ran first. Equal `command_id` replay still
-returns its stored receipt before this current-state precedence is evaluated. A
-quarantine of **delivery origin** is a broken credential rather than a throttled
-one, and what clears it is whatever can re-establish the credential — which
-differs by which delivery produced it, so the two are stated separately rather
-than rejected together. A rejected daemon-owned OAuth refresh rejects this
-mutation, because only re-provisioning can clear it and this daemon has a
-provisioning command that does exactly that. A `codex_home` identity walk that
-failed instead **accepts** it, because no daemon `codex_home` provisioning
-transaction exists: the store is external, an operator repairs it outside the
-daemon, and rejecting the clear would leave that quarantine with no transition
-out at all — the profile is no longer selected, so no preparation reruns the
-walk that would clear it. Accepting the clear costs nothing, because the walk
-runs at every preparation and re-quarantines immediately if the home is still
-broken; the operator's clear asserts only that it is worth walking again. The
-rejection therefore turns on the quarantine's origin and never on the profile's
-delivery. Rejecting by delivery would conflate the two and leave a rate-limited
-`oauth` member with no clearing path at all where its adapter offers no
-zero-cost probe, which is the one case the operator command exists for.
+scope. The comparison is confined to that scope — the profile **and the
+exclusion's origin** for `profile_quarantine`, since a policy quarantine and a
+delivery quarantine on one profile are independent states and neither makes the
+other stale; the pool policy and profile for `membership_exclusion`, and the
+session, pool policy, and profile for `session_displacement` — because a newer
+generation elsewhere describes a different exclusion the operator did not name.
+Without that confinement a still-active target the listing API returned could
+not be cleared until every unrelated newer exclusion was cleared first, and a
+profile taking continuous triggers in another pool could block the requested
+repair indefinitely. A chain target whose named predecessor correlates with no
+retained record for that profile and scope, or whose retained record does not
+exactly match the named correlation, is `unknown_credential_exclusion` — as is
+any other target with no such record. An exact retained record that an earlier
+command already marked inactive is not unknown: it follows the `already_cleared`
+path below, so the idempotent repair returns one answer rather than depending on
+which command ran first. Equal `command_id` replay still returns its stored
+receipt before this current-state precedence is evaluated. A quarantine of
+**delivery origin** is a broken credential rather than a throttled one, and what
+clears it is whatever can re-establish the credential — which differs by which
+delivery produced it, so the two are stated separately rather than rejected
+together. A rejected daemon-owned OAuth refresh rejects this mutation, because
+only re-provisioning can clear it and this daemon has a provisioning command
+that does exactly that. A `codex_home` identity walk that failed instead
+**accepts** it, because no daemon `codex_home` provisioning transaction exists:
+the store is external, an operator repairs it outside the daemon, and rejecting
+the clear would leave that quarantine with no transition out at all — the
+profile is no longer selected, so no preparation reruns the walk that would
+clear it. Accepting the clear costs nothing, because the walk runs at every
+preparation and re-quarantines immediately if the home is still broken; the
+operator's clear asserts only that it is worth walking again. The rejection
+therefore turns on the quarantine's origin and never on the profile's delivery.
+Rejecting by delivery would conflate the two and leave a rate-limited `oauth`
+member with no clearing path at all where its adapter offers no zero-cost probe,
+which is the one case the operator command exists for.
 
 Success returns `credential_exclusion_cleared { target, outcome }`, where
 `outcome` is `cleared` for the winning transition or `already_cleared` when a

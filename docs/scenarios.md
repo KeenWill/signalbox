@@ -721,8 +721,9 @@ INV-tagged test names and attached doc comments.
 - **State transitions:** Predecessor call → known availability failure and
   predecessor attempt → known failed; turn → successor eligible; successor
   attempt/call → terminal. Each availability-successor chain is bounded to at
-  most one call per pool member; a successful call or release from a parked wait
-  ends that chain before later continuation
+  most one call per pool member; a successful call ends that chain before later
+  continuation, while releasing a parked wait resumes the chain the wait belongs
+  to
   ([availability successor calls](spec/model-call-execution.md#availability-successor-calls)).
 - **Transient updates:** No current client update announces that a successor is
   being considered or selected. The predecessor, cause, and successor are

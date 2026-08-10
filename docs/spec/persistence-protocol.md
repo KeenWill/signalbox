@@ -1490,14 +1490,20 @@ protocol, owned by
 [the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery).
 This paragraph makes those decisions representable and takes none of them.
 Provisioning replaces the quarantined generation with a fresh authorization in
-one transaction. That transaction also decides account-level independence, and
-its lock *order* is what makes that decision total. It reads the pool-policy
-revisions its profile is pinned into, forms the complete set of profile rows it
-will need — **its own row together with every co-member's** — and acquires that
-whole set in one acquisition ordered by profile reference, holding it until
-after its own commit. Under those locks it re-reads its memberships; if the set
-has grown it releases, repeats with the enlarged set, and proceeds only once the
-read taken under the locks agrees with the set it locked.
+one transaction, and publishes the durable member-availability update the
+scheduler consumes in that same transaction, for the reason an accepted clear
+does: re-provisioning is the only recovery from an OAuth delivery-origin
+quarantine, so a wait held by that quarantine has no other wake, and a crash
+between the replacement and any in-memory notification would leave the repaired
+profile's turn parked with its session slot held and nothing left to release it.
+That transaction also decides account-level independence, and its lock *order*
+is what makes that decision total. It reads the pool-policy revisions its
+profile is pinned into, forms the complete set of profile rows it will need —
+**its own row together with every co-member's** — and acquires that whole set in
+one acquisition ordered by profile reference, holding it until after its own
+commit. Under those locks it re-reads its memberships; if the set has grown it
+releases, repeats with the enlarged set, and proceeds only once the read taken
+under the locks agrees with the set it locked.
 
 Two properties of that shape are load-bearing, and neither survives a simpler
 one. Including the provisioned row in the *same* ordered acquisition is what
@@ -1564,17 +1570,22 @@ substitute its newer policy. The call's target adapter and the current profile
 registration must agree with the membership row's expected adapter and delivery
 kind before credential resolution, or preparation fails before send.
 
-Each profile owns one durable action head naming its current exclusion
-generation. Every transaction that mints, activates, or clears an exclusion
-locks that head `FOR UPDATE` before reading it, so concurrent observations in
-different sessions cannot mint two active generations for one profile and a
-uniqueness conflict cannot prevent a terminal observation from committing with
-its required action record. Call preparation locks the head of every member it
-may select before reading exclusion state and holds it through the `Prepared`
-insert, in the modes the lock protocol above fixes — `FOR SHARE` for a member it
-only reads, and `FOR UPDATE` for one whose pending displacement it consumes — so
-selection and exclusion mutation are serialized against each other rather than
-only against their own kind.
+Each profile owns one durable action head **per exclusion origin** — policy and
+delivery — naming that origin's current exclusion generation. Every transaction
+that mints, activates, or clears an exclusion locks the head for its own origin
+`FOR UPDATE` before reading it, so concurrent observations in different sessions
+cannot mint two active generations for one profile and origin, and a uniqueness
+conflict cannot prevent a terminal observation from committing with its required
+action record. Origin separates the heads because the clear protocol answers
+administrability from it, and a single head would force a policy quarantine and
+a delivery quarantine onto one generation with two contradictory answers; the
+two are independent states of one profile and neither supersedes the other. Call
+preparation locks the head of every member it may select before reading
+exclusion state and holds it through the `Prepared` insert, in the modes the
+lock protocol above fixes — `FOR SHARE` for a member it only reads, and
+`FOR UPDATE` for one whose pending displacement it consumes — so selection and
+exclusion mutation are serialized against each other rather than only against
+their own kind.
 
 Profile-quarantine, membership-exclusion, and session-displacement rows each
 carry a positive generation, active/cleared state, and their exact scope. A
