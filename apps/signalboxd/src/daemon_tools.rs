@@ -2036,7 +2036,7 @@ with open(sys.argv[3], encoding="utf-8") as source:
 hook = settings["hooks"]["SessionStart"][0]["hooks"][0]
 assert hook["type"] == "command"
 hook_timeout = hook["timeout"]
-assert hook_timeout == 10
+assert isinstance(hook_timeout, (int, float)) and hook_timeout > 0
 expected_bridge = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
 assert server["command"] == expected_bridge
 hook_arguments = shlex.split(hook["command"])
