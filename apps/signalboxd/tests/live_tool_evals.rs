@@ -623,7 +623,7 @@ async fn run_selected_family_if_enabled() -> EvalResult {
     write_report(&report)?;
     reject_credential_rejections(&report)?;
     reject_forced_executor_failures(&report.forced)?;
-    reject_natural_executor_failure(&report.natural, family)?;
+    reject_natural_executor_failure(&report.natural, family, report.natural_state)?;
     Ok(())
 }
 
@@ -10615,6 +10615,31 @@ impl CaseOutcome {
         })
     }
 
+    fn exact_natural_exec_state_mismatched(&self, natural_state: EvalDisposition) -> bool {
+        natural_state != EvalDisposition::Pass
+            && self.snapshot.requests.iter().any(|request| {
+                request.name == SANDBOXED_EXEC_NAME
+                    && exact_exec_natural_arguments(request)
+                    && request.attempt_succeeded
+                    && self
+                        .tool_results
+                        .iter()
+                        .find(|result| result.request_id == request.request_id)
+                        .is_some_and(tracked_natural_exec_result_passed)
+            })
+    }
+
+    fn natural_infrastructure_label(
+        &self,
+        family: EvalFamily,
+        natural_state: EvalDisposition,
+    ) -> &'static str {
+        if family == EvalFamily::Exec && self.exact_natural_exec_state_mismatched(natural_state) {
+            return "exact state mismatch";
+        }
+        self.infrastructure_label()
+    }
+
     fn exact_forced_executor_failed(&self) -> bool {
         let Some(target) = self.target.as_deref() else {
             return false;
@@ -11080,7 +11105,11 @@ fn reject_credential_rejections(report: &FamilyReport) -> EvalResult {
     Ok(())
 }
 
-fn reject_natural_executor_failure(outcome: &CaseOutcome, family: EvalFamily) -> EvalResult {
+fn reject_natural_executor_failure(
+    outcome: &CaseOutcome,
+    family: EvalFamily,
+    natural_state: EvalDisposition,
+) -> EvalResult {
     if outcome.snapshot.exact_natural_request_failed(family)
         || (family == EvalFamily::Exec
             && outcome
@@ -11088,6 +11117,8 @@ fn reject_natural_executor_failure(outcome: &CaseOutcome, family: EvalFamily) ->
                 .iter()
                 .any(exec_result_is_infrastructure))
         || (family == EvalFamily::Exec && outcome.exact_natural_exec_result_mismatched())
+        || (family == EvalFamily::Exec
+            && outcome.exact_natural_exec_state_mismatched(natural_state))
     {
         return Err(io::Error::other(EXACT_EXECUTOR_FAILURE).into());
     }
@@ -11557,7 +11588,9 @@ fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
         outcome.natural_loop_disposition(EvalFamily::Git),
         EvalDisposition::Infrastructure
     );
-    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Git).is_err());
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Git, EvalDisposition::Pass).is_err()
+    );
 }
 
 #[test]
@@ -11772,7 +11805,10 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
         outcome.natural_loop_disposition(EvalFamily::Workspace),
         EvalDisposition::Miss
     );
-    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Workspace).is_ok());
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Workspace, EvalDisposition::Pass)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -11824,7 +11860,10 @@ fn unforced_workspace_tier_reports_read_failure_after_an_unrelated_mutation_as_i
         outcome.natural_loop_disposition(EvalFamily::Workspace),
         EvalDisposition::Infrastructure
     );
-    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Workspace).is_err());
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Workspace, EvalDisposition::Pass)
+            .is_err()
+    );
 }
 
 #[test]
@@ -18116,6 +18155,19 @@ fn unforced_exec_tier_passes_a_confined_zero_exit() {
 }
 
 #[test]
+fn unforced_exec_tier_rejects_an_exact_state_mismatch_as_infrastructure() {
+    let outcome = natural_exec_outcome(confined_exit(EXEC_NATURAL_OUTPUT));
+
+    assert_eq!(
+        outcome.natural_infrastructure_label(EvalFamily::Exec, EvalDisposition::Miss),
+        "exact state mismatch"
+    );
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Exec, EvalDisposition::Miss).is_err()
+    );
+}
+
+#[test]
 fn unforced_exec_tier_rejects_a_truncated_capture() {
     let mut execution = confined_exit(EXEC_NATURAL_OUTPUT);
     execution["stdout"]["completeness"] = serde_json::json!("truncated");
@@ -18147,7 +18199,9 @@ fn unforced_exec_tier_reports_a_timed_out_process_as_infrastructure() {
         outcome.natural_loop_disposition(EvalFamily::Exec),
         EvalDisposition::Infrastructure
     );
-    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Exec).is_err());
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Exec, EvalDisposition::Pass).is_err()
+    );
 }
 
 #[test]
@@ -18158,7 +18212,9 @@ fn unforced_exec_tier_reports_a_nonzero_exit_as_infrastructure() {
         outcome.natural_loop_disposition(EvalFamily::Exec),
         EvalDisposition::Infrastructure
     );
-    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Exec).is_err());
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Exec, EvalDisposition::Pass).is_err()
+    );
 }
 
 #[test]
@@ -18177,7 +18233,9 @@ fn unforced_exec_structured_infrastructure_fails_the_job() {
     let outcome =
         natural_exec_outcome(direct_exec_result(DirectExecEvidence::supervision_failure()));
 
-    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Exec).is_err());
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Exec, EvalDisposition::Pass).is_err()
+    );
 }
 
 #[test]
@@ -18302,7 +18360,9 @@ fn unforced_exec_tier_rejects_an_unconfined_execution() {
         outcome.natural_loop_disposition(EvalFamily::Exec),
         EvalDisposition::Infrastructure
     );
-    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Exec).is_err());
+    assert!(
+        reject_natural_executor_failure(&outcome, EvalFamily::Exec, EvalDisposition::Pass).is_err()
+    );
 }
 
 #[test]
@@ -20437,7 +20497,9 @@ fn write_report(report: &FamilyReport) -> EvalResult {
     markdown.push_str(&format!(
         "\n### Unforced tier\n\n| Result | Infrastructure | Calls observed | Tool result round-trips | Task state | Turn |\n| --- | --- | --- | ---: | --- | --- |\n| {} | {} | {} | {} | {} | `{}` |\n\nModel outcomes are report-only; a model miss does not fail this workflow. An exact forced or natural executor failure or rejected model credential fails after this summary is written.\n",
         natural.label(),
-        report.natural.infrastructure_label(),
+        report
+            .natural
+            .natural_infrastructure_label(report.family, report.natural_state),
         report.natural.snapshot.called_names(),
         report.natural.round_tripped_result_count(),
         report.natural_state.label(),
