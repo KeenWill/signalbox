@@ -6681,6 +6681,62 @@ async fn s32_inv002_inv045_profile_replacement_authenticates_durable_grant_prede
     Ok(())
 }
 
+/// INV-002 / INV-045: a profile replacement grant belongs to the exact
+/// placement event that installs it.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv045_profile_replacement_authenticates_grant_placement_event()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_credential_grant AS credential_grant
+            SET placement_event_ordinal = placement.event_ordinal
+           FROM runner_session_placement_record AS placement
+          WHERE credential_grant.session_id = $1
+            AND credential_grant.grant_revision = $2
+            AND placement.session_id = credential_grant.session_id
+            AND placement.event_kind = 'pinned'",
+    )
+    .bind(replacement.grant.grant.session().into_uuid())
+    .bind(Decimal::from(replacement.grant.grant.revision().get()))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let corrupted = store
+        .load_placement(replacement.placement.session())
+        .await
+        .expect_err("a profile replacement grant cannot name another placement event");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv045_new_revoked_grant_round_trips_terminal_audit() -> Result<(), Box<dyn Error>> {
