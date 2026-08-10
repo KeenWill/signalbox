@@ -11277,29 +11277,6 @@ async fn s32_inv002_inv045_profile_replacement_rejects_revoked_predecessor_grant
     Ok(())
 }
 
-/// INV-045: policy lookup for each historical grant uses the lineage/event
-/// index instead of recursively revisiting the complete predecessor chain.
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn s32_inv045_grant_policy_placement_lookup_index_is_pinned() -> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
-    let index_definition: String = sqlx::query_scalar(
-        "SELECT indexdef
-           FROM pg_indexes
-          WHERE schemaname = 'public'
-            AND indexname = 'runner_credential_grant_policy_placement_idx'",
-    )
-    .fetch_one(&pool)
-    .await?;
-
-    assert_eq!(
-        index_definition,
-        "CREATE INDEX runner_credential_grant_policy_placement_idx ON public.runner_credential_grant USING btree (session_id, lineage_origin_event_ordinal, placement_event_ordinal DESC)"
-    );
-    drop(pool);
-    Ok(())
-}
-
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv045_new_revoked_grant_round_trips_terminal_audit() -> Result<(), Box<dyn Error>> {
@@ -11977,6 +11954,110 @@ async fn s32_inv045_profile_free_tombstone_uses_predecessor_approval_policy()
         &second_profile_free.placement
     );
     assert_eq!(reloaded_successor.grant(), Some(successor_tombstone));
+    drop(pool);
+    Ok(())
+}
+
+/// INV-002 / INV-045: grant policy resolution follows the exact durable
+/// predecessor chain and ignores a later sibling sharing its lineage origin.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv045_grant_policy_resolution_excludes_sibling_lineage()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    let lost = pin
+        .placement
+        .mark_runner_lost()
+        .expect("the pinned runner may be marked lost");
+    append_runner_lost_projection(&pool, lost.session()).await?;
+    let successor_enrollment = replacement_enrollment();
+    store.insert_enrollment(&successor_enrollment).await?;
+    let successor_registration = store
+        .register(&successor_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(successor_enrollment.enrollment())
+        .await?;
+    let replacement = lost
+        .replace_lost_runner(
+            SessionRunnerPlacementRequest {
+                selector: RunnerSelector::CapabilityClass(class()),
+                working_directory: WorkingDirectorySelection::RunnerDefault,
+                credential_profile: None,
+                workspace: WorkspaceRequirement::None,
+                sandbox: RunnerSandboxProfile::Ambient,
+                permission_overrides: no_permission_overrides(),
+            },
+            successor_registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/successor".to_owned())
+                .expect("the successor working directory is valid"),
+            None,
+            pin.grant,
+        )
+        .expect("the profile-free successor carries a grant tombstone");
+    let tombstone = replacement
+        .grant
+        .as_ref()
+        .expect("the replacement retains its terminal grant");
+    store
+        .store_runner_replacement_projection_for_test(
+            &replacement.placement,
+            &successor_registration,
+            Some(tombstone),
+        )
+        .await?;
+    let expected_policy_event: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'pinned'",
+    )
+    .bind(replacement.placement.session().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_credential_grant
+            (session_id, lineage_origin_event_ordinal, runner_id,
+             grant_revision, credential_profile_name,
+             registration_enrollment_id, registration_revision,
+             placement_event_ordinal, prior_runner_id,
+             prior_grant_revision, tool_count)
+         SELECT grant_record.session_id,
+                grant_record.lineage_origin_event_ordinal,
+                $2, grant_record.grant_revision + 1,
+                grant_record.credential_profile_name,
+                grant_record.registration_enrollment_id,
+                grant_record.registration_revision,
+                loss.event_ordinal, grant_record.runner_id,
+                grant_record.grant_revision, 0
+           FROM runner_credential_grant AS grant_record
+           JOIN runner_session_placement_record AS loss
+             ON loss.session_id = grant_record.session_id
+            AND loss.event_kind = 'runner_lost'
+          WHERE grant_record.session_id = $1
+            AND grant_record.grant_revision = 1",
+    )
+    .bind(replacement.placement.session().into_uuid())
+    .bind(uuid(LATER_RUNNER))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_credential_grant ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let actual_policy_event = store
+        .load_current_grant_policy_event_for_test(replacement.placement.session())
+        .await?
+        .expect("the retained grant has an authenticated policy event");
+    let loaded = store
+        .load_placement(replacement.placement.session())
+        .await?
+        .expect("the sibling grant does not corrupt the authenticated chain");
+
+    assert_eq!(actual_policy_event, expected_policy_event);
+    assert_eq!(loaded.grant(), Some(tombstone));
     drop(pool);
     Ok(())
 }
