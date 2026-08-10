@@ -1377,7 +1377,15 @@ predecessor lineage is authoritative.
 One logical snapshot is a bounded message sequence sharing the request identity:
 
 1. `transcript_snapshot_start { session_id, cursor, runner }`, where `runner` is
-   the same complete nullable runner object as the session summary;
+   the same complete nullable runner object as the session summary. The object
+   carries the exact selector, current-or-lost runner, positive placement
+   revision, sandbox, independent credential/repository/directory axes, closed
+   placement state, and required-nullable `connection_health`. Connection health
+   is present exactly for a pinned placement and is `connected`, `suspect`,
+   `shutdown`, or `lost`; the snapshot therefore authenticates a health event at
+   or before its cursor instead of suppressing that current fact as an already
+   observed delta. A `runner_lost_before_pin` state requires an exact runner
+   selector naming the lost runner, never a capability selector;
 2. one `transcript_turn` per turn, with canonical decimal `acceptance_position`
    and required-nullable `model_settings`; a settings-aware turn carries the
    complete owning turn, accepted input, defaults epoch, requested and selected

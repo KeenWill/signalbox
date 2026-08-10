@@ -2848,28 +2848,39 @@ fn reconstitute_pinned_placement(
 }
 
 fn placement_revision_history_matches(
-    revision: RunnerGeneration,
+    mut revision: RunnerGeneration,
     request: &SessionRunnerPlacementRequest,
     history: &RunnerPlacementReconstitutionHistory,
 ) -> bool {
-    match history {
-        RunnerPlacementReconstitutionHistory::Initial => revision == RunnerGeneration::one(),
-        RunnerPlacementReconstitutionHistory::PrePinReplacement {
-            predecessor_history,
-            prior_revision,
-            lost_runner,
-            prior_request,
-            replacement_request,
-        } => {
-            let successor_differs = match request.selector {
-                RunnerSelector::Identity(successor) => successor != *lost_runner,
-                RunnerSelector::CapabilityClass(_) => false,
-            };
-            placement_revision_history_matches(*prior_revision, prior_request, predecessor_history)
-                && prior_revision.checked_next() == Some(revision)
-                && prior_request.selector == RunnerSelector::Identity(*lost_runner)
-                && replacement_request.as_ref() == request
-                && successor_differs
+    let mut request = request;
+    let mut history = history;
+    loop {
+        match history {
+            RunnerPlacementReconstitutionHistory::Initial => {
+                return revision == RunnerGeneration::one();
+            }
+            RunnerPlacementReconstitutionHistory::PrePinReplacement {
+                predecessor_history,
+                prior_revision,
+                lost_runner,
+                prior_request,
+                replacement_request,
+            } => {
+                let successor_differs = match request.selector {
+                    RunnerSelector::Identity(successor) => successor != *lost_runner,
+                    RunnerSelector::CapabilityClass(_) => false,
+                };
+                if prior_revision.checked_next() != Some(revision)
+                    || prior_request.selector != RunnerSelector::Identity(*lost_runner)
+                    || replacement_request.as_ref() != request
+                    || !successor_differs
+                {
+                    return false;
+                }
+                revision = *prior_revision;
+                request = prior_request;
+                history = predecessor_history;
+            }
         }
     }
 }

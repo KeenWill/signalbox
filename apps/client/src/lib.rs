@@ -5329,11 +5329,11 @@ mod tests {
         ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
         ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
         ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
-        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, RunnerPlacementRevision,
-        RunnerProjection, RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
-        RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
-        SettingOverlay, SystemPromptMember, ToolBatchState, ToolDecision, TurnState,
-        decode_client_line, encode_server_line,
+        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, RunnerConnectionHealth,
+        RunnerPlacementRevision, RunnerProjection, RunnerProjectionSelector, RunnerProjectionState,
+        RunnerSandboxProfile, RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent,
+        SessionPlacement, SettingOverlay, SystemPromptMember, ToolBatchState, ToolDecision,
+        TurnState, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -5417,7 +5417,11 @@ mod tests {
         CanonicalUuid::from_uuid(Uuid::from_u128(FOLLOWED_SESSION_IDENTITY))
     }
 
-    fn runner_projection(revision: u64, state: RunnerProjectionState) -> RunnerProjection {
+    fn runner_projection(
+        revision: u64,
+        state: RunnerProjectionState,
+        connection_health: Option<RunnerConnectionHealth>,
+    ) -> RunnerProjection {
         let runner_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
         RunnerProjection::try_new(
             RunnerProjectionSelector::Runner { runner_id },
@@ -5428,6 +5432,7 @@ mod tests {
             None,
             None,
             None,
+            connection_health,
             state,
         )
         .expect("the fixture runner projection is coherent")
@@ -6873,7 +6878,7 @@ mod tests {
 
     #[test]
     fn queued_send_stops_on_current_pre_pin_runner_loss_from_snapshot() {
-        let projection = runner_projection(1, RunnerProjectionState::RunnerLostBeforePin);
+        let projection = runner_projection(1, RunnerProjectionState::RunnerLostBeforePin, None);
         let result = queued_turn_runner_recovery(Some(&projection));
 
         assert!(matches!(result, Err(ClientError::RunnerRecoveryRequired)));
@@ -6881,7 +6886,11 @@ mod tests {
 
     #[test]
     fn queued_send_ignores_pre_pin_runner_loss_superseded_in_snapshot() {
-        let projection = runner_projection(2, RunnerProjectionState::Pinned);
+        let projection = runner_projection(
+            2,
+            RunnerProjectionState::Pinned,
+            Some(RunnerConnectionHealth::Connected),
+        );
         let result = queued_turn_runner_recovery(Some(&projection));
 
         assert!(result.is_ok());
@@ -6889,7 +6898,7 @@ mod tests {
 
     #[test]
     fn queued_send_stops_on_current_pinned_runner_loss() {
-        let projection = runner_projection(1, RunnerProjectionState::RunnerLost);
+        let projection = runner_projection(1, RunnerProjectionState::RunnerLost, None);
         let result = queued_turn_runner_recovery(Some(&projection));
 
         assert!(matches!(result, Err(ClientError::RunnerRecoveryRequired)));
