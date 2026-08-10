@@ -652,7 +652,7 @@ BEGIN
       FROM session_scheduler
      WHERE session_id = NEW.session_id
      FOR UPDATE;
-    IF NOT FOUND THEN
+    IF NOT FOUND AND TG_TABLE_NAME = 'turn_attempt' THEN
         RAISE EXCEPTION 'turn attempt lacks its session scheduler'
             USING ERRCODE = '23514';
     END IF;
