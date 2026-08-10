@@ -2028,11 +2028,12 @@ fn exec_natural_entries_match(
     Ok(result_matches
         && actual == *seed_entries
         && actual_modified_times == expected_modified_times
-        && workspace_mutation_target_times_match(
+        && workspace_mutation_entry_times_match(
             root,
             Path::new(EXEC_RESULT_PATH),
             execution_window,
         )?
+        && workspace_mutation_entry_times_match(root, Path::new(""), execution_window)?
         && created_entry_ownership_matches(
             &actual_entry_identities,
             seed_entry_identities,
@@ -17360,6 +17361,29 @@ fn exec_natural_state_rejects_out_of_window_output_times() -> EvalResult {
     ) = prepared_exec_natural_workspace()?;
     fs::File::open(workspace.path().join(EXEC_RESULT_PATH))?
         .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn exec_natural_state_rejects_out_of_window_parent_times() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    fs::File::open(workspace.path())?.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
 
     assert!(!exec_natural_entries_match(
         workspace.path(),
