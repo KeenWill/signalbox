@@ -30,7 +30,7 @@ use std::{
 
 use git2::{
     BranchType, Delta, DiffOptions, IndexAddOption, IndexTime, ObjectType, Oid, Patch, Repository,
-    RepositoryState, Signature, Status, Time,
+    RepositoryState, Signature, Status, Time, build::CheckoutBuilder,
 };
 use sha1::{Digest as _, Sha1};
 use signalbox_application::{
@@ -99,10 +99,11 @@ use signalbox_tools_web::{
     WebSearchTool, WebSearchTransport, WebSearchTransportFailure, WebSearchTransportOutcome,
 };
 use signalbox_tools_workspace::{
-    APPLY_PATCH_NAME, EDIT_FILE_NAME, GLOB_FILES_NAME, LIST_DIRECTORY_NAME,
-    LocalWorkspaceFileSystem, MAX_WORKSPACE_READ_BYTES, READ_FILE_NAME, ReadFileArguments,
-    SEARCH_FILES_NAME, WRITE_FILE_NAME, WorkspaceMutationExecutor, WorkspaceMutationTools,
-    WorkspaceReadExecutor, WorkspaceReadTools,
+    APPLY_PATCH_NAME, ApplyPatchArguments, EDIT_FILE_NAME, EditFileArguments, GLOB_FILES_NAME,
+    LIST_DIRECTORY_NAME, LocalWorkspaceFileSystem, MAX_WORKSPACE_READ_BYTES, READ_FILE_NAME,
+    ReadFileArguments, SEARCH_FILES_NAME, WRITE_FILE_NAME, WorkspaceMutationExecutor,
+    WorkspaceMutationTools, WorkspacePatch, WorkspaceReadExecutor, WorkspaceReadTools,
+    WriteFileArguments,
 };
 use signalboxd::{ActivatedTurnExecution, PostgresProviderModelExecution};
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -333,6 +334,10 @@ const SYNTHETIC_CONTRACTED_FAILURE_REPORT: &str = "The operation wasn't complete
 const SYNTHETIC_NEVER_COMPLETION_REPORT: &str = "Never completed the requested operation.";
 const SYNTHETIC_DEFERRED_COMPLETION_REPORT: &str =
     "The requested operation has yet to be completed.";
+const SYNTHETIC_PENDING_COMPLETION_REPORT: &str =
+    "Done, but the requested operation remains pending.";
+const SYNTHETIC_NO_PENDING_COMPLETION_REPORT: &str =
+    "No requested operation remains pending; done.";
 const SYNTHETIC_APPLIED_COMPLETION_REPORT: &str = "The patch was applied successfully.";
 const SYNTHETIC_NOT_APPLIED_REPORT: &str = "The patch was not applied.";
 const SYNTHETIC_NO_ERRORS_COMPLETION_REPORT: &str =
@@ -2701,6 +2706,7 @@ fn git_forced_case_passed(
             seed_fixture,
             pre_execution_metadata_root_modified_time,
             pre_execution_metadata_root_identity,
+            filesystem_execution_window,
         )?
         && git_forced_metadata_top_level_matches(
             root,
@@ -2751,12 +2757,14 @@ fn git_forced_case_passed(
             name,
             seed_fixture,
             pre_execution_worktree_modified_times,
+            filesystem_execution_window,
         )?
         && git_forced_worktree_entry_identities_match(
             root,
             name,
             seed_fixture,
             pre_execution_worktree_entry_identities,
+            filesystem_execution_window,
         )?
         && git_forced_worktree_extended_attributes_match(
             root,
@@ -5020,6 +5028,7 @@ fn git_forced_metadata_root_modified_time_matches(
     seed_fixture: &GitFixtureSnapshot,
     pre_execution: Option<SystemTime>,
     pre_execution_identity: Option<FilesystemIdentity>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let actual_identity = git_metadata_root_identity(root)?;
     let expected_identity = pre_execution_identity.or(seed_fixture.metadata_root_identity);
@@ -5027,15 +5036,31 @@ fn git_forced_metadata_root_modified_time_matches(
         case_name,
         GIT_BRANCH_SWITCH_NAME | GIT_CREATE_COMMIT_NAME | GIT_STAGE_NAME
     ) {
-        return Ok(filesystem_identity_matches_without_change_time(
+        let actual_modified = git_metadata_root_modified_time(root)?;
+        return Ok(git_mutated_metadata_root_times_match(
+            actual_modified,
             actual_identity,
             expected_identity,
+            execution_window,
         ));
     }
     let Some(expected) = pre_execution.or(seed_fixture.metadata_root_modified_time) else {
         return Ok(false);
     };
     Ok(git_metadata_root_modified_time(root)? == expected && actual_identity == expected_identity)
+}
+
+fn git_mutated_metadata_root_times_match(
+    actual_modified: SystemTime,
+    actual_identity: Option<FilesystemIdentity>,
+    expected_identity: Option<FilesystemIdentity>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
+) -> bool {
+    filesystem_identity_matches_without_change_time(actual_identity, expected_identity)
+        && execution_window.is_some_and(|window| {
+            window.contains_modified(actual_modified)
+                && actual_identity.is_some_and(|identity| window.contains_change_time(identity))
+        })
 }
 
 fn git_forced_metadata_top_level_matches(
@@ -5222,6 +5247,7 @@ fn git_forced_worktree_modified_times_match(
     case_name: &str,
     seed_fixture: &GitFixtureSnapshot,
     pre_execution: Option<&BTreeMap<PathBuf, SystemTime>>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let mut actual = git_worktree_modified_times(root)?;
     let mut expected = pre_execution
@@ -5229,8 +5255,14 @@ fn git_forced_worktree_modified_times_match(
         .unwrap_or_else(|| seed_fixture.worktree_modified_times.clone());
     match case_name {
         GIT_BRANCH_SWITCH_NAME => {
-            actual.remove(Path::new(GIT_SEED_PATH));
-            expected.remove(Path::new(GIT_SEED_PATH));
+            let target = Path::new(GIT_SEED_PATH);
+            let Some(actual_modified) = actual.remove(target) else {
+                return Ok(false);
+            };
+            if !execution_window.is_some_and(|window| window.contains_modified(actual_modified)) {
+                return Ok(false);
+            }
+            expected.remove(target);
         }
         GIT_BRANCH_CREATE_NAME
         | GIT_CREATE_COMMIT_NAME
@@ -5248,6 +5280,7 @@ fn git_forced_worktree_entry_identities_match(
     case_name: &str,
     seed_fixture: &GitFixtureSnapshot,
     pre_execution: Option<&BTreeMap<PathBuf, FilesystemIdentity>>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let mut actual = git_worktree_entry_identities(root)?;
     let mut expected = pre_execution
@@ -5256,7 +5289,11 @@ fn git_forced_worktree_entry_identities_match(
     match case_name {
         GIT_BRANCH_SWITCH_NAME => {
             let target = Path::new(GIT_SEED_PATH);
-            if !filesystem_ownership_matches(actual.get(target), expected.get(target)) {
+            if !git_branch_switch_target_identity_matches(
+                actual.get(target),
+                expected.get(target),
+                execution_window,
+            ) {
                 return Ok(false);
             }
             actual.remove(target);
@@ -5271,6 +5308,17 @@ fn git_forced_worktree_entry_identities_match(
         _ => return Ok(false),
     }
     Ok(actual == expected)
+}
+
+fn git_branch_switch_target_identity_matches(
+    actual: Option<&FilesystemIdentity>,
+    expected: Option<&FilesystemIdentity>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
+) -> bool {
+    filesystem_ownership_matches(actual, expected)
+        && actual.is_some_and(|identity| {
+            execution_window.is_some_and(|window| window.contains_change_time(*identity))
+        })
 }
 
 fn filesystem_ownership_matches(
@@ -7304,6 +7352,18 @@ fn report_words_deny_success(
             && negative_outcomes.contains(&claim[3].as_str())
     });
     let clauses_with_dotted_paths_preserved = normalized_report_clauses(report);
+    let affirmative_pending = clauses_with_dotted_paths_preserved.iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            word == "pending"
+                && clause[..index].last().is_some_and(|predicate| {
+                    matches!(
+                        predicate.as_str(),
+                        "is" | "left" | "remain" | "remains" | "stays" | "still"
+                    )
+                })
+                && !failure_term_is_negated(clause, index)
+        })
+    });
     let scoped_negation = clauses_with_dotted_paths_preserved
         .into_iter()
         .any(|clause| {
@@ -7410,6 +7470,7 @@ fn report_words_deny_success(
         || requested_path_destructive_state
         || negative_nothing_claim
         || deferred_completion
+        || affirmative_pending
         || scoped_negation
 }
 
@@ -7619,6 +7680,26 @@ fn final_response_report_rejects_deferred_completion() {
     tracker.observe_response_text(SYNTHETIC_DEFERRED_COMPLETION_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_an_affirmative_pending_state() {
+    let tracker = OperationTracker::default();
+    tracker.observe_result(
+        Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+        &synthetic_result_with_receipt(),
+    );
+    tracker.observe_response_text(SYNTHETIC_PENDING_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_a_negated_pending_state() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_PENDING_COMPLETION_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
 }
 
 #[test]
@@ -8983,10 +9064,7 @@ impl CaseSnapshot {
                                 .is_some_and(|arguments| workspace_read_covers_seed(&arguments))
                             && !self.requests[..index].iter().any(|earlier| {
                                 earlier.attempt_succeeded
-                                    && matches!(
-                                        earlier.name.as_str(),
-                                        WRITE_FILE_NAME | EDIT_FILE_NAME | APPLY_PATCH_NAME
-                                    )
+                                    && workspace_mutation_could_alter_seed(earlier)
                             }))
                             || (request.name == WRITE_FILE_NAME
                                 && request.arguments().is_some_and(|arguments| {
@@ -9051,6 +9129,28 @@ fn workspace_read_covers_seed(arguments: &serde_json::Value) -> bool {
     arguments.path == WORKSPACE_SEED_PATH
         && arguments.max_bytes >= WORKSPACE_SEED.len()
         && arguments.max_bytes <= MAX_WORKSPACE_READ_BYTES
+}
+
+fn workspace_mutation_could_alter_seed(request: &RequestSnapshot) -> bool {
+    let Some(arguments) = request.arguments() else {
+        return false;
+    };
+    match request.name.as_str() {
+        WRITE_FILE_NAME => serde_json::from_value::<WriteFileArguments>(arguments)
+            .is_ok_and(|arguments| arguments.path == WORKSPACE_SEED_PATH),
+        EDIT_FILE_NAME => serde_json::from_value::<EditFileArguments>(arguments)
+            .is_ok_and(|arguments| arguments.path == WORKSPACE_SEED_PATH),
+        APPLY_PATCH_NAME => serde_json::from_value::<ApplyPatchArguments>(arguments)
+            .ok()
+            .and_then(|arguments| WorkspacePatch::parse(&arguments.patch).ok())
+            .is_some_and(|patch| {
+                patch
+                    .operations()
+                    .iter()
+                    .any(|operation| operation.path() == WORKSPACE_SEED_PATH)
+            }),
+        _ => false,
+    }
 }
 
 fn workspace_natural_read_result_passed(
@@ -10359,8 +10459,12 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
                 RequestSnapshot {
                     request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
                     producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
-                    name: String::from(APPLY_PATCH_NAME),
-                    arguments_text: String::from("{}"),
+                    name: String::from(WRITE_FILE_NAME),
+                    arguments_text: serde_json::json!({
+                        "path": WORKSPACE_SEED_PATH,
+                        "content": WORKSPACE_ANSWER,
+                    })
+                    .to_string(),
                     entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
                     completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
                     attempt_succeeded: true,
@@ -10385,6 +10489,58 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
         outcome.natural_loop_disposition(EvalFamily::Workspace),
         EvalDisposition::Miss
     );
+    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Workspace).is_ok());
+}
+
+#[test]
+fn unforced_workspace_tier_reports_read_failure_after_an_unrelated_mutation_as_infrastructure() {
+    let outcome = CaseOutcome {
+        target: None,
+        expected_arguments: None,
+        execution_completed: true,
+        tool_results: vec![TrackedToolResult {
+            request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+            content: String::from("fixture result"),
+            is_error: false,
+            round_tripped: true,
+        }],
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(WRITE_FILE_NAME),
+                    arguments_text: serde_json::json!({
+                        "path": WORKSPACE_ANSWER_PATH,
+                        "content": WORKSPACE_ANSWER,
+                    })
+                    .to_string(),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: Some(ARBITRARY_COMPLETED_RESULT_ENTRY_INDEX),
+                    attempt_succeeded: true,
+                    attempt_denied: false,
+                },
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
+                    name: String::from(READ_FILE_NAME),
+                    arguments_text: bounded_workspace_read_arguments().to_string(),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: None,
+                    attempt_succeeded: false,
+                    attempt_denied: false,
+                },
+            ],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.natural_loop_disposition(EvalFamily::Workspace),
+        EvalDisposition::Infrastructure
+    );
+    assert!(reject_natural_executor_failure(&outcome, EvalFamily::Workspace).is_err());
 }
 
 #[test]
@@ -12027,6 +12183,177 @@ fn forced_git_branch_switch_verifier_rejects_a_head_only_update() -> EvalResult 
     .to_string();
 
     assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+struct GitBranchSwitchTimestampFixture {
+    suite: FamilySuite,
+    pre_worktree_modified_times: BTreeMap<PathBuf, SystemTime>,
+    pre_worktree_entry_identities: BTreeMap<PathBuf, FilesystemIdentity>,
+    pre_metadata_root_modified_time: SystemTime,
+    pre_metadata_root_identity: FilesystemIdentity,
+    execution_window: FilesystemExecutionTimeWindow,
+}
+
+#[cfg(unix)]
+fn git_branch_switch_timestamp_fixture() -> EvalResult<GitBranchSwitchTimestampFixture> {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_BRANCH_SWITCH_NAME)?;
+    let pre_worktree_modified_times = suite
+        .git_pre_execution_worktree_modified_times
+        .lock()
+        .expect("Git pre-execution worktree-time lock is available")
+        .clone()
+        .expect("the Git branch-switch fixture has captured worktree times");
+    let pre_worktree_entry_identities = suite
+        .git_pre_execution_worktree_entry_identities
+        .lock()
+        .expect("Git pre-execution worktree-identity lock is available")
+        .clone()
+        .expect("the Git branch-switch fixture has captured worktree identities");
+    let pre_metadata_root_modified_time = suite
+        .git_pre_execution_metadata_root_modified_time
+        .lock()
+        .expect("Git pre-execution metadata-root-time lock is available")
+        .expect("the Git branch-switch fixture has a captured metadata-root time");
+    let pre_metadata_root_identity = suite
+        .git_pre_execution_metadata_root_identity
+        .lock()
+        .expect("Git pre-execution metadata-root-identity lock is available")
+        .expect("the Git branch-switch fixture has a captured metadata-root identity");
+    let started = current_filesystem_recorded_time()?;
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("switch-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    repository.checkout_tree(target.as_object(), Some(CheckoutBuilder::new().force()))?;
+    repository.set_head("refs/heads/switch-target")?;
+    let execution_window = FilesystemExecutionTimeWindow {
+        started,
+        finished: current_filesystem_recorded_time()?,
+    };
+
+    Ok(GitBranchSwitchTimestampFixture {
+        suite,
+        pre_worktree_modified_times,
+        pre_worktree_entry_identities,
+        pre_metadata_root_modified_time,
+        pre_metadata_root_identity,
+        execution_window,
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_branch_switch_timestamp_gates_accept_the_exact_checkout() -> EvalResult {
+    let fixture = git_branch_switch_timestamp_fixture()?;
+    let actual_worktree_modified_times =
+        git_worktree_modified_times(fixture.suite.workspace.path())?;
+
+    assert_eq!(
+        fs::read_to_string(fixture.suite.workspace.path().join(GIT_SEED_PATH))?,
+        GIT_SWITCH_CONTENT,
+    );
+    assert!(git_forced_metadata_root_modified_time_matches(
+        fixture.suite.workspace.path(),
+        GIT_BRANCH_SWITCH_NAME,
+        &fixture.suite.git_seed_fixture,
+        Some(fixture.pre_metadata_root_modified_time),
+        Some(fixture.pre_metadata_root_identity),
+        Some(fixture.execution_window),
+    )?);
+    assert!(
+        git_forced_worktree_modified_times_match(
+            fixture.suite.workspace.path(),
+            GIT_BRANCH_SWITCH_NAME,
+            &fixture.suite.git_seed_fixture,
+            Some(&fixture.pre_worktree_modified_times),
+            Some(fixture.execution_window),
+        )?,
+        "actual target time: {:?}; execution window: {:?}",
+        actual_worktree_modified_times[Path::new(GIT_SEED_PATH)],
+        fixture.execution_window,
+    );
+    assert!(git_forced_worktree_entry_identities_match(
+        fixture.suite.workspace.path(),
+        GIT_BRANCH_SWITCH_NAME,
+        &fixture.suite.git_seed_fixture,
+        Some(&fixture.pre_worktree_entry_identities),
+        Some(fixture.execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_metadata_root_gate_rejects_an_epoch_mtime_after_switch() -> EvalResult {
+    let fixture = git_branch_switch_timestamp_fixture()?;
+    let repository = Repository::open(fixture.suite.workspace.path())?;
+    fs::File::open(repository.path())?.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+
+    assert!(!git_forced_metadata_root_modified_time_matches(
+        fixture.suite.workspace.path(),
+        GIT_BRANCH_SWITCH_NAME,
+        &fixture.suite.git_seed_fixture,
+        Some(fixture.pre_metadata_root_modified_time),
+        Some(fixture.pre_metadata_root_identity),
+        Some(fixture.execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_metadata_root_gate_rejects_an_epoch_change_time() -> EvalResult {
+    let fixture = git_branch_switch_timestamp_fixture()?;
+    let mut actual_identity = git_metadata_root_identity(fixture.suite.workspace.path())?
+        .expect("the switched Git fixture has a metadata-root identity");
+    actual_identity.change_time_seconds = 0;
+    actual_identity.change_time_nanoseconds = 0;
+
+    assert!(!git_mutated_metadata_root_times_match(
+        git_metadata_root_modified_time(fixture.suite.workspace.path())?,
+        Some(actual_identity),
+        Some(fixture.pre_metadata_root_identity),
+        Some(fixture.execution_window),
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_branch_switch_gate_rejects_an_epoch_target_mtime() -> EvalResult {
+    let fixture = git_branch_switch_timestamp_fixture()?;
+    fs::File::open(fixture.suite.workspace.path().join(GIT_SEED_PATH))?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+
+    assert!(!git_forced_worktree_modified_times_match(
+        fixture.suite.workspace.path(),
+        GIT_BRANCH_SWITCH_NAME,
+        &fixture.suite.git_seed_fixture,
+        Some(&fixture.pre_worktree_modified_times),
+        Some(fixture.execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_branch_switch_gate_rejects_an_epoch_target_change_time() -> EvalResult {
+    let fixture = git_branch_switch_timestamp_fixture()?;
+    let target = Path::new(GIT_SEED_PATH);
+    let mut actual_identity =
+        git_worktree_entry_identities(fixture.suite.workspace.path())?[target];
+    actual_identity.change_time_seconds = 0;
+    actual_identity.change_time_nanoseconds = 0;
+
+    assert!(!git_branch_switch_target_identity_matches(
+        Some(&actual_identity),
+        fixture.pre_worktree_entry_identities.get(target),
+        Some(fixture.execution_window),
+    ));
     Ok(())
 }
 
