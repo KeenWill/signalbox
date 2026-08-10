@@ -1631,6 +1631,14 @@ async fn insert_runner_recovery_turn_with_interrupted_loss(
     pool: &PgPool,
     facts: InterruptedLossRecoveryFacts,
 ) -> Result<(), sqlx::Error> {
+    insert_runner_recovery_turn_with_interrupted_loss_boundary(pool, facts, "continuing").await
+}
+
+async fn insert_runner_recovery_turn_with_interrupted_loss_boundary(
+    pool: &PgPool,
+    facts: InterruptedLossRecoveryFacts,
+    boundary_kind: &str,
+) -> Result<(), sqlx::Error> {
     let starting_frontier = ContextFrontierId::from_uuid(uuid(
         facts.turn.into_uuid().as_u128() + RELATED_IDENTITY_OFFSET,
     ));
@@ -1667,6 +1675,12 @@ async fn insert_runner_recovery_turn_with_interrupted_loss(
     sqlx::query("ALTER TABLE turn_attempt DISABLE TRIGGER ALL")
         .execute(&mut *transaction)
         .await?;
+    sqlx::query("ALTER TABLE model_call DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("ALTER TABLE tool_round DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
     sqlx::query(
         "ALTER TABLE turn_lifecycle
          ENABLE TRIGGER turn_lifecycle_runner_recovery_is_complete",
@@ -1678,16 +1692,18 @@ async fn insert_runner_recovery_turn_with_interrupted_loss(
             (turn_id, session_id, origin_kind, origin_accepted_input_id,
              acceptance_position, state_kind, start_lineage_kind,
              starting_frontier_id, active_phase_kind,
+             pinned_provider_model_identity_id,
              active_tool_round_call_id, runner_recovery_runner_id,
              runner_recovery_placement_revision,
              runner_recovery_tool_attempt_id)
          VALUES ($1, $2, 'delegation', NULL, 1, 'active',
                  'first_in_session', $3, 'awaiting_runner_recovery',
-                 $4, $5, $6, $7)",
+                 $4, $5, $6, $7, $8)",
     )
     .bind(facts.turn.into_uuid())
     .bind(facts.session.into_uuid())
     .bind(starting_frontier.into_uuid())
+    .bind(uuid(0xa159))
     .bind(facts.active_tool_round_call.into_uuid())
     .bind(facts.runner.into_uuid())
     .bind(Decimal::from(facts.placement_revision.get()))
@@ -1710,6 +1726,43 @@ async fn insert_runner_recovery_turn_with_interrupted_loss(
     .bind(facts.session.into_uuid())
     .execute(&mut *transaction)
     .await?;
+    sqlx::query(
+        "INSERT INTO model_call
+            (model_call_id, turn_id, session_id, turn_attempt_id,
+             selection_kind, direct_model_selection_id,
+             resolved_provider_model_identity_id, context_frontier_id,
+             credential_reference, state_kind, terminal_disposition_kind)
+         VALUES ($1, $2, $3, $4, 'direct', $5, $6, $7,
+                 'synthetic-runner-recovery-test', 'terminal', 'completed')",
+    )
+    .bind(facts.active_tool_round_call.into_uuid())
+    .bind(facts.turn.into_uuid())
+    .bind(facts.session.into_uuid())
+    .bind(yielded_attempt)
+    .bind(uuid(0xa101))
+    .bind(uuid(0xa159))
+    .bind(starting_frontier.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_round
+            (producing_model_call_id, session_id, turn_id, boundary_kind,
+             boundary_frontier_id, response_part_count, request_count)
+         VALUES ($1, $2, $3, $4, $5, 1, 1)",
+    )
+    .bind(facts.active_tool_round_call.into_uuid())
+    .bind(facts.session.into_uuid())
+    .bind(facts.turn.into_uuid())
+    .bind(boundary_kind)
+    .bind(starting_frontier.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("ALTER TABLE tool_round ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("ALTER TABLE model_call ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
     sqlx::query("ALTER TABLE turn_attempt ENABLE TRIGGER ALL")
         .execute(&mut *transaction)
         .await?;
@@ -6620,6 +6673,41 @@ async fn s32_inv009_inv044_nullable_runner_wait_rejects_closed_tool_round_bounda
 
     assert_check_violation(rejected);
     malformed.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: a runner-recovery wait naming the interrupted physical
+/// attempt also requires that attempt's tool round to remain continuing.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_interrupted_runner_wait_rejects_closed_tool_round_boundary()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (_, expected_enrollment, _, pin) = stored_side_effecting_pin_fixture(&pool).await?;
+    let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
+    let producing_call = ModelCallId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
+    ));
+    record_execution_possible_lease_loss(&pool, &pin.lease).await?;
+    mark_interrupted_attempt_ambiguous(&pool, interrupted_attempt).await?;
+    let rejected = insert_runner_recovery_turn_with_interrupted_loss_boundary(
+        &pool,
+        InterruptedLossRecoveryFacts {
+            session: pin.placement.session(),
+            turn: TurnId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.turn)),
+            runner: expected_enrollment.runner(),
+            placement_revision: pin.placement.revision(),
+            placement_interrupted_tool_attempt: interrupted_attempt,
+            recovery_interrupted_tool_attempt: Some(interrupted_attempt),
+            active_tool_round_call: producing_call,
+        },
+        "closed_by_turn_end",
+    )
+    .await
+    .expect_err("runner recovery cannot retain an interrupted attempt from a closed tool round");
+
+    assert_check_violation(rejected);
     drop(pool);
     Ok(())
 }
