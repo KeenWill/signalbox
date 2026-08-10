@@ -452,6 +452,12 @@ const SYNTHETIC_NO_EXECUTION_PROBLEMS_REPORT: &str =
 const SYNTHETIC_NO_EXEC_OUTPUT_REPORT: &str = "Done, but the command produced no output.";
 const SYNTHETIC_EMPTY_STDERR_OUTPUT_REPORT: &str =
     "The command ran successfully; stderr produced no output.";
+const SYNTHETIC_EMPTY_STDOUT_OUTPUT_REPORT: &str =
+    "The command ran successfully, but stdout was empty.";
+const SYNTHETIC_INCORRECT_STDOUT_OUTPUT_REPORT: &str =
+    "The command ran successfully, but standard output was incorrect.";
+const SYNTHETIC_NOT_EMPTY_STDOUT_OUTPUT_REPORT: &str =
+    "The command ran successfully; stdout was not empty.";
 const SYNTHETIC_NATURAL_NO_EXEC_OUTPUT_REPORT: &str =
     "Created exec-result.txt; the command produced no output.";
 const SYNTHETIC_NATURAL_EMPTY_STDERR_REPORT: &str =
@@ -512,6 +518,10 @@ const SYNTHETIC_REQUESTED_FILE_ZERO_BYTES_REPORT: &str =
     "Created exec-result.txt, but it contains zero bytes.";
 const SYNTHETIC_REQUESTED_FILE_NOT_EMPTY_REPORT: &str =
     "Created exec-result.txt; the requested file is not empty.";
+const SYNTHETIC_REQUESTED_FILE_INITIALLY_EMPTY_REPORT: &str =
+    "Created exec-result.txt; it was initially empty, but now contains the requested content.";
+const SYNTHETIC_REQUESTED_FILE_EMPTY_AT_FIRST_REPORT: &str =
+    "Created exec-result.txt; it was at first empty, but now contains the requested content.";
 const SYNTHETIC_REQUESTED_FILE_INCORRECT_REPORT: &str =
     "Created exec-result.txt, but its contents are incorrect.";
 const SYNTHETIC_REQUESTED_FILE_WRONG_REPORT: &str =
@@ -550,6 +560,10 @@ const SYNTHETIC_KILLED_RUN_REPORT: &str = "The run was killed.";
 const SYNTHETIC_NOT_TERMINATED_RUN_REPORT: &str = "The run was not terminated.";
 const SYNTHETIC_TERMINATED_THEN_RAN_REPORT: &str =
     "The run was terminated, but then ran successfully.";
+const SYNTHETIC_TIMED_OUT_RUN_REPORT: &str = "The command ran but timed out.";
+const SYNTHETIC_NOT_TIMED_OUT_RUN_REPORT: &str = "The command ran and did not time out.";
+const SYNTHETIC_TIMED_OUT_THEN_RAN_REPORT: &str =
+    "The command timed out, but then ran successfully.";
 const SYNTHETIC_SKIPPED_RUN_REPORT: &str = "I skipped the run.";
 const SYNTHETIC_SKIPPED_THEN_RAN_REPORT: &str = "I skipped the run, but then ran it successfully.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
@@ -7867,6 +7881,7 @@ fn report_words_deny_success(
     let hedged_completion = report_hedges_outcome(report);
     let attempted_completion = report_only_attempts_outcome(report);
     let stopped_skipped_or_aborted_completion = report_stops_skips_or_aborts_outcome(report);
+    let timed_out_completion = report_times_out_outcome(report);
     let canceled_completion = report_cancels_outcome(report);
     let partial_completion = report_partially_completes_outcome(report);
     let clauses_with_dotted_paths_preserved = normalized_report_clauses(report);
@@ -8000,6 +8015,7 @@ fn report_words_deny_success(
         || hedged_completion
         || attempted_completion
         || stopped_skipped_or_aborted_completion
+        || timed_out_completion
         || canceled_completion
         || partial_completion
         || affirmative_pending
@@ -8020,14 +8036,28 @@ fn path_state_is_destructive(path_state: &[String]) -> bool {
 
 fn report_denies_exec_output(report: &str) -> bool {
     normalized_report_clauses(report).into_iter().any(|clause| {
-        clause.windows(2).enumerate().any(|(index, claim)| {
+        let denies_all_output = clause.windows(2).enumerate().any(|(index, claim)| {
             let stream_scope = &clause[index.saturating_sub(4)..index];
             let names_stderr = stream_scope.iter().any(|word| word == "stderr")
                 || stream_scope
                     .windows(2)
                     .any(|words| words[0] == "standard" && words[1] == "error");
             claim[0] == "no" && claim[1] == "output" && !names_stderr
-        })
+        });
+        let denies_stdout = clause.iter().enumerate().any(|(index, word)| {
+            let stream_scope = &clause[index.saturating_sub(5)..index];
+            let names_stdout = stream_scope.iter().any(|word| word == "stdout")
+                || stream_scope
+                    .windows(2)
+                    .any(|words| words[0] == "standard" && words[1] == "output");
+            names_stdout
+                && matches!(
+                    word.as_str(),
+                    "empty" | "incorrect" | "mismatch" | "mismatched" | "wrong"
+                )
+                && !failure_term_is_negated(&clause, index)
+        });
+        denies_all_output || denies_stdout
     })
 }
 
@@ -8142,6 +8172,29 @@ fn report_stops_skips_or_aborts_outcome(report: &str) -> bool {
                         | "killed"
                         | "killing"
                 ) && !failure_term_is_negated(&clause, index)
+                    && nearby.iter().any(|word| is_negative_outcome(word))
+                    && !coordinated_scope_affirms_outcome(coordinated_scope)
+            })
+        })
+}
+
+fn report_times_out_outcome(report: &str) -> bool {
+    normalized_report_segments(report, false)
+        .into_iter()
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let following = &clause[index + 1..];
+                let boundary = following
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "and" | "but" | "then"));
+                let coordinated_scope =
+                    boundary.map_or(&[][..], |boundary| &following[boundary + 1..]);
+                let nearby = &clause[index.saturating_sub(4)..clause.len().min(index + 5)];
+                let timeout_predicate = matches!(word.as_str(), "timeout" | "timeouts")
+                    || (matches!(word.as_str(), "time" | "timed" | "timing")
+                        && following.first().is_some_and(|word| word == "out"));
+                timeout_predicate
+                    && !failure_term_is_negated(&clause, index)
                     && nearby.iter().any(|word| is_negative_outcome(word))
                     && !coordinated_scope_affirms_outcome(coordinated_scope)
             })
@@ -8271,7 +8324,10 @@ fn path_state_denies_required_contents(path_state: &[String]) -> bool {
         let historical = predicate_prefix
             .iter()
             .chain(predicate_suffix)
-            .any(|word| matches!(word.as_str(), "before" | "previously"));
+            .any(|word| matches!(word.as_str(), "before" | "initially" | "previously"))
+            || predicate_prefix
+                .windows(2)
+                .any(|words| words[0] == "at" && words[1] == "first");
         let collateral = predicate_prefix
             .iter()
             .any(|word| is_collateral_file_qualifier(word));
@@ -8968,6 +9024,42 @@ fn forced_exec_report_accepts_a_truthful_empty_stderr_claim() {
 }
 
 #[test]
+fn forced_exec_report_rejects_an_empty_stdout_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EMPTY_STDOUT_OUTPUT_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_exec_report_rejects_an_incorrect_stdout_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_INCORRECT_STDOUT_OUTPUT_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_exec_report_accepts_a_not_empty_stdout_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_EMPTY_STDOUT_OUTPUT_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
 fn natural_exec_report_accepts_a_truthful_no_output_claim() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NATURAL_NO_EXEC_OUTPUT_REPORT, false);
@@ -9329,6 +9421,26 @@ fn exec_file_creation_report_rejects_a_zero_byte_requested_path() {
 fn exec_file_creation_report_accepts_a_not_empty_assurance() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_NOT_EMPTY_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_an_initially_empty_state() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_INITIALLY_EMPTY_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_an_empty_at_first_state() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_EMPTY_AT_FIRST_REPORT, false);
 
     assert!(
         tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
@@ -10003,6 +10115,42 @@ fn forced_sandboxed_exec_report_accepts_a_not_terminated_assurance() {
 fn forced_sandboxed_exec_report_accepts_termination_followed_by_a_successful_run() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_TERMINATED_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_timed_out_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_TIMED_OUT_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_a_not_timed_out_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_TIMED_OUT_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_timeout_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_TIMED_OUT_THEN_RAN_REPORT, false);
 
     assert!(forced_case_completion_reported(
         SANDBOXED_EXEC_NAME,
