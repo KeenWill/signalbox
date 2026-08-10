@@ -4705,6 +4705,10 @@ async fn load_grant_policy_index(
            JOIN runner_session_placement_record AS policy_placement
              ON policy_placement.session_id = grant_line.session_id
             AND policy_placement.event_ordinal = grant_line.placement_event_ordinal
+            AND policy_placement.credential_grant_lineage_origin_ordinal =
+                grant_line.lineage_origin_event_ordinal
+            AND policy_placement.credential_grant_runner_id = grant_line.runner_id
+            AND policy_placement.credential_grant_revision = grant_line.grant_revision
           ORDER BY grant_line.placement_event_ordinal",
     )
     .bind(session)
