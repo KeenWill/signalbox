@@ -5383,6 +5383,20 @@ pub enum RunnerProjectionSelector {
     CapabilityClass { name: RunnerCapabilityClass },
 }
 
+/// Closed current connection health carried for a pinned runner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerConnectionHealth {
+    /// The runner connection is currently healthy.
+    Connected,
+    /// The connection missed a heartbeat and remains within its recovery window.
+    Suspect,
+    /// The connection closed through an orderly daemon or runner shutdown.
+    Shutdown,
+    /// The connection reached a terminal loss transition.
+    Lost,
+}
+
 /// Closed current state carried by an authoritative runner projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -5417,6 +5431,8 @@ pub struct RunnerProjection {
     repository: Option<RunnerRepositoryKey>,
     /// Independently nullable exact requested working directory.
     working_directory: Option<RunnerWorkingDirectory>,
+    /// Current connection health, present exactly while the placement is pinned.
+    connection_health: Option<RunnerConnectionHealth>,
     /// Exact current placement state.
     state: RunnerProjectionState,
 }
@@ -5435,6 +5451,8 @@ struct RawRunnerProjection {
     repository: Option<RunnerRepositoryKey>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     working_directory: Option<RunnerWorkingDirectory>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    connection_health: Option<RunnerConnectionHealth>,
     state: RunnerProjectionState,
 }
 
@@ -5452,21 +5470,38 @@ impl RunnerProjection {
         credential_profile: Option<RunnerCredentialProfileName>,
         repository: Option<RunnerRepositoryKey>,
         working_directory: Option<RunnerWorkingDirectory>,
+        connection_health: Option<RunnerConnectionHealth>,
         state: RunnerProjectionState,
     ) -> Result<Self, CanonicalValueError> {
         let runner_shape_valid =
             matches!(state, RunnerProjectionState::Unpinned) == runner_id.is_none();
-        let selector_valid = match (&selector, runner_id) {
+        let selector_valid = match (&selector, runner_id, state) {
             (
                 RunnerProjectionSelector::Runner {
                     runner_id: selected,
                 },
                 Some(current),
+                _,
             ) => *selected == current,
-            (RunnerProjectionSelector::Runner { .. }, None)
-            | (RunnerProjectionSelector::CapabilityClass { .. }, _) => true,
+            (RunnerProjectionSelector::Runner { .. }, None, RunnerProjectionState::Unpinned)
+            | (
+                RunnerProjectionSelector::CapabilityClass { .. },
+                _,
+                RunnerProjectionState::Unpinned
+                | RunnerProjectionState::Pinned
+                | RunnerProjectionState::RunnerLost
+                | RunnerProjectionState::RunnerAbandoned,
+            ) => true,
+            (RunnerProjectionSelector::Runner { .. }, None, _)
+            | (
+                RunnerProjectionSelector::CapabilityClass { .. },
+                _,
+                RunnerProjectionState::RunnerLostBeforePin,
+            ) => false,
         };
-        if !runner_shape_valid || !selector_valid {
+        let connection_shape_valid =
+            matches!(state, RunnerProjectionState::Pinned) == connection_health.is_some();
+        if !runner_shape_valid || !selector_valid || !connection_shape_valid {
             return Err(CanonicalValueError::RunnerProjection);
         }
         Ok(Self {
@@ -5477,6 +5512,7 @@ impl RunnerProjection {
             credential_profile,
             repository,
             working_directory,
+            connection_health,
             state,
         })
     }
@@ -5516,6 +5552,11 @@ impl RunnerProjection {
         self.working_directory.as_ref()
     }
 
+    /// Returns current connection health exactly while the placement is pinned.
+    pub const fn connection_health(&self) -> Option<RunnerConnectionHealth> {
+        self.connection_health
+    }
+
     /// Returns the exact current placement state.
     pub const fn state(&self) -> RunnerProjectionState {
         self.state
@@ -5534,6 +5575,7 @@ impl TryFrom<RawRunnerProjection> for RunnerProjection {
             raw.credential_profile,
             raw.repository,
             raw.working_directory,
+            raw.connection_health,
             raw.state,
         )
     }
@@ -8198,14 +8240,15 @@ mod tests {
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
         ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject,
-        RunnerCapabilityClass, RunnerCredentialProfileName, RunnerPlacementRevision,
-        RunnerProjection, RunnerProjectionSelector, RunnerProjectionState, RunnerRepositoryKey,
-        RunnerSandboxProfile, RunnerStateTransitionState, RunnerWorkingDirectory, ServerFrame,
-        ServerMessage, ServiceTier, SessionEvent, SessionMetadata, SettingOverlay,
-        SystemPromptMember, SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision,
-        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
-        TurnModelSettingsSnapshot, TurnState, UsageProvenance, decode_client_line,
-        decode_server_line, encode_client_line, encode_server_line, validate_adjustments,
+        RunnerCapabilityClass, RunnerConnectionHealth, RunnerCredentialProfileName,
+        RunnerPlacementRevision, RunnerProjection, RunnerProjectionSelector, RunnerProjectionState,
+        RunnerRepositoryKey, RunnerSandboxProfile, RunnerStateTransitionState,
+        RunnerWorkingDirectory, ServerFrame, ServerMessage, ServiceTier, SessionEvent,
+        SessionMetadata, SettingOverlay, SystemPromptMember, SystemPromptText,
+        ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
+        TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnModelSettingsSnapshot,
+        TurnState, UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
+        encode_server_line, validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
@@ -14555,10 +14598,35 @@ mod tests {
                     Some(RunnerWorkingDirectory::try_new(String::from(
                         "workspace/project",
                     ))?),
+                    None,
                     RunnerProjectionState::RunnerLost,
                 )?),
             },
-            r#"{"type":"transcript_snapshot_start","session_id":"00000000-0000-0000-0000-000000000001","cursor":"9","runner":{"selector":{"type":"capability_class","name":"linux.workspace"},"runner_id":"00000000-0000-0000-0000-000000000002","placement_revision":"3","sandbox_profile":"workspace-restricted","credential_profile":"readonly","repository":"signalbox","working_directory":"workspace/project","state":"runner_lost"}}"#,
+            r#"{"type":"transcript_snapshot_start","session_id":"00000000-0000-0000-0000-000000000001","cursor":"9","runner":{"selector":{"type":"capability_class","name":"linux.workspace"},"runner_id":"00000000-0000-0000-0000-000000000002","placement_revision":"3","sandbox_profile":"workspace-restricted","credential_profile":"readonly","repository":"signalbox","working_directory":"workspace/project","connection_health":null,"state":"runner_lost"}}"#,
+        )
+    }
+
+    #[test]
+    fn runner_projection_round_trips_pinned_suspect_health()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::TranscriptSnapshotStart {
+                session_id: uuid(1),
+                cursor: CanonicalU64::new(9),
+                runner: Some(RunnerProjection::try_new(
+                    RunnerProjectionSelector::Runner { runner_id: uuid(2) },
+                    Some(uuid(2)),
+                    RunnerPlacementRevision::try_new(3).expect("the fixture revision is positive"),
+                    RunnerSandboxProfile::WorkspaceRestricted,
+                    None,
+                    None,
+                    None,
+                    Some(RunnerConnectionHealth::Suspect),
+                    RunnerProjectionState::Pinned,
+                )?),
+            },
+            r#"{"type":"transcript_snapshot_start","session_id":"00000000-0000-0000-0000-000000000001","cursor":"9","runner":{"selector":{"type":"runner","runner_id":"00000000-0000-0000-0000-000000000002"},"runner_id":"00000000-0000-0000-0000-000000000002","placement_revision":"3","sandbox_profile":"workspace-restricted","credential_profile":null,"repository":null,"working_directory":null,"connection_health":"suspect","state":"pinned"}}"#,
         )
     }
 
@@ -14573,6 +14641,7 @@ mod tests {
             Some(current),
             RunnerPlacementRevision::try_new(1).expect("the fixture revision is positive"),
             RunnerSandboxProfile::WorkspaceRestricted,
+            None,
             None,
             None,
             None,
@@ -14598,7 +14667,31 @@ mod tests {
             None,
             None,
             None,
+            None,
             RunnerProjectionState::RunnerLost,
+        );
+
+        assert_eq!(
+            projection,
+            Err(super::CanonicalValueError::RunnerProjection)
+        );
+    }
+
+    #[test]
+    fn runner_projection_rejects_capability_selector_for_pre_pin_loss() {
+        let projection = RunnerProjection::try_new(
+            RunnerProjectionSelector::CapabilityClass {
+                name: RunnerCapabilityClass::try_new(String::from("linux.workspace"))
+                    .expect("the fixture capability is valid"),
+            },
+            Some(uuid(1)),
+            RunnerPlacementRevision::try_new(1).expect("the fixture revision is positive"),
+            RunnerSandboxProfile::WorkspaceRestricted,
+            None,
+            None,
+            None,
+            None,
+            RunnerProjectionState::RunnerLostBeforePin,
         );
 
         assert_eq!(
