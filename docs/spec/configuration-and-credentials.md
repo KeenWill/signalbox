@@ -756,26 +756,32 @@ resolves now, since it is the one binding no later request re-resolves: its
 worktree descriptor is pinned, but its mutation and execution tools reach `.git`
 through that descriptor by name, so a `.git` renamed and recreated under it is
 reachable from the configured root while the pinned pair still names the
-displaced one. A configured pathname that cannot be captured at all leaves the
-pinned pair as the only comparison. An accepted residual: a filesystem may reuse
-a device and inode pair after the directory that held them is removed, so a
+displaced one. A configured pathname whose pair cannot be captured at all fails
+the request closed rather than falling back to the pinned pair: the configured
+adapter still holds its root descriptor and still reaches whatever stands under
+it, so a failed capture is less than the comparison needs rather than more, and
+comparing against the startup pair alone would admit exactly the sharing the
+comparison exists to refuse. An accepted residual: a filesystem may reuse a
+device and inode pair after the directory that held them is removed, so a
 derived directory removed and recreated while its composition is not retained
 can present the identities the record names. Distinguishing that would require
 holding a descriptor for every session ever bound, which is the descriptor
 growth the retained bound exists to prevent. Failure to compose or bind a
 derived root — an unopenable directory, a rejected repository layout, a root
-replaced during composition or since the session bound it, a root shared with
-another session or with the configured root, or a repository whose object format
-disagrees with the one the process-lifetime catalog compiled — closes that tool
-request as a known failure whose sanitized detail names the closed reason. No
-second operator event is emitted for it: the tool loop's single failed-attempt
-admission site owns that telemetry, and the reason travels in the durable
-result. It never falls back to another root. The GitHub policy admits exactly
-`https://api.github.com:443` for authenticated requests. The code-host
-`change_request_ci_job_log` operation retains the tool-loop-owned exception for
-one credential-free download from its validated, pinned, bounded public HTTPS
-redirect destination; the pull-request suite has no such exception. Model
-arguments cannot widen either admission rule.
+replaced during composition or since the session bound it, a root reached
+through a parent that is no longer the classified one, a root shared with
+another session or with the configured root, a configured root whose own
+directories could not be captured to decide that sharing, or a repository whose
+object format disagrees with the one the process-lifetime catalog compiled —
+closes that tool request as a known failure whose sanitized detail names the
+closed reason. No second operator event is emitted for it: the tool loop's
+single failed-attempt admission site owns that telemetry, and the reason travels
+in the durable result. It never falls back to another root. The GitHub policy
+admits exactly `https://api.github.com:443` for authenticated requests. The
+code-host `change_request_ci_job_log` operation retains the tool-loop-owned
+exception for one credential-free download from its validated, pinned, bounded
+public HTTPS redirect destination; the pull-request suite has no such exception.
+Model arguments cannot widen either admission rule.
 
 The optional `[tool_approval_postures]` table maps an exact composed tool name
 to one of `auto`, `delegated`, or `human`. The parser rejects non-string or

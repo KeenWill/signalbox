@@ -219,6 +219,9 @@ const SESSION_WORKSPACE_SHARED_DETAIL: &str =
 const SESSION_WORKSPACE_REPLACED_DETAIL: &str =
     "session workspace root changed since this session bound it";
 
+const SESSION_WORKSPACE_UNVERIFIABLE_CONFIGURED_DETAIL: &str =
+    "configured workspace root could not be revalidated";
+
 /// Derives each session's workspace root from the configured root by a fixed
 /// formula.
 ///
@@ -468,21 +471,20 @@ const fn decide_session_root(
 /// descriptor is pinned, but its mutation and execution tools reach `.git`
 /// through that descriptor by name, so a `.git` renamed and recreated under the
 /// configured root is reachable from it while `pinned` still names the old one.
-/// Both pairs are therefore refused. A configured pathname that cannot be
-/// captured at all leaves `pinned` as the only comparison, which is the one
-/// that was made before `standing` was consulted.
+/// Both pairs are therefore refused.
+///
+/// `standing` is not optional. A caller that could not capture it knows less
+/// than this comparison needs, not more: the configured adapter still holds its
+/// root descriptor and still reaches whatever `.git` stands under it, so a
+/// failed capture is a reason to refuse rather than a reason to compare against
+/// `pinned` alone. Making the unknown unrepresentable here is what stops that
+/// degradation being reintroduced at a call site.
 const fn shares_a_directory_with_the_configured_root(
     composed: ComposedWorkspaceIdentity,
     pinned: ComposedWorkspaceIdentity,
-    standing: Option<ComposedWorkspaceIdentity>,
+    standing: ComposedWorkspaceIdentity,
 ) -> bool {
-    if composed.shares_a_directory_with(pinned) {
-        return true;
-    }
-    match standing {
-        Some(standing) => composed.shares_a_directory_with(standing),
-        None => false,
-    }
+    composed.shares_a_directory_with(pinned) || composed.shares_a_directory_with(standing)
 }
 
 /// Whether a session other than `session` already bound the directory a
@@ -1460,6 +1462,9 @@ enum SessionWorkspaceFailure {
     SharedRootIdentity,
     /// A different directory now stands at the pathname this session bound.
     ReplacedRootIdentity,
+    /// The configured root's own directories could not be captured, so whether
+    /// this session's root is one of them could not be decided.
+    UnverifiableConfiguredRoot,
 }
 
 impl SessionWorkspaceFailure {
@@ -1471,6 +1476,7 @@ impl SessionWorkspaceFailure {
             Self::UnresolvableRoot => "derived_root_unresolvable",
             Self::SharedRootIdentity => "derived_root_shared",
             Self::ReplacedRootIdentity => "derived_root_replaced",
+            Self::UnverifiableConfiguredRoot => "configured_root_unverifiable",
         }
     }
 }
@@ -1490,6 +1496,7 @@ struct SessionWorkspaceFailureDetails {
     unresolvable_root: ToolExecutionErrorDetail,
     shared_root: ToolExecutionErrorDetail,
     replaced_root: ToolExecutionErrorDetail,
+    unverifiable_configured_root: ToolExecutionErrorDetail,
 }
 
 impl SessionWorkspaceFailureDetails {
@@ -1504,6 +1511,7 @@ impl SessionWorkspaceFailureDetails {
             unresolvable_root: detail(SESSION_WORKSPACE_UNRESOLVABLE_DETAIL)?,
             shared_root: detail(SESSION_WORKSPACE_SHARED_DETAIL)?,
             replaced_root: detail(SESSION_WORKSPACE_REPLACED_DETAIL)?,
+            unverifiable_configured_root: detail(SESSION_WORKSPACE_UNVERIFIABLE_CONFIGURED_DETAIL)?,
         })
     }
 
@@ -1515,6 +1523,9 @@ impl SessionWorkspaceFailureDetails {
             SessionWorkspaceFailure::UnresolvableRoot => self.unresolvable_root.clone(),
             SessionWorkspaceFailure::SharedRootIdentity => self.shared_root.clone(),
             SessionWorkspaceFailure::ReplacedRootIdentity => self.replaced_root.clone(),
+            SessionWorkspaceFailure::UnverifiableConfiguredRoot => {
+                self.unverifiable_configured_root.clone()
+            }
         }
     }
 }
@@ -1797,10 +1808,13 @@ where
                     // under separate serialization domains. The comparison is
                     // therefore remade on every dispatch, before the retained
                     // set is consulted and before a recomposition begins.
+                    let standing_configured =
+                        ComposedWorkspaceIdentity::capture(self.roots.configured())
+                            .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
                     if shares_a_directory_with_the_configured_root(
                         bound,
                         self.configured.workspace_identity,
-                        ComposedWorkspaceIdentity::capture(self.roots.configured()).ok(),
+                        standing_configured,
                     ) {
                         return Err(SessionWorkspaceFailure::SharedRootIdentity);
                     }
@@ -1840,10 +1854,12 @@ where
         // each would pass composition on its own. The isolation this derivation
         // exists to establish is a property of the directories, not of the
         // pathname, so it is checked against what every other binding pinned.
+        let standing_configured = ComposedWorkspaceIdentity::capture(self.roots.configured())
+            .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
         if shares_a_directory_with_the_configured_root(
             composed,
             self.configured.workspace_identity,
-            ComposedWorkspaceIdentity::capture(self.roots.configured()).ok(),
+            standing_configured,
         ) {
             return Err(SessionWorkspaceFailure::SharedRootIdentity);
         }
@@ -3498,6 +3514,59 @@ mod tests {
         );
     }
 
+    /// Whether a derived root is one of the configured root's own directories
+    /// cannot be decided once the configured pathname stops resolving. The
+    /// configured adapter still holds its root descriptor and still reaches
+    /// whatever stands under it, so a session already bound to a derived root
+    /// fails closed on its next request rather than dispatching on a
+    /// comparison against the startup pair alone.
+    #[tokio::test]
+    async fn an_uncapturable_configured_root_fails_a_bound_session() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+        let first = session(FIRST_SESSION_IDENTITY);
+        provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+        let (catalog, executor) = offline_daemon_composition(&configured);
+        let bound = daemon_evidence(
+            catalog.clone(),
+            executor.clone(),
+            first,
+            read_marker_proposal(),
+        )
+        .await;
+        fs::remove_dir_all(configured.join(GIT_ADMINISTRATION_DIRECTORY))
+            .expect("the configured administration directory is removed");
+
+        let after_removal = daemon_evidence(catalog, executor, first, read_marker_proposal()).await;
+
+        assert_eq!(read_content(bound), FIRST_SESSION_MARKER);
+        assert_eq!(
+            known_failure_detail(after_removal),
+            SESSION_WORKSPACE_UNVERIFIABLE_CONFIGURED_DETAIL
+        );
+    }
+
+    /// The same refusal on the admission path, which reaches the comparison
+    /// through its own capture: a session composing its derived root for the
+    /// first time is not admitted while the configured pair is unreadable.
+    #[tokio::test]
+    async fn an_uncapturable_configured_root_fails_an_unbound_session() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+        let first = session(FIRST_SESSION_IDENTITY);
+        provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+        let (catalog, executor) = offline_daemon_composition(&configured);
+        fs::remove_dir_all(configured.join(GIT_ADMINISTRATION_DIRECTORY))
+            .expect("the configured administration directory is removed");
+
+        let first_request = daemon_evidence(catalog, executor, first, read_marker_proposal()).await;
+
+        assert_eq!(
+            known_failure_detail(first_request),
+            SESSION_WORKSPACE_UNVERIFIABLE_CONFIGURED_DETAIL
+        );
+    }
+
     /// A write through one session's workspace tools reaches only that
     /// session's root: the other session's read is unchanged, and so is the
     /// configured root's own copy of the same relative path.
@@ -4020,7 +4089,7 @@ mod tests {
         assert!(shares_a_directory_with_the_configured_root(
             FIXTURE_SHARES_CONFIGURED_STANDING_IDENTITY,
             FIXTURE_BOUND_IDENTITY,
-            Some(FIXTURE_CONFIGURED_STANDING_IDENTITY),
+            FIXTURE_CONFIGURED_STANDING_IDENTITY,
         ));
     }
 
@@ -4031,7 +4100,7 @@ mod tests {
         assert!(shares_a_directory_with_the_configured_root(
             FIXTURE_BOUND_IDENTITY,
             FIXTURE_BOUND_IDENTITY,
-            Some(FIXTURE_CONFIGURED_STANDING_IDENTITY),
+            FIXTURE_CONFIGURED_STANDING_IDENTITY,
         ));
     }
 
@@ -4042,7 +4111,7 @@ mod tests {
         assert!(!shares_a_directory_with_the_configured_root(
             FIXTURE_OTHER_IDENTITY,
             FIXTURE_BOUND_IDENTITY,
-            Some(FIXTURE_CONFIGURED_STANDING_IDENTITY),
+            FIXTURE_CONFIGURED_STANDING_IDENTITY,
         ));
     }
 
