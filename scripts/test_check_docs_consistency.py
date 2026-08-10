@@ -327,31 +327,29 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertNotIn("machine-owner-link", failure_categories(failures))
 
-    def test_link_with_no_rendered_label_is_not_a_citation(self) -> None:
-        """An anchor with nothing to click cites nothing.
+    def test_label_rendering_is_out_of_scope(self) -> None:
+        """A resolving link is a citation whatever its label renders.
 
-        The third shape that resolved correctly and rendered no navigation,
-        after images and bare definitions — and the reason the rule is now
-        stated positively rather than as a list of exclusions.
+        This pins a scope decision, not an oversight. Four waves produced four
+        findings in one family — a construct that resolves but renders no
+        navigation — and testing the label closed three while the fourth
+        arrived against the restatement meant to end the family. Deciding it
+        soundly needs a Markdown renderer this module does not have, and none
+        of the shapes occurs in the tracked corpus. The guarded failure is a
+        page that stops citing its owner, which no label can cause.
         """
-        self._write_machine_owner(
-            "This page owns the evidence algebra of "
-            "[](credential-availability.md).\n"
-        )
+        for label in ("", "**  **", "<span></span>"):
+            with self.subTest(label=label):
+                self._write_machine_owner(
+                    "This page owns the evidence algebra of "
+                    f"[{label}](credential-availability.md).\n"
+                )
 
-        failures = run_checks(self.root)
+                failures = run_checks(self.root)
 
-        self.assertIn("machine-owner-link", failure_categories(failures))
-
-    def test_formatting_only_label_is_not_a_citation(self) -> None:
-        self._write_machine_owner(
-            "This page owns the evidence algebra of "
-            "[**  **](credential-availability.md).\n"
-        )
-
-        failures = run_checks(self.root)
-
-        self.assertIn("machine-owner-link", failure_categories(failures))
+                self.assertNotIn(
+                    "machine-owner-link", failure_categories(failures)
+                )
 
     def test_image_destination_is_not_a_citation(self) -> None:
         """An image renders a fetch, not a navigation.

@@ -571,13 +571,14 @@ its pool authorizes an availability successor against a *different* eligible
 profile ([availability successor calls](#availability-successor-calls)) — the
 `terminal` and `successor` rows of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
-which states the four disjoint reasons a failure reaches the first rather than
-the second — and ambiguity parks the turn for recovery. That exception is
-substitution, never repetition: no path re-issues a call against the profile
-that failed. A later scheduler pass never treats an issued unclassified call as
-fresh authorization. Why: a lost acknowledgement cannot prove the provider did
-not act, so repetition risks undisclosed duplicate provider effects and spend;
-honest ambiguity is preferred to an invented exactly-once claim.
+which states the four ordered gates that send a failure to the first rather than
+the second, the first gate it fails deciding — and ambiguity parks the turn for
+recovery. That exception is substitution, never repetition: no path re-issues a
+call against the profile that failed. A later scheduler pass never treats an
+issued unclassified call as fresh authorization. Why: a lost acknowledgement
+cannot prove the provider did not act, so repetition risks undisclosed duplicate
+provider effects and spend; honest ambiguity is preferred to an invented
+exactly-once claim.
 
 ### Availability successor calls
 

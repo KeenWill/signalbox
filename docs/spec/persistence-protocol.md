@@ -1494,8 +1494,11 @@ one transaction. That transaction also decides account-level independence: it
 locks the profile rows of every co-member of every pool-policy revision the
 profile is pinned into, in profile-reference byte order, before it reads their
 stored account identities and until after its own commit, so two provisionings
-of one account can never both observe that identity unclaimed. Which memberships
-are consulted, and what a collision does, are owned by
+of one account can never both observe that identity unclaimed. The transaction
+that interns a pool-policy revision takes the same locks over the membership it
+is about to freeze, for the same reason and in the same order, so a revision and
+a provisioning cannot each observe the other's members as unclaimed. Which
+memberships are consulted, and what a collision does, are owned by
 [the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery);
 this paragraph supplies only the lock span that makes two concurrent commits
 decide it the same way. Each generation stores the exact provisioning tuple it
