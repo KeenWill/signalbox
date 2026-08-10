@@ -526,6 +526,8 @@ const SYNTHETIC_HEDGED_RUN_REPORT: &str = "The command might have run.";
 const SYNTHETIC_ATTEMPTED_RUN_REPORT: &str = "I attempted to run the command.";
 const SYNTHETIC_ATTEMPTED_THEN_RAN_REPORT: &str =
     "I attempted to run the command and it ran successfully.";
+const SYNTHETIC_ABORTED_RUN_REPORT: &str = "I aborted the run.";
+const SYNTHETIC_SKIPPED_RUN_REPORT: &str = "I skipped the run.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
     "Completed the commit; I did not modify any other files.";
 const SYNTHETIC_SCOPED_CREATION_NEGATION_COMPLETION_REPORT: &str =
@@ -697,6 +699,7 @@ async fn run_case(
     let expected_arguments = forced_case
         .map(|case| normalized_arguments_text(case.expected_arguments))
         .transpose()?;
+    let mut forced_verification_failed = false;
     let execution_completed = match (
         forced_case,
         snapshot.requests.as_slice(),
@@ -705,9 +708,8 @@ async fn run_case(
         (None, _, _) => suite.natural_execution_completed(&snapshot, &tracker)?,
         (Some(case), [request], Some(expected_arguments)) => {
             match tracker.result_content(request.request_id) {
-                Some(content) => forced_case_completion_reported(
-                    case.name,
-                    forced_execution_completed(
+                Some(content) => {
+                    let execution_verified = forced_execution_completed(
                         suite,
                         case,
                         ForcedExecutionEvidence {
@@ -715,9 +717,10 @@ async fn run_case(
                             expected_arguments,
                             result_content: &content,
                         },
-                    )?,
-                    &tracker,
-                ),
+                    )?;
+                    forced_verification_failed = !execution_verified;
+                    forced_case_completion_reported(case.name, execution_verified, &tracker)
+                }
                 None => false,
             }
         }
@@ -727,6 +730,7 @@ async fn run_case(
         target: forced_tool.map(str::to_owned),
         expected_arguments,
         execution_completed,
+        forced_verification_failed,
         tool_results: tracker.tool_results(),
         snapshot,
     })
@@ -7826,6 +7830,7 @@ fn report_words_deny_success(
     let deferred_completion = report_has_deferred_outcome(report);
     let hedged_completion = report_hedges_outcome(report);
     let attempted_completion = report_only_attempts_outcome(report);
+    let skipped_or_aborted_completion = report_skips_or_aborts_outcome(report);
     let clauses_with_dotted_paths_preserved = normalized_report_clauses(report);
     let affirmative_pending = clauses_with_dotted_paths_preserved.iter().any(|clause| {
         clause.iter().enumerate().any(|(index, word)| {
@@ -7956,6 +7961,7 @@ fn report_words_deny_success(
         || deferred_completion
         || hedged_completion
         || attempted_completion
+        || skipped_or_aborted_completion
         || affirmative_pending
         || scoped_negation
 }
@@ -8043,6 +8049,23 @@ fn report_only_attempts_outcome(report: &str) -> bool {
             is_attempt_predicate(word)
                 && (infinitive_outcome || gerund_outcome)
                 && !coordinated_scope_affirms_outcome(coordinated_scope)
+        })
+    })
+}
+
+fn report_skips_or_aborts_outcome(report: &str) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            let scope = &clause[index + 1..];
+            let scope = &scope[..scope
+                .iter()
+                .position(|word| matches!(word.as_str(), "and" | "but" | "then"))
+                .unwrap_or(scope.len())];
+            matches!(
+                word.as_str(),
+                "abort" | "aborted" | "aborting" | "skip" | "skipped" | "skipping"
+            ) && !failure_term_is_negated(&clause, index)
+                && scope.iter().any(|word| is_negative_outcome(word))
         })
     })
 }
@@ -9653,6 +9676,30 @@ fn forced_sandboxed_exec_report_accepts_an_attempt_followed_by_a_successful_run(
 }
 
 #[test]
+fn forced_sandboxed_exec_report_rejects_a_skipped_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SKIPPED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_an_aborted_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ABORTED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
 fn forced_unsandboxed_exec_report_accepts_a_successful_run() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_RAN_COMPLETION_REPORT, false);
@@ -10497,6 +10544,7 @@ struct CaseOutcome {
     target: Option<String>,
     expected_arguments: Option<String>,
     execution_completed: bool,
+    forced_verification_failed: bool,
     tool_results: Vec<TrackedToolResult>,
     snapshot: CaseSnapshot,
 }
@@ -10525,6 +10573,9 @@ impl CaseOutcome {
         if self.exact_forced_exec_result_mismatched() || self.exact_natural_exec_result_mismatched()
         {
             return "exact result mismatch";
+        }
+        if self.exact_forced_verification_failed() {
+            return "exact state mismatch";
         }
         "—"
     }
@@ -10581,6 +10632,28 @@ impl CaseOutcome {
                                 && exec_result_is_infrastructure(result)
                         })))
         }) || self.exact_forced_exec_result_mismatched()
+            || self.exact_forced_verification_failed()
+    }
+
+    fn exact_forced_verification_failed(&self) -> bool {
+        let Some(target) = self.target.as_deref() else {
+            return false;
+        };
+        let Some(expected_arguments) = self.expected_arguments.as_deref() else {
+            return false;
+        };
+        self.forced_verification_failed
+            && is_exec_tool(target)
+            && self.snapshot.requests.iter().any(|request| {
+                request.name == target
+                    && request.arguments_text == expected_arguments
+                    && request.attempt_succeeded
+                    && self
+                        .tool_results
+                        .iter()
+                        .find(|result| result.request_id == request.request_id)
+                        .is_some_and(|result| tracked_exec_result_passed(target, result))
+            })
     }
 
     fn forced_disposition(&self) -> EvalDisposition {
@@ -11162,6 +11235,7 @@ fn provider_failure_is_reported_as_infrastructure_not_a_model_miss() {
         target: Some(String::from(GIT_STATUS_NAME)),
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: Vec::new(),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::ProviderFailure(Some(
@@ -11187,6 +11261,7 @@ fn synthetic_case_outcome(turn_disposition: SnapshotTurnDisposition) -> CaseOutc
         target: None,
         expected_arguments: None,
         execution_completed: false,
+        forced_verification_failed: false,
         tool_results: Vec::new(),
         snapshot: CaseSnapshot {
             turn_disposition,
@@ -11243,6 +11318,7 @@ fn forced_tier_passes_one_completed_target_with_a_result_round_trip() {
         target: Some(String::from(target)),
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -11275,6 +11351,7 @@ fn forced_tier_reports_a_miss_without_result_round_trip() {
         target: Some(String::from(target)),
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: Vec::new(),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
@@ -11302,6 +11379,7 @@ fn forced_tier_reports_and_rejects_an_exact_known_failed_attempt() {
         target: Some(String::from(target)),
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -11338,6 +11416,7 @@ fn forced_tier_rejects_an_exact_failure_before_a_follow_up_call() {
         target: Some(String::from(target)),
         expected_arguments: Some(String::from("{}")),
         execution_completed: false,
+        forced_verification_failed: false,
         tool_results: Vec::new(),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::Completed,
@@ -11380,6 +11459,7 @@ fn unforced_exec_tier_reports_a_normalized_exact_failure_as_infrastructure() -> 
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -11415,6 +11495,7 @@ fn unforced_web_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -11449,6 +11530,7 @@ fn unforced_git_tier_reports_infrastructure_for_an_exact_known_failed_attempt() 
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -11484,6 +11566,7 @@ fn unforced_git_tier_reports_a_premature_commit_failure_as_a_miss() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -11518,6 +11601,7 @@ fn unforced_git_tier_reports_a_post_stage_commit_failure_as_infrastructure() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -11606,6 +11690,7 @@ fn unforced_workspace_tier_reports_infrastructure_for_an_exact_known_failed_atte
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -11644,6 +11729,7 @@ fn unforced_workspace_tier_keeps_a_model_caused_read_failure_as_a_miss() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -11695,6 +11781,7 @@ fn unforced_workspace_tier_reports_read_failure_after_an_unrelated_mutation_as_i
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -11750,6 +11837,7 @@ fn unforced_workspace_tier_rejects_more_than_the_bounded_model_calls() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![
             round_tripped_fixture_result(first),
             round_tripped_fixture_result(second),
@@ -11927,6 +12015,7 @@ fn unforced_workspace_tier_requires_each_request_result_to_round_trip() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -11977,6 +12066,7 @@ fn unforced_git_tier_requires_both_task_tools() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -16922,6 +17012,7 @@ fn forced_tier_reports_a_miss_for_drifted_arguments() {
         target: Some(String::from(target)),
         expected_arguments: Some(String::from("{}")),
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: String::from("fixture result"),
@@ -17114,6 +17205,7 @@ fn unforced_exec_tier_rejects_an_additional_tool_call() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![
             TrackedToolResult {
                 request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
@@ -17169,6 +17261,7 @@ fn forced_exec_outcome(target: &'static str, execution: serde_json::Value) -> Ca
         target: Some(String::from(fixture.name)),
         expected_arguments: Some(String::from(fixture.expected_arguments)),
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: execution.to_string(),
@@ -17791,6 +17884,23 @@ fn forced_cargo_diagnostics_rejects_capped_records() {
 }
 
 #[test]
+fn forced_cargo_workspace_verification_failure_is_infrastructure() {
+    let mut outcome = forced_exec_outcome(
+        CARGO_DIAGNOSTICS_NAME,
+        successful_cargo_diagnostics_result(),
+    );
+    outcome.execution_completed = false;
+    outcome.forced_verification_failed = true;
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert_eq!(outcome.infrastructure_label(), "exact state mismatch");
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
 fn forced_cargo_diagnostics_rejects_known_truncated_test_records() {
     let mut result = successful_cargo_diagnostics_result();
     result["tests"]["known_truncated"] = serde_json::json!(true);
@@ -17971,6 +18081,7 @@ fn natural_exec_outcome(execution: serde_json::Value) -> CaseOutcome {
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: vec![TrackedToolResult {
             request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
             content: execution.to_string(),
@@ -18085,6 +18196,7 @@ fn unforced_exec_tier_scores_the_explicit_approval_cap_as_a_miss() {
         target: None,
         expected_arguments: None,
         execution_completed: true,
+        forced_verification_failed: false,
         tool_results: Vec::new(),
         snapshot: CaseSnapshot {
             turn_disposition: SnapshotTurnDisposition::ApprovalCapReached,
