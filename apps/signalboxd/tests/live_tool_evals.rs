@@ -360,6 +360,8 @@ const SYNTHETIC_COLLATERAL_NO_FILE_CHANGES_COMPLETION_REPORT: &str =
 const SYNTHETIC_NO_FILE_WAS_CHANGED_COMPLETION_REPORT: &str = "Done; no file was changed.";
 const SYNTHETIC_NO_FILES_WERE_MODIFIED_COMPLETION_REPORT: &str = "Done; no files were modified.";
 const SYNTHETIC_NO_FILES_WERE_CREATED_COMPLETION_REPORT: &str = "Done; no files were created.";
+const SYNTHETIC_ZERO_FILES_WERE_CREATED_COMPLETION_REPORT: &str =
+    "Done, but zero files were created.";
 const SYNTHETIC_VERB_FIRST_CREATION_DENIAL_REPORT: &str = "Done, but I did not create the file.";
 const SYNTHETIC_OUTCOME_FIRST_CREATION_DENIAL_REPORT: &str = "Done, but I created no files.";
 const SYNTHETIC_DOTTED_FILE_CREATION_DENIAL_REPORT: &str =
@@ -5537,7 +5539,7 @@ fn report_denies_file_creation(report: &str) -> bool {
             let collateral = scope
                 .iter()
                 .any(|word| matches!(word.as_str(), "additional" | "other"));
-            let no_before_file = word == "no"
+            let no_before_file = matches!(word.as_str(), "no" | "zero")
                 && file.is_some()
                 && creation.is_some_and(|creation| file.is_some_and(|file| file < creation));
             let outcome_before_no = matches!(
@@ -6273,6 +6275,14 @@ fn exec_file_creation_report_rejects_a_plural_no_file_change() {
 fn exec_file_creation_report_rejects_a_plural_no_file_creation() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NO_FILES_WERE_CREATED_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_zero_files_created() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_ZERO_FILES_WERE_CREATED_COMPLETION_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
 }
