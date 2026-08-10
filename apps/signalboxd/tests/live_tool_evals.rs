@@ -1039,6 +1039,19 @@ impl FilesystemExecutionTimeWindow {
         (self.started..=self.finished).contains(&modified)
     }
 
+    fn contains_git_modified(self, modified: SystemTime) -> bool {
+        let Ok(started) = self.started.duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        let Ok(finished) = self.finished.duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        let Ok(modified) = modified.duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        (started.as_secs()..=finished.as_secs()).contains(&modified.as_secs())
+    }
+
     fn contains_change_time(self, identity: FilesystemIdentity) -> bool {
         let Ok(started) = self.started.duration_since(UNIX_EPOCH) else {
             return false;
@@ -1627,6 +1640,7 @@ impl FamilySuite {
         author_email: &str,
     ) -> EvalResult {
         let started = current_git_recorded_time()?;
+        let filesystem_started = current_filesystem_recorded_time()?;
         commit_staged_paths_with_identity(
             self.workspace.path(),
             message,
@@ -1637,6 +1651,13 @@ impl FamilySuite {
         self.executor.record_git_execution_window(
             GIT_CREATE_COMMIT_NAME,
             GitExecutionTimeWindow { started, finished },
+        );
+        self.executor.record_filesystem_execution_window(
+            GIT_CREATE_COMMIT_NAME,
+            FilesystemExecutionTimeWindow {
+                started: filesystem_started,
+                finished: current_filesystem_recorded_time()?,
+            },
         );
         Ok(())
     }
@@ -1763,6 +1784,9 @@ impl FamilySuite {
                         pre_execution_object_entry_identities:
                             pre_execution_object_entry_identities.as_ref(),
                         execution_window: self.executor.git_execution_window(case.name),
+                        filesystem_execution_window: self
+                            .executor
+                            .filesystem_execution_window(case.name),
                     },
                     case.name,
                     &arguments,
@@ -1819,6 +1843,9 @@ impl FamilySuite {
                     &self.git_seed_refs,
                     &self.git_seed_fixture,
                     self.executor.git_execution_window(GIT_CREATE_COMMIT_NAME),
+                    self.executor.filesystem_execution_window(GIT_STAGE_NAME),
+                    self.executor
+                        .filesystem_execution_window(GIT_CREATE_COMMIT_NAME),
                 )? && snapshot.git_natural_requests_passed()?)
             }
             EvalFamily::Workspace => {
@@ -2264,6 +2291,7 @@ struct GitForcedVerification<'a> {
     pre_execution_object_modified_times: Option<&'a BTreeMap<PathBuf, SystemTime>>,
     pre_execution_object_entry_identities: Option<&'a BTreeMap<PathBuf, FilesystemIdentity>>,
     execution_window: Option<GitExecutionTimeWindow>,
+    filesystem_execution_window: Option<FilesystemExecutionTimeWindow>,
 }
 
 fn git_forced_case_passed(
@@ -2291,6 +2319,7 @@ fn git_forced_case_passed(
         pre_execution_object_modified_times,
         pre_execution_object_entry_identities,
         execution_window,
+        filesystem_execution_window,
     } = verification;
     let repository = Repository::open(root)?;
     let head = repository.head()?.peel_to_commit()?;
@@ -2539,6 +2568,7 @@ fn git_forced_case_passed(
             name,
             seed_fixture,
             pre_execution_metadata_top_level,
+            filesystem_execution_window,
         )?
         && git_forced_objects_match(
             &repository,
@@ -2552,12 +2582,30 @@ fn git_forced_case_passed(
             name,
             &head,
             seed_fixture,
-            pre_execution_object_entries,
-            pre_execution_object_modified_times,
-            pre_execution_object_entry_identities,
+            GitObjectEntryVerification {
+                pre_execution_entries: pre_execution_object_entries,
+                pre_execution_modified_times: pre_execution_object_modified_times,
+                pre_execution_entry_identities: pre_execution_object_entry_identities,
+                execution_window: filesystem_execution_window,
+            },
         )?
-        && git_forced_reference_entries_match(root, name, arguments, &head, seed_fixture)?
-        && git_forced_reflogs_match(root, name, seed, head.id(), seed_fixture, execution_window)?
+        && git_forced_reference_entries_match(
+            root,
+            name,
+            arguments,
+            &head,
+            seed_fixture,
+            filesystem_execution_window,
+        )?
+        && git_forced_reflogs_match(
+            root,
+            name,
+            seed,
+            head.id(),
+            seed_fixture,
+            execution_window,
+            filesystem_execution_window,
+        )?
         && git_forced_worktree_matches(root, name, seed_fixture, pre_execution_worktree_entries)?
         && git_forced_worktree_modified_times_match(
             root,
@@ -3165,7 +3213,8 @@ fn entry_identities_match_except(
 ) -> bool {
     let mut expected = expected.clone();
     for path in allowed_paths {
-        if !filesystem_ownership_matches(actual.get(*path), expected.get(*path)) {
+        let expected_ownership = expected.get(*path).or_else(|| expected.get(Path::new("")));
+        if !filesystem_ownership_matches(actual.get(*path), expected_ownership) {
             return false;
         }
         let mut ancestor = path.parent();
@@ -3461,12 +3510,18 @@ fn admit_modified_time_path_and_ancestors(
     actual: &BTreeMap<PathBuf, SystemTime>,
     expected: &mut BTreeMap<PathBuf, SystemTime>,
     path: &Path,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> bool {
     let mut current = Some(path);
     while let Some(candidate) = current {
         let Some(modified) = actual.get(candidate) else {
             return false;
         };
+        if expected.get(candidate) != Some(modified)
+            && !execution_window.is_some_and(|window| window.contains_git_modified(*modified))
+        {
+            return false;
+        }
         expected.insert(candidate.to_path_buf(), *modified);
         current = candidate.parent();
     }
@@ -3477,11 +3532,22 @@ fn admit_filesystem_identity_path(
     actual: &BTreeMap<PathBuf, FilesystemIdentity>,
     expected: &mut BTreeMap<PathBuf, FilesystemIdentity>,
     path: &Path,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> bool {
-    let Some(identity) = actual.get(path) else {
+    let Some(actual_identity) = actual.get(path) else {
         return false;
     };
-    expected.insert(path.to_path_buf(), *identity);
+    let Some(expected_identity) = expected.get_mut(path) else {
+        return false;
+    };
+    if !filesystem_ownership_matches(Some(actual_identity), Some(expected_identity))
+        || actual_identity.device != expected_identity.device
+        || !execution_window.is_some_and(|window| window.contains_change_time(*actual_identity))
+    {
+        return false;
+    }
+    expected_identity.inode = actual_identity.inode;
+    admit_filesystem_change_time(expected_identity, *actual_identity);
     let mut ancestor = path.parent();
     while let Some(candidate) = ancestor {
         let Some(actual_identity) = actual.get(candidate) else {
@@ -3490,6 +3556,11 @@ fn admit_filesystem_identity_path(
         let Some(expected_identity) = expected.get_mut(candidate) else {
             return false;
         };
+        if *actual_identity != *expected_identity
+            && !execution_window.is_some_and(|window| window.contains_change_time(*actual_identity))
+        {
+            return false;
+        }
         admit_filesystem_change_time(expected_identity, *actual_identity);
         ancestor = candidate.parent();
     }
@@ -3500,6 +3571,7 @@ fn admit_new_filesystem_identity_path_and_ancestors(
     actual: &BTreeMap<PathBuf, FilesystemIdentity>,
     expected: &mut BTreeMap<PathBuf, FilesystemIdentity>,
     path: &Path,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> bool {
     let mut current = Some(path);
     while let Some(candidate) = current {
@@ -3507,8 +3579,26 @@ fn admit_new_filesystem_identity_path_and_ancestors(
             return false;
         };
         if let Some(expected_identity) = expected.get_mut(candidate) {
+            if !filesystem_ownership_matches(Some(identity), Some(expected_identity))
+                || identity.device != expected_identity.device
+                || identity.inode != expected_identity.inode
+                || (*identity != *expected_identity
+                    && !execution_window
+                        .is_some_and(|window| window.contains_change_time(*identity)))
+            {
+                return false;
+            }
             admit_filesystem_change_time(expected_identity, *identity);
         } else {
+            let Some(root_identity) = expected.get(Path::new("")) else {
+                return false;
+            };
+            if !filesystem_ownership_matches(Some(identity), Some(root_identity))
+                || identity.device != root_identity.device
+                || !execution_window.is_some_and(|window| window.contains_change_time(*identity))
+            {
+                return false;
+            }
             expected.insert(candidate.to_path_buf(), *identity);
         }
         current = candidate.parent();
@@ -3557,6 +3647,7 @@ fn git_forced_reference_entries_match(
     arguments: &serde_json::Value,
     head: &git2::Commit<'_>,
     seed_fixture: &GitFixtureSnapshot,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let mut expected = seed_fixture.reference_entries.clone();
@@ -3585,10 +3676,12 @@ fn git_forced_reference_entries_match(
                 &actual_modified_times,
                 &mut expected_modified_times,
                 &path,
+                execution_window,
             ) || !admit_filesystem_identity_path(
                 &actual_entry_identities,
                 &mut expected_entry_identities,
                 &path,
+                execution_window,
             ) {
                 return Ok(false);
             }
@@ -3606,10 +3699,12 @@ fn git_forced_reference_entries_match(
                 &actual_modified_times,
                 &mut expected_modified_times,
                 &base_path,
+                execution_window,
             ) || !admit_filesystem_identity_path(
                 &actual_entry_identities,
                 &mut expected_entry_identities,
                 &base_path,
+                execution_window,
             ) {
                 return Ok(false);
             }
@@ -4048,6 +4143,7 @@ fn git_object_entry_inventory_matches(
     baseline_entry_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
     allowed_ids: &[Oid],
     seed_fixture: &GitFixtureSnapshot,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let actual = git_object_entries(root)?;
     let actual_modified_times = git_object_modified_times(root)?;
@@ -4082,6 +4178,7 @@ fn git_object_entry_inventory_matches(
             &actual_modified_times,
             &mut expected_modified_times,
             &relative,
+            execution_window,
         ) {
             return Ok(false);
         }
@@ -4108,6 +4205,7 @@ fn git_object_entry_inventory_matches(
             &actual_entry_identities,
             &mut expected_entry_identities,
             &relative,
+            execution_window,
         ) {
             return Ok(false);
         }
@@ -4157,15 +4255,26 @@ fn git_forced_objects_match(
     Ok(git_object_inventory(repository).is_ok_and(|actual| actual == expected))
 }
 
+struct GitObjectEntryVerification<'a> {
+    pre_execution_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
+    pre_execution_modified_times: Option<&'a BTreeMap<PathBuf, SystemTime>>,
+    pre_execution_entry_identities: Option<&'a BTreeMap<PathBuf, FilesystemIdentity>>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
+}
+
 fn git_forced_object_entries_match(
     root: &Path,
     case_name: &str,
     head: &git2::Commit<'_>,
     seed_fixture: &GitFixtureSnapshot,
-    pre_execution: Option<&BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
-    pre_execution_modified_times: Option<&BTreeMap<PathBuf, SystemTime>>,
-    pre_execution_entry_identities: Option<&BTreeMap<PathBuf, FilesystemIdentity>>,
+    verification: GitObjectEntryVerification<'_>,
 ) -> EvalResult<bool> {
+    let GitObjectEntryVerification {
+        pre_execution_entries,
+        pre_execution_modified_times,
+        pre_execution_entry_identities,
+        execution_window,
+    } = verification;
     let allowed = match case_name {
         GIT_STAGE_NAME => vec![Oid::hash_object(
             ObjectType::Blob,
@@ -4176,11 +4285,12 @@ fn git_forced_object_entries_match(
     };
     git_object_entry_inventory_matches(
         root,
-        pre_execution.unwrap_or(&seed_fixture.object_entries),
+        pre_execution_entries.unwrap_or(&seed_fixture.object_entries),
         pre_execution_modified_times.unwrap_or(&seed_fixture.object_modified_times),
         pre_execution_entry_identities.unwrap_or(&seed_fixture.object_entry_identities),
         &allowed,
         seed_fixture,
+        execution_window,
     )
 }
 
@@ -4206,18 +4316,22 @@ fn git_forced_reflogs_match(
     head: Oid,
     seed_fixture: &GitFixtureSnapshot,
     execution_window: Option<GitExecutionTimeWindow>,
+    filesystem_execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     match case_name {
         GIT_CREATE_COMMIT_NAME => {
             let branch_reference = format!("refs/heads/{GIT_BASE_BRANCH}");
             git_reflog_updates_match(
                 root,
-                seed,
-                head,
-                GIT_COMMIT_REFLOG_MESSAGE,
                 &["HEAD", branch_reference.as_str()],
                 seed_fixture,
-                None,
+                GitReflogUpdateExpectation {
+                    old: seed,
+                    new: head,
+                    message: GIT_COMMIT_REFLOG_MESSAGE,
+                    execution_window: None,
+                    filesystem_execution_window,
+                },
             )
         }
         GIT_BRANCH_SWITCH_NAME => {
@@ -4229,12 +4343,15 @@ fn git_forced_reflogs_match(
                 .id();
             git_reflog_updates_match(
                 root,
-                seed,
-                target,
-                GIT_SWITCH_REFLOG_MESSAGE,
                 &["HEAD"],
                 seed_fixture,
-                execution_window,
+                GitReflogUpdateExpectation {
+                    old: seed,
+                    new: target,
+                    message: GIT_SWITCH_REFLOG_MESSAGE,
+                    execution_window,
+                    filesystem_execution_window,
+                },
             )
         }
         _ => Ok(git_reflog_entries(root)? == seed_fixture.reflog_entries
@@ -4245,12 +4362,9 @@ fn git_forced_reflogs_match(
 
 fn git_reflog_updates_match(
     root: &Path,
-    old: Oid,
-    new: Oid,
-    message: &str,
     references: &[&str],
     seed_fixture: &GitFixtureSnapshot,
-    execution_window: Option<GitExecutionTimeWindow>,
+    expectation: GitReflogUpdateExpectation<'_>,
 ) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let actual_entries = git_reflog_entries(root)?;
@@ -4259,12 +4373,6 @@ fn git_reflog_updates_match(
     let mut expected_modified_times = seed_fixture.reflog_modified_times.clone();
     let actual_entry_identities = git_reflog_entry_identities(root)?;
     let mut expected_entry_identities = seed_fixture.reflog_entry_identities.clone();
-    let expectation = GitReflogUpdateExpectation {
-        old,
-        new,
-        message,
-        execution_window,
-    };
     for reference in references {
         if !replace_expected_reflog_update(
             &repository,
@@ -4280,10 +4388,12 @@ fn git_reflog_updates_match(
             &actual_modified_times,
             &mut expected_modified_times,
             path,
+            expectation.filesystem_execution_window,
         ) || !admit_filesystem_identity_path(
             &actual_entry_identities,
             &mut expected_entry_identities,
             path,
+            expectation.filesystem_execution_window,
         ) {
             return Ok(false);
         }
@@ -4299,6 +4409,7 @@ struct GitReflogUpdateExpectation<'a> {
     new: Oid,
     message: &'a str,
     execution_window: Option<GitExecutionTimeWindow>,
+    filesystem_execution_window: Option<FilesystemExecutionTimeWindow>,
 }
 
 fn replace_expected_reflog_update(
@@ -4313,6 +4424,7 @@ fn replace_expected_reflog_update(
         new,
         message,
         execution_window,
+        filesystem_execution_window: _,
     } = expectation;
     let path = Path::new(reference);
     let Some(WorkspaceEntrySnapshot::File {
@@ -4585,6 +4697,7 @@ fn git_forced_metadata_top_level_matches(
     case_name: &str,
     seed_fixture: &GitFixtureSnapshot,
     pre_execution: Option<&BTreeMap<PathBuf, GitMetadataEntrySnapshot>>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let actual = git_metadata_top_level(root)?;
     let mut expected = pre_execution
@@ -4592,13 +4705,17 @@ fn git_forced_metadata_top_level_matches(
         .unwrap_or_else(|| seed_fixture.metadata_top_level.clone());
     match case_name {
         GIT_BRANCH_SWITCH_NAME => {
-            if !admit_git_metadata_file_mutation(&actual, &mut expected, Path::new(GIT_HEAD_PATH))
-                || !admit_git_metadata_file_mutation(
-                    &actual,
-                    &mut expected,
-                    Path::new(GIT_INDEX_PATH),
-                )
-            {
+            if !admit_git_metadata_file_mutation(
+                &actual,
+                &mut expected,
+                Path::new(GIT_HEAD_PATH),
+                execution_window,
+            ) || !admit_git_metadata_file_mutation(
+                &actual,
+                &mut expected,
+                Path::new(GIT_INDEX_PATH),
+                execution_window,
+            ) {
                 return Ok(false);
             }
         }
@@ -4607,10 +4724,12 @@ fn git_forced_metadata_top_level_matches(
                 &actual,
                 &mut expected,
                 Path::new(GIT_OBJECTS_DIRECTORY),
+                execution_window,
             ) || !admit_git_metadata_modified_time(
                 &actual,
                 &mut expected,
                 Path::new(GIT_LOGS_DIRECTORY),
+                execution_window,
             ) {
                 return Ok(false);
             }
@@ -4619,13 +4738,17 @@ fn git_forced_metadata_top_level_matches(
             expected.remove(Path::new(GIT_MERGE_MODE_PATH));
         }
         GIT_STAGE_NAME => {
-            if !admit_git_metadata_file_mutation(&actual, &mut expected, Path::new(GIT_INDEX_PATH))
-                || !admit_git_metadata_modified_time(
-                    &actual,
-                    &mut expected,
-                    Path::new(GIT_OBJECTS_DIRECTORY),
-                )
-            {
+            if !admit_git_metadata_file_mutation(
+                &actual,
+                &mut expected,
+                Path::new(GIT_INDEX_PATH),
+                execution_window,
+            ) || !admit_git_metadata_modified_time(
+                &actual,
+                &mut expected,
+                Path::new(GIT_OBJECTS_DIRECTORY),
+                execution_window,
+            ) {
                 return Ok(false);
             }
         }
@@ -4638,16 +4761,33 @@ fn git_forced_metadata_top_level_matches(
 fn git_natural_metadata_top_level_matches(
     root: &Path,
     seed_fixture: &GitFixtureSnapshot,
+    stage_execution_window: Option<FilesystemExecutionTimeWindow>,
+    commit_execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let actual = git_metadata_top_level(root)?;
     let mut expected = seed_fixture.metadata_top_level.clone();
-    if !admit_git_metadata_file_mutation(&actual, &mut expected, Path::new(GIT_INDEX_PATH)) {
+    if !admit_git_metadata_file_mutation(
+        &actual,
+        &mut expected,
+        Path::new(GIT_INDEX_PATH),
+        stage_execution_window,
+    ) {
         return Ok(false);
     }
-    if !admit_git_metadata_modified_time(&actual, &mut expected, Path::new(GIT_OBJECTS_DIRECTORY)) {
+    if !admit_git_metadata_modified_time(
+        &actual,
+        &mut expected,
+        Path::new(GIT_OBJECTS_DIRECTORY),
+        commit_execution_window,
+    ) {
         return Ok(false);
     }
-    if !admit_git_metadata_modified_time(&actual, &mut expected, Path::new(GIT_LOGS_DIRECTORY)) {
+    if !admit_git_metadata_modified_time(
+        &actual,
+        &mut expected,
+        Path::new(GIT_LOGS_DIRECTORY),
+        commit_execution_window,
+    ) {
         return Ok(false);
     }
     Ok(actual == expected)
@@ -4657,6 +4797,7 @@ fn admit_git_metadata_file_mutation(
     actual: &BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
     expected: &mut BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
     path: &Path,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> bool {
     let Some(actual) = actual.get(path) else {
         return false;
@@ -4664,7 +4805,9 @@ fn admit_git_metadata_file_mutation(
     let Some(expected) = expected.get_mut(path) else {
         return false;
     };
-    if !filesystem_ownership_matches(actual.identity.as_ref(), expected.identity.as_ref()) {
+    if !filesystem_ownership_matches(actual.identity.as_ref(), expected.identity.as_ref())
+        || !git_metadata_times_match_execution(actual, execution_window)
+    {
         return false;
     }
     expected.content.clone_from(&actual.content);
@@ -4677,6 +4820,7 @@ fn admit_git_metadata_modified_time(
     actual: &BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
     expected: &mut BTreeMap<PathBuf, GitMetadataEntrySnapshot>,
     path: &Path,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> bool {
     let Some(actual) = actual.get(path) else {
         return false;
@@ -4684,15 +4828,47 @@ fn admit_git_metadata_modified_time(
     let Some(expected) = expected.get_mut(path) else {
         return false;
     };
+    if actual.modified != expected.modified
+        && !actual.modified.is_some_and(|modified| {
+            execution_window.is_some_and(|window| window.contains_modified(modified))
+        })
+    {
+        return false;
+    }
     expected.modified = actual.modified;
     match (expected.identity.as_mut(), actual.identity) {
         (Some(expected_identity), Some(actual_identity)) => {
+            if actual_identity != *expected_identity
+                && !filesystem_identity_matches_without_change_time(
+                    Some(actual_identity),
+                    Some(*expected_identity),
+                )
+            {
+                return false;
+            }
+            if actual_identity != *expected_identity
+                && !execution_window
+                    .is_some_and(|window| window.contains_change_time(actual_identity))
+            {
+                return false;
+            }
             admit_filesystem_change_time(expected_identity, actual_identity);
         }
         (None, None) => {}
         _ => return false,
     }
     true
+}
+
+fn git_metadata_times_match_execution(
+    snapshot: &GitMetadataEntrySnapshot,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
+) -> bool {
+    snapshot.modified.is_some_and(|modified| {
+        execution_window.is_some_and(|window| window.contains_modified(modified))
+    }) && snapshot.identity.is_some_and(|identity| {
+        execution_window.is_some_and(|window| window.contains_change_time(identity))
+    })
 }
 
 fn git_forced_worktree_modified_times_match(
@@ -5049,6 +5225,8 @@ fn git_natural_state_passed(
             started: recorded,
             finished: recorded,
         }),
+        None,
+        None,
     )
 }
 
@@ -5058,6 +5236,8 @@ fn git_natural_state_passed_in_window(
     seed_refs: &GitReferenceInventory,
     seed_fixture: &GitFixtureSnapshot,
     execution_window: Option<GitExecutionTimeWindow>,
+    stage_filesystem_execution_window: Option<FilesystemExecutionTimeWindow>,
+    commit_filesystem_execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let repository = Repository::open(root)?;
     let head_reference = repository.head()?;
@@ -5132,34 +5312,47 @@ fn git_natural_state_passed_in_window(
         GitReferenceTarget::Direct(head.id()),
     );
     let complete_ref_inventory_matches = git_reference_inventory(&repository)? == expected_refs;
-    let complete_reference_entry_inventory_matches =
-        git_natural_reference_entries_match(root, &head, seed_fixture)?;
+    let complete_reference_entry_inventory_matches = git_natural_reference_entries_match(
+        root,
+        &head,
+        seed_fixture,
+        commit_filesystem_execution_window,
+    )?;
     let complete_object_inventory_matches =
         git_natural_objects_match(&repository, &head, seed_fixture)?;
-    let complete_object_entry_inventory_matches =
-        git_natural_object_entries_match(root, &head, seed_fixture)?;
+    let complete_object_entry_inventory_matches = git_natural_object_entries_match(
+        root,
+        &head,
+        seed_fixture,
+        commit_filesystem_execution_window,
+    )?;
     let fixture_matches = git_fixture_snapshot_matches(root, &repository, seed_fixture)?;
     let reflogs_match = git_reflog_updates_match(
         root,
-        seed,
-        head.id(),
-        GIT_COMMIT_REFLOG_MESSAGE,
         &["HEAD", format!("refs/heads/{GIT_BASE_BRANCH}").as_str()],
         seed_fixture,
-        None,
+        GitReflogUpdateExpectation {
+            old: seed,
+            new: head.id(),
+            message: GIT_COMMIT_REFLOG_MESSAGE,
+            execution_window: None,
+            filesystem_execution_window: commit_filesystem_execution_window,
+        },
     )?;
     let complete_worktree_inventory_matches =
         git_worktree_entries(root)? == seed_fixture.worktree_entries;
     let complete_worktree_time_inventory_matches =
         git_worktree_modified_times(root)? == seed_fixture.worktree_modified_times;
-    let complete_worktree_identity_inventory_matches = entry_identities_match_except(
-        git_worktree_entry_identities(root)?,
-        &seed_fixture.worktree_entry_identities,
-        &[Path::new(GIT_NATURAL_PATH)],
-    );
+    let complete_worktree_identity_inventory_matches =
+        git_natural_worktree_entry_identities_match(root, seed_fixture)?;
     let complete_worktree_attribute_inventory_matches =
         git_worktree_extended_attributes(root)? == seed_fixture.worktree_extended_attributes;
-    let metadata_top_level_matches = git_natural_metadata_top_level_matches(root, seed_fixture)?;
+    let metadata_top_level_matches = git_natural_metadata_top_level_matches(
+        root,
+        seed_fixture,
+        stage_filesystem_execution_window,
+        commit_filesystem_execution_window,
+    )?;
     let metadata_extended_attributes_match =
         git_metadata_extended_attributes_match(root, seed_fixture, None)?;
     Ok(head_remains_on_seeded_branch
@@ -5187,6 +5380,13 @@ fn git_natural_state_passed_in_window(
         && complete_worktree_attribute_inventory_matches
         && metadata_top_level_matches
         && metadata_extended_attributes_match)
+}
+
+fn git_natural_worktree_entry_identities_match(
+    root: &Path,
+    seed_fixture: &GitFixtureSnapshot,
+) -> EvalResult<bool> {
+    Ok(git_worktree_entry_identities(root)? == seed_fixture.worktree_entry_identities)
 }
 
 fn git_natural_objects_match(
@@ -5219,6 +5419,7 @@ fn git_natural_object_entries_match(
     root: &Path,
     head: &git2::Commit<'_>,
     seed_fixture: &GitFixtureSnapshot,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let allowed = [
         Oid::hash_object(ObjectType::Blob, GIT_NATURAL_CONTENT.as_bytes())?,
@@ -5232,6 +5433,7 @@ fn git_natural_object_entries_match(
         &seed_fixture.object_entry_identities,
         &allowed,
         seed_fixture,
+        execution_window,
     )
 }
 
@@ -5239,6 +5441,7 @@ fn git_natural_reference_entries_match(
     root: &Path,
     head: &git2::Commit<'_>,
     seed_fixture: &GitFixtureSnapshot,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let mut expected = seed_fixture.reference_entries.clone();
     let actual_modified_times = git_reference_modified_times(root)?;
@@ -5256,10 +5459,12 @@ fn git_natural_reference_entries_match(
         &actual_modified_times,
         &mut expected_modified_times,
         &base_path,
+        execution_window,
     ) || !admit_filesystem_identity_path(
         &actual_entry_identities,
         &mut expected_entry_identities,
         &base_path,
+        execution_window,
     ) {
         return Ok(false);
     }
@@ -5611,7 +5816,13 @@ impl ToolExecutor for SharedFamilyExecutor {
         .map_err(FamilyExecutorError::new)?;
         let filesystem_execution_started = matches!(
             name.as_str(),
-            APPLY_PATCH_NAME | EDIT_FILE_NAME | WRITE_FILE_NAME
+            GIT_BRANCH_CREATE_NAME
+                | GIT_BRANCH_SWITCH_NAME
+                | GIT_CREATE_COMMIT_NAME
+                | GIT_STAGE_NAME
+                | APPLY_PATCH_NAME
+                | EDIT_FILE_NAME
+                | WRITE_FILE_NAME
         )
         .then(current_filesystem_recorded_time)
         .transpose()
@@ -9996,6 +10207,45 @@ fn git_natural_state_rejects_a_commit_with_drifted_bytes() -> EvalResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn git_natural_state_rejects_a_byte_identical_target_replacement() -> EvalResult {
+    let workspace = tempfile::tempdir()?;
+    let (_, _, seed_fixture) = seed_git_repository_with_refs(workspace.path())?;
+    stage_path(workspace.path(), GIT_NATURAL_PATH)?;
+    commit_staged_paths(workspace.path(), GIT_NATURAL_MESSAGE)?;
+
+    assert!(git_natural_worktree_entry_identities_match(
+        workspace.path(),
+        &seed_fixture,
+    )?);
+
+    let target = workspace.path().join(GIT_NATURAL_PATH);
+    replace_git_metadata_file_byte_identically(
+        &target,
+        seed_fixture.worktree_modified_times[Path::new(GIT_NATURAL_PATH)],
+        seed_fixture.worktree_modified_times[Path::new("")],
+    )?;
+
+    assert_eq!(
+        git_worktree_entries(workspace.path())?,
+        seed_fixture.worktree_entries
+    );
+    assert_eq!(
+        git_worktree_modified_times(workspace.path())?,
+        seed_fixture.worktree_modified_times
+    );
+    assert_ne!(
+        git_worktree_entry_identities(workspace.path())?,
+        seed_fixture.worktree_entry_identities
+    );
+    assert!(!git_natural_worktree_entry_identities_match(
+        workspace.path(),
+        &seed_fixture,
+    )?);
+    Ok(())
+}
+
 #[test]
 fn git_natural_state_rejects_skip_worktree_index_drift() -> EvalResult {
     let workspace = tempfile::tempdir()?;
@@ -10518,7 +10768,15 @@ fn forced_git_stage_verifier_accepts_the_exact_staged_blob() -> EvalResult {
         .iter()
         .find(|case| case.name == GIT_STAGE_NAME)
         .expect("the Git stage fixture exists");
+    let started = current_filesystem_recorded_time()?;
     stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    suite.executor.record_filesystem_execution_window(
+        GIT_STAGE_NAME,
+        FilesystemExecutionTimeWindow {
+            started,
+            finished: current_filesystem_recorded_time()?,
+        },
+    );
     let repository = Repository::open(suite.workspace.path())?;
     let index = repository.index()?;
     let entry = index
@@ -11293,6 +11551,81 @@ fn forced_git_metadata_mutation_gate_rejects_index_ownership_drift() -> EvalResu
         &actual,
         &mut expected,
         index,
+        None,
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_metadata_mutation_gate_rejects_an_out_of_window_index_mtime() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let index = Path::new(GIT_INDEX_PATH);
+    let mut expected = git_metadata_top_level(suite.workspace.path())?;
+    let started = current_filesystem_recorded_time()?;
+    stage_path(suite.workspace.path(), GIT_STAGE_PATH)?;
+    let window = FilesystemExecutionTimeWindow {
+        started,
+        finished: current_filesystem_recorded_time()?,
+    };
+    let mut actual = git_metadata_top_level(suite.workspace.path())?;
+    actual
+        .get_mut(index)
+        .expect("the Git index has a metadata snapshot")
+        .modified = Some(UNIX_EPOCH);
+
+    assert!(!admit_git_metadata_file_mutation(
+        &actual,
+        &mut expected,
+        index,
+        Some(window),
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn rewritten_git_identity_gate_rejects_changed_ownership() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let target = Path::new("heads").join(GIT_BASE_BRANCH);
+    let mut actual = suite.git_seed_fixture.reference_entry_identities.clone();
+    let mut expected = actual.clone();
+    let target_identity = actual[&target];
+    let recorded = UNIX_EPOCH
+        + Duration::new(
+            target_identity
+                .change_time_seconds
+                .try_into()
+                .expect("the captured change time is nonnegative"),
+            target_identity
+                .change_time_nanoseconds
+                .try_into()
+                .expect("the captured change-time fraction is valid"),
+        );
+    let execution_window = FilesystemExecutionTimeWindow {
+        started: recorded,
+        finished: recorded,
+    };
+    let mut unchanged_expected = expected.clone();
+
+    assert!(admit_filesystem_identity_path(
+        &actual,
+        &mut unchanged_expected,
+        &target,
+        Some(execution_window),
+    ));
+
+    let changed_group_id = target_identity.group_id.wrapping_add(1);
+    actual
+        .get_mut(&target)
+        .expect("the seeded branch has a filesystem identity")
+        .group_id = changed_group_id;
+
+    assert!(!admit_filesystem_identity_path(
+        &actual,
+        &mut expected,
+        &target,
+        Some(execution_window),
     ));
     Ok(())
 }
@@ -13143,6 +13476,24 @@ fn workspace_mutation_identity_gate_rejects_changed_target_ownership() -> EvalRe
         .get_mut(target)
         .expect("the workspace seed has a filesystem identity")
         .group_id = changed_group_id;
+
+    assert!(!entry_identities_match_except(
+        actual,
+        &suite.workspace_seed_entry_identities,
+        &[target],
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_mutation_identity_gate_rejects_changed_new_target_ownership() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let target = Path::new("created-during-execution.txt");
+    let mut actual = suite.workspace_seed_entry_identities.clone();
+    let mut target_identity = actual[Path::new("")];
+    target_identity.group_id = target_identity.group_id.wrapping_add(1);
+    actual.insert(target.to_path_buf(), target_identity);
 
     assert!(!entry_identities_match_except(
         actual,
