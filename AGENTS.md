@@ -254,11 +254,19 @@ containers on SIGTERM, SIGINT, and SIGQUIT, which covers Ctrl-C, `timeout`, and
 a cancelled CI job; no in-process handler can cover SIGKILL or an OOM kill.
 Reclaim what those leave behind with
 [`tooling/sweep-test-containers.sh`](tooling/sweep-test-containers.sh), which
-removes testcontainers-managed containers past an age bound — two hours by
-default, far above any suite's runtime — together with their volumes. It reports
-what it would remove and changes nothing until passed `--apply`. On a shared
-machine, run it on a timer: SIGKILL is the case no in-process handler converts,
-so a periodic sweep is what bounds the leak there rather than any code change.
+removes containers past an age bound — two hours by default, far above any
+suite's runtime — together with their volumes. It reports what it would remove
+and changes nothing until passed `--apply`. On a shared machine, run it on a
+timer: SIGKILL is the case no in-process handler converts, so a periodic sweep
+is what bounds the leak there rather than any code change.
+
+The sweep selects positively, on the label
+`signalbox_persistence::disposable_test_container_labels` attaches to every
+container this repository's suites start, and on nothing else — not the image,
+not the global testcontainers label, and not a list of names to spare. A
+container that carries no such label is another party's to remove, so a sweep on
+a shared daemon leaves it alone whatever it is running. Start a test container
+through that helper, or the sweep will not reclaim it.
 
 CI runs these ignored suites from
 [`.github/postgres-integration-suites.toml`](.github/postgres-integration-suites.toml),

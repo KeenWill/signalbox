@@ -9,38 +9,60 @@
 # strands every container it had started, permanently. The `watchdog` feature
 # this repository enables closes the SIGTERM/SIGINT/SIGQUIT paths, which covers
 # Ctrl-C and `timeout`, but no in-process handler can survive SIGKILL. This
-# script is the backstop for what nothing in-process can catch, and the only
-# way to reclaim orphans that were stranded before the watchdog was enabled.
+# script is the backstop for what nothing in-process can catch.
 #
-# Selection is by the `org.testcontainers.managed-by=testcontainers` label,
-# which `AsyncRunner::start` applies unconditionally to every container it
-# creates — overwriting any caller-supplied value for that key, so it cannot be
-# spoofed away. That label is deliberately not Signalbox-specific: a per-repo
-# label would identify nothing on the containers already stranded, since they
-# were created without it. Any testcontainers-managed container older than the
-# age bound is an orphan by construction — the library's containers exist only
-# for the duration of a test process — so sweeping another project's day-old
-# orphan on a shared box is correct, not collateral damage.
+# Selection is positive and repository-scoped: a container is swept only when it
+# carries the label this repository's own harness attaches immediately before
+# starting it, which
+# `signalbox_persistence::disposable_test_container_labels` is the single
+# source of. That label states the property that makes removal safe — this
+# container exists only for the duration of one of this repository's tests, and
+# removing it is already the harness's own job. Nothing is excluded by name or
+# by image, because an exclusion list only protects what someone remembered to
+# name: a container without the label is simply not this script's to remove,
+# whether it is another project's test container, a hand-run database, or a
+# long-lived instance that happens to run the same PostgreSQL image. The
+# harness withholds the label when the operator set `TESTCONTAINERS_COMMAND=keep`,
+# since a container the client was asked to keep is by definition not
+# disposable.
 #
-# The age bound is what makes this safe to run while tests are in flight: a
-# container serving a live test is minutes old at most, and the default
-# two-hour floor sits far above any suite's runtime. Removal is `--volumes`, so
-# each container's anonymous volume — roughly 49 MB of stranded disk apiece —
-# goes with it.
+# The age bound is what keeps a live test's container safe: a container serving
+# a running test is minutes old at most, and the default two-hour floor sits far
+# above any suite's runtime. Removal is `--volumes`, so each container's
+# anonymous volume — roughly 49 MB of stranded disk apiece — goes with it.
 #
 # A volume whose container was already removed separately is dangling, belongs
-# to no container, and so is beyond anything this script can select; the run
-# reports how many exist and leaves reclaiming them to `docker volume prune`,
-# which is not run here because it is not scoped to this repository's images.
+# to no container, and so is beyond anything this script can select; every
+# successful run reports how many exist and leaves reclaiming them to
+# `docker volume prune`, which is not run here because it is not scoped to this
+# repository's images.
 #
 # Reports what it would remove and exits without touching anything unless
 # `--apply` is passed.
 #
-# Usage: sweep-test-containers.sh [--older-than-hours <n>] [--apply]
+# Usage: sweep-test-containers.sh [--older-than-hours <n>]
+#                                 [--daemon-probe-seconds <n>] [--apply]
 set -euo pipefail
 
-readonly MANAGED_BY_LABEL='org.testcontainers.managed-by=testcontainers'
+# Kept identical to `signalbox_persistence::DISPOSABLE_TEST_CONTAINER_LABEL_KEY`
+# and its value; `tooling/test_sweep_test_containers.py` fails when the two
+# drift.
+readonly DISPOSABLE_LABEL='org.signalbox.disposable=test-container'
+
+# `docker inspect` names each identifier it could not find on stderr and still
+# prints every container it did find. A line of this shape is a container that
+# left between the listing and the inspection, which is the outcome this sweep
+# wants; any other line is a real fault that must not be read as "everything
+# vanished".
+readonly MISSING_OBJECT_PATTERN='^Error( response from daemon)?: No such (object|container): '
+
+# `wait` reports a child killed by a signal as 128 plus the signal number, which
+# is how the bounded probe below tells a daemon that never answered from one
+# that refused.
+readonly SIGNALLED_STATUS_FLOOR=128
+
 older_than_hours=2
+daemon_probe_seconds=10
 apply=0
 
 while [ "$#" -gt 0 ]; do
@@ -53,17 +75,27 @@ while [ "$#" -gt 0 ]; do
 		older_than_hours="$2"
 		shift 2
 		;;
+	--daemon-probe-seconds)
+		if [ "$#" -lt 2 ]; then
+			echo "sweep-test-containers: --daemon-probe-seconds needs a value" >&2
+			exit 2
+		fi
+		daemon_probe_seconds="$2"
+		shift 2
+		;;
 	--apply)
 		apply=1
 		shift
 		;;
 	-h | --help)
-		echo "usage: sweep-test-containers.sh [--older-than-hours <n>] [--apply]"
+		echo "usage: sweep-test-containers.sh [--older-than-hours <n>]" \
+			"[--daemon-probe-seconds <n>] [--apply]"
 		exit 0
 		;;
 	*)
 		echo "sweep-test-containers: unknown argument: $1" >&2
-		echo "usage: sweep-test-containers.sh [--older-than-hours <n>] [--apply]" >&2
+		echo "usage: sweep-test-containers.sh [--older-than-hours <n>]" \
+			"[--daemon-probe-seconds <n>] [--apply]" >&2
 		exit 2
 		;;
 	esac
@@ -77,57 +109,138 @@ case "$older_than_hours" in
 	;;
 esac
 
+case "$daemon_probe_seconds" in
+'' | 0 | *[!0-9]*)
+	echo "sweep-test-containers: --daemon-probe-seconds must be a positive whole" \
+		"number of seconds, got: $daemon_probe_seconds" >&2
+	exit 2
+	;;
+esac
+
 if ! command -v docker >/dev/null 2>&1; then
 	echo "sweep-test-containers: docker is not on PATH" >&2
 	exit 1
 fi
 
+# Dangling volumes are the part of the leak no container-scoped selector can
+# reach, so every successful run reports them — including the runs that find
+# nothing to remove. A box whose containers were already reclaimed without their
+# volumes reports an empty container inventory, and stopping there would leave
+# the remaining disk leak invisible.
+report_dangling_volumes() {
+	local dangling
+	dangling="$(docker volume ls --quiet --filter dangling=true | wc -l | tr -d ' ')"
+	if [ "$dangling" -gt 0 ]; then
+		echo "sweep-test-containers: $dangling dangling volume(s) remain, belonging" \
+			"to no container; reclaim with 'docker volume prune'"
+	fi
+}
+
+finish_clean() {
+	report_dangling_volumes
+	exit 0
+}
+
 # A daemon that is stopped or refusing connections would otherwise surface as an
 # empty container listing, which reads exactly like a clean box and would leave
 # an operator believing the sweep found nothing to do. Ask once, and name the
-# real problem. A daemon that is hung rather than absent — the socket accepts
-# but never answers — blocks here instead of failing, as it would at any later
-# call; that is visible to the operator as a stall, which an empty listing is
-# not.
-if ! docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+# real problem.
+#
+# `docker version` carries no timeout of its own, so a daemon whose socket
+# accepts but never answers would block here forever: on a timer that is a job
+# that never reports and never returns, which is worse than the empty listing
+# this probe exists to prevent. Bound the probe with a deadline process instead
+# and report a daemon that did not answer separately from one that refused.
+probe_daemon() {
+	docker version --format '{{.Server.Version}}' >/dev/null 2>&1 &
+	local probe=$!
+	(
+		sleep "$daemon_probe_seconds"
+		kill -s TERM "$probe"
+	) >/dev/null 2>&1 &
+	local deadline=$!
+	local status=0
+	wait "$probe" || status=$?
+	kill -s TERM "$deadline" >/dev/null 2>&1 || true
+	wait "$deadline" >/dev/null 2>&1 || true
+	return "$status"
+}
+
+probe_status=0
+probe_daemon || probe_status=$?
+
+if [ "$probe_status" -ge "$SIGNALLED_STATUS_FLOOR" ]; then
+	echo "sweep-test-containers: the Docker daemon did not answer within" \
+		"${daemon_probe_seconds}s" >&2
+	exit 1
+fi
+
+if [ "$probe_status" -ne 0 ]; then
 	echo "sweep-test-containers: cannot reach the Docker daemon" >&2
 	exit 1
 fi
 
-candidates="$(docker ps --all --quiet --filter "label=$MANAGED_BY_LABEL")"
+candidates="$(docker ps --all --quiet --filter "label=$DISPOSABLE_LABEL")"
 
 if [ -z "$candidates" ]; then
-	echo "sweep-test-containers: no testcontainers-managed containers present"
-	exit 0
+	echo "sweep-test-containers: no disposable test containers present"
+	finish_clean
+fi
+
+# Identifiers arrive on stdin so a sweep of several thousand containers cannot
+# overflow the argument list. Inspection's stderr is captured rather than passed
+# through because the classification below reads it.
+inspection_errors="$(mktemp)"
+trap 'rm -f "$inspection_errors"' EXIT
+
+inspection_status=0
+inspected="$(
+	printf '%s\n' "$candidates" |
+		xargs docker inspect \
+			--format '{{.Id}} {{.Created}} {{.State.Status}} {{.Config.Image}}' \
+			2>"$inspection_errors"
+)" || inspection_status=$?
+
+# A container listed a moment ago can be gone by the time it is inspected: a
+# concurrent test run finishing, or a second operator sweeping. That is benign,
+# and the sweep continues with the rest. Every other inspection failure — the
+# daemon restarting after the probe, an authorization policy that permits
+# listing but denies inspection, a nonzero exit carrying nothing on stderr — is
+# a fault, and tolerating it would let a timer report success while the orphans
+# keep accumulating.
+#
+# The two are told apart only when the inspection actually failed, because
+# stderr is not evidence on its own: `docker inspect` writes warnings there
+# while succeeding, and treating those as faults would abort sweeps that had
+# nothing wrong with them. Once the status is nonzero, every candidate must be
+# accounted for — inspected, or named on stderr as gone — and stderr must say
+# nothing else.
+candidate_count="$(printf '%s\n' "$candidates" | grep -c . || true)"
+inspected_count="$(printf '%s\n' "$inspected" | grep -c . || true)"
+
+if [ "$inspection_status" -ne 0 ]; then
+	vanished_count="$(grep -c -E "$MISSING_OBJECT_PATTERN" "$inspection_errors" || true)"
+	unexplained="$(grep -v -E "$MISSING_OBJECT_PATTERN" "$inspection_errors" || true)"
+
+	if [ -n "$unexplained" ] ||
+		[ "$((inspected_count + vanished_count))" -ne "$candidate_count" ]; then
+		echo "sweep-test-containers: docker inspect failed for a reason other than a" \
+			"container disappearing (exit status $inspection_status); removed nothing" >&2
+		cat "$inspection_errors" >&2
+		exit 1
+	fi
+fi
+
+if [ -z "$inspected" ]; then
+	echo "sweep-test-containers: every candidate container was gone before it" \
+		"could be inspected"
+	finish_clean
 fi
 
 # `docker inspect` reports creation time as RFC 3339 with nanosecond precision,
 # which predates `fromisoformat`'s tolerance for anything but 3 or 6 fractional
 # digits; the fraction is truncated rather than parsed since only whole hours
-# matter here. Identifiers arrive on stdin so a sweep of several thousand
-# containers cannot overflow the argument list.
-#
-# A container listed a moment ago can be gone by the time it is inspected: a
-# concurrent test run finishing, or a second operator sweeping. `docker inspect`
-# then names that identifier on stderr and exits nonzero while still printing
-# every container it did find, which under `set -o pipefail` would abort the
-# sweep having removed nothing. A container that left on its own is the outcome
-# this sweep wants, so the status is tolerated and whatever was returned is
-# filtered; the daemon was already proven reachable above, so a genuine fault
-# cannot hide behind this.
-inspected="$(
-	printf '%s\n' "$candidates" |
-		xargs docker inspect \
-			--format '{{.Id}} {{.Created}} {{.State.Status}} {{.Config.Image}}' ||
-		true
-)"
-
-if [ -z "$inspected" ]; then
-	echo "sweep-test-containers: every candidate container was gone before it" \
-		"could be inspected"
-	exit 0
-fi
-
+# matter here.
 selected="$(
 	printf '%s\n' "$inspected" |
 		python3 -c '
@@ -151,13 +264,12 @@ for line in sys.stdin:
 )"
 
 if [ -z "$selected" ]; then
-	total="$(printf '%s\n' "$candidates" | wc -l | tr -d ' ')"
-	echo "sweep-test-containers: $total testcontainers-managed container(s)" \
+	echo "sweep-test-containers: $inspected_count disposable test container(s)" \
 		"present, none older than ${older_than_hours}h"
-	exit 0
+	finish_clean
 fi
 
-count="$(printf '%s\n' "$selected" | wc -l | tr -d ' ')"
+count="$(printf '%s\n' "$selected" | grep -c . || true)"
 
 if [ "$apply" -eq 0 ]; then
 	echo "sweep-test-containers: would remove $count container(s) older than" \
@@ -165,7 +277,7 @@ if [ "$apply" -eq 0 ]; then
 	printf '%s\n' "$selected" |
 		awk '{ printf "  %s  age=%sh  %s  %s\n", substr($1, 1, 12), $2, $3, $4 }'
 	echo "sweep-test-containers: re-run with --apply to remove them"
-	exit 0
+	finish_clean
 fi
 
 echo "sweep-test-containers: removing $count container(s) older than" \
@@ -174,12 +286,4 @@ printf '%s\n' "$selected" |
 	awk '{ print $1 }' |
 	xargs docker rm --force --volumes >/dev/null
 echo "sweep-test-containers: removed $count container(s)"
-
-# Volumes stranded by a container removed without `--volumes` outlive every
-# selector this script has, so report them rather than leaving the operator to
-# conclude the disk should now be clear.
-dangling="$(docker volume ls --quiet --filter dangling=true | wc -l | tr -d ' ')"
-if [ "$dangling" -gt 0 ]; then
-	echo "sweep-test-containers: $dangling dangling volume(s) remain, belonging" \
-		"to no container; reclaim with 'docker volume prune'"
-fi
+finish_clean

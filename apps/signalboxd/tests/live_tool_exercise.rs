@@ -34,8 +34,9 @@ use signalbox_model_runtime::{
     ToolCallId, ToolCallProposal, ToolName,
 };
 use signalbox_persistence::{
-    local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
-    scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
+    disposable_test_container_labels, local_test_connection_options, migrate,
+    model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository,
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
@@ -1211,6 +1212,7 @@ async fn migrated_postgres() -> SmokeResult<(ContainerAsync<Postgres>, PgPool)> 
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
         .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
         .start()
         .await?;
     let host = container.get_host().await?;

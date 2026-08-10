@@ -32,7 +32,7 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     create_session::{CreateSessionHandlingOutcome, CreateSessionRepository},
-    local_test_connection_options, migrate,
+    disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository},
@@ -326,6 +326,7 @@ impl PostgresEnvironment {
         let container = image
             .with_tag(POSTGRES_IMAGE_TAG)
             .with_cmd(command)
+            .with_labels(disposable_test_container_labels())
             .start()
             .await?;
         let host = container.get_host().await?.to_string();
