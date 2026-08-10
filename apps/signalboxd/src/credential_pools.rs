@@ -39,9 +39,11 @@ pub(crate) const MAX_CREDENTIAL_POOL_MEMBERS: usize = 1_024;
 ///
 /// Capped rather than left at the integer domain because a contended wait
 /// durably names the identity of every live reservation holding the bound and
-/// rewrites that snapshot on release, so the admitted maximum is also the
-/// maximum evidence one wait carries and the multiplier on every wake's
-/// rewrite.
+/// rewrites that snapshot on release, so this bound is the multiplier on every
+/// wake's rewrite. It bounds one member's contribution and not the whole wait,
+/// whose evidence is the sum across every otherwise-admissible bounded member;
+/// what this cap buys is that no single misconfigured member supplies an
+/// unbounded share of that sum.
 pub(crate) const MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS: u32 = 1_024;
 
 /// Every delivery spelling the grammar recognizes, whether or not this build

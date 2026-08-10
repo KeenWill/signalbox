@@ -124,9 +124,14 @@ impl ModelAdapter {
 
     /// Reports whether this adapter's contract admits one credential delivery.
     ///
-    /// Direct HTTP adapters authenticate each request themselves. CLI adapters
-    /// additionally own an external login, and Codex admits the future
-    /// profile-specific deliveries the grammar reserves for it.
+    /// This is a permission rather than an asserted subset: a pair is admitted
+    /// exactly where a delivery contract defines how the secret reaches that
+    /// adapter's provider, and startup rejects every pair no contract defines.
+    /// Direct HTTP adapters authenticate each request themselves, so only
+    /// `file` is defined for them; the CLI adapters additionally own an
+    /// external login, and the Codex profile-specific deliveries are defined
+    /// here even though no surface supplies them yet — which `delivers` below,
+    /// not this predicate, is what decides.
     pub(crate) fn admits_delivery(self, delivery: &str) -> bool {
         match self {
             Self::Anthropic | Self::OpenAi => matches!(delivery, "file"),

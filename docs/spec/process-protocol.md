@@ -329,19 +329,27 @@ one closed `target` object:
   names the exact qualifying predecessor observation that excluded one member
   from an availability-successor chain.
 
-The read lists every active non-OAuth exclusion the caller is authorized to
-administer as its exact closed target object, so the generation or predecessor
-correlation required by the clear mutation is observable even while another pool
-member remains usable. `page_size` is a canonical decimal string from 1 through
-100\. `after` is either null or one complete target object and is an exclusive
-keyset cursor. Results sort first by the closed target tags in the order above,
-then by each tagged target field's owned canonical order — UTF-8 bytes for
-configured names, UUID bytes for durable identities, and unsigned numeric order
-for generations. `credential_exclusion_page { exclusions, next_after }` returns
-no more than the requested count and uses null `next_after` only at the end.
-Clearing or creating an exclusion between page requests may change a traversal,
-so an operator needing one fresh inventory restarts from null. The read exposes
-only non-secret references and correlations.
+The read lists every active exclusion the caller is authorized to administer
+except those the clear mutation rejects, as its exact closed target object, so
+the generation or predecessor correlation required by that mutation is
+observable even while another pool member remains usable. The filter is the
+mutation's own, stated once below and turning on the exclusion's **origin**: it
+omits exactly the delivery-origin quarantines that cannot be cleared and lists
+every other record, including every throttling exclusion attached to an `oauth`
+profile. Filtering by delivery instead would hide a rate-limited `oauth`
+member's record while the mutation stood ready to clear it, leaving an operator
+unable to construct a request the daemon would have accepted — the read and the
+mutation must not disagree about what is clearable. `page_size` is a canonical
+decimal string from 1 through 100. `after` is either null or one complete target
+object and is an exclusive keyset cursor. Results sort first by the closed
+target tags in the order above, then by each tagged target field's owned
+canonical order — UTF-8 bytes for configured names, UUID bytes for durable
+identities, and unsigned numeric order for generations.
+`credential_exclusion_page { exclusions, next_after }` returns no more than the
+requested count and uses null `next_after` only at the end. Clearing or creating
+an exclusion between page requests may change a traversal, so an operator
+needing one fresh inventory restarts from null. The read exposes only non-secret
+references and correlations.
 
 Both operations are authorized exactly as every other request on this transport
 is: reaching the owner-private socket is the authority. The process protocol has
@@ -384,14 +392,23 @@ earlier command already marked inactive is not unknown: it follows the
 `already_cleared` path below, so the idempotent repair returns one answer rather
 than depending on which command ran first. Equal `command_id` replay still
 returns its stored receipt before this current-state precedence is evaluated. A
-quarantine of **delivery origin** rejects this mutation, because only
-re-provisioning can clear it: a rejected daemon-owned OAuth refresh, or a
-credential-home identity that failed its walk, is a broken credential rather
-than a throttled one. The rejection therefore turns on the quarantine's origin
-and never on the profile's delivery. Rejecting by delivery would conflate the
-two and leave a rate-limited `oauth` member with no clearing path at all where
-its adapter offers no zero-cost probe, which is the one case the operator
-command exists for.
+quarantine of **delivery origin** is a broken credential rather than a throttled
+one, and what clears it is whatever can re-establish the credential — which
+differs by which delivery produced it, so the two are stated separately rather
+than rejected together. A rejected daemon-owned OAuth refresh rejects this
+mutation, because only re-provisioning can clear it and this daemon has a
+provisioning command that does exactly that. A `codex_home` identity walk that
+failed instead **accepts** it, because no daemon `codex_home` provisioning
+transaction exists: the store is external, an operator repairs it outside the
+daemon, and rejecting the clear would leave that quarantine with no transition
+out at all — the profile is no longer selected, so no preparation reruns the
+walk that would clear it. Accepting the clear costs nothing, because the walk
+runs at every preparation and re-quarantines immediately if the home is still
+broken; the operator's clear asserts only that it is worth walking again. The
+rejection therefore turns on the quarantine's origin and never on the profile's
+delivery. Rejecting by delivery would conflate the two and leave a rate-limited
+`oauth` member with no clearing path at all where its adapter offers no
+zero-cost probe, which is the one case the operator command exists for.
 
 Success returns `credential_exclusion_cleared { target, outcome }`, where
 `outcome` is `cleared` for the winning transition or `already_cleared` when a

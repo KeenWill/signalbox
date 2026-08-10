@@ -3867,16 +3867,6 @@ def is_image_link(text: str, link: MarkdownLink) -> bool:
     )
 
 
-def renders_visible_label(link: MarkdownLink) -> bool:
-    """Report whether an anchor renders text a reader can see and click.
-
-    An anchor whose label is empty, or is only emphasis punctuation, renders no
-    clickable surface, so it cites nothing however well its destination
-    resolves.
-    """
-    return bool(unescape_markdown_punctuation(link.label).strip(" \t*_~`").strip())
-
-
 def check_machine_owner_links(root: Path) -> list[Violation]:
     """Each projection owner links the machine it projects.
 
@@ -3891,6 +3881,29 @@ def check_machine_owner_links(root: Path) -> list[Violation]:
     checker that read prose generated more review findings than the pages it
     guarded; this costs one resolution per page and adds no Markdown surface
     beyond the link extraction this module already performs.
+
+    Scope, decided by count rather than by argument: whether a citation's label
+    *renders* anything is out of scope. Four consecutive review waves produced
+    exactly four findings against this function, every one of them the same
+    family — a construct that resolves but renders no navigation (an unused
+    reference definition, an image destination, an empty label, a raw-HTML
+    label). Three were closed by testing the label; the fourth arrived
+    immediately after the third was restated positively so that "nothing is
+    left for the next shape to slip through." It bought one round, which is the
+    same yield the two deleted documentation lints returned before they were
+    removed. The complement is unbounded at the string level — an HTML comment,
+    a zero-width entity, a soft hyphen — and closing it soundly needs a
+    Markdown renderer this stdlib-only module does not have and should not
+    acquire for a guard this coarse. None of the four shapes occurs anywhere in
+    the tracked corpus.
+
+    So the guarded property is stated as what it always was: a derived view
+    that stops citing its owner. A page either carries a link construct
+    resolving to the owner or it does not. An invisible label is not that
+    failure, and a page that somehow contained one would be broken in a way
+    this check could not repair anyway. Images and bare reference definitions
+    stay excluded, because those are destination-side facts this module already
+    decides without reading a label.
     """
     owner = (root / "docs/spec/credential-availability.md").resolve()
     if not owner.exists():
@@ -3912,13 +3925,9 @@ def check_machine_owner_links(root: Path) -> list[Violation]:
         parsed = mask_inline_code(
             mask_block_content(source.read_text(encoding="utf-8"))
         )
-        # The property, stated positively: a citation is an anchor a reader
-        # can see and click through to the owner. Three shapes were previously
-        # excluded one at a time — an image, a bare reference definition, an
-        # empty label — and enumerating what does not count is unbounded,
-        # because it is the complement of a small positive property. Requiring
-        # the anchor and its rendered label instead makes all three fall out,
-        # and leaves nothing for the next shape to slip through.
+        # A citation is a link construct whose destination resolves to the
+        # owner. Label rendering is deliberately NOT tested — see the scope
+        # note in this function's docstring.
         citations = [
             link
             for link in extract_inline_links(parsed)
@@ -3928,8 +3937,7 @@ def check_machine_owner_links(root: Path) -> list[Violation]:
             extract_reference_links(parsed, reference_definitions(parsed))
         )
         linked = any(
-            renders_visible_label(link)
-            and (resolved := resolve_relative_target(root, source, link.destination))
+            (resolved := resolve_relative_target(root, source, link.destination))
             is not None
             and resolved[0] == owner
             for link in citations

@@ -876,10 +876,29 @@ adapter-scoped catalog and resolves each operation's pinned reference, and the
 direct HTTP adapters resolve theirs from the same catalog, so differing
 preferences are admitted for all three.
 
-A profile's closed `delivery` states how its secret reaches the provider. The
-grammar admits four, and an adapter admits a subset of them. Each
-`[[credential_profiles]]` entry is one flat TOML table: `delivery` is a required
-TOML string discriminant, common fields are exactly `name`, `adapter`,
+A profile's closed `delivery` states how its secret reaches the provider. Four
+are admitted. Which of them a given adapter accepts is **not** a table stated
+here: an `(adapter, delivery)` pair is admitted exactly when that adapter's own
+delivery contract defines how the secret reaches its provider, and startup
+rejects every pair no such contract defines. Stating it as a permission rather
+than a matrix is deliberate — the matrix would have to be edited in two places
+every time an adapter gained a delivery, and the contract is the thing an
+implementer actually needs. Recording the rejection rather than an aspirational
+matrix is also what keeps this page from promising a pair no code could serve.
+
+The contracts defined here are `ambient`, for the CLI adapters that take a
+non-secret reference; `file`, for the direct HTTP adapters and for `claude_cli`,
+whose `env_key` and materialized settings store this branch describes below, and
+for `codex_cli`, whose own `env_key` spelling it describes there too; and the
+Codex `codex_home` and `oauth` deliveries. Every other pair is rejected because
+no contract here says how the secret would reach that provider: `ambient`,
+`codex_home`, and `oauth` for a direct HTTP adapter, and `codex_home` and
+`oauth` for `claude_cli`. Defining a pair and supplying a surface for it remain
+separate questions — the deliveries this build refuses despite defining them are
+enumerated below.
+
+Each `[[credential_profiles]]` entry is one flat TOML table: `delivery` is a
+required TOML string discriminant, common fields are exactly `name`, `adapter`,
 `billing_kind`, and `delivery`, and the selected variant admits only its fields
 below. A field owned by another variant is unknown and rejected.
 
@@ -1067,27 +1086,34 @@ is `max_concurrent_invocations`, a TOML integer from 1 through 1,024; zero, a
 negative or larger integer, and every non-integer value are rejected. The bound
 is capped rather than left at the integer domain because a contended wait
 durably names the identity of every live reservation holding the bound and
-rewrites that snapshot on release, so the admitted maximum is also the maximum
-evidence one wait carries and the multiplier on every wake's rewrite. A bound
-larger than a pool can usefully run would buy nothing and would let one wake
-rewrite thousands of identities while holding capacity rows.
+rewrites that snapshot on release, so the bound is the multiplier on every
+wake's rewrite. It bounds **one member's** contribution, not the whole wait: a
+wait names every otherwise-admissible bounded member, so its evidence is the sum
+across them, and the two grammar bounds jointly cap it at the pool-size limit
+times this one. That product is large, and stating it as if the per-profile cap
+were the whole of it would be false. What keeps it small in practice is that
+every named identity is a *live invocation*: reaching the product requires that
+many concurrent children actually running, so a deployment's real ceiling is its
+own concurrency, and the per-profile cap is what stops any single misconfigured
+member from supplying an unbounded share of it. Bounding the product directly
+was considered and not done here, because that is a grammar constraint spanning
+two settings and it would move a value this stack's parser already encodes;
+sizing it belongs with the implementing child that first writes a wait row.
 
 The child that admits this delivery owes one separation rule the present refusal
 makes unnecessary: a document declaring an `ambient` `codex_cli` profile may not
 also declare a `codex_home` profile, because static configuration cannot prove
 that the ambient login store and the explicitly named directory differ, and
 admitting both would give one physical login two availability and capacity
-identities.
-
-Supplying the directory is necessary but not sufficient: the invocation must
-also force the CLI's file credential backend and disable its keyring, automatic,
-and every other external store, exactly as the OAuth delivery already does.
-Without that, a CLI configured for its process-wide keyring reads an
-authentication context this walk never verified, two custody-approved homes
-resolve the same external login, and both the containment property and the
-distinct-identity check are bypassed without either being violated on its own
-terms. Failure to enforce the backend is a typed pre-send delivery failure and
-starts no child.
+identities. Supplying the directory is necessary but not sufficient: the
+invocation must also force the CLI's file credential backend and disable its
+keyring, automatic, and every other external store, exactly as the OAuth
+delivery already does. Without that, a CLI configured for its process-wide
+keyring reads an authentication context this walk never verified, two
+custody-approved homes resolve the same external login, and both the containment
+property and the distinct-identity check are bypassed without either being
+violated on its own terms. Failure to enforce the backend is a typed pre-send
+delivery failure and starts no child.
 
 The daemon supplies the directory as that process's credential home and never
 reads or interprets its entries; it opens them for metadata alone, which is what
@@ -1517,7 +1543,22 @@ what a pool needs, and a profile in no pool has no co-member to contradict. Two
 provisionings of one account must not both commit, so this consultation is
 serialized against any concurrent provisioning commit of a consulted profile;
 the lock protocol that achieves it is owned by
-[persistence protocol](persistence-protocol.md#lock-protocol). Without that
+[persistence protocol](persistence-protocol.md#lock-protocol).
+
+Provisioning is not the only moment co-membership arises, and checking only at
+provisioning would leave the property unenforced by the other one. Two profiles
+provisioned to one account while neither shared a pool pass this rule correctly
+— they had no co-member — and a later configuration can then intern a revision
+naming both. **Interning a pool-policy revision therefore applies the same rule
+to the membership it is about to freeze**, under the same locks and against the
+same stored identities, and fails to intern when two members resolve to one
+account. Between them the two moments are exhaustive: a pair can only become
+co-members holding one account by a provisioning that joins an existing
+membership or by a membership that joins existing provisionings, and each is
+checked where it happens. An interning failure is a configuration error,
+reported like any other rejected registration — the alternative, admitting the
+revision and discovering the collision at a `switch_now`, is exactly the
+account-level rejection domain the rule exists to prevent. Without that
 serialization each would read an unclaimed identity and both would commit,
 leaving a pool holding two members the provider meters, throttles, and rejects
 as one — so a later `switch_now` would retry into the same account-level
