@@ -963,12 +963,15 @@ class SweepTestContainersTest(unittest.TestCase):
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
             arguments=["--apply", "--deadline-seconds", "1"],
             hangs_on="volume",
+            hang_seconds=10,
+            ignores_term=True,
         )
 
         self.assertEqual(run.status, 0, run.stderr)
         self.assertEqual(run.removed, ["old111"])
         self.assertIn("removed 1 container(s)", run.stdout)
         self.assertIn("could not count dangling volumes", run.stderr)
+        self.assertEqual(run.survived, [], "the abandoned volume count kept running")
 
     def test_a_refused_volume_listing_does_not_undo_a_completed_sweep(self) -> None:
         run = run_sweep(
