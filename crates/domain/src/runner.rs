@@ -2529,8 +2529,14 @@ impl SessionRunnerPlacement {
         request: SessionRunnerPlacementRequest,
         registration: &ValidatedRunnerRegistration,
     ) -> Result<RunnerPrePinReplacement, RunnerDomainError> {
-        let SessionRunnerPlacementState::RunnerLostBeforePin(before) = self.state else {
-            return Err(RunnerDomainError::InvalidState);
+        let before = match self.state {
+            SessionRunnerPlacementState::RunnerLostBeforePin(before) => before,
+            SessionRunnerPlacementState::Unpinned
+            | SessionRunnerPlacementState::Pinned(_)
+            | SessionRunnerPlacementState::RunnerLost(_)
+            | SessionRunnerPlacementState::RunnerAbandoned(_) => {
+                return Err(RunnerDomainError::InvalidState);
+            }
         };
         match &request.selector {
             RunnerSelector::Identity(runner) if *runner == registration.runner => {}
@@ -3155,15 +3161,18 @@ fn validate_placement_request_against(
     {
         return Err(RunnerDomainError::CredentialProfileUnavailable);
     }
-    if let WorkspaceRequirement::RepositoryWorktree { repository } = &request.workspace {
-        if !registration.supports_workspace(WorkspaceCapability::WorktreePerSession) {
-            return Err(RunnerDomainError::WorkspaceCapabilityUnavailable);
-        }
-        let entry = registration
-            .repository(repository)
-            .ok_or(RunnerDomainError::RepositoryUnavailable)?;
-        if entry.credential_profile() != request.credential_profile.as_ref() {
-            return Err(RunnerDomainError::CredentialProfileUnavailable);
+    match &request.workspace {
+        WorkspaceRequirement::None => {}
+        WorkspaceRequirement::RepositoryWorktree { repository } => {
+            if !registration.supports_workspace(WorkspaceCapability::WorktreePerSession) {
+                return Err(RunnerDomainError::WorkspaceCapabilityUnavailable);
+            }
+            let entry = registration
+                .repository(repository)
+                .ok_or(RunnerDomainError::RepositoryUnavailable)?;
+            if entry.credential_profile() != request.credential_profile.as_ref() {
+                return Err(RunnerDomainError::CredentialProfileUnavailable);
+            }
         }
     }
     Ok(())
