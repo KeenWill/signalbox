@@ -459,6 +459,8 @@ const SYNTHETIC_PRIOR_NONEXISTENCE_REPORT: &str =
     "Created exec-result.txt; it did not exist before.";
 const SYNTHETIC_PREVIOUS_NONEXISTENCE_REPORT: &str =
     "Created exec-result.txt; it did not previously exist.";
+const SYNTHETIC_HISTORICAL_MISSING_FILE_REPORT: &str =
+    "Created exec-result.txt; the file was missing before I created it.";
 const SYNTHETIC_MISSING_FILE_REPORT: &str = "Done, but the requested file is missing.";
 const SYNTHETIC_READ_COMPLETION_REPORT: &str = "brief.txt was read successfully.";
 const SYNTHETIC_SWITCH_COMPLETION_REPORT: &str = "The branch was switched successfully.";
@@ -7392,9 +7394,13 @@ fn report_denies_file_creation(report: &str) -> bool {
                             matches!(word.as_str(), "absent" | "deleted" | "missing" | "removed")
                         })
                         .is_some_and(|state| {
-                            !scope[..state]
+                            let historical = scope[..scope.len().min(state + 5)]
                                 .iter()
-                                .any(|word| matches!(word.as_str(), "never" | "not"))
+                                .any(|word| matches!(word.as_str(), "before" | "previously"));
+                            !historical
+                                && !scope[..state]
+                                    .iter()
+                                    .any(|word| matches!(word.as_str(), "never" | "not"))
                         })
                     && !clause[index.saturating_sub(4)..index]
                         .iter()
@@ -8727,6 +8733,14 @@ fn exec_file_creation_report_accepts_prior_nonexistence() {
 fn exec_file_creation_report_accepts_previous_nonexistence() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_PREVIOUS_NONEXISTENCE_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_historical_missing_state() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_HISTORICAL_MISSING_FILE_REPORT, false);
 
     assert!(tracker.final_response_reports_file_creation());
 }
@@ -10722,7 +10736,7 @@ fn unforced_git_tier_keeps_a_duplicate_commit_failure_as_a_miss() {
                 attempt_denied: false,
             },
             RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_ATTEMPT_ID),
+                request_id: Uuid::from_u128(ARBITRARY_THIRD_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(GIT_CREATE_COMMIT_NAME),
                 arguments_text: serde_json::json!({"message": GIT_NATURAL_MESSAGE}).to_string(),
@@ -17428,7 +17442,7 @@ fn workspace_natural_state_rejects_an_unrelated_mutation() {
                 attempt_denied: false,
             },
             RequestSnapshot {
-                request_id: Uuid::from_u128(ARBITRARY_EVAL_ATTEMPT_ID),
+                request_id: Uuid::from_u128(ARBITRARY_THIRD_EVAL_REQUEST_ID),
                 producing_model_call_id: Uuid::from_u128(ARBITRARY_SECOND_EVAL_MODEL_CALL_ID),
                 name: String::from(EDIT_FILE_NAME),
                 arguments_text: serde_json::json!({
