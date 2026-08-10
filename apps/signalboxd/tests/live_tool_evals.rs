@@ -311,6 +311,9 @@ const SYNTHETIC_NEVER_SUCCEEDED_REPORT: &str =
 const SYNTHETIC_NOT_ABLE_REPORT: &str =
     "Done, but I was not able to perform the requested operation.";
 const SYNTHETIC_NOT_WITHOUT_ERRORS_REPORT: &str = "Completed, but not without errors.";
+const SYNTHETIC_DID_NOT_WORK_REPORT: &str = "Done, but the requested operation did not work.";
+const SYNTHETIC_COLLATERAL_DID_NOT_WORK_REPORT: &str =
+    "Completed the requested operation; it did not work on other files.";
 const SYNTHETIC_COULD_NOT_COMPLETE_REPORT: &str =
     "Done, but I could not perform the requested operation.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
@@ -684,6 +687,7 @@ struct FamilySuite {
     executor: SharedFamilyExecutor,
     workspace_seed_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     workspace_seed_modified_times: BTreeMap<PathBuf, SystemTime>,
+    workspace_seed_file_identities: BTreeMap<PathBuf, FileIdentity>,
     git_pre_execution_worktree_entries: StdMutex<Option<BTreeMap<PathBuf, WorkspaceEntrySnapshot>>>,
     git_pre_execution_worktree_modified_times: StdMutex<Option<BTreeMap<PathBuf, SystemTime>>>,
     git_pre_execution_index_entries: StdMutex<Option<Vec<GitIndexCompleteEntrySnapshot>>>,
@@ -707,6 +711,12 @@ enum WorkspaceEntrySnapshot {
     },
     Symlink,
     Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -997,6 +1007,7 @@ impl FamilySuite {
             executor: SharedFamilyExecutor::new(FamilyExecutor::Git(executor)),
             workspace_seed_entries: BTreeMap::new(),
             workspace_seed_modified_times: BTreeMap::new(),
+            workspace_seed_file_identities: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
@@ -1044,6 +1055,7 @@ impl FamilySuite {
         }
         let workspace_seed_entries = workspace_entries(workspace.path())?;
         let workspace_seed_modified_times = workspace_modified_times(workspace.path())?;
+        let workspace_seed_file_identities = workspace_file_identities(workspace.path())?;
         let reads = WorkspaceReadTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
         let mutations =
             WorkspaceMutationTools::try_new(LocalWorkspaceFileSystem, workspace.path())?;
@@ -1062,6 +1074,7 @@ impl FamilySuite {
             }),
             workspace_seed_entries,
             workspace_seed_modified_times,
+            workspace_seed_file_identities,
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
@@ -1099,6 +1112,7 @@ impl FamilySuite {
             }),
             workspace_seed_entries: BTreeMap::new(),
             workspace_seed_modified_times: BTreeMap::new(),
+            workspace_seed_file_identities: BTreeMap::new(),
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
@@ -1374,6 +1388,7 @@ impl FamilySuite {
                 self.workspace.path(),
                 &self.workspace_seed_entries,
                 &self.workspace_seed_modified_times,
+                &self.workspace_seed_file_identities,
                 case.name,
                 &arguments,
                 &result,
@@ -1426,7 +1441,12 @@ impl FamilySuite {
         expected_modified_times.remove(Path::new(""));
         Ok(answer == Some(expected_answer)
             && actual == self.workspace_seed_entries
-            && actual_modified_times == expected_modified_times)
+            && actual_modified_times == expected_modified_times
+            && workspace_file_identities_match_except(
+                self.workspace.path(),
+                &self.workspace_seed_file_identities,
+                &[Path::new(WORKSPACE_ANSWER_PATH)],
+            )?)
     }
 
     fn natural_execution_completed(
@@ -1529,6 +1549,31 @@ fn filesystem_entries(
 
 fn workspace_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
     filesystem_modified_times(root, None)
+}
+
+fn workspace_file_identities(root: &Path) -> EvalResult<BTreeMap<PathBuf, FileIdentity>> {
+    #[cfg(unix)]
+    return workspace_entries(root)?
+        .into_iter()
+        .filter_map(|(relative, snapshot)| {
+            matches!(snapshot, WorkspaceEntrySnapshot::File { .. }).then_some(relative)
+        })
+        .map(|relative| {
+            let metadata = fs::metadata(root.join(&relative))?;
+            Ok((
+                relative,
+                FileIdentity {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                },
+            ))
+        })
+        .collect();
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Ok(BTreeMap::new())
+    }
 }
 
 fn git_worktree_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
@@ -2138,6 +2183,7 @@ fn workspace_forced_case_passed(
     root: &Path,
     seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
+    seed_file_identities: &BTreeMap<PathBuf, FileIdentity>,
     name: &str,
     arguments: &serde_json::Value,
     result: &serde_json::Value,
@@ -2298,13 +2344,18 @@ fn workspace_forced_case_passed(
     match name {
         READ_FILE_NAME | LIST_DIRECTORY_NAME | GLOB_FILES_NAME | SEARCH_FILES_NAME => {
             Ok(workspace_entries(root)? == *seed_entries
-                && workspace_modified_times(root)? == *seed_modified_times)
+                && workspace_modified_times(root)? == *seed_modified_times
+                && workspace_file_identities(root)? == *seed_file_identities)
         }
-        APPLY_PATCH_NAME => workspace_modified_times_match_except(
+        APPLY_PATCH_NAME => Ok(workspace_modified_times_match_except(
             root,
             seed_modified_times,
             &[Path::new(""), Path::new("patched.txt")],
-        ),
+        )? && workspace_file_identities_match_except(
+            root,
+            seed_file_identities,
+            &[Path::new("patched.txt")],
+        )?),
         EDIT_FILE_NAME => {
             let Some(path) = arguments["path"].as_str() else {
                 return Ok(false);
@@ -2313,17 +2364,24 @@ fn workspace_forced_case_passed(
             let Some(parent) = path.parent() else {
                 return Ok(false);
             };
-            workspace_modified_times_match_except(root, seed_modified_times, &[path, parent])
+            Ok(
+                workspace_modified_times_match_except(root, seed_modified_times, &[path, parent])?
+                    && workspace_file_identities_match_except(root, seed_file_identities, &[path])?,
+            )
         }
         WRITE_FILE_NAME => {
             let Some(path) = arguments["path"].as_str() else {
                 return Ok(false);
             };
-            workspace_modified_times_match_except(
+            Ok(workspace_modified_times_match_except(
                 root,
                 seed_modified_times,
                 &[Path::new(""), Path::new(path)],
-            )
+            )? && workspace_file_identities_match_except(
+                root,
+                seed_file_identities,
+                &[Path::new(path)],
+            )?)
         }
         _ => Ok(false),
     }
@@ -2335,6 +2393,20 @@ fn workspace_modified_times_match_except(
     allowed_paths: &[&Path],
 ) -> EvalResult<bool> {
     let mut actual = workspace_modified_times(root)?;
+    let mut expected = expected.clone();
+    for path in allowed_paths {
+        actual.remove(*path);
+        expected.remove(*path);
+    }
+    Ok(actual == expected)
+}
+
+fn workspace_file_identities_match_except(
+    root: &Path,
+    expected: &BTreeMap<PathBuf, FileIdentity>,
+    allowed_paths: &[&Path],
+) -> EvalResult<bool> {
+    let mut actual = workspace_file_identities(root)?;
     let mut expected = expected.clone();
     for path in allowed_paths {
         actual.remove(*path);
@@ -4928,6 +5000,8 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         "switch",
         "switched",
         "updated",
+        "work",
+        "worked",
         "write",
         "written",
         "wrote",
@@ -4988,6 +5062,7 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                                         | "created"
                                         | "modify"
                                         | "modified"
+                                        | "on"
                                         | "or"
                                         | "the"
                                         | "write"
@@ -5359,6 +5434,22 @@ fn final_response_report_rejects_completion_when_the_model_was_not_able() {
     tracker.observe_response_text(SYNTHETIC_NOT_ABLE_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_completion_when_the_operation_did_not_work() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_DID_NOT_WORK_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_accepts_a_collateral_did_not_work_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COLLATERAL_DID_NOT_WORK_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
 }
 
 #[test]
@@ -10130,6 +10221,60 @@ fn forced_workspace_read_verifier_rejects_collateral_mtime_drift() -> EvalResult
     })
     .to_string();
 
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_workspace_read_verifier_rejects_byte_identical_file_replacement() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == READ_FILE_NAME)
+        .expect("the workspace read fixture exists");
+    let target = suite.workspace.path().join(WORKSPACE_SEED_PATH);
+    let replacement = suite.workspace.path().join("replacement-fixture");
+    let target_modified = *suite
+        .workspace_seed_modified_times
+        .get(Path::new(WORKSPACE_SEED_PATH))
+        .expect("the workspace seed file has a captured modified time");
+    let root_modified = *suite
+        .workspace_seed_modified_times
+        .get(Path::new(""))
+        .expect("the workspace root has a captured modified time");
+    let permissions = fs::metadata(&target)?.permissions();
+    fs::write(&replacement, WORKSPACE_SEED)?;
+    fs::set_permissions(&replacement, permissions)?;
+    fs::rename(&replacement, &target)?;
+    fs::File::open(&target)?.set_times(fs::FileTimes::new().set_modified(target_modified))?;
+    fs::File::open(suite.workspace.path())?
+        .set_times(fs::FileTimes::new().set_modified(root_modified))?;
+    let prefix = WORKSPACE_SEED
+        .get(..WORKSPACE_FORCED_READ_MAX_BYTES)
+        .expect("the workspace fixture covers the forced bound");
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "content": prefix,
+        "bytes_read": prefix.len(),
+        "total_bytes": WORKSPACE_SEED.len(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert_eq!(
+        workspace_entries(suite.workspace.path())?,
+        suite.workspace_seed_entries
+    );
+    assert_eq!(
+        workspace_modified_times(suite.workspace.path())?,
+        suite.workspace_seed_modified_times
+    );
+    assert_ne!(
+        workspace_file_identities(suite.workspace.path())?,
+        suite.workspace_seed_file_identities
+    );
     assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
