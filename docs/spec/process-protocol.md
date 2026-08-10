@@ -2609,8 +2609,9 @@ harness, not a protocol client.
 **Committed unimplemented functionality.** No present event or transcript state
 admits this shape. This section is the wire-projection column of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine)
-for its `pre-call fail` ending; that table states which endings project to a
-terminal state and which to an active one. The implementing wire slice must add
+for its `pre-call fail` and `wait-transition fail (no call)` endings, which
+share one wire projection; that table states which endings project to a terminal
+state and which to an active one. The implementing wire slice must add
 `failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
 as a distinct `transcript_turn.state` variant and
 `turn_credential_pool_exhausted { turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id, pool_policy_id, policy_members, members }`

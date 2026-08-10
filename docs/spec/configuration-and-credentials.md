@@ -917,19 +917,22 @@ cannot; this contract says which for every delivery, and there is no third case.
 - `oauth` — *established*, by the provider account identity that provisioning
   harvests and stores alongside the refresh token. That identity is what the
   provider meters, throttles, and rejects against, so two members are
-  independent exactly when their stored account identities differ, and a pool
-  rejects two members resolving to one account however they were provisioned.
-  The provisioning tuple is deliberately **not** this relation, and it fails in
-  both directions: two independently metered accounts reached through one OAuth
-  client, endpoints, and scopes have identical tuples and are nonetheless
-  independent, while two grants for one account obtained under different clients
-  or scopes have different tuples and are nonetheless one authorization. The
-  tuple keeps its own separate job — binding a stored token to the configuration
-  it was minted under, so an edited endpoint cannot receive a token issued for
-  another — and for that job it is compared as parsed canonical components:
-  scheme, lowercased host, effective port, path, and query, never configured
-  bytes, with fragments and user information rejected at admission because
-  neither reaches the request target at all.
+  independent exactly when their stored account identities differ. Static pool
+  admission cannot decide that relation, because no member has a stored identity
+  until an operator provisions it; the relation is therefore enforced at the
+  provisioning commit that first makes the identity knowable, as
+  [the `oauth` delivery](#the-oauth-delivery) states. The provisioning tuple is
+  deliberately **not** this relation, and it fails in both directions: two
+  independently metered accounts reached through one OAuth client, endpoints,
+  and scopes have identical tuples and are nonetheless independent, while two
+  grants for one account obtained under different clients or scopes have
+  different tuples and are nonetheless one authorization. The tuple keeps its
+  own separate job — binding a stored token to the configuration it was minted
+  under, so an edited endpoint cannot receive a token issued for another — and
+  for that job it is compared as parsed canonical components: scheme, lowercased
+  host, effective port, path, and query, never configured bytes, with fragments
+  and user information rejected at admission because neither reaches the request
+  target at all.
 
 Two exceptions, and only these two. `quarantine` excludes a member from every
 pool rather than from the one that observed it, so an authorization that turns
@@ -1302,9 +1305,11 @@ select, in profile-reference byte order. The rows are profile-scoped rather than
 session- or pool-scoped, so concurrent sessions and distinct pools serialize
 against the same bound without a lock-order cycle. Under those locks the
 transaction counts live reservations, chooses the member, and acquires its
-`pending_spawn` reservation together with the call's `Prepared` record; a
-database constraint rejects a live count above the configured bound. That bound
-is read from the profile's current registration and is never frozen into a pool
+`pending_spawn` reservation together with the call's `Prepared` record. The
+durable constraint that backs the bound, and the reason it is scoped to
+admissions rather than to states, are owned by
+[persistence protocol](persistence-protocol.md#lock-protocol). That bound is
+read from the profile's current registration and is never frozen into a pool
 policy, because `max_concurrent_invocations` guards a live refresh race the
 operator is adjusting now: a session pinned to an older policy must not keep
 running against a limit the operator has since tightened. A raised bound
@@ -1436,6 +1441,25 @@ operator, polls the configured token endpoint under the same
 one-POST-per-attempt and no-redirect rules the refresh path uses, and on success
 harvests the refresh token, the identity token, and non-secret account metadata
 into one transaction.
+
+That transaction is also where account-level independence is decided, because it
+is the first moment an account identity exists to compare. Provisioning consults
+every profile that shares a pool-policy revision with this one — its co-members
+in each revision the profile is pinned into, and no profile outside them — and
+fails typed, storing nothing, when any of those co-members already stores the
+harvested account identity. Re-provisioning a member against its own previously
+stored identity is not a collision; the rule concerns a *different* profile
+already holding it. The consulted set is per revision because independence is
+what a pool needs, and a profile in no pool has no co-member to contradict. Two
+provisionings of one account must not both commit, so this consultation is
+serialized against any concurrent provisioning commit of a consulted profile;
+the lock protocol that achieves it is owned by
+[persistence protocol](persistence-protocol.md#lock-protocol). Without that
+serialization each would read an unclaimed identity and both would commit,
+leaving a pool holding two members the provider meters, throttles, and rejects
+as one — so a later `switch_now` would retry into the same account-level
+rejection domain the pool exists to leave, which is exactly the independence
+this delivery claims to establish.
 
 The identity token is stored durably, with the refresh token and under the same
 protections, and this is stated because dispatch requires one on every
@@ -2488,15 +2512,13 @@ Enforcement as implemented:
   and thinking deltas, tool-argument JSON, tool proposals, native error bodies,
   provider request ids, reported model identity, stop-sequence and finish
   tokens, transport detail — is scrubbed with the exact preparation-time
-  credential value before crossing the boundary. Streamed deltas additionally
-  withhold a trailing credential prefix and, when ordering forces a flush,
-  replace the withheld bytes with `[redacted]`. Why: provider chunk boundaries
-  are arbitrary, so a reflected secret must not escape split across two deltas —
-  the pipeline fails closed. Native error bodies get JSON-aware redaction before
-  truncation so an escape-encoded secret cannot survive. The scrub covers the
-  exact value, its JSON-string-escaped form in error bodies, and chunk-split
-  prefixes in deltas; a reflection the provider re-encodes in any other form
-  (base64, say) is outside these code paths. INV-035-tagged tests in
+  credential value before crossing the boundary. Which value seeds that scrub is
+  this contract's to say; how the adapter applies it — the representations it
+  covers, its behaviour across provider chunk boundaries, where it sits relative
+  to truncation and parsing, and the limit that bounds the guarantee — is owned
+  by
+  [the credential-access boundary](runtime-substrate.md#credential-access-boundary)
+  and is not restated here. INV-035-tagged tests in
   `crates/model-runtime/src/credential.rs`,
   `crates/model-runtime-anthropic/tests/loopback.rs`, and
   `apps/signalboxd/src/configuration.rs` enforce this boundary.
