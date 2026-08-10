@@ -2157,15 +2157,23 @@ finally:
         let current = std::env::current_exe().expect("test executable path is available");
         let invocation_directory =
             std::env::current_dir().expect("direct test invocation directory is available");
-        cargo_test_invocation_from_artifact(&current, &invocation_directory)
-            .expect("direct Cargo test artifacts must retain an unambiguous profile directory")
+        cargo_test_invocation_from_artifact(CargoTestArtifactInvocation {
+            current_executable: &current,
+            invocation_directory: &invocation_directory,
+        })
+        .expect("direct Cargo test artifacts must retain an unambiguous profile directory")
+    }
+
+    struct CargoTestArtifactInvocation<'a> {
+        current_executable: &'a Path,
+        invocation_directory: &'a Path,
     }
 
     fn cargo_test_invocation_from_artifact(
-        current_executable: &Path,
-        invocation_directory: &Path,
+        input: CargoTestArtifactInvocation<'_>,
     ) -> Option<CargoTestInvocation> {
-        let profile_directory = current_executable
+        let profile_directory = input
+            .current_executable
             .parent()
             .and_then(Path::parent)
             .expect("test executable is under a Cargo profile directory");
@@ -2181,7 +2189,7 @@ finally:
             config_overrides: Vec::new(),
             unstable_flags: Vec::new(),
             ignore_rust_version: false,
-            invocation_directory: invocation_directory.to_path_buf(),
+            invocation_directory: input.invocation_directory.to_path_buf(),
         })
     }
 
@@ -2996,7 +3004,10 @@ finally:
     fn cargo_test_invocation_rejects_an_ambiguous_direct_debug_artifact() {
         let workspace = Path::new("/synthetic/workspace");
         let executable = Path::new("/synthetic/target/debug/deps/daemon-tools-test");
-        let invocation = cargo_test_invocation_from_artifact(executable, workspace);
+        let invocation = cargo_test_invocation_from_artifact(CargoTestArtifactInvocation {
+            current_executable: executable,
+            invocation_directory: workspace,
+        });
 
         assert_eq!(invocation, None);
     }
@@ -3005,7 +3016,10 @@ finally:
     fn cargo_test_invocation_rejects_an_ambiguous_direct_release_artifact() {
         let workspace = Path::new("/synthetic/workspace");
         let executable = Path::new("/synthetic/target/release/deps/daemon-tools-test");
-        let invocation = cargo_test_invocation_from_artifact(executable, workspace);
+        let invocation = cargo_test_invocation_from_artifact(CargoTestArtifactInvocation {
+            current_executable: executable,
+            invocation_directory: workspace,
+        });
 
         assert_eq!(invocation, None);
     }
@@ -3014,8 +3028,11 @@ finally:
     fn cargo_test_invocation_preserves_an_unambiguous_direct_custom_profile() {
         let workspace = Path::new("/synthetic/workspace");
         let executable = Path::new("/synthetic/target/ci-fast/deps/daemon-tools-test");
-        let invocation = cargo_test_invocation_from_artifact(executable, workspace)
-            .expect("the custom profile directory is unambiguous");
+        let invocation = cargo_test_invocation_from_artifact(CargoTestArtifactInvocation {
+            current_executable: executable,
+            invocation_directory: workspace,
+        })
+        .expect("the custom profile directory is unambiguous");
 
         assert_eq!(invocation.profile, OsStr::new("ci-fast"));
         assert_eq!(invocation.invocation_directory, workspace);
