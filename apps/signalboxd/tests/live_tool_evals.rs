@@ -708,6 +708,8 @@ struct FamilySuite {
         StdMutex<Option<BTreeMap<PathBuf, FilesystemIdentity>>>,
     git_pre_execution_worktree_extended_attributes:
         StdMutex<Option<BTreeMap<PathBuf, ExtendedAttributeSnapshot>>>,
+    git_pre_execution_metadata_extended_attributes:
+        StdMutex<Option<BTreeMap<PathBuf, ExtendedAttributeSnapshot>>>,
     git_pre_execution_index_entries: StdMutex<Option<Vec<GitIndexCompleteEntrySnapshot>>>,
     git_pre_execution_metadata_root_modified_time: StdMutex<Option<SystemTime>>,
     git_pre_execution_metadata_root_identity: StdMutex<Option<FilesystemIdentity>>,
@@ -738,6 +740,8 @@ enum WorkspaceEntrySnapshot {
 struct FilesystemIdentity {
     device: u64,
     inode: u64,
+    user_id: u32,
+    group_id: u32,
     change_time_seconds: i64,
     change_time_nanoseconds: i64,
 }
@@ -749,6 +753,8 @@ fn filesystem_identity(metadata: &fs::Metadata) -> Option<FilesystemIdentity> {
     Some(FilesystemIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
+        user_id: metadata.uid(),
+        group_id: metadata.gid(),
         change_time_seconds: metadata.ctime(),
         change_time_nanoseconds: metadata.ctime_nsec(),
     })
@@ -767,6 +773,7 @@ struct GitFixtureSnapshot {
     worktree_modified_times: BTreeMap<PathBuf, SystemTime>,
     worktree_entry_identities: BTreeMap<PathBuf, FilesystemIdentity>,
     worktree_extended_attributes: BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    metadata_extended_attributes: BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
     metadata_root_kind: GitMetadataEntryKind,
     metadata_root_mode: Option<u32>,
     metadata_root_modified_time: Option<SystemTime>,
@@ -863,6 +870,40 @@ impl From<Time> for GitRecordedTime {
 struct GitExecutionTimeWindow {
     started: GitRecordedTime,
     finished: GitRecordedTime,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FilesystemExecutionTimeWindow {
+    started: SystemTime,
+    finished: SystemTime,
+}
+
+impl FilesystemExecutionTimeWindow {
+    fn contains_modified(self, modified: SystemTime) -> bool {
+        let Ok(started) = self.started.duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        let Ok(finished) = self.finished.duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        let Ok(modified) = modified.duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        (started.as_secs()..=finished.as_secs()).contains(&modified.as_secs())
+    }
+
+    fn contains_change_time(self, identity: FilesystemIdentity) -> bool {
+        let Ok(started) = self.started.duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        let Ok(finished) = self.finished.duration_since(UNIX_EPOCH) else {
+            return false;
+        };
+        let Ok(seconds) = u64::try_from(identity.change_time_seconds) else {
+            return false;
+        };
+        (started.as_secs()..=finished.as_secs()).contains(&seconds)
+    }
 }
 
 impl GitExecutionTimeWindow {
@@ -1061,6 +1102,7 @@ impl FamilySuite {
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
             git_pre_execution_worktree_extended_attributes: StdMutex::new(None),
+            git_pre_execution_metadata_extended_attributes: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
             git_pre_execution_metadata_root_identity: StdMutex::new(None),
@@ -1134,6 +1176,7 @@ impl FamilySuite {
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
             git_pre_execution_worktree_extended_attributes: StdMutex::new(None),
+            git_pre_execution_metadata_extended_attributes: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
             git_pre_execution_metadata_root_identity: StdMutex::new(None),
@@ -1177,6 +1220,7 @@ impl FamilySuite {
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
             git_pre_execution_worktree_extended_attributes: StdMutex::new(None),
+            git_pre_execution_metadata_extended_attributes: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
             git_pre_execution_metadata_root_identity: StdMutex::new(None),
@@ -1303,6 +1347,11 @@ impl FamilySuite {
                 .expect("Git pre-execution worktree-attribute lock is available") =
                 Some(git_worktree_extended_attributes(self.workspace.path())?);
             *self
+                .git_pre_execution_metadata_extended_attributes
+                .lock()
+                .expect("Git pre-execution metadata-attribute lock is available") =
+                Some(git_metadata_extended_attributes(self.workspace.path())?);
+            *self
                 .git_pre_execution_index_entries
                 .lock()
                 .expect("Git pre-execution index lock is available") = Some(
@@ -1428,6 +1477,10 @@ impl FamilySuite {
                     .git_pre_execution_worktree_extended_attributes
                     .lock()
                     .expect("Git pre-execution worktree-attribute lock is available");
+                let pre_execution_metadata_extended_attributes = self
+                    .git_pre_execution_metadata_extended_attributes
+                    .lock()
+                    .expect("Git pre-execution metadata-attribute lock is available");
                 let pre_execution_index_entries = self
                     .git_pre_execution_index_entries
                     .lock()
@@ -1473,6 +1526,8 @@ impl FamilySuite {
                             pre_execution_worktree_entry_identities.as_ref(),
                         pre_execution_worktree_extended_attributes:
                             pre_execution_worktree_extended_attributes.as_ref(),
+                        pre_execution_metadata_extended_attributes:
+                            pre_execution_metadata_extended_attributes.as_ref(),
                         pre_execution_index_entries: pre_execution_index_entries.as_deref(),
                         pre_execution_metadata_root_modified_time:
                             *pre_execution_metadata_root_modified_time,
@@ -1498,6 +1553,7 @@ impl FamilySuite {
                     seed_modified_times: &self.workspace_seed_modified_times,
                     seed_entry_identities: &self.workspace_seed_entry_identities,
                     seed_extended_attributes: &self.workspace_seed_extended_attributes,
+                    execution_window: self.executor.filesystem_execution_window(case.name),
                 },
                 case.name,
                 &arguments,
@@ -1552,6 +1608,11 @@ impl FamilySuite {
         Ok(answer == Some(expected_answer)
             && actual == self.workspace_seed_entries
             && actual_modified_times == expected_modified_times
+            && workspace_created_target_times_match(
+                self.workspace.path(),
+                Path::new(WORKSPACE_ANSWER_PATH),
+                self.executor.filesystem_execution_window(WRITE_FILE_NAME),
+            )?
             && workspace_extended_attributes_match_for_mutation(
                 self.workspace.path(),
                 &self.workspace_seed_extended_attributes,
@@ -1755,6 +1816,8 @@ fn filesystem_entry_identities(
                 FilesystemIdentity {
                     device: metadata.dev(),
                     inode: metadata.ino(),
+                    user_id: metadata.uid(),
+                    group_id: metadata.gid(),
                     change_time_seconds: metadata.ctime(),
                     change_time_nanoseconds: metadata.ctime_nsec(),
                 },
@@ -1795,6 +1858,8 @@ struct GitForcedVerification<'a> {
     pre_execution_worktree_entry_identities: Option<&'a BTreeMap<PathBuf, FilesystemIdentity>>,
     pre_execution_worktree_extended_attributes:
         Option<&'a BTreeMap<PathBuf, ExtendedAttributeSnapshot>>,
+    pre_execution_metadata_extended_attributes:
+        Option<&'a BTreeMap<PathBuf, ExtendedAttributeSnapshot>>,
     pre_execution_index_entries: Option<&'a [GitIndexCompleteEntrySnapshot]>,
     pre_execution_metadata_root_modified_time: Option<SystemTime>,
     pre_execution_metadata_root_identity: Option<FilesystemIdentity>,
@@ -1821,6 +1886,7 @@ fn git_forced_case_passed(
         pre_execution_worktree_modified_times,
         pre_execution_worktree_entry_identities,
         pre_execution_worktree_extended_attributes,
+        pre_execution_metadata_extended_attributes,
         pre_execution_index_entries,
         pre_execution_metadata_root_modified_time,
         pre_execution_metadata_root_identity,
@@ -2114,6 +2180,11 @@ fn git_forced_case_passed(
             root,
             seed_fixture,
             pre_execution_worktree_extended_attributes,
+        )?
+        && git_metadata_extended_attributes_match(
+            root,
+            seed_fixture,
+            pre_execution_metadata_extended_attributes,
         )?)
 }
 
@@ -2399,6 +2470,7 @@ struct WorkspaceForcedVerification<'a> {
     seed_modified_times: &'a BTreeMap<PathBuf, SystemTime>,
     seed_entry_identities: &'a BTreeMap<PathBuf, FilesystemIdentity>,
     seed_extended_attributes: &'a BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 }
 
 fn workspace_forced_case_passed(
@@ -2413,6 +2485,7 @@ fn workspace_forced_case_passed(
         seed_modified_times,
         seed_entry_identities,
         seed_extended_attributes,
+        execution_window,
     } = verification;
     let expected_fields: &[&str] = match name {
         APPLY_PATCH_NAME => &["operations_applied", EVAL_RECEIPT_FIELD],
@@ -2586,6 +2659,10 @@ fn workspace_forced_case_passed(
             root,
             seed_extended_attributes,
             Path::new("patched.txt"),
+        )? && workspace_created_target_times_match(
+            root,
+            Path::new("patched.txt"),
+            execution_window,
         )?),
         EDIT_FILE_NAME => {
             let Some(path) = arguments["path"].as_str() else {
@@ -2625,10 +2702,24 @@ fn workspace_forced_case_passed(
                 root,
                 seed_extended_attributes,
                 Path::new(path),
-            )?)
+            )? && workspace_created_target_times_match(root, Path::new(path), execution_window)?)
         }
         _ => Ok(false),
     }
+}
+
+fn workspace_created_target_times_match(
+    root: &Path,
+    target: &Path,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
+) -> EvalResult<bool> {
+    let metadata = fs::metadata(root.join(target))?;
+    let modified = metadata.modified()?;
+    let identity = filesystem_identity(&metadata);
+    Ok(execution_window.is_some_and(|window| {
+        window.contains_modified(modified)
+            && identity.is_some_and(|identity| window.contains_change_time(identity))
+    }))
 }
 
 fn workspace_modified_times_match_except(
@@ -2674,6 +2765,9 @@ fn entry_identities_match_except(
 ) -> bool {
     let mut expected = expected.clone();
     for path in allowed_paths {
+        if !filesystem_ownership_matches(actual.get(*path), expected.get(*path)) {
+            return false;
+        }
         let mut ancestor = path.parent();
         while let Some(candidate) = ancestor {
             let Some(actual_identity) = actual.get(candidate) else {
@@ -3115,6 +3209,7 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         worktree_modified_times: git_worktree_modified_times(root)?,
         worktree_entry_identities: git_worktree_entry_identities(root)?,
         worktree_extended_attributes: git_worktree_extended_attributes(root)?,
+        metadata_extended_attributes: git_metadata_extended_attributes(root)?,
         metadata_root_kind: git_metadata_root_kind(root)?,
         metadata_root_mode: worktree_mode(repository.path())?,
         metadata_root_modified_time: Some(git_metadata_root_modified_time(root)?),
@@ -3150,6 +3245,15 @@ fn git_metadata_root_kind(root: &Path) -> EvalResult<GitMetadataEntryKind> {
     } else {
         GitMetadataEntryKind::Other
     })
+}
+
+fn git_metadata_extended_attributes(
+    root: &Path,
+) -> EvalResult<BTreeMap<PathBuf, ExtendedAttributeSnapshot>> {
+    let repository = Repository::open(root)?;
+    let mut attributes = filesystem_extended_attributes(repository.path(), None)?;
+    attributes.insert(PathBuf::new(), extended_attributes(repository.path())?);
+    Ok(attributes)
 }
 
 fn git_metadata_root_modified_time(root: &Path) -> EvalResult<SystemTime> {
@@ -3961,6 +4065,8 @@ fn git_static_metadata_entry_identities(
                     FilesystemIdentity {
                         device: metadata.dev(),
                         inode: metadata.ino(),
+                        user_id: metadata.uid(),
+                        group_id: metadata.gid(),
                         change_time_seconds: metadata.ctime(),
                         change_time_nanoseconds: metadata.ctime_nsec(),
                     },
@@ -4190,8 +4296,12 @@ fn git_forced_worktree_entry_identities_match(
         .unwrap_or_else(|| seed_fixture.worktree_entry_identities.clone());
     match case_name {
         GIT_BRANCH_SWITCH_NAME => {
-            actual.remove(Path::new(GIT_SEED_PATH));
-            expected.remove(Path::new(GIT_SEED_PATH));
+            let target = Path::new(GIT_SEED_PATH);
+            if !filesystem_ownership_matches(actual.get(target), expected.get(target)) {
+                return Ok(false);
+            }
+            actual.remove(target);
+            expected.remove(target);
         }
         GIT_BRANCH_CREATE_NAME
         | GIT_CREATE_COMMIT_NAME
@@ -4204,6 +4314,19 @@ fn git_forced_worktree_entry_identities_match(
     Ok(actual == expected)
 }
 
+fn filesystem_ownership_matches(
+    actual: Option<&FilesystemIdentity>,
+    expected: Option<&FilesystemIdentity>,
+) -> bool {
+    match (actual, expected) {
+        (Some(actual), Some(expected)) => {
+            actual.user_id == expected.user_id && actual.group_id == expected.group_id
+        }
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
 fn git_forced_worktree_extended_attributes_match(
     root: &Path,
     seed_fixture: &GitFixtureSnapshot,
@@ -4213,6 +4336,25 @@ fn git_forced_worktree_extended_attributes_match(
         .cloned()
         .unwrap_or_else(|| seed_fixture.worktree_extended_attributes.clone());
     Ok(git_worktree_extended_attributes(root)? == expected)
+}
+
+fn git_metadata_extended_attributes_match(
+    root: &Path,
+    seed_fixture: &GitFixtureSnapshot,
+    pre_execution: Option<&BTreeMap<PathBuf, ExtendedAttributeSnapshot>>,
+) -> EvalResult<bool> {
+    let actual = git_metadata_extended_attributes(root)?;
+    let baseline = pre_execution.unwrap_or(&seed_fixture.metadata_extended_attributes);
+    let expected = actual
+        .keys()
+        .map(|path| {
+            (
+                path.clone(),
+                baseline.get(path).cloned().unwrap_or_default(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    Ok(actual == expected)
 }
 
 fn git_forced_worktree_matches(
@@ -4581,6 +4723,8 @@ fn git_natural_state_passed_in_window(
     let complete_worktree_attribute_inventory_matches =
         git_worktree_extended_attributes(root)? == seed_fixture.worktree_extended_attributes;
     let metadata_top_level_matches = git_natural_metadata_top_level_matches(root, seed_fixture)?;
+    let metadata_extended_attributes_match =
+        git_metadata_extended_attributes_match(root, seed_fixture, None)?;
     Ok(head_remains_on_seeded_branch
         && seeded_branch_advanced
         && message_matches
@@ -4604,7 +4748,8 @@ fn git_natural_state_passed_in_window(
         && complete_worktree_time_inventory_matches
         && complete_worktree_identity_inventory_matches
         && complete_worktree_attribute_inventory_matches
-        && metadata_top_level_matches)
+        && metadata_top_level_matches
+        && metadata_extended_attributes_match)
 }
 
 fn git_natural_objects_match(
@@ -4846,6 +4991,7 @@ enum FamilyExecutor {
 struct SharedFamilyExecutor {
     inner: Arc<Mutex<FamilyExecutor>>,
     git_execution_windows: Arc<StdMutex<BTreeMap<String, GitExecutionTimeWindow>>>,
+    filesystem_execution_windows: Arc<StdMutex<BTreeMap<String, FilesystemExecutionTimeWindow>>>,
 }
 
 impl SharedFamilyExecutor {
@@ -4853,6 +4999,7 @@ impl SharedFamilyExecutor {
         Self {
             inner: Arc::new(Mutex::new(inner)),
             git_execution_windows: Arc::new(StdMutex::new(BTreeMap::new())),
+            filesystem_execution_windows: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }
 
@@ -4868,6 +5015,25 @@ impl SharedFamilyExecutor {
         self.git_execution_windows
             .lock()
             .expect("Git execution-window lock is available")
+            .insert(name.to_owned(), window);
+    }
+
+    fn filesystem_execution_window(&self, name: &str) -> Option<FilesystemExecutionTimeWindow> {
+        self.filesystem_execution_windows
+            .lock()
+            .expect("filesystem execution-window lock is available")
+            .get(name)
+            .copied()
+    }
+
+    fn record_filesystem_execution_window(
+        &self,
+        name: &str,
+        window: FilesystemExecutionTimeWindow,
+    ) {
+        self.filesystem_execution_windows
+            .lock()
+            .expect("filesystem execution-window lock is available")
             .insert(name.to_owned(), window);
     }
 }
@@ -4928,6 +5094,11 @@ impl ToolExecutor for SharedFamilyExecutor {
         .then(current_git_recorded_time)
         .transpose()
         .map_err(FamilyExecutorError::new)?;
+        let filesystem_execution_started = matches!(
+            name.as_str(),
+            APPLY_PATCH_NAME | EDIT_FILE_NAME | WRITE_FILE_NAME
+        )
+        .then(SystemTime::now);
         let receipt_binding = invocation.clone();
         let mut inner = self.inner.lock().await;
         let evidence = match &mut *inner {
@@ -4963,7 +5134,16 @@ impl ToolExecutor for SharedFamilyExecutor {
             self.git_execution_windows
                 .lock()
                 .expect("Git execution-window lock is available")
-                .insert(name, GitExecutionTimeWindow { started, finished });
+                .insert(name.clone(), GitExecutionTimeWindow { started, finished });
+        }
+        if let Some(started) = filesystem_execution_started {
+            self.record_filesystem_execution_window(
+                &name,
+                FilesystemExecutionTimeWindow {
+                    started,
+                    finished: SystemTime::now(),
+                },
+            );
         }
         if evidence.correlation() != receipt_binding.correlation() {
             return Err(FamilyExecutorError::new(io::Error::other(
@@ -8970,6 +9150,44 @@ fn forced_git_branch_switch_attribute_gate_rejects_target_drift() -> EvalResult 
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_git_metadata_attribute_gate_rejects_index_drift() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_STAGE_NAME)?;
+    let pre_execution = suite
+        .git_pre_execution_metadata_extended_attributes
+        .lock()
+        .expect("Git pre-execution metadata-attribute lock is available");
+    let repository = Repository::open(suite.workspace.path())?;
+    let relative = Path::new(GIT_INDEX_PATH);
+    let target = repository.path().join(relative);
+    assert!(git_metadata_extended_attributes_match(
+        suite.workspace.path(),
+        &suite.git_seed_fixture,
+        pre_execution.as_ref(),
+    )?);
+    rustix::fs::setxattr(
+        &target,
+        SYNTHETIC_UNEXPECTED_XATTR_NAME,
+        SYNTHETIC_UNEXPECTED_XATTR_VALUE,
+        rustix::fs::XattrFlags::CREATE,
+    )?;
+
+    assert_ne!(
+        git_metadata_extended_attributes(suite.workspace.path())?[relative],
+        pre_execution
+            .as_ref()
+            .expect("the Git stage fixture has a captured metadata-attribute inventory")[relative]
+    );
+    assert!(!git_metadata_extended_attributes_match(
+        suite.workspace.path(),
+        &suite.git_seed_fixture,
+        pre_execution.as_ref(),
+    )?);
+    Ok(())
+}
+
 #[test]
 fn forced_git_branch_switch_verifier_rejects_rewriting_the_base_branch() -> EvalResult {
     let suite = FamilySuite::git()?;
@@ -10753,11 +10971,19 @@ fn forced_workspace_write_verifier_accepts_the_private_creation_mode() -> EvalRe
         .as_str()
         .expect("the workspace write fixture has content");
     let target = suite.workspace.path().join(path);
+    let started = SystemTime::now();
     fs::write(&target, content)?;
     fs::set_permissions(
         &target,
         fs::Permissions::from_mode(WORKSPACE_PRIVATE_CREATION_MODE),
     )?;
+    suite.executor.record_filesystem_execution_window(
+        WRITE_FILE_NAME,
+        FilesystemExecutionTimeWindow {
+            started,
+            finished: SystemTime::now(),
+        },
+    );
     let result = serde_json::json!({
         "path": path,
         "bytes_written": content.len(),
@@ -10767,6 +10993,53 @@ fn forced_workspace_write_verifier_accepts_the_private_creation_mode() -> EvalRe
     .to_string();
 
     assert!(suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_created_target_time_gate_rejects_a_pre_execution_mtime() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let target = Path::new("created-during-execution.txt");
+    let started = SystemTime::now();
+    fs::write(suite.workspace.path().join(target), WORKSPACE_ANSWER)?;
+    let window = FilesystemExecutionTimeWindow {
+        started,
+        finished: SystemTime::now(),
+    };
+    assert!(workspace_created_target_times_match(
+        suite.workspace.path(),
+        target,
+        Some(window),
+    )?);
+    fs::File::open(suite.workspace.path().join(target))?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+
+    assert!(!workspace_created_target_times_match(
+        suite.workspace.path(),
+        target,
+        Some(window),
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_mutation_identity_gate_rejects_changed_target_ownership() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let target = Path::new(WORKSPACE_SEED_PATH);
+    let mut actual = suite.workspace_seed_entry_identities.clone();
+    let changed_group_id = actual[target].group_id.wrapping_add(1);
+    actual
+        .get_mut(target)
+        .expect("the workspace seed has a filesystem identity")
+        .group_id = changed_group_id;
+
+    assert!(!entry_identities_match_except(
+        actual,
+        &suite.workspace_seed_entry_identities,
+        &[target],
+    ));
     Ok(())
 }
 
@@ -12160,11 +12433,19 @@ fn workspace_natural_state_rejects_a_collateral_directory() -> EvalResult {
 fn workspace_natural_state_accepts_the_private_answer_mode() -> EvalResult {
     let suite = FamilySuite::workspace()?;
     let answer = suite.workspace.path().join(WORKSPACE_ANSWER_PATH);
+    let started = SystemTime::now();
     fs::write(&answer, WORKSPACE_ANSWER)?;
     fs::set_permissions(
         &answer,
         fs::Permissions::from_mode(WORKSPACE_PRIVATE_CREATION_MODE),
     )?;
+    suite.executor.record_filesystem_execution_window(
+        WRITE_FILE_NAME,
+        FilesystemExecutionTimeWindow {
+            started,
+            finished: SystemTime::now(),
+        },
+    );
     let snapshot = successful_workspace_natural_snapshot();
 
     assert!(suite.natural_state_passed(&snapshot)?);
