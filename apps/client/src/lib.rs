@@ -3769,6 +3769,11 @@ async fn await_turn_terminal(
                         }
                         if wait_mode == TurnWaitMode::QueuedTurn {
                             queued_turn_blocker_recovery(&mut refreshed, turn_id)?;
+                            queued_turn_runner_recovery(
+                                &event,
+                                cursor.value(),
+                                refreshed.cursor(),
+                            )?;
                         }
                         if !runner_recovery_transition(&event) {
                             return Err(ClientError::Protocol(
@@ -3929,6 +3934,27 @@ fn runner_recovery_transition(event: &SessionEvent) -> bool {
             ..
         }
     )
+}
+
+/// Rejects only when the authoritative reread closes at the pre-pin loss
+/// event; a later snapshot no longer authenticates that event as current.
+fn queued_turn_runner_recovery(
+    event: &SessionEvent,
+    event_cursor: u64,
+    snapshot_cursor: u64,
+) -> Result<(), ClientError> {
+    if event_cursor == snapshot_cursor
+        && matches!(
+            event,
+            SessionEvent::RunnerStateTransition {
+                state: RunnerStateTransitionState::RunnerLostBeforePin,
+                ..
+            }
+        )
+    {
+        return Err(ClientError::RunnerRecoveryRequired);
+    }
+    Ok(())
 }
 
 fn selected_turn_recovery_transition(event: &SessionEvent, selected_turn: CanonicalUuid) -> bool {
@@ -5379,16 +5405,16 @@ mod tests {
         decode_goal_mutation_receipt, delegation_rejection_matches, descendant_scope,
         import_conversation_file, imported, model_call_recovery_transition,
         open_scanned_import_source, placement_update_receipt_matches,
-        placement_update_rejection_matches, read_delegation_content_file, read_goal_text_file,
-        read_import_file, read_input, read_review_json_file, read_system_prompt_file,
-        reconcile_turn, replace_session_model, replacement_receipt_settings_match, review,
-        review_concern_state_is_coherent, review_finding_event_status,
-        review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
-        review_pass_completion_is_coherent, review_publication_state_is_coherent,
-        review_repair_state_is_coherent, run, search, selected_turn_recovery_transition,
-        session_recovery_transition, socket_path, source_fits_single_shot_import, stop_turn,
-        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
-        tool_recovery_transition,
+        placement_update_rejection_matches, queued_turn_runner_recovery,
+        read_delegation_content_file, read_goal_text_file, read_import_file, read_input,
+        read_review_json_file, read_system_prompt_file, reconcile_turn, replace_session_model,
+        replacement_receipt_settings_match, review, review_concern_state_is_coherent,
+        review_finding_event_status, review_judgment_effect_state_is_coherent,
+        review_judgment_plan_state_is_coherent, review_pass_completion_is_coherent,
+        review_publication_state_is_coherent, review_repair_state_is_coherent, run, search,
+        selected_turn_recovery_transition, session_recovery_transition, socket_path,
+        source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{child_lifecycle_terminalization, error::ClientError, presentation::Output};
 
@@ -5398,6 +5424,18 @@ mod tests {
 
     fn followed_session() -> CanonicalUuid {
         CanonicalUuid::from_uuid(Uuid::from_u128(FOLLOWED_SESSION_IDENTITY))
+    }
+
+    /// One pre-pin loss event whose identities are arbitrary fixture material.
+    fn pre_pin_runner_loss_event() -> SessionEvent {
+        SessionEvent::RunnerStateTransition {
+            runner_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            placement_revision: RunnerPlacementRevision::try_new(1)
+                .expect("the fixture placement revision is positive"),
+            sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: None,
+            state: RunnerStateTransitionState::RunnerLostBeforePin,
+        }
     }
 
     fn delegation_rejection_expectation(
@@ -6832,6 +6870,25 @@ mod tests {
             &event,
             CanonicalUuid::from_uuid(Uuid::from_u128(3))
         ));
+    }
+
+    #[test]
+    fn queued_send_stops_on_current_pre_pin_runner_loss() {
+        const CURRENT_CURSOR: u64 = 1;
+        let event = pre_pin_runner_loss_event();
+        let result = queued_turn_runner_recovery(&event, CURRENT_CURSOR, CURRENT_CURSOR);
+
+        assert!(matches!(result, Err(ClientError::RunnerRecoveryRequired)));
+    }
+
+    #[test]
+    fn queued_send_ignores_pre_pin_runner_loss_superseded_in_snapshot() {
+        const LOSS_CURSOR: u64 = 1;
+        const REPLACEMENT_CURSOR: u64 = 2;
+        let event = pre_pin_runner_loss_event();
+        let result = queued_turn_runner_recovery(&event, LOSS_CURSOR, REPLACEMENT_CURSOR);
+
+        assert!(result.is_ok());
     }
 
     #[test]
