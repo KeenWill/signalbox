@@ -18,9 +18,10 @@ use signalbox_process_protocol::{
     ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
     ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
     ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
-    ReviewTargetSubject, ReviewWorkflow, RunnerSandboxProfile, RunnerStateTransitionState,
-    SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState,
-    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance,
+    ReviewTargetSubject, ReviewWorkflow, RunnerConnectionHealth, RunnerProjection,
+    RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
+    RunnerStateTransitionState, SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision,
+    ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance,
 };
 
 use crate::{
@@ -1358,6 +1359,7 @@ impl<'a> Output<'a> {
         let mut rendered_snapshot = tempfile::tempfile()?;
         {
             let mut staged = Output::new(&mut rendered_snapshot, &mut *self.stderr, self.raw);
+            staged.snapshot_runner(snapshot.runner())?;
             staged.render_snapshot(snapshot, None, SnapshotSelection::All, true)?;
             staged.render_usage(snapshot)?;
         }
@@ -1371,7 +1373,67 @@ impl<'a> Output<'a> {
         snapshot: &mut TranscriptSnapshot,
         displayed: &mut SnapshotIdentitySet,
     ) -> Result<(), ClientError> {
+        self.snapshot_runner(snapshot.runner())?;
         self.render_snapshot(snapshot, Some(displayed), SnapshotSelection::All, true)
+    }
+
+    fn snapshot_runner(&mut self, runner: Option<&RunnerProjection>) -> io::Result<()> {
+        let Some(runner) = runner else {
+            return Ok(());
+        };
+        write!(self.stdout, "runner_snapshot selector=")?;
+        match runner.selector() {
+            RunnerProjectionSelector::Runner { runner_id } => {
+                write!(self.stdout, "runner selector_runner={runner_id}")?;
+            }
+            RunnerProjectionSelector::CapabilityClass { name } => write!(
+                self.stdout,
+                "capability_class selector_capability={}",
+                self.render_field(name.as_str(), TextField::DelimitedOnLine)
+            )?,
+        }
+        if let Some(runner_id) = runner.runner_id() {
+            write!(self.stdout, " runner={runner_id}")?;
+        }
+        write!(
+            self.stdout,
+            " placement_revision={} sandbox={}",
+            runner.placement_revision().value(),
+            runner_sandbox_profile(runner.sandbox_profile())
+        )?;
+        if let Some(profile) = runner.credential_profile() {
+            write!(
+                self.stdout,
+                " credential_profile={}",
+                self.render_field(profile.as_str(), TextField::DelimitedOnLine)
+            )?;
+        }
+        if let Some(repository) = runner.repository() {
+            write!(
+                self.stdout,
+                " repository={}",
+                self.render_field(repository.as_str(), TextField::DelimitedOnLine)
+            )?;
+        }
+        if let Some(directory) = runner.working_directory() {
+            write!(
+                self.stdout,
+                " working_directory={}",
+                self.render_field(directory.as_str(), TextField::DelimitedOnLine)
+            )?;
+        }
+        if let Some(health) = runner.connection_health() {
+            write!(
+                self.stdout,
+                " connection_health={}",
+                runner_connection_health(health)
+            )?;
+        }
+        writeln!(
+            self.stdout,
+            " state={}",
+            runner_projection_state(runner.state())
+        )
     }
 
     pub(crate) fn terminal_material(
@@ -2727,6 +2789,25 @@ const fn runner_sandbox_profile(profile: RunnerSandboxProfile) -> &'static str {
     }
 }
 
+const fn runner_connection_health(health: RunnerConnectionHealth) -> &'static str {
+    match health {
+        RunnerConnectionHealth::Connected => "connected",
+        RunnerConnectionHealth::Suspect => "suspect",
+        RunnerConnectionHealth::Shutdown => "shutdown",
+        RunnerConnectionHealth::Lost => "lost",
+    }
+}
+
+const fn runner_projection_state(state: RunnerProjectionState) -> &'static str {
+    match state {
+        RunnerProjectionState::Unpinned => "unpinned",
+        RunnerProjectionState::Pinned => "pinned",
+        RunnerProjectionState::RunnerLostBeforePin => "runner_lost_before_pin",
+        RunnerProjectionState::RunnerLost => "runner_lost",
+        RunnerProjectionState::RunnerAbandoned => "runner_abandoned",
+    }
+}
+
 const fn runner_state_transition_state(state: RunnerStateTransitionState) -> &'static str {
     match state {
         RunnerStateTransitionState::Pinned => "pinned",
@@ -3031,7 +3112,9 @@ mod tests {
         ImportedTextPreview, InputContent, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
         ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ReviewDiffSide,
         ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
-        ReviewTargetSnapshot, ReviewTargetSubject, RunnerPlacementRevision, RunnerSandboxProfile,
+        ReviewTargetSnapshot, ReviewTargetSubject, RunnerCapabilityClass, RunnerConnectionHealth,
+        RunnerCredentialProfileName, RunnerPlacementRevision, RunnerProjection,
+        RunnerProjectionSelector, RunnerProjectionState, RunnerRepositoryKey, RunnerSandboxProfile,
         RunnerStateTransitionState, RunnerWorkingDirectory, ServerMessage, SessionEvent,
         ToolApprovalEventDecider, ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry,
         TurnState, UsageProvenance,
@@ -3570,6 +3653,54 @@ mod tests {
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         assert!(rendered.contains("state=queued"));
         assert!(rendered.contains("queued user text"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn followed_snapshot_renders_its_complete_authoritative_runner_projection() {
+        let projection = RunnerProjection::try_new(
+            RunnerProjectionSelector::CapabilityClass {
+                name: RunnerCapabilityClass::try_new(String::from("linux.workspace"))
+                    .expect("the fixture capability class is valid"),
+            },
+            Some(wire_uuid(2)),
+            RunnerPlacementRevision::try_new(3)
+                .expect("the fixture placement revision is positive"),
+            RunnerSandboxProfile::WorkspaceRestricted,
+            Some(
+                RunnerCredentialProfileName::try_new(String::from("readonly"))
+                    .expect("the fixture credential profile is valid"),
+            ),
+            Some(
+                RunnerRepositoryKey::try_new(String::from("signalbox"))
+                    .expect("the fixture repository key is valid"),
+            ),
+            Some(
+                RunnerWorkingDirectory::try_new(String::from("workspace root\nproject"))
+                    .expect("the fixture working directory is valid"),
+            ),
+            Some(RunnerConnectionHealth::Suspect),
+            RunnerProjectionState::Pinned,
+        )
+        .expect("the fixture projection is coherent");
+        let mut snapshot = TranscriptSnapshot::from_messages_with_runner(
+            9,
+            Some(projection),
+            std::iter::empty::<ServerMessage>(),
+        )
+        .expect("test snapshot must spool");
+        let mut displayed = SnapshotIdentitySet::new().expect("identity spool must open");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .followed_snapshot(&mut snapshot, &mut displayed)
+            .expect("runner snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            runner_snapshot selector=capability_class selector_capability=linux.workspace runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted credential_profile=readonly repository=signalbox working_directory=workspace\u{20}root\u{a}project connection_health=suspect state=pinned
+        "#]]
+        .assert_eq(&rendered);
         assert!(stderr.is_empty());
     }
 

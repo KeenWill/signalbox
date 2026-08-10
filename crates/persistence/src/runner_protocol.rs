@@ -24,18 +24,19 @@ use signalbox_domain::{
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerId,
     RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseLoss,
     RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
-    RunnerLostBeforePin, RunnerPlacementReconstitutionHistory, RunnerRepositoryEntry,
-    RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass,
-    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
-    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
-    SessionRunnerPlacementState, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd, ToolAttemptId,
-    ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind, ToolName,
-    ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
-    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceBranchName,
-    WorkspaceCapability, WorkspaceManifestId, WorkspaceRecovery, WorkspaceRelativePath,
-    WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
+    RunnerLostBeforePin, RunnerPlacementReconstitutionHistory, RunnerPrePinReplacementHistory,
+    RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
+    RunnerToolPermissionOverrides, RunnerWorkingDirectory, SessionId, SessionRunnerPin,
+    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind,
+    ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
+    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
+    WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceManifestId,
+    WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement,
+    WorkspaceRevision,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -4008,7 +4009,22 @@ async fn decode_placement(
     let placement_revision = decode_generation(row.decode_column("placement_revision")?)?;
     let request = decode_placement_request(connection, row).await?;
     let permission_overrides = request.permission_overrides.clone();
+    let event_kind: String = row.decode_column("event_kind")?;
     let state_kind: String = row.decode_column("state_kind")?;
+    let event_matches_state = match state_kind.as_str() {
+        "unpinned" => matches!(event_kind.as_str(), "created" | "pre_pin_replaced"),
+        "pinned" => matches!(
+            event_kind.as_str(),
+            "pinned" | "runner_replaced" | "profile_replaced"
+        ),
+        "runner_lost_before_pin" => event_kind == "runner_lost_before_pin",
+        "runner_lost" => event_kind == "runner_lost",
+        "runner_abandoned" => event_kind == "abandoned",
+        _ => false,
+    };
+    if !event_matches_state {
+        return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+    }
     let lost_runner = row
         .decode_column::<Option<Uuid>>("lost_runner_id")?
         .map(runner_id);
@@ -4280,7 +4296,7 @@ async fn load_placement_reconstitution_history(
     if origins.len() != expected_origins {
         return Err(RunnerProtocolCorruption::MissingCanonicalPlacement.into());
     }
-    let mut history = RunnerPlacementReconstitutionHistory::Initial;
+    let mut replacements = Vec::with_capacity(origins.len());
     for (index, origin) in origins.iter().enumerate() {
         let current_revision = u64::try_from(index)
             .ok()
@@ -4331,15 +4347,16 @@ async fn load_placement_reconstitution_history(
             return Err(RunnerProtocolCorruption::CrossWiredReference.into());
         }
         let replacement_request = decode_placement_request(connection, origin).await?;
-        history = RunnerPlacementReconstitutionHistory::PrePinReplacement {
-            predecessor_history: Box::new(history),
+        replacements.push(RunnerPrePinReplacementHistory {
             prior_revision,
             lost_runner,
-            prior_request: Box::new(prior_request),
-            replacement_request: Box::new(replacement_request),
-        };
+            prior_request,
+            replacement_request,
+        });
     }
-    Ok(history)
+    Ok(RunnerPlacementReconstitutionHistory::PrePinReplacements(
+        replacements,
+    ))
 }
 
 fn decode_provisioned_workspace(
@@ -4997,15 +5014,20 @@ async fn prospective_placement_reconstitution_history(
         .decode_column::<Option<Uuid>>("lost_runner_id")?
         .map(runner_id)
         .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-    Ok(RunnerPlacementReconstitutionHistory::PrePinReplacement {
-        predecessor_history: Box::new(
-            load_placement_reconstitution_history(connection, prior).await?,
-        ),
+    let history = load_placement_reconstitution_history(connection, prior).await?;
+    let mut replacements = match history {
+        RunnerPlacementReconstitutionHistory::Initial => Vec::new(),
+        RunnerPlacementReconstitutionHistory::PrePinReplacements(replacements) => replacements,
+    };
+    replacements.push(RunnerPrePinReplacementHistory {
         prior_revision,
         lost_runner,
-        prior_request: Box::new(decode_placement_request(connection, prior).await?),
-        replacement_request: Box::new(placement.request().clone()),
-    })
+        prior_request: decode_placement_request(connection, prior).await?,
+        replacement_request: placement.request().clone(),
+    });
+    Ok(RunnerPlacementReconstitutionHistory::PrePinReplacements(
+        replacements,
+    ))
 }
 
 fn grant_input(grant: &CredentialProfileGrant) -> CredentialProfileGrantReconstitutionInput {
