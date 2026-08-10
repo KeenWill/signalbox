@@ -1866,6 +1866,7 @@ mod tests {
     #[derive(Debug, Eq, PartialEq)]
     struct CargoTestInvocation {
         profile: OsString,
+        target: Option<OsString>,
         config_overrides: Vec<OsString>,
         unstable_flags: Vec<OsString>,
         ignore_rust_version: bool,
@@ -1941,6 +1942,9 @@ mod tests {
     const CARGO_PROGRAM_STEM: &str = "cargo";
     const CARGO_PROFILE_OPTION: &str = "--profile";
     const CARGO_PROFILE_OPTION_PREFIX: &str = "--profile=";
+    const CARGO_TARGET_OPTION: &str = "--target";
+    const CARGO_TARGET_OPTION_PREFIX: &str = "--target=";
+    const CARGO_ARGUMENT_SEPARATOR: &str = "--";
     const CARGO_CONFIG_OPTION: &str = "--config";
     const CARGO_CONFIG_OPTION_PREFIX: &str = "--config=";
     const CARGO_MANIFEST_PATH_OPTION: &str = "--manifest-path";
@@ -2089,6 +2093,7 @@ finally:
     ) -> BridgeArtifactSelection {
         let current = std::env::current_exe().expect("test executable path is available");
         let known_targets = rustc_target_names(&invocation.invocation_directory);
+        reject_custom_cargo_target(invocation.target.as_deref(), &known_targets);
         let configured_target_dir = configured_cargo_target_dir(ConfiguredCargoTargetDirLookup {
             current_executable: &current,
             invocation_directory: &invocation.invocation_directory,
@@ -2185,6 +2190,7 @@ finally:
         };
         Some(CargoTestInvocation {
             profile,
+            target: None,
             config_overrides: Vec::new(),
             unstable_flags: Vec::new(),
             ignore_rust_version: false,
@@ -2210,6 +2216,7 @@ finally:
             return None;
         }
         let mut profile = None;
+        let mut target = None;
         let mut config_overrides = Vec::new();
         let mut unstable_flags = Vec::new();
         let mut ignore_rust_version = false;
@@ -2273,6 +2280,23 @@ finally:
                 index += 2;
                 continue;
             }
+            if argument == OsStr::new(CARGO_ARGUMENT_SEPARATOR) {
+                break;
+            }
+            if argument == OsStr::new(CARGO_TARGET_OPTION) {
+                target = Some(arguments.get(index + 1)?.to_os_string());
+                index += 2;
+                continue;
+            }
+            if let Some(argument_target) = argument
+                .to_str()
+                .and_then(|argument| argument.strip_prefix(CARGO_TARGET_OPTION_PREFIX))
+                .filter(|target| !target.is_empty())
+            {
+                target = Some(OsString::from(argument_target));
+                index += 1;
+                continue;
+            }
             if let Some(argument_profile) = argument
                 .to_str()
                 .and_then(|argument| argument.strip_prefix(CARGO_PROFILE_OPTION_PREFIX))
@@ -2294,11 +2318,20 @@ finally:
         }
         found_test_subcommand.then(|| CargoTestInvocation {
             profile: profile.unwrap_or_else(|| OsString::from(CARGO_TEST_PROFILE)),
+            target,
             config_overrides,
             unstable_flags,
             ignore_rust_version,
             invocation_directory: invocation_directory.to_path_buf(),
         })
+    }
+
+    #[track_caller]
+    fn reject_custom_cargo_target(target: Option<&OsStr>, known_targets: &BTreeSet<OsString>) {
+        assert!(
+            target.is_none_or(|target| known_targets.contains(target)),
+            "custom Cargo target specifications are unsupported by the nested bridge build"
+        );
     }
 
     fn cargo_global_option_takes_value(argument: &OsStr) -> bool {
@@ -3210,6 +3243,29 @@ finally:
             expected_target: Some(SYNTHETIC_CARGO_TARGET),
             recognized_target: Some(SYNTHETIC_CARGO_TARGET),
         });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "custom Cargo target specifications are unsupported by the nested bridge build"
+    )]
+    fn bridge_artifact_selection_rejects_a_custom_target_reusing_a_builtin_name() {
+        let custom_target = Path::new("synthetic-target-specifications")
+            .join(format!("{SYNTHETIC_CARGO_TARGET}.json"));
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new(CARGO_TEST_SUBCOMMAND),
+            OsStr::new(CARGO_TARGET_OPTION),
+            custom_target.as_os_str(),
+        ];
+        let invocation = cargo_test_invocation_from_arguments(&arguments, Path::new("."))
+            .expect("the synthetic Cargo test invocation is admitted");
+
+        assert_eq!(
+            invocation.target.as_deref(),
+            Some(custom_target.as_os_str())
+        );
+        reject_custom_cargo_target(invocation.target.as_deref(), &synthetic_known_targets());
     }
 
     #[test]
