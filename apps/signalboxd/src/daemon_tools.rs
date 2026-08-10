@@ -1962,9 +1962,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     const SYNTHETIC_MCP_BRIDGE_PATH: &str = "synthetic-claude-mcp-bridge";
     #[cfg(target_os = "linux")]
-    const SYNTHETIC_COMPILER_WRAPPER_PATH: &str = "./synthetic-compiler-wrapper";
-    #[cfg(target_os = "linux")]
-    const SYNTHETIC_COMPILER_WRAPPER_SCRIPT: &str = "#!/bin/sh\nexec \"$@\"\n";
     #[cfg(target_os = "linux")]
     const CLAUDE_CATALOG_CAPTURE_SCRIPT: &str = r#"#!/bin/sh
 set -eu
@@ -2115,12 +2112,13 @@ finally:
         let invocation_directory =
             std::env::current_dir().expect("direct test invocation directory is available");
         cargo_test_invocation_from_artifact(&current, &invocation_directory)
+            .expect("direct Cargo test artifacts must retain an unambiguous profile directory")
     }
 
     fn cargo_test_invocation_from_artifact(
         current_executable: &Path,
         invocation_directory: &Path,
-    ) -> CargoTestInvocation {
+    ) -> Option<CargoTestInvocation> {
         let profile_directory = current_executable
             .parent()
             .and_then(Path::parent)
@@ -2128,18 +2126,17 @@ finally:
         let profile_name = profile_directory
             .file_name()
             .expect("Cargo profile directory has a name");
-        let profile = match profile_name.to_str() {
-            Some(CARGO_DEBUG_PROFILE_DIRECTORY) => OsString::from(CARGO_TEST_PROFILE),
-            Some(CARGO_RELEASE_PROFILE) => OsString::from(CARGO_RELEASE_PROFILE),
-            _ => profile_name.to_os_string(),
+        let profile = match profile_name.to_str()? {
+            CARGO_DEBUG_PROFILE_DIRECTORY | CARGO_RELEASE_PROFILE => return None,
+            profile => OsString::from(profile),
         };
-        CargoTestInvocation {
+        Some(CargoTestInvocation {
             profile,
             config_overrides: Vec::new(),
             unstable_flags: Vec::new(),
             ignore_rust_version: false,
             invocation_directory: invocation_directory.to_path_buf(),
-        }
+        })
     }
 
     #[cfg(target_os = "linux")]
@@ -2950,12 +2947,31 @@ finally:
     }
 
     #[test]
-    fn cargo_test_invocation_falls_back_to_the_running_debug_artifact() {
+    fn cargo_test_invocation_rejects_an_ambiguous_direct_debug_artifact() {
         let workspace = Path::new("/synthetic/workspace");
         let executable = Path::new("/synthetic/target/debug/deps/daemon-tools-test");
         let invocation = cargo_test_invocation_from_artifact(executable, workspace);
 
-        assert_eq!(invocation.profile, OsStr::new(CARGO_TEST_PROFILE));
+        assert_eq!(invocation, None);
+    }
+
+    #[test]
+    fn cargo_test_invocation_rejects_an_ambiguous_direct_release_artifact() {
+        let workspace = Path::new("/synthetic/workspace");
+        let executable = Path::new("/synthetic/target/release/deps/daemon-tools-test");
+        let invocation = cargo_test_invocation_from_artifact(executable, workspace);
+
+        assert_eq!(invocation, None);
+    }
+
+    #[test]
+    fn cargo_test_invocation_preserves_an_unambiguous_direct_custom_profile() {
+        let workspace = Path::new("/synthetic/workspace");
+        let executable = Path::new("/synthetic/target/ci-fast/deps/daemon-tools-test");
+        let invocation = cargo_test_invocation_from_artifact(executable, workspace)
+            .expect("the custom profile directory is unambiguous");
+
+        assert_eq!(invocation.profile, OsStr::new("ci-fast"));
         assert_eq!(invocation.invocation_directory, workspace);
         assert!(invocation.config_overrides.is_empty());
         assert!(invocation.unstable_flags.is_empty());
@@ -4018,36 +4034,34 @@ finally:
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "subprocess fixture for direct libtest invocation provenance"]
+    #[ignore = "subprocess fixture for direct libtest invocation rejection"]
     fn bridge_build_direct_invocation_fixture() {
         assert!(ensure_claude_mcp_bridge_executable().is_file());
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn bridge_build_supports_a_directly_invoked_test_binary() {
+    fn bridge_build_rejects_an_ambiguous_directly_invoked_test_binary() {
         let current = std::env::current_exe().expect("test executable path is available");
         let invocation_directory =
             tempfile::tempdir().expect("synthetic direct invocation directory exists");
-        let compiler_wrapper = invocation_directory
-            .path()
-            .join(SYNTHETIC_COMPILER_WRAPPER_PATH);
-        fs::write(&compiler_wrapper, SYNTHETIC_COMPILER_WRAPPER_SCRIPT)
-            .expect("synthetic compiler wrapper is written");
-        fs::set_permissions(&compiler_wrapper, fs::Permissions::from_mode(0o700))
-            .expect("synthetic compiler wrapper is executable");
-        let status = Command::new(current)
+        let output = Command::new(current)
             .arg("daemon_tools::tests::bridge_build_direct_invocation_fixture")
             .args(["--exact", "--ignored"])
             .current_dir(invocation_directory.path())
-            .env("RUSTC_WRAPPER", SYNTHETIC_COMPILER_WRAPPER_PATH)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
             .expect("directly invoked bridge-build fixture exits");
+        let stdout = String::from_utf8_lossy(&output.stdout);
 
-        assert!(status.success());
+        assert!(!output.status.success());
+        assert!(
+            stdout.contains(
+                "direct Cargo test artifacts must retain an unambiguous profile directory"
+            )
+        );
     }
 
     #[cfg(unix)]
@@ -5698,6 +5712,31 @@ finally:
     }
 
     #[cfg(target_os = "linux")]
+    #[track_caller]
+    fn assert_mcp_invalid_params_response(response: &serde_json::Value, expected_id: u64) {
+        let envelope = response
+            .as_object()
+            .expect("the MCP rejection is a JSON-RPC object");
+        let error = response["error"]
+            .as_object()
+            .expect("the MCP rejection carries an error object");
+
+        assert_eq!(envelope.len(), 3);
+        assert_eq!(response["jsonrpc"], MCP_JSON_RPC_VERSION);
+        assert_eq!(response["id"], expected_id);
+        assert_eq!(response.get("result"), None);
+        assert_eq!(
+            error.get("code"),
+            Some(&serde_json::json!(MCP_INVALID_PARAMS_ERROR_CODE))
+        );
+        assert!(
+            error
+                .get("message")
+                .is_some_and(serde_json::Value::is_string)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn claude_mcp_bridge_negotiates_the_supported_protocol() {
         let mut fixture = McpBridgeFixture::start();
@@ -5836,8 +5875,7 @@ finally:
         let called = fixture.call_undeclared_tool();
         fixture.finish();
 
-        expect![[r#"{"code":-32602,"message":"undeclared tool or non-object arguments"}"#]]
-            .assert_eq(&called["error"].to_string());
+        assert_mcp_invalid_params_response(&called, MCP_UNDECLARED_TOOL_REQUEST_ID);
     }
 
     #[cfg(target_os = "linux")]
@@ -5849,8 +5887,7 @@ finally:
         let called = fixture.call_write_file_with_non_object_arguments();
         fixture.finish();
 
-        expect![[r#"{"code":-32602,"message":"undeclared tool or non-object arguments"}"#]]
-            .assert_eq(&called["error"].to_string());
+        assert_mcp_invalid_params_response(&called, MCP_NON_OBJECT_ARGUMENTS_REQUEST_ID);
     }
     /// Root-level JSON Schema keywords an advertised argument schema may
     /// carry: object declaration, its members, and annotations.
