@@ -165,8 +165,8 @@ const GIT_COLLATERAL_PATH: &str = "collateral.txt";
 const GIT_COLLATERAL_CONTENT: &str = "collateral\n";
 const GIT_COLLATERAL_OBJECT_CONTENT: &[u8] = b"collateral object";
 const GIT_COLLATERAL_DIRECTORY: &str = "collateral-directory";
+const GIT_BRANCHES_DIRECTORY: &str = "branches";
 const GIT_HOOKS_DIRECTORY: &str = "hooks";
-const GIT_INFO_DIRECTORY: &str = "info";
 const GIT_LOGS_DIRECTORY: &str = "logs";
 const GIT_REFS_DIRECTORY: &str = "refs";
 const GIT_HEAD_PATH: &str = "HEAD";
@@ -287,6 +287,7 @@ const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
 const ARBITRARY_EVAL_SELECTION_ID: u128 = 0x9101;
 const ARBITRARY_EVAL_PROVIDER_ID: u128 = 0x9102;
 const ARBITRARY_EVAL_REQUEST_ID: u128 = 0x9103;
+const ARBITRARY_FOLLOW_UP_REQUEST_ID: u128 = 0x9104;
 const ARBITRARY_EVAL_ATTEMPT_ID: u128 = 0x9104;
 const ARBITRARY_EVAL_ENTRY_ID: u128 = 0x9105;
 const ARBITRARY_EVAL_TURN_ATTEMPT_ID: u128 = 0x9106;
@@ -395,11 +396,14 @@ const SYNTHETIC_PERFECT_TENSE_NO_MODIFICATIONS_DENIAL_REPORT: &str =
     "Done, but no modifications have been made.";
 const SYNTHETIC_EXISTENTIAL_NO_MODIFICATIONS_DENIAL_REPORT: &str =
     "Done, but there were no modifications.";
+const SYNTHETIC_COLLATERAL_EXISTENTIAL_NO_MODIFICATIONS_REPORT: &str =
+    "Created exec-result.txt; there were no modifications to any other files.";
 const SYNTHETIC_UNCHANGED_FILE_DENIAL_REPORT: &str = "Done, but the file was left unchanged.";
 const SYNTHETIC_NO_FILE_WRITTEN_REPORT: &str = "No file was written.";
 const SYNTHETIC_NO_FILES_WRITTEN_REPORT: &str = "Done; no files were written.";
 const SYNTHETIC_EFFECT_FREE_NO_FILE_CREATED_REPORT: &str = "Read completed; no file was created.";
 const SYNTHETIC_COMPLETION_WITHOUT_FILE_REPORT: &str = "Done, but no file exists.";
+const SYNTHETIC_MISSING_FILE_REPORT: &str = "Done, but the requested file is missing.";
 const SYNTHETIC_READ_COMPLETION_REPORT: &str = "brief.txt was read successfully.";
 const SYNTHETIC_SWITCH_COMPLETION_REPORT: &str = "The branch was switched successfully.";
 const SYNTHETIC_NOTHING_WRITTEN_REPORT: &str = "Nothing was written.";
@@ -820,6 +824,7 @@ struct FamilySuite {
     git_pre_execution_objects: StdMutex<Option<GitObjectInventory>>,
     git_pre_execution_object_entries: StdMutex<Option<BTreeMap<PathBuf, WorkspaceEntrySnapshot>>>,
     git_pre_execution_object_modified_times: StdMutex<Option<BTreeMap<PathBuf, SystemTime>>>,
+    git_pre_execution_object_file_identities: StdMutex<Option<BTreeMap<PathBuf, FileIdentity>>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -871,13 +876,17 @@ struct GitFixtureSnapshot {
     index_extensions: Vec<GitIndexExtensionSnapshot>,
     static_metadata_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     static_metadata_modified_times: BTreeMap<PathBuf, SystemTime>,
+    static_metadata_file_identities: BTreeMap<PathBuf, FileIdentity>,
     reflog_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reflog_modified_times: BTreeMap<PathBuf, SystemTime>,
+    reflog_file_identities: BTreeMap<PathBuf, FileIdentity>,
     reference_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     reference_modified_times: BTreeMap<PathBuf, SystemTime>,
+    reference_file_identities: BTreeMap<PathBuf, FileIdentity>,
     objects: GitObjectInventory,
     object_entries: BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     object_modified_times: BTreeMap<PathBuf, SystemTime>,
+    object_file_identities: BTreeMap<PathBuf, FileIdentity>,
 }
 
 type GitObjectInventory = BTreeMap<Oid, GitObjectSnapshot>;
@@ -1155,6 +1164,7 @@ impl FamilySuite {
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
             git_pre_execution_object_modified_times: StdMutex::new(None),
+            git_pre_execution_object_file_identities: StdMutex::new(None),
         })
     }
 
@@ -1223,6 +1233,7 @@ impl FamilySuite {
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
             git_pre_execution_object_modified_times: StdMutex::new(None),
+            git_pre_execution_object_file_identities: StdMutex::new(None),
         })
     }
 
@@ -1262,6 +1273,7 @@ impl FamilySuite {
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
             git_pre_execution_object_modified_times: StdMutex::new(None),
+            git_pre_execution_object_file_identities: StdMutex::new(None),
         })
     }
 
@@ -1310,6 +1322,7 @@ impl FamilySuite {
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
             git_pre_execution_object_modified_times: StdMutex::new(None),
+            git_pre_execution_object_file_identities: StdMutex::new(None),
         })
     }
 
@@ -1462,6 +1475,11 @@ impl FamilySuite {
                 .lock()
                 .expect("Git pre-execution object-time lock is available") =
                 Some(git_object_modified_times(self.workspace.path())?);
+            *self
+                .git_pre_execution_object_file_identities
+                .lock()
+                .expect("Git pre-execution object-identity lock is available") =
+                Some(git_object_file_identities(self.workspace.path())?);
         }
         Ok(())
     }
@@ -1570,6 +1588,10 @@ impl FamilySuite {
                     .git_pre_execution_object_modified_times
                     .lock()
                     .expect("Git pre-execution object-time lock is available");
+                let pre_execution_object_file_identities = self
+                    .git_pre_execution_object_file_identities
+                    .lock()
+                    .expect("Git pre-execution object-identity lock is available");
                 git_forced_case_passed(
                     GitForcedVerification {
                         root: self.workspace.path(),
@@ -1588,6 +1610,8 @@ impl FamilySuite {
                         pre_execution_objects: pre_execution_objects.as_ref(),
                         pre_execution_object_entries: pre_execution_object_entries.as_ref(),
                         pre_execution_object_modified_times: pre_execution_object_modified_times
+                            .as_ref(),
+                        pre_execution_object_file_identities: pre_execution_object_file_identities
                             .as_ref(),
                         execution_window: self.executor.git_execution_window(case.name),
                     },
@@ -1959,6 +1983,7 @@ struct GitForcedVerification<'a> {
     pre_execution_objects: Option<&'a GitObjectInventory>,
     pre_execution_object_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
     pre_execution_object_modified_times: Option<&'a BTreeMap<PathBuf, SystemTime>>,
+    pre_execution_object_file_identities: Option<&'a BTreeMap<PathBuf, FileIdentity>>,
     execution_window: Option<GitExecutionTimeWindow>,
 }
 
@@ -1982,6 +2007,7 @@ fn git_forced_case_passed(
         pre_execution_objects,
         pre_execution_object_entries,
         pre_execution_object_modified_times,
+        pre_execution_object_file_identities,
         execution_window,
     } = verification;
     let repository = Repository::open(root)?;
@@ -2245,6 +2271,7 @@ fn git_forced_case_passed(
             seed_fixture,
             pre_execution_object_entries,
             pre_execution_object_modified_times,
+            pre_execution_object_file_identities,
         )?
         && git_forced_reference_entries_match(root, name, arguments, &head, seed_fixture)?
         && git_forced_reflogs_match(root, name, seed, head.id(), seed_fixture, execution_window)?
@@ -2960,6 +2987,7 @@ fn normalized_arguments_text(arguments: &str) -> EvalResult<String> {
 
 fn seed_git_repository(root: &Path) -> EvalResult<Oid> {
     let repository = Repository::init(root)?;
+    fs::create_dir_all(repository.path().join(GIT_BRANCHES_DIRECTORY))?;
     fs::write(root.join(GIT_SEED_PATH), "seed\n")?;
     fs::write(root.join(GIT_STAGE_PATH), GIT_STAGE_CONTENT)?;
     fs::write(root.join(GIT_COMMIT_PATH), GIT_COMMIT_CONTENT)?;
@@ -3023,6 +3051,11 @@ fn git_reference_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, Sys
     filesystem_file_and_directory_modified_times(&repository.path().join(GIT_REFS_DIRECTORY))
 }
 
+fn git_reference_file_identities(root: &Path) -> EvalResult<BTreeMap<PathBuf, FileIdentity>> {
+    let repository = Repository::open(root)?;
+    filesystem_file_identities(&repository.path().join(GIT_REFS_DIRECTORY), None)
+}
+
 fn filesystem_file_and_directory_modified_times(
     root: &Path,
 ) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
@@ -3058,6 +3091,18 @@ fn admit_modified_time_path_and_ancestors(
     true
 }
 
+fn admit_file_identity_path(
+    actual: &BTreeMap<PathBuf, FileIdentity>,
+    expected: &mut BTreeMap<PathBuf, FileIdentity>,
+    path: &Path,
+) -> bool {
+    let Some(identity) = actual.get(path) else {
+        return false;
+    };
+    expected.insert(path.to_path_buf(), *identity);
+    true
+}
+
 fn direct_git_reference_entry(
     template: &WorkspaceEntrySnapshot,
     target: Oid,
@@ -3083,6 +3128,8 @@ fn git_forced_reference_entries_match(
     let mut expected = seed_fixture.reference_entries.clone();
     let actual_modified_times = git_reference_modified_times(root)?;
     let mut expected_modified_times = seed_fixture.reference_modified_times.clone();
+    let actual_file_identities = git_reference_file_identities(root)?;
+    let mut expected_file_identities = seed_fixture.reference_file_identities.clone();
     let base_path = Path::new("heads").join(GIT_BASE_BRANCH);
     match case_name {
         GIT_BRANCH_CREATE_NAME => {
@@ -3104,6 +3151,10 @@ fn git_forced_reference_entries_match(
                 &actual_modified_times,
                 &mut expected_modified_times,
                 &path,
+            ) || !admit_file_identity_path(
+                &actual_file_identities,
+                &mut expected_file_identities,
+                &path,
             ) {
                 return Ok(false);
             }
@@ -3121,16 +3172,19 @@ fn git_forced_reference_entries_match(
                 &actual_modified_times,
                 &mut expected_modified_times,
                 &base_path,
+            ) || !admit_file_identity_path(
+                &actual_file_identities,
+                &mut expected_file_identities,
+                &base_path,
             ) {
                 return Ok(false);
             }
         }
         _ => {}
     }
-    Ok(
-        git_reference_entries(root)? == expected
-            && actual_modified_times == expected_modified_times,
-    )
+    Ok(git_reference_entries(root)? == expected
+        && actual_modified_times == expected_modified_times
+        && actual_file_identities == expected_file_identities)
 }
 
 fn git_fixture_modes(root: &Path) -> EvalResult<BTreeMap<PathBuf, Option<u32>>> {
@@ -3163,13 +3217,17 @@ fn git_fixture_snapshot(root: &Path) -> EvalResult<GitFixtureSnapshot> {
         index_extensions: git_index_extensions(&repository)?,
         static_metadata_entries: git_static_metadata_entries(root)?,
         static_metadata_modified_times: git_static_metadata_modified_times(root)?,
+        static_metadata_file_identities: git_static_metadata_file_identities(root)?,
         reflog_entries: git_reflog_entries(root)?,
         reflog_modified_times: git_reflog_modified_times(root)?,
+        reflog_file_identities: git_reflog_file_identities(root)?,
         reference_entries: git_reference_entries(root)?,
         reference_modified_times: git_reference_modified_times(root)?,
+        reference_file_identities: git_reference_file_identities(root)?,
         objects: git_object_inventory(&repository)?,
         object_entries: git_object_entries(root)?,
         object_modified_times: git_object_modified_times(root)?,
+        object_file_identities: git_object_file_identities(root)?,
     })
 }
 
@@ -3523,6 +3581,11 @@ fn git_object_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, System
     filesystem_file_and_directory_modified_times(&repository.path().join(GIT_OBJECTS_DIRECTORY))
 }
 
+fn git_object_file_identities(root: &Path) -> EvalResult<BTreeMap<PathBuf, FileIdentity>> {
+    let repository = Repository::open(root)?;
+    filesystem_file_identities(&repository.path().join(GIT_OBJECTS_DIRECTORY), None)
+}
+
 fn git_loose_object_relative_path(id: Oid) -> PathBuf {
     let id = id.to_string();
     Path::new(&id[..2]).join(&id[2..])
@@ -3532,12 +3595,15 @@ fn git_object_entry_inventory_matches(
     root: &Path,
     baseline: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     baseline_modified_times: &BTreeMap<PathBuf, SystemTime>,
+    baseline_file_identities: &BTreeMap<PathBuf, FileIdentity>,
     allowed_ids: &[Oid],
     seed_fixture: &GitFixtureSnapshot,
 ) -> EvalResult<bool> {
     let actual = git_object_entries(root)?;
     let actual_modified_times = git_object_modified_times(root)?;
+    let actual_file_identities = git_object_file_identities(root)?;
     let mut expected_modified_times = baseline_modified_times.clone();
+    let mut expected_file_identities = baseline_file_identities.clone();
     let Some((file_mode, file_links)) = seed_fixture.object_entries.values().find_map(|entry| {
         if let WorkspaceEntrySnapshot::File { mode, links, .. } = entry {
             Some((*mode, *links))
@@ -3581,15 +3647,24 @@ fn git_object_entry_inventory_matches(
             return Ok(false);
         };
         expected.insert(
-            relative,
+            relative.clone(),
             WorkspaceEntrySnapshot::File {
                 content: content.clone(),
                 mode: file_mode,
                 links: file_links,
             },
         );
+        if !admit_file_identity_path(
+            &actual_file_identities,
+            &mut expected_file_identities,
+            &relative,
+        ) {
+            return Ok(false);
+        }
     }
-    Ok(actual == expected && actual_modified_times == expected_modified_times)
+    Ok(actual == expected
+        && actual_modified_times == expected_modified_times
+        && actual_file_identities == expected_file_identities)
 }
 
 fn git_forced_objects_match(
@@ -3639,6 +3714,7 @@ fn git_forced_object_entries_match(
     seed_fixture: &GitFixtureSnapshot,
     pre_execution: Option<&BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
     pre_execution_modified_times: Option<&BTreeMap<PathBuf, SystemTime>>,
+    pre_execution_file_identities: Option<&BTreeMap<PathBuf, FileIdentity>>,
 ) -> EvalResult<bool> {
     let allowed = match case_name {
         GIT_STAGE_NAME => vec![Oid::hash_object(
@@ -3652,6 +3728,7 @@ fn git_forced_object_entries_match(
         root,
         pre_execution.unwrap_or(&seed_fixture.object_entries),
         pre_execution_modified_times.unwrap_or(&seed_fixture.object_modified_times),
+        pre_execution_file_identities.unwrap_or(&seed_fixture.object_file_identities),
         &allowed,
         seed_fixture,
     )
@@ -3665,6 +3742,11 @@ fn git_reflog_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntr
 fn git_reflog_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBuf, SystemTime>> {
     let repository = Repository::open(root)?;
     filesystem_file_and_directory_modified_times(&repository.path().join(GIT_LOGS_DIRECTORY))
+}
+
+fn git_reflog_file_identities(root: &Path) -> EvalResult<BTreeMap<PathBuf, FileIdentity>> {
+    let repository = Repository::open(root)?;
+    filesystem_file_identities(&repository.path().join(GIT_LOGS_DIRECTORY), None)
 }
 
 fn git_forced_reflogs_match(
@@ -3706,7 +3788,8 @@ fn git_forced_reflogs_match(
             )
         }
         _ => Ok(git_reflog_entries(root)? == seed_fixture.reflog_entries
-            && git_reflog_modified_times(root)? == seed_fixture.reflog_modified_times),
+            && git_reflog_modified_times(root)? == seed_fixture.reflog_modified_times
+            && git_reflog_file_identities(root)? == seed_fixture.reflog_file_identities),
     }
 }
 
@@ -3724,6 +3807,8 @@ fn git_reflog_updates_match(
     let mut expected_entries = seed_fixture.reflog_entries.clone();
     let actual_modified_times = git_reflog_modified_times(root)?;
     let mut expected_modified_times = seed_fixture.reflog_modified_times.clone();
+    let actual_file_identities = git_reflog_file_identities(root)?;
+    let mut expected_file_identities = seed_fixture.reflog_file_identities.clone();
     let expectation = GitReflogUpdateExpectation {
         old,
         new,
@@ -3745,11 +3830,17 @@ fn git_reflog_updates_match(
             &actual_modified_times,
             &mut expected_modified_times,
             path,
+        ) || !admit_file_identity_path(
+            &actual_file_identities,
+            &mut expected_file_identities,
+            path,
         ) {
             return Ok(false);
         }
     }
-    Ok(actual_entries == expected_entries && actual_modified_times == expected_modified_times)
+    Ok(actual_entries == expected_entries
+        && actual_modified_times == expected_modified_times
+        && actual_file_identities == expected_file_identities)
 }
 
 #[derive(Clone, Copy)]
@@ -3890,9 +3981,17 @@ fn git_static_metadata_entries(
     let repository = Repository::open(root)?;
     let metadata_root = repository.path();
     let mut entries = BTreeMap::new();
-    for directory in [GIT_HOOKS_DIRECTORY, GIT_INFO_DIRECTORY] {
-        for (relative, snapshot) in filesystem_entries(&metadata_root.join(directory), None)? {
-            entries.insert(Path::new(directory).join(relative), snapshot);
+    for (directory, snapshot) in git_metadata_top_level(root)? {
+        if snapshot.kind != GitMetadataEntryKind::Directory
+            || matches!(
+                directory.to_str(),
+                Some(GIT_OBJECTS_DIRECTORY | GIT_LOGS_DIRECTORY | GIT_REFS_DIRECTORY)
+            )
+        {
+            continue;
+        }
+        for (relative, snapshot) in filesystem_entries(&metadata_root.join(&directory), None)? {
+            entries.insert(directory.join(relative), snapshot);
         }
     }
     let description = metadata_root.join(GIT_DESCRIPTION_PATH);
@@ -3923,6 +4022,34 @@ fn git_static_metadata_modified_times(root: &Path) -> EvalResult<BTreeMap<PathBu
             Ok((relative, modified))
         })
         .collect()
+}
+
+fn git_static_metadata_file_identities(root: &Path) -> EvalResult<BTreeMap<PathBuf, FileIdentity>> {
+    #[cfg(unix)]
+    {
+        let repository = Repository::open(root)?;
+        return git_static_metadata_entries(root)?
+            .into_iter()
+            .filter_map(|(relative, snapshot)| {
+                matches!(snapshot, WorkspaceEntrySnapshot::File { .. }).then_some(relative)
+            })
+            .map(|relative| {
+                let metadata = fs::metadata(repository.path().join(&relative))?;
+                Ok((
+                    relative,
+                    FileIdentity {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    },
+                ))
+            })
+            .collect();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Ok(BTreeMap::new())
+    }
 }
 
 fn git_fixture_modes_match(
@@ -3958,7 +4085,8 @@ fn git_fixture_snapshot_matches(
         && git_metadata_root_kind(root)? == expected.metadata_root_kind
         && worktree_mode(repository.path())? == expected.metadata_root_mode
         && git_static_metadata_entries(root)? == expected.static_metadata_entries
-        && git_static_metadata_modified_times(root)? == expected.static_metadata_modified_times)
+        && git_static_metadata_modified_times(root)? == expected.static_metadata_modified_times
+        && git_static_metadata_file_identities(root)? == expected.static_metadata_file_identities)
 }
 
 fn git_forced_metadata_root_modified_time_matches(
@@ -4565,6 +4693,7 @@ fn git_natural_object_entries_match(
         root,
         &seed_fixture.object_entries,
         &seed_fixture.object_modified_times,
+        &seed_fixture.object_file_identities,
         &allowed,
         seed_fixture,
     )
@@ -4578,6 +4707,8 @@ fn git_natural_reference_entries_match(
     let mut expected = seed_fixture.reference_entries.clone();
     let actual_modified_times = git_reference_modified_times(root)?;
     let mut expected_modified_times = seed_fixture.reference_modified_times.clone();
+    let actual_file_identities = git_reference_file_identities(root)?;
+    let mut expected_file_identities = seed_fixture.reference_file_identities.clone();
     let base_path = Path::new("heads").join(GIT_BASE_BRANCH);
     let Some(template) = expected.get(&base_path) else {
         return Ok(false);
@@ -4589,14 +4720,17 @@ fn git_natural_reference_entries_match(
         &actual_modified_times,
         &mut expected_modified_times,
         &base_path,
+    ) || !admit_file_identity_path(
+        &actual_file_identities,
+        &mut expected_file_identities,
+        &base_path,
     ) {
         return Ok(false);
     }
     expected.insert(base_path.clone(), entry);
-    Ok(
-        git_reference_entries(root)? == expected
-            && actual_modified_times == expected_modified_times,
-    )
+    Ok(git_reference_entries(root)? == expected
+        && actual_modified_times == expected_modified_times
+        && actual_file_identities == expected_file_identities)
 }
 
 fn git_natural_status_matches(repository: &Repository) -> EvalResult<bool> {
@@ -5512,12 +5646,25 @@ fn report_denies_file_changes(report: &str) -> bool {
         .split([';', '.', ',', '!', '?', '\n'])
         .map(normalized_report_words)
         .any(|clause| clause_denies_modifications_made(&clause));
-    let no_existential_modifications = words.windows(4).any(|claim| {
-        claim[0] == "there"
-            && matches!(claim[1].as_str(), "was" | "were")
-            && claim[2] == "no"
-            && matches!(claim[3].as_str(), "modification" | "modifications")
-    });
+    let no_existential_modifications =
+        normalized_report_clauses(report).into_iter().any(|clause| {
+            clause.windows(4).enumerate().any(|(index, claim)| {
+                let scope = &clause[index + 4..clause.len().min(index + 12)];
+                let collateral = scope
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "file" | "files"))
+                    .is_some_and(|file| {
+                        scope[..file]
+                            .iter()
+                            .any(|word| matches!(word.as_str(), "additional" | "other"))
+                    });
+                claim[0] == "there"
+                    && matches!(claim[1].as_str(), "was" | "were")
+                    && claim[2] == "no"
+                    && matches!(claim[3].as_str(), "modification" | "modifications")
+                    && !collateral
+            })
+        });
     let verb_first_modification_denial = words.iter().enumerate().any(|(index, word)| {
         let scope = &words[index + 1..words.len().min(index + 6)];
         let modification = scope
@@ -5672,7 +5819,16 @@ fn report_denies_file_creation(report: &str) -> bool {
                 .is_some_and(|no| file.is_some_and(|file| no < file));
             let without_creation = word == "without"
                 && creation.is_some_and(|creation| file.is_some_and(|file| creation < file));
-            (no_before_file || outcome_before_no || without_creation) && !collateral
+            let file_state_denial = matches!(word.as_str(), "file" | "files")
+                && scope
+                    .iter()
+                    .take(4)
+                    .any(|word| matches!(word.as_str(), "absent" | "missing"))
+                && !clause[index.saturating_sub(4)..index]
+                    .iter()
+                    .any(|word| matches!(word.as_str(), "additional" | "other"));
+            ((no_before_file || outcome_before_no || without_creation) && !collateral)
+                || file_state_denial
         })
     })
 }
@@ -6596,6 +6752,17 @@ fn exec_file_creation_report_rejects_an_existential_no_modifications_denial() {
 }
 
 #[test]
+fn exec_file_creation_report_accepts_a_collateral_existential_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(
+        SYNTHETIC_COLLATERAL_EXISTENTIAL_NO_MODIFICATIONS_REPORT,
+        false,
+    );
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
 fn exec_file_creation_report_rejects_an_unchanged_file_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_UNCHANGED_FILE_DENIAL_REPORT, false);
@@ -6701,6 +6868,14 @@ fn effect_free_final_response_accepts_a_file_creation_denial() {
 fn exec_file_creation_report_rejects_completion_when_the_file_does_not_exist() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_COMPLETION_WITHOUT_FILE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_rejects_completion_when_the_file_is_missing() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_MISSING_FILE_REPORT, false);
 
     assert!(!tracker.final_response_reports_file_creation());
 }
@@ -7544,14 +7719,18 @@ impl CaseOutcome {
         let Some(expected_arguments) = self.expected_arguments.as_deref() else {
             return false;
         };
-        self.snapshot.requests.len() == 1
-            && self.snapshot.requests[0].name == target
-            && self.snapshot.requests[0].arguments_text == expected_arguments
-            && (!self.snapshot.requests[0].attempt_succeeded
-                || (matches!(
-                    target,
-                    SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
-                ) && self.tool_results.iter().any(exec_result_is_infrastructure)))
+        self.snapshot.requests.iter().any(|request| {
+            request.name == target
+                && request.arguments_text == expected_arguments
+                && (!request.attempt_succeeded
+                    || (matches!(
+                        target,
+                        SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME
+                    ) && self.tool_results.iter().any(|result| {
+                        result.request_id == request.request_id
+                            && exec_result_is_infrastructure(result)
+                    })))
+        })
     }
 
     fn forced_disposition(&self) -> EvalDisposition {
@@ -8296,6 +8475,47 @@ fn forced_tier_reports_and_rejects_an_exact_known_failed_attempt() {
                 completed_result_entry_index: None,
                 attempt_succeeded: false,
             }],
+            model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
+        },
+    };
+
+    assert_eq!(
+        outcome.forced_disposition(),
+        EvalDisposition::Infrastructure
+    );
+    assert!(reject_forced_executor_failures(&[outcome]).is_err());
+}
+
+#[test]
+fn forced_tier_rejects_an_exact_failure_before_a_follow_up_call() {
+    let target = GIT_STATUS_NAME;
+    let outcome = CaseOutcome {
+        target: Some(String::from(target)),
+        expected_arguments: Some(String::from("{}")),
+        execution_completed: false,
+        tool_results: Vec::new(),
+        snapshot: CaseSnapshot {
+            turn_disposition: SnapshotTurnDisposition::Completed,
+            requests: vec![
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(target),
+                    arguments_text: String::from("{}"),
+                    entry_index: ARBITRARY_REQUEST_ENTRY_INDEX,
+                    completed_result_entry_index: None,
+                    attempt_succeeded: false,
+                },
+                RequestSnapshot {
+                    request_id: Uuid::from_u128(ARBITRARY_FOLLOW_UP_REQUEST_ID),
+                    producing_model_call_id: Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID),
+                    name: String::from(GIT_LOG_NAME),
+                    arguments_text: String::from("{}"),
+                    entry_index: ARBITRARY_LATE_RESULT_ENTRY_INDEX,
+                    completed_result_entry_index: None,
+                    attempt_succeeded: false,
+                },
+            ],
             model_calls: MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP,
         },
     };
@@ -10433,6 +10653,182 @@ fn forced_git_log_verifier_rejects_byte_identical_worktree_replacement() -> Eval
         git_worktree_file_identities(suite.workspace.path())?,
         suite.git_seed_fixture.worktree_file_identities
     );
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+fn forced_git_log_result(suite: &FamilySuite) -> EvalResult<String> {
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    Ok(serde_json::json!({
+        "commits": [{
+            "commit": target.id().to_string(),
+            "author_name": target.author().name().unwrap_or_default(),
+            "author_name_truncated": false,
+            "author_email": target.author().email().unwrap_or_default(),
+            "author_email_truncated": false,
+            "message": target.message().unwrap_or_default(),
+            "message_truncated": false,
+        }],
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string())
+}
+
+#[cfg(unix)]
+fn replace_git_metadata_file_byte_identically(
+    target: &Path,
+    target_modified: SystemTime,
+    parent_modified: SystemTime,
+) -> EvalResult {
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::other("the Git metadata fixture has no parent"))?;
+    let replacement = parent.join("identity-replacement-fixture");
+    let content = fs::read(target)?;
+    let permissions = fs::metadata(target)?.permissions();
+    fs::write(&replacement, content)?;
+    fs::set_permissions(&replacement, permissions)?;
+    fs::rename(&replacement, target)?;
+    fs::File::open(target)?.set_times(fs::FileTimes::new().set_modified(target_modified))?;
+    fs::File::open(parent)?.set_times(fs::FileTimes::new().set_modified(parent_modified))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_log_verifier_rejects_byte_identical_nested_reference_replacement() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let relative = Path::new("heads/log-target");
+    let parent = Path::new("heads");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository.path().join(GIT_REFS_DIRECTORY).join(relative);
+    let target_modified = suite.git_seed_fixture.reference_modified_times[relative];
+    let parent_modified = suite.git_seed_fixture.reference_modified_times[parent];
+    replace_git_metadata_file_byte_identically(&target, target_modified, parent_modified)?;
+    let result = forced_git_log_result(&suite)?;
+
+    assert_ne!(
+        git_reference_file_identities(suite.workspace.path())?,
+        suite.git_seed_fixture.reference_file_identities
+    );
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_log_verifier_rejects_byte_identical_reflog_replacement() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let relative = Path::new("HEAD");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository.path().join(GIT_LOGS_DIRECTORY).join(relative);
+    let target_modified = suite.git_seed_fixture.reflog_modified_times[relative];
+    let parent_modified = suite.git_seed_fixture.reflog_modified_times[Path::new("")];
+    replace_git_metadata_file_byte_identically(&target, target_modified, parent_modified)?;
+    let result = forced_git_log_result(&suite)?;
+
+    assert_ne!(
+        git_reflog_file_identities(suite.workspace.path())?,
+        suite.git_seed_fixture.reflog_file_identities
+    );
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_log_verifier_rejects_byte_identical_loose_object_replacement() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let target_commit = repository
+        .find_branch("log-target", BranchType::Local)?
+        .into_reference()
+        .peel_to_commit()?;
+    let relative = git_loose_object_relative_path(target_commit.id());
+    let parent = relative
+        .parent()
+        .expect("the loose object fixture has a parent");
+    let target = repository
+        .path()
+        .join(GIT_OBJECTS_DIRECTORY)
+        .join(&relative);
+    let target_modified = suite.git_seed_fixture.object_modified_times[&relative];
+    let parent_modified = suite.git_seed_fixture.object_modified_times[parent];
+    replace_git_metadata_file_byte_identically(&target, target_modified, parent_modified)?;
+    let result = forced_git_log_result(&suite)?;
+
+    assert_ne!(
+        git_object_file_identities(suite.workspace.path())?,
+        suite.git_seed_fixture.object_file_identities
+    );
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_git_log_verifier_rejects_byte_identical_static_metadata_replacement() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let relative = Path::new(GIT_DESCRIPTION_PATH);
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository.path().join(relative);
+    let target_modified = suite.git_seed_fixture.static_metadata_modified_times[relative];
+    let parent_modified = suite
+        .git_seed_fixture
+        .metadata_root_modified_time
+        .expect("the Git fixture has a metadata-root modified time");
+    replace_git_metadata_file_byte_identically(&target, target_modified, parent_modified)?;
+    let result = forced_git_log_result(&suite)?;
+
+    assert_ne!(
+        git_static_metadata_file_identities(suite.workspace.path())?,
+        suite.git_seed_fixture.static_metadata_file_identities
+    );
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_log_verifier_rejects_content_in_a_seeded_metadata_directory() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    suite.prepare_git_case(GIT_LOG_NAME)?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_LOG_NAME)
+        .expect("the Git log fixture exists");
+    let repository = Repository::open(suite.workspace.path())?;
+    let branches = repository.path().join(GIT_BRANCHES_DIRECTORY);
+    let modified =
+        suite.git_seed_fixture.static_metadata_modified_times[Path::new(GIT_BRANCHES_DIRECTORY)];
+    fs::write(branches.join("collateral"), "synthetic metadata fixture\n")?;
+    fs::File::open(branches)?.set_times(fs::FileTimes::new().set_modified(modified))?;
+    let result = forced_git_log_result(&suite)?;
+
     assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
