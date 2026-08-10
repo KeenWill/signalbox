@@ -244,6 +244,20 @@ persistence integration suite must include its feature:
 without `--features postgres-integration` it runs zero tests and exits
 successfully.
 
+These suites start one PostgreSQL container per test through testcontainers,
+whose Rust client ships no Ryuk reaper: a container is removed by
+`ContainerAsync`'s `Drop` and by nothing else, and it is created with
+`AutoRemove: false`, so a test process that dies without unwinding strands every
+container it started along with that container's anonymous volume. The
+`watchdog` feature enabled on `testcontainers-modules` removes registered
+containers on SIGTERM, SIGINT, and SIGQUIT, which covers Ctrl-C, `timeout`, and
+a cancelled CI job; no in-process handler can cover SIGKILL or an OOM kill.
+Reclaim what those leave behind with
+[`tooling/sweep-test-containers.sh`](tooling/sweep-test-containers.sh), which
+removes testcontainers-managed containers past an age bound — two hours by
+default, far above any suite's runtime — together with their volumes. It reports
+what it would remove and changes nothing until passed `--apply`.
+
 CI runs these ignored suites from
 [`.github/postgres-integration-suites.toml`](.github/postgres-integration-suites.toml),
 which names each suite's package, features, shard count, and exclusions. Both
