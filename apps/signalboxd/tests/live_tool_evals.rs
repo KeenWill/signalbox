@@ -574,6 +574,8 @@ const SYNTHETIC_HIT_TIMEOUT_RUN_REPORT: &str = "The command ran until it hit the
 const SYNTHETIC_WORKED_RUN_REPORT: &str = "The command worked.";
 const SYNTHETIC_PLEASE_RUN_REPORT: &str = "Please run the command.";
 const SYNTHETIC_IMPERATIVE_RUN_REPORT: &str = "Run the command.";
+const SYNTHETIC_COMPLETED_RUN_WITH_ANCILLARY_REQUEST_REPORT: &str =
+    "The command ran successfully. Please read the output above.";
 const SYNTHETIC_SKIPPED_RUN_REPORT: &str = "I skipped the run.";
 const SYNTHETIC_SKIPPED_THEN_RAN_REPORT: &str = "I skipped the run, but then ran it successfully.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
@@ -2173,6 +2175,9 @@ fn exec_natural_entries_match(
     seed_inode_flags: &BTreeMap<PathBuf, u32>,
     execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
+    if workspace_contains_oversized_regular_file(root, MAX_WORKSPACE_READ_BYTES)? {
+        return Ok(false);
+    }
     let mut actual = workspace_entries(root)?;
     let mut actual_modified_times = workspace_modified_times(root)?;
     let result = actual.remove(Path::new(EXEC_RESULT_PATH));
@@ -2221,6 +2226,25 @@ fn exec_natural_entries_match(
             Path::new(EXEC_RESULT_PATH),
             Path::new("Cargo.toml"),
         )?)
+}
+
+fn workspace_contains_oversized_regular_file(
+    root: &Path,
+    maximum_bytes: usize,
+) -> EvalResult<bool> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() && entry.metadata()?.len() > maximum_bytes as u64 {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(unix)]
@@ -8156,7 +8180,8 @@ fn report_only_attempts_outcome(report: &str) -> bool {
 }
 
 fn report_requests_outcome(report: &str) -> bool {
-    normalized_report_clauses(report).into_iter().any(|clause| {
+    let clauses = normalized_report_clauses(report);
+    clauses.iter().enumerate().any(|(request_index, clause)| {
         let polite_request = clause.iter().enumerate().any(|(index, word)| {
             word == "please"
                 && clause[index + 1..]
@@ -8168,7 +8193,10 @@ fn report_requests_outcome(report: &str) -> bool {
             && clause.get(1).is_some_and(|word| {
                 matches!(word.as_str(), "command" | "it" | "that" | "the" | "this")
             });
-        polite_request || imperative_run
+        let independent_completion = clauses.iter().enumerate().any(|(index, clause)| {
+            index != request_index && coordinated_scope_affirms_outcome(clause)
+        });
+        (polite_request || imperative_run) && !independent_completion
     })
 }
 
@@ -10326,6 +10354,18 @@ fn forced_sandboxed_exec_report_rejects_an_imperative_run_request() {
     tracker.observe_response_text(SYNTHETIC_IMPERATIVE_RUN_REPORT, false);
 
     assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_completion_with_an_ancillary_polite_request() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COMPLETED_RUN_WITH_ANCILLARY_REQUEST_REPORT, false);
+
+    assert!(forced_case_completion_reported(
         SANDBOXED_EXEC_NAME,
         true,
         &tracker,
@@ -20565,6 +20605,32 @@ fn exec_natural_state_rejects_a_collateral_addition() -> EvalResult {
         workspace.path().join("collateral.txt"),
         "collateral fixture\n",
     )?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        &seed_inode_flags,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn exec_natural_state_rejects_an_oversized_sparse_collateral_file() -> EvalResult {
+    let (
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_entry_identities,
+        seed_extended_attributes,
+        seed_inode_flags,
+        execution_window,
+    ) = prepared_exec_natural_workspace()?;
+    fs::File::create(workspace.path().join("oversized-collateral.txt"))?
+        .set_len((MAX_WORKSPACE_READ_BYTES + 1) as u64)?;
 
     assert!(!exec_natural_entries_match(
         workspace.path(),
