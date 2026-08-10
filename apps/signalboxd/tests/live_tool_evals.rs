@@ -449,6 +449,9 @@ const SYNTHETIC_NO_EXECUTION_PROBLEMS_REPORT: &str =
 const SYNTHETIC_NO_EXEC_OUTPUT_REPORT: &str = "Done, but the command produced no output.";
 const SYNTHETIC_NATURAL_NO_EXEC_OUTPUT_REPORT: &str =
     "Created exec-result.txt; the command produced no output.";
+const SYNTHETIC_NATURAL_EMPTY_STDERR_REPORT: &str =
+    "Created exec-result.txt. The captured stderr was empty.";
+const SYNTHETIC_CARGO_RAN_REPORT: &str = "Cargo check ran successfully.";
 const SYNTHETIC_CARGO_FAILURE: &str = "synthetic Cargo fixture failure";
 const SYNTHETIC_COLLATERAL_NO_CHANGES_REPORT: &str =
     "Created exec-result.txt; no changes were made to any other files.";
@@ -7276,6 +7279,7 @@ fn case_outcome_verbs(case_name: &str) -> &'static [&'static str] {
         WEB_FETCH_NAME => &["fetched", "read"][..],
         WEB_SEARCH_NAME => &["searched"][..],
         SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME => &["executed", "ran", "run"][..],
+        CARGO_DIAGNOSTICS_NAME => &["checked", "ran", "succeeded"][..],
         _ => &[][..],
     }
 }
@@ -7642,6 +7646,14 @@ fn report_denies_file_creation(report: &str) -> bool {
 }
 
 fn normalized_report_clauses(report: &str) -> Vec<Vec<String>> {
+    normalized_report_segments(report, true)
+}
+
+fn normalized_report_sentences(report: &str) -> Vec<Vec<String>> {
+    normalized_report_segments(report, false)
+}
+
+fn normalized_report_segments(report: &str, split_commas: bool) -> Vec<Vec<String>> {
     // `str::split` predicates cannot inspect the characters adjacent to a
     // period, while `str::split_inclusive` would first fragment dotted paths
     // and require reassembling them. This bounded report scanner preserves
@@ -7656,7 +7668,8 @@ fn normalized_report_clauses(report: &str) -> Vec<Vec<String>> {
                 .next_back()
                 .is_some_and(char::is_alphanumeric)
             && next.chars().next().is_some_and(char::is_alphanumeric);
-        if matches!(character, ';' | ',' | '!' | '?' | '\n')
+        if matches!(character, ';' | '!' | '?' | '\n')
+            || (character == ',' && split_commas)
             || (character == '.' && !embedded_period)
         {
             separated.push('\n');
@@ -7799,16 +7812,19 @@ fn report_words_deny_success(
                         })
                 })
         });
-        let invalid_contents =
-            words
-                .windows(path_words.len())
-                .enumerate()
-                .any(|(path_start, candidate)| {
-                    candidate == path_words
-                        && path_state_denies_required_contents(
-                            &words[path_start + path_words.len()..],
-                        )
-                });
+        let invalid_contents = normalized_report_sentences(report)
+            .into_iter()
+            .any(|clause| {
+                clause
+                    .windows(path_words.len())
+                    .enumerate()
+                    .any(|(path_start, candidate)| {
+                        candidate == path_words
+                            && path_state_denies_required_contents(
+                                &clause[path_start + path_words.len()..],
+                            )
+                    })
+            });
         destructive_state || invalid_contents
     });
     let negative_nothing_claim = words.iter().enumerate().any(|(index, word)| {
@@ -8690,6 +8706,28 @@ fn natural_exec_report_accepts_a_truthful_no_output_claim() {
     assert!(
         tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
     );
+}
+
+#[test]
+fn natural_exec_report_keeps_requested_contents_within_their_clause() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NATURAL_EMPTY_STDERR_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn forced_cargo_completion_accepts_a_successful_check_report() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_CARGO_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        CARGO_DIAGNOSTICS_NAME,
+        true,
+        &tracker,
+    ));
 }
 
 #[test]
