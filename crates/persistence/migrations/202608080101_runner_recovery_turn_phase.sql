@@ -637,6 +637,34 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_turn_runner_recovery_complete();
 
+CREATE CONSTRAINT TRIGGER tool_round_rechecks_turn_runner_recovery
+AFTER INSERT OR UPDATE OR DELETE ON tool_round
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_turn_runner_recovery_complete();
+
+CREATE FUNCTION lock_scheduler_before_turn_attempt_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM 1
+      FROM session_scheduler
+     WHERE session_id = NEW.session_id
+     FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'turn attempt lacks its session scheduler'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER turn_attempt_00_locks_scheduler_before_insert
+BEFORE INSERT ON turn_attempt
+FOR EACH ROW
+EXECUTE FUNCTION lock_scheduler_before_turn_attempt_insert();
+
 CREATE FUNCTION recheck_session_turn_runner_recovery()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1158,6 +1186,7 @@ DECLARE
     checked_cancellation_entry uuid;
     cancellation_entry_count bigint;
     runner_tool_result_count bigint := 0;
+    malformed_runner_result_count bigint := 0;
     contradictory_entry_count bigint;
     call_count bigint;
     outbox_count bigint;
@@ -1333,6 +1362,44 @@ BEGIN
      WHERE owning_session_id = checked_session
        AND context_frontier_id = checked_terminal_frontier;
 
+    IF runner_recovery_effect.command_id IS NOT NULL THEN
+        SELECT count(*)
+          INTO malformed_runner_result_count
+          FROM tool_round AS round
+          JOIN generate_series(0, round.request_count - 1)
+            AS expected(request_ordinal) ON true
+          JOIN tool_request AS request
+            ON request.producing_model_call_id = round.producing_model_call_id
+           AND request.session_id = round.session_id
+           AND request.turn_id = round.turn_id
+           AND request.request_ordinal = expected.request_ordinal
+          LEFT JOIN context_frontier_member AS member
+            ON member.owning_session_id = checked_session
+           AND member.context_frontier_id = checked_terminal_frontier
+           AND member.member_position =
+                base_member_count + expected.request_ordinal + 1
+          LEFT JOIN semantic_transcript_entry AS entry
+            ON entry.source_session_id = member.source_session_id
+           AND entry.semantic_entry_id = member.semantic_entry_id
+          LEFT JOIN tool_attempt AS attempt
+            ON attempt.attempt_id = entry.tool_result_attempt_id
+         WHERE round.session_id = checked_session
+           AND round.turn_id = checked_turn_id
+           AND round.boundary_kind = 'continuing'
+           AND round.boundary_frontier_id = base_frontier
+           AND (
+                member.source_session_id IS DISTINCT FROM checked_session
+                OR ((
+                    entry.payload_kind = 'tool_execution_result'
+                    AND attempt.request_id = request.request_id
+                )
+                OR (
+                    entry.payload_kind IN ('tool_denied', 'tool_closed_by_turn_end')
+                    AND entry.tool_result_request_id = request.request_id
+                )) IS NOT TRUE
+           );
+    END IF;
+
     SELECT count(*)
       INTO prefix_mismatch_count
       FROM context_frontier_member AS base_member
@@ -1360,6 +1427,7 @@ BEGIN
        OR terminal_member_count IS DISTINCT FROM
             base_member_count + runner_tool_result_count + 1
        OR prefix_mismatch_count <> 0
+       OR malformed_runner_result_count <> 0
        OR NOT EXISTS (
             SELECT 1
               FROM context_frontier_member
