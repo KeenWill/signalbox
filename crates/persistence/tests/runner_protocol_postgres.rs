@@ -48,6 +48,7 @@ use signalbox_persistence::{
         RunnerStateTransitionOutboxTestEvent, RunnerStateTransitionOutboxTestSource,
         append_runner_state_transition_for_test,
     },
+    process_read::{ProcessReadRepository, ProcessRunnerProjectionState},
     runner_protocol::{
         RunnerConnectionEpoch, RunnerConnectionTransition, RunnerProtocolCorruption,
         RunnerProtocolStore, RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
@@ -5603,6 +5604,49 @@ async fn s32_inv044_runner_lost_before_pin_round_trips_exact_identity() -> Resul
     assert_eq!(loaded.placement(), &lost);
     assert_eq!(loaded.registration(), None);
     assert_eq!(loaded.grant(), None);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_transcript_snapshot_authenticates_current_pre_pin_runner_loss()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    let lost = placement
+        .mark_runner_lost_before_pin(runner)
+        .expect("the exact selected runner may be lost before pinning");
+    append_runner_lost_before_pin_projection(&pool, lost.session()).await?;
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(lost.session())
+        .await?
+        .expect("the fixture session has a transcript snapshot");
+    let projection = snapshot
+        .runner()
+        .expect("the runner-placed session projects its current placement");
+
+    assert_eq!(projection.selector(), &lost.request().selector);
+    assert_eq!(projection.runner(), Some(runner));
+    assert_eq!(projection.placement_revision(), lost.revision());
+    assert_eq!(projection.sandbox(), lost.request().sandbox);
+    assert_eq!(projection.credential_profile(), None);
+    assert_eq!(projection.repository(), None);
+    assert_eq!(
+        projection.working_directory(),
+        Some(&exact_runner_directory())
+    );
+    assert_eq!(
+        projection.state(),
+        ProcessRunnerProjectionState::RunnerLostBeforePin
+    );
     drop(pool);
     Ok(())
 }

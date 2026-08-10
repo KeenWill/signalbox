@@ -73,9 +73,10 @@ use signalbox_domain::{
     ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
     ReviewProducedFindings, ReviewReferencedFindingEvidence, ReviewRun, ReviewRunId, ReviewRunRef,
     ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
-    ReviewWorkflowKind, SemanticTranscriptEntryId, ServiceTier as DomainServiceTier,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionMetadataContent, SessionMetadataLastWriter, SessionMetadataSnapshot,
+    ReviewWorkflowKind, RunnerSandboxProfile as DomainRunnerSandboxProfile, RunnerSelector,
+    SemanticTranscriptEntryId, ServiceTier as DomainServiceTier, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
+    SessionMetadataLastWriter, SessionMetadataSnapshot,
     SessionModelSettingsChanged as DomainSessionModelSettingsChanged,
     SessionPlacement as DomainSessionPlacement, SessionPlacementPath, SessionPlacementVersion,
     SessionTemplateName, SessionTemplateProvenance, SettingOverlay as DomainSettingOverlay,
@@ -117,9 +118,10 @@ use signalbox_persistence::{
         ProcessImportedContentKind, ProcessImportedSourceSpeaker,
         ProcessModelCallRecoveryPrecondition, ProcessModelCallUsageProvenance,
         ProcessModelSelection, ProcessProviderModelCallFailureCause, ProcessReadError,
-        ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionDefaultsRead,
-        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptModelCallUsage,
-        ProcessTranscriptTurn, ProcessTurnState,
+        ProcessReadRepository, ProcessReconciliationOperation, ProcessRunnerProjection,
+        ProcessRunnerProjectionState, ProcessSessionDefaultsRead, ProcessTranscriptEntry,
+        ProcessTranscriptItem, ProcessTranscriptModelCallUsage, ProcessTranscriptTurn,
+        ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRejectionOnlyOutcome,
@@ -170,7 +172,13 @@ use signalbox_process_protocol::{
     ReviewPassTerminalOutcome, ReviewRunLifecycle, ReviewRunSnapshot,
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
+    RunnerCapabilityClass as WireRunnerCapabilityClass,
+    RunnerCredentialProfileName as WireRunnerCredentialProfileName,
     RunnerPlacementRevision as WireRunnerPlacementRevision,
+    RunnerProjection as WireRunnerProjection,
+    RunnerProjectionSelector as WireRunnerProjectionSelector,
+    RunnerProjectionState as WireRunnerProjectionState,
+    RunnerRepositoryKey as WireRunnerRepositoryKey,
     RunnerSandboxProfile as WireRunnerSandboxProfile,
     RunnerStateTransitionState as WireRunnerStateTransitionState,
     RunnerWorkingDirectory as WireRunnerWorkingDirectory, ServerFrame, ServerMessage,
@@ -10593,7 +10601,15 @@ async fn spool_transcript(
         &mut file,
         version,
         request_id,
-        ServerMessage::TranscriptSnapshotStart { session_id, cursor },
+        ServerMessage::TranscriptSnapshotStart {
+            session_id,
+            cursor,
+            runner: reader
+                .runner()
+                .map(wire_runner_projection)
+                .transpose()
+                .map_err(TranscriptSpoolError::Spool)?,
+        },
     )
     .await
     .map_err(TranscriptSpoolError::Spool)?;
@@ -10678,6 +10694,63 @@ async fn spool_transcript(
         file,
         cursor: summary.cursor(),
     }))
+}
+
+fn wire_runner_projection(
+    projection: &ProcessRunnerProjection,
+) -> Result<WireRunnerProjection, SnapshotSpoolError> {
+    let selector = match projection.selector() {
+        RunnerSelector::Identity(runner) => WireRunnerProjectionSelector::Runner {
+            runner_id: wire_uuid(runner.into_uuid()),
+        },
+        RunnerSelector::CapabilityClass(capability) => {
+            WireRunnerProjectionSelector::CapabilityClass {
+                name: WireRunnerCapabilityClass::try_new(capability.as_str().to_owned())
+                    .map_err(|_| SnapshotSpoolError::EncodeInvariant)?,
+            }
+        }
+    };
+    let sandbox_profile = match projection.sandbox() {
+        DomainRunnerSandboxProfile::Ambient => WireRunnerSandboxProfile::Ambient,
+        DomainRunnerSandboxProfile::WorkspaceRestricted => {
+            WireRunnerSandboxProfile::WorkspaceRestricted
+        }
+    };
+    let state = match projection.state() {
+        ProcessRunnerProjectionState::Unpinned => WireRunnerProjectionState::Unpinned,
+        ProcessRunnerProjectionState::Pinned => WireRunnerProjectionState::Pinned,
+        ProcessRunnerProjectionState::RunnerLostBeforePin => {
+            WireRunnerProjectionState::RunnerLostBeforePin
+        }
+        ProcessRunnerProjectionState::RunnerLost => WireRunnerProjectionState::RunnerLost,
+        ProcessRunnerProjectionState::RunnerAbandoned => WireRunnerProjectionState::RunnerAbandoned,
+    };
+    WireRunnerProjection::try_new(
+        selector,
+        projection
+            .runner()
+            .map(|runner| wire_uuid(runner.into_uuid())),
+        WireRunnerPlacementRevision::try_new(projection.placement_revision().get())
+            .ok_or(SnapshotSpoolError::EncodeInvariant)?,
+        sandbox_profile,
+        projection
+            .credential_profile()
+            .map(|profile| WireRunnerCredentialProfileName::try_new(profile.as_str().to_owned()))
+            .transpose()
+            .map_err(|_| SnapshotSpoolError::EncodeInvariant)?,
+        projection
+            .repository()
+            .map(|repository| WireRunnerRepositoryKey::try_new(repository.as_str().to_owned()))
+            .transpose()
+            .map_err(|_| SnapshotSpoolError::EncodeInvariant)?,
+        projection
+            .working_directory()
+            .map(|directory| WireRunnerWorkingDirectory::try_new(directory.as_str().to_owned()))
+            .transpose()
+            .map_err(|_| SnapshotSpoolError::EncodeInvariant)?,
+        state,
+    )
+    .map_err(|_| SnapshotSpoolError::EncodeInvariant)
 }
 
 async fn write_spooled_transcript<Writer>(

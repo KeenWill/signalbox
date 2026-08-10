@@ -40,10 +40,10 @@ use signalbox_process_protocol::{
     ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
     ReviewOrchestrationState, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
     ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
-    ReviewRepairTerminalOutcome, ReviewRunSnapshot, RunnerStateTransitionState, ServerFrame,
-    ServerMessage, SessionEvent, SessionPlacement, SystemPromptMember, SystemPromptText,
-    ToolBatchState, ToolDecision, TurnState, decode_server_line, encode_client_line,
-    encode_server_line,
+    ReviewRepairTerminalOutcome, ReviewRunSnapshot, RunnerProjection, RunnerProjectionState,
+    RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
+    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
+    decode_server_line, encode_client_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -3745,6 +3745,7 @@ async fn await_turn_terminal(
         }
         if wait_mode == TurnWaitMode::QueuedTurn {
             queued_turn_blocker_recovery(&mut snapshot, turn_id)?;
+            queued_turn_runner_recovery(snapshot.runner())?;
         }
         let mut observed_cursor = snapshot.cursor();
         loop {
@@ -3769,11 +3770,7 @@ async fn await_turn_terminal(
                         }
                         if wait_mode == TurnWaitMode::QueuedTurn {
                             queued_turn_blocker_recovery(&mut refreshed, turn_id)?;
-                            queued_turn_runner_recovery(
-                                &event,
-                                cursor.value(),
-                                refreshed.cursor(),
-                            )?;
+                            queued_turn_runner_recovery(refreshed.runner())?;
                         }
                         if !runner_recovery_transition(&event) {
                             return Err(ClientError::Protocol(
@@ -3936,22 +3933,15 @@ fn runner_recovery_transition(event: &SessionEvent) -> bool {
     )
 }
 
-/// Rejects only when the authoritative reread closes at the pre-pin loss
-/// event; a later snapshot no longer authenticates that event as current.
-fn queued_turn_runner_recovery(
-    event: &SessionEvent,
-    event_cursor: u64,
-    snapshot_cursor: u64,
-) -> Result<(), ClientError> {
-    if event_cursor == snapshot_cursor
-        && matches!(
-            event,
-            SessionEvent::RunnerStateTransition {
-                state: RunnerStateTransitionState::RunnerLostBeforePin,
-                ..
-            }
+/// Rejects when the authoritative snapshot retains a current runner loss that
+/// prevents the selected queued turn from activating.
+fn queued_turn_runner_recovery(runner: Option<&RunnerProjection>) -> Result<(), ClientError> {
+    if runner.is_some_and(|runner| {
+        matches!(
+            runner.state(),
+            RunnerProjectionState::RunnerLostBeforePin | RunnerProjectionState::RunnerLost
         )
-    {
+    }) {
         return Err(ClientError::RunnerRecoveryRequired);
     }
     Ok(())
@@ -5340,9 +5330,10 @@ mod tests {
         ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
         ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
         ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, RunnerPlacementRevision,
-        RunnerSandboxProfile, RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent,
-        SessionPlacement, SettingOverlay, SystemPromptMember, ToolBatchState, ToolDecision,
-        TurnState, decode_client_line, encode_server_line,
+        RunnerProjection, RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
+        RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
+        SettingOverlay, SystemPromptMember, ToolBatchState, ToolDecision, TurnState,
+        decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -5426,16 +5417,20 @@ mod tests {
         CanonicalUuid::from_uuid(Uuid::from_u128(FOLLOWED_SESSION_IDENTITY))
     }
 
-    /// One pre-pin loss event whose identities are arbitrary fixture material.
-    fn pre_pin_runner_loss_event() -> SessionEvent {
-        SessionEvent::RunnerStateTransition {
-            runner_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
-            placement_revision: RunnerPlacementRevision::try_new(1)
+    fn runner_projection(revision: u64, state: RunnerProjectionState) -> RunnerProjection {
+        let runner_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        RunnerProjection::try_new(
+            RunnerProjectionSelector::Runner { runner_id },
+            Some(runner_id),
+            RunnerPlacementRevision::try_new(revision)
                 .expect("the fixture placement revision is positive"),
-            sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
-            working_directory: None,
-            state: RunnerStateTransitionState::RunnerLostBeforePin,
-        }
+            RunnerSandboxProfile::WorkspaceRestricted,
+            None,
+            None,
+            None,
+            state,
+        )
+        .expect("the fixture runner projection is coherent")
     }
 
     fn delegation_rejection_expectation(
@@ -6327,6 +6322,7 @@ mod tests {
                     encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
                         session_id,
                         cursor: CanonicalU64::new(cursor),
+                        runner: None,
                     })?)
                     .map_err(io::Error::other)?;
                 response.extend_from_slice(
@@ -6477,6 +6473,7 @@ mod tests {
                     encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
                         session_id,
                         cursor: CanonicalU64::new(cursor),
+                        runner: None,
                     })?)
                     .map_err(io::Error::other)?;
                 response.extend_from_slice(
@@ -6615,6 +6612,7 @@ mod tests {
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
                     session_id,
                     cursor: CanonicalU64::new(0),
+                    runner: None,
                 })?)
                 .map_err(io::Error::other)?;
             response.extend_from_slice(
@@ -6708,6 +6706,7 @@ mod tests {
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
                     session_id,
                     cursor: CanonicalU64::new(0),
+                    runner: None,
                 })?)
                 .map_err(io::Error::other)?;
             response.extend_from_slice(
@@ -6873,22 +6872,27 @@ mod tests {
     }
 
     #[test]
-    fn queued_send_stops_on_current_pre_pin_runner_loss() {
-        const CURRENT_CURSOR: u64 = 1;
-        let event = pre_pin_runner_loss_event();
-        let result = queued_turn_runner_recovery(&event, CURRENT_CURSOR, CURRENT_CURSOR);
+    fn queued_send_stops_on_current_pre_pin_runner_loss_from_snapshot() {
+        let projection = runner_projection(1, RunnerProjectionState::RunnerLostBeforePin);
+        let result = queued_turn_runner_recovery(Some(&projection));
 
         assert!(matches!(result, Err(ClientError::RunnerRecoveryRequired)));
     }
 
     #[test]
     fn queued_send_ignores_pre_pin_runner_loss_superseded_in_snapshot() {
-        const LOSS_CURSOR: u64 = 1;
-        const REPLACEMENT_CURSOR: u64 = 2;
-        let event = pre_pin_runner_loss_event();
-        let result = queued_turn_runner_recovery(&event, LOSS_CURSOR, REPLACEMENT_CURSOR);
+        let projection = runner_projection(2, RunnerProjectionState::Pinned);
+        let result = queued_turn_runner_recovery(Some(&projection));
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn queued_send_stops_on_current_pinned_runner_loss() {
+        let projection = runner_projection(1, RunnerProjectionState::RunnerLost);
+        let result = queued_turn_runner_recovery(Some(&projection));
+
+        assert!(matches!(result, Err(ClientError::RunnerRecoveryRequired)));
     }
 
     #[test]
