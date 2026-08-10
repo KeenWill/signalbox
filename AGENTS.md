@@ -256,7 +256,9 @@ Reclaim what those leave behind with
 [`tooling/sweep-test-containers.sh`](tooling/sweep-test-containers.sh), which
 removes testcontainers-managed containers past an age bound — two hours by
 default, far above any suite's runtime — together with their volumes. It reports
-what it would remove and changes nothing until passed `--apply`.
+what it would remove and changes nothing until passed `--apply`. On a shared
+machine, run it on a timer: SIGKILL is the case no in-process handler converts,
+so a periodic sweep is what bounds the leak there rather than any code change.
 
 CI runs these ignored suites from
 [`.github/postgres-integration-suites.toml`](.github/postgres-integration-suites.toml),
