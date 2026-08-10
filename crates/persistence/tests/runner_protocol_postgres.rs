@@ -9915,6 +9915,89 @@ async fn s32_inv002_inv044_load_rejects_pinned_loss_relabelled_from_abandonment(
     Ok(())
 }
 
+/// INV-002 / INV-044: active pinned reconstitution requires the exact
+/// predecessor for its admitted pinned event kind.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv044_load_rejects_pinned_state_relabelled_from_abandonment()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    append_runner_lost_projection(&pool, pin.placement.session()).await?;
+    append_abandoned_projection(&pool, pin.placement.session(), None).await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER ALL",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET event_kind = 'pinned', state_kind = 'pinned',
+                lost_runner_id = NULL, loss_source_kind = NULL
+          WHERE session_id = $1 AND event_kind = 'abandoned'",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(pin.placement.session())
+        .await
+        .expect_err("terminal abandonment cannot be resurrected as an active pin");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-002 / INV-044: every historical pre-pin loss authenticates its own
+/// immediately preceding unpinned origin.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv044_load_rejects_abandonment_relabelled_as_historical_loss()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let initial_runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(initial_runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    append_abandoned_projection(&pool, placement.session(), None).await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER ALL",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET event_kind = 'runner_lost_before_pin',
+                state_kind = 'runner_lost_before_pin'
+          WHERE session_id = $1 AND event_kind = 'abandoned'",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    append_pre_pin_replacement_projection(
+        &pool,
+        placement.session(),
+        RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER)),
+    )
+    .await?;
+    let corrupted = store
+        .load_placement(placement.session())
+        .await
+        .expect_err("replacement history cannot resurrect an abandoned placement");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_generic_store_rejects_abandonment_without_scheduler_authority()
