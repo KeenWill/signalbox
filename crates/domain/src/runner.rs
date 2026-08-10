@@ -2574,8 +2574,14 @@ impl SessionRunnerPlacement {
         workspace: Option<ProvisionedWorkspace>,
         prior_grant: Option<CredentialProfileGrant>,
     ) -> Result<RunnerPlacementReplacement, RunnerDomainError> {
-        let SessionRunnerPlacementState::RunnerLost(lost) = self.state else {
-            return Err(RunnerDomainError::InvalidState);
+        let lost = match self.state {
+            SessionRunnerPlacementState::RunnerLost(lost) => lost,
+            SessionRunnerPlacementState::Unpinned
+            | SessionRunnerPlacementState::Pinned(_)
+            | SessionRunnerPlacementState::RunnerLostBeforePin(_)
+            | SessionRunnerPlacementState::RunnerAbandoned(_) => {
+                return Err(RunnerDomainError::InvalidState);
+            }
         };
         let before = lost.pinned;
         if !registration.is_current() {
@@ -2849,6 +2855,7 @@ fn placement_revision_history_matches(
     match history {
         RunnerPlacementReconstitutionHistory::Initial => revision == RunnerGeneration::one(),
         RunnerPlacementReconstitutionHistory::PrePinReplacement {
+            predecessor_history,
             prior_revision,
             lost_runner,
             prior_request,
@@ -2858,7 +2865,8 @@ fn placement_revision_history_matches(
                 RunnerSelector::Identity(successor) => successor != *lost_runner,
                 RunnerSelector::CapabilityClass(_) => false,
             };
-            prior_revision.checked_next() == Some(revision)
+            placement_revision_history_matches(*prior_revision, prior_request, predecessor_history)
+                && prior_revision.checked_next() == Some(revision)
                 && prior_request.selector == RunnerSelector::Identity(*lost_runner)
                 && replacement_request.as_ref() == request
                 && successor_differs
@@ -2873,6 +2881,8 @@ pub enum RunnerPlacementReconstitutionHistory {
     Initial,
     /// A lost-before-pin placement installed this successor unpinned request.
     PrePinReplacement {
+        /// Complete append-only history authenticating the predecessor revision.
+        predecessor_history: Box<RunnerPlacementReconstitutionHistory>,
         /// Exact predecessor revision consumed by the replacement.
         prior_revision: RunnerGeneration,
         /// Exact runner retained by the predecessor loss.
@@ -3703,6 +3713,7 @@ mod tests {
     const ENROLLMENT: u128 = 0x7100;
     const RUNNER: u128 = 0x7200;
     const REPLACEMENT_RUNNER: u128 = 0x7201;
+    const THIRD_RUNNER: u128 = 0x7202;
     const AUTHENTICATION: u128 = 0x7300;
     const LEASE: u128 = 0x7400;
     const ATTEMPT: u128 = 0x7500;
@@ -6406,6 +6417,7 @@ mod tests {
         let initial_history = placement_reconstitution_input(replacement.placement);
         let mut replacement_history = initial_history.clone();
         replacement_history.history = RunnerPlacementReconstitutionHistory::PrePinReplacement {
+            predecessor_history: Box::new(RunnerPlacementReconstitutionHistory::Initial),
             prior_revision,
             lost_runner: selected,
             prior_request: Box::new(prior_request),
@@ -6424,6 +6436,33 @@ mod tests {
         )
         .expect("append-only pre-pin replacement history authenticates revision two");
         assert_eq!(restored.state(), &SessionRunnerPlacementState::Unpinned);
+    }
+
+    #[test]
+    fn s32_inv044_pre_pin_reconstitution_rejects_a_truncated_predecessor_chain() {
+        let second_runner = runner_id(REPLACEMENT_RUNNER);
+        let third_runner = runner_id(THIRD_RUNNER);
+        let second_request = exact_placement_request(second_runner);
+        let third_request = exact_placement_request(third_runner);
+        let input = SessionRunnerPlacementReconstitutionInput {
+            session: session_id(SESSION),
+            revision: RunnerGeneration::try_from_u64(3).expect("three is a positive generation"),
+            request: third_request.clone(),
+            state: SessionRunnerPlacementState::Unpinned,
+            history: RunnerPlacementReconstitutionHistory::PrePinReplacement {
+                predecessor_history: Box::new(RunnerPlacementReconstitutionHistory::Initial),
+                prior_revision: RunnerGeneration::try_from_u64(2)
+                    .expect("two is a positive generation"),
+                lost_runner: second_runner,
+                prior_request: Box::new(second_request),
+                replacement_request: Box::new(third_request),
+            },
+        };
+
+        assert_eq!(
+            SessionRunnerPlacement::reconstitute(input, session_id(SESSION), None, None),
+            Err(RunnerDomainError::CorruptStoredFacts),
+        );
     }
 
     #[test]
