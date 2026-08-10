@@ -1702,9 +1702,9 @@ impl RunnerProtocolStore {
         };
         let pinned_profile =
             row.decode_column::<Option<String>>("pinned_credential_profile_name")?;
-        let profileless_tombstone = grant.as_ref().filter(|grant| {
-            grant.state() == CredentialProfileGrantState::Revoked && pinned_profile.is_none()
-        });
+        let profileless_tombstone = grant
+            .as_ref()
+            .filter(|grant| credential_grant_is_revoked(grant.state()) && pinned_profile.is_none());
         let placement = decode_placement(
             transaction.as_mut(),
             &row,
@@ -3721,7 +3721,7 @@ async fn insert_grant_if_new(
     .bind(grant.profile().as_str())
     .execute(&mut **transaction)
     .await?;
-    if grant.state() == CredentialProfileGrantState::Revoked {
+    if credential_grant_is_revoked(grant.state()) {
         sqlx::query(
             "INSERT INTO runner_credential_grant_audit
                 (session_id, lineage_origin_event_ordinal,
@@ -3803,13 +3803,18 @@ async fn decode_placement(
 ) -> Result<SessionRunnerPlacement, RunnerProtocolStoreError> {
     let session = session_id(row.decode_column("session_id")?);
     let event = row.decode_column::<Decimal>("event_ordinal")?;
+    let event_ordinal = decode_u64(row.decode_column("event_ordinal")?)?;
     let placement_revision = decode_generation(row.decode_column("placement_revision")?)?;
     let request = decode_placement_request(connection, row).await?;
     let permission_overrides = request.permission_overrides.clone();
     let event_kind: String = row.decode_column("event_kind")?;
     let state_kind: String = row.decode_column("state_kind")?;
     let event_matches_state = match state_kind.as_str() {
-        "unpinned" => matches!(event_kind.as_str(), "created" | "pre_pin_replaced"),
+        "unpinned" => match event_kind.as_str() {
+            "created" => event_ordinal == 1 && placement_revision == RunnerGeneration::one(),
+            "pre_pin_replaced" => true,
+            _ => false,
+        },
         "pinned" => matches!(
             event_kind.as_str(),
             "pinned" | "runner_replaced" | "profile_replaced"
@@ -4710,7 +4715,7 @@ fn validate_placement_snapshot(
     let profileless_tombstone = match (pinned_placement(placement.state()), grant) {
         (Some(pinned), Some(grant))
             if pinned.credential_profile.is_none()
-                && grant.state() == CredentialProfileGrantState::Revoked =>
+                && credential_grant_is_revoked(grant.state()) =>
         {
             Some(grant)
         }
@@ -4745,7 +4750,7 @@ fn validate_placement_snapshot(
             }
             None => {
                 placement.session() == grant.session()
-                    && grant.state() == CredentialProfileGrantState::Revoked
+                    && credential_grant_is_revoked(grant.state())
                     && grant.revision() != RunnerGeneration::one()
                     && pinned.grant_lineage == Some(grant.lineage())
             }
@@ -4761,6 +4766,13 @@ fn validate_placement_snapshot(
         ));
     }
     Ok(())
+}
+
+fn credential_grant_is_revoked(state: CredentialProfileGrantState) -> bool {
+    match state {
+        CredentialProfileGrantState::Active => false,
+        CredentialProfileGrantState::Revoked => true,
+    }
 }
 
 fn pinned_placement(state: &SessionRunnerPlacementState) -> Option<&PinnedRunnerPlacement> {
