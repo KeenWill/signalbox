@@ -2064,8 +2064,16 @@ impl RunnerProtocolStore {
             "SELECT replacement_attempt_id, replacement_session_id,
                     replacement_turn_id, replacement_issuing_turn_attempt_id,
                     replacement_request_id, replacement_dispatch_generation
-               FROM runner_claimed_retry_attempt_authority
-              WHERE source_lease_id = $1 AND source_generation = $2",
+               FROM runner_claimed_retry_attempt_authority AS authority
+               JOIN runner_lease_generation AS lease
+                 ON lease.lease_id = authority.source_lease_id
+                AND lease.generation = authority.source_generation
+               JOIN tool_attempt AS source_attempt
+                 ON source_attempt.attempt_id = lease.attempt_id
+                AND source_attempt.session_id = lease.session_id
+              WHERE authority.source_lease_id = $1
+                AND authority.source_generation = $2
+                AND source_attempt.state_kind = 'in_flight'",
         )
         .bind(lease.into_uuid())
         .bind(Decimal::from(generation.get()))
