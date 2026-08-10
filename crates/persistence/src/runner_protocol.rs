@@ -1708,6 +1708,7 @@ impl RunnerProtocolStore {
         let placement = decode_placement(
             transaction.as_mut(),
             &row,
+            &self.catalog,
             registration
                 .as_ref()
                 .map(StoredValidatedRunnerRegistration::registration),
@@ -3798,6 +3799,7 @@ async fn load_permission_overrides(
 async fn decode_placement(
     connection: &mut PgConnection,
     row: &PgRow,
+    catalog: &RunnerCatalog,
     registration: Option<&ValidatedRunnerRegistration>,
     profileless_tombstone: Option<&CredentialProfileGrant>,
 ) -> Result<SessionRunnerPlacement, RunnerProtocolStoreError> {
@@ -3886,9 +3888,9 @@ async fn decode_placement(
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
     };
-    authenticate_pinned_predecessor(connection, row, &request, &state).await?;
-    authenticate_loss_predecessor(connection, row, &request, &state).await?;
-    authenticate_abandonment_predecessor(connection, row, &request, &state).await?;
+    authenticate_pinned_predecessor(connection, row, catalog, &request, &state).await?;
+    authenticate_loss_predecessor(connection, row, catalog, &request, &state).await?;
+    authenticate_abandonment_predecessor(connection, row, catalog, &request, &state).await?;
     let history = match &state {
         SessionRunnerPlacementState::Unpinned
         | SessionRunnerPlacementState::RunnerLostBeforePin(_)
@@ -3919,6 +3921,7 @@ async fn decode_placement(
 async fn authenticate_loss_predecessor(
     connection: &mut PgConnection,
     row: &PgRow,
+    catalog: &RunnerCatalog,
     request: &SessionRunnerPlacementRequest,
     state: &SessionRunnerPlacementState,
 ) -> Result<(), RunnerProtocolStoreError> {
@@ -3936,6 +3939,7 @@ async fn authenticate_loss_predecessor(
     authenticate_pinned_predecessor(
         connection,
         &predecessor,
+        catalog,
         &predecessor_request,
         &SessionRunnerPlacementState::Pinned(pinned),
     )
@@ -4049,6 +4053,7 @@ async fn authenticate_pre_pin_loss_predecessor(
 async fn authenticate_pinned_predecessor(
     connection: &mut PgConnection,
     initial_row: &PgRow,
+    catalog: &RunnerCatalog,
     request: &SessionRunnerPlacementRequest,
     state: &SessionRunnerPlacementState,
 ) -> Result<(), RunnerProtocolStoreError> {
@@ -4060,6 +4065,14 @@ async fn authenticate_pinned_predecessor(
     let mut current_pinned = pinned.clone();
     loop {
         let row = current_row.as_ref().unwrap_or(initial_row);
+        authenticate_pinned_registration(
+            connection,
+            row,
+            catalog,
+            &current_request,
+            &current_pinned,
+        )
+        .await?;
         let session = session_id(row.decode_column("session_id")?);
         let predecessor_ordinal = decode_u64(row.decode_column("event_ordinal")?)?
             .checked_sub(1)
@@ -4202,6 +4215,38 @@ async fn authenticate_pinned_predecessor(
     }
 }
 
+async fn authenticate_pinned_registration(
+    connection: &mut PgConnection,
+    row: &PgRow,
+    catalog: &RunnerCatalog,
+    request: &SessionRunnerPlacementRequest,
+    pinned: &PinnedRunnerPlacement,
+) -> Result<(), RunnerProtocolStoreError> {
+    let session = session_id(row.decode_column("session_id")?);
+    let registration = load_placement_registration(connection, row, catalog)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    let grant = load_grant_for_placement(connection, row, catalog).await?;
+    let pinned_profile = row.decode_column::<Option<String>>("pinned_credential_profile_name")?;
+    let profileless_tombstone = grant
+        .as_ref()
+        .filter(|grant| credential_grant_is_revoked(grant.state()) && pinned_profile.is_none());
+    SessionRunnerPlacement::reconstitute(
+        SessionRunnerPlacementReconstitutionInput {
+            session,
+            revision: decode_generation(row.decode_column("placement_revision")?)?,
+            request: request.clone(),
+            state: SessionRunnerPlacementState::Pinned(pinned.clone()),
+            history: RunnerPlacementReconstitutionHistory::Initial,
+        },
+        session,
+        Some(registration.registration()),
+        profileless_tombstone,
+    )
+    .map(|_| ())
+    .map_err(RunnerProtocolStoreError::Domain)
+}
+
 fn runner_replacement_grant_is_successor(
     predecessor: &PgRow,
     replacement: &PgRow,
@@ -4293,6 +4338,7 @@ async fn decode_pinned_placement(
 async fn authenticate_abandonment_predecessor(
     connection: &mut PgConnection,
     row: &PgRow,
+    catalog: &RunnerCatalog,
     request: &SessionRunnerPlacementRequest,
     state: &SessionRunnerPlacementState,
 ) -> Result<(), RunnerProtocolStoreError> {
@@ -4332,7 +4378,8 @@ async fn authenticate_abandonment_predecessor(
                     == Some(lost.runner())
                 && !placement_row_has_invalid_pre_pin_loss_facts(&predecessor)? =>
         {
-            Ok(())
+            authenticate_pre_pin_loss_predecessor(connection, &predecessor, &predecessor_request)
+                .await
         }
         AbandonedRunnerPlacement::Pinned(lost)
             if predecessor_event == "runner_lost"
@@ -4355,16 +4402,31 @@ async fn authenticate_abandonment_predecessor(
                 &predecessor,
                 session,
                 predecessor_request.sandbox,
-                predecessor_request.permission_overrides,
+                predecessor_request.permission_overrides.clone(),
             )
             .await?;
             let predecessor_registration = decode_pinned_registration_identity(&predecessor)?;
             let abandonment_registration = decode_pinned_registration_identity(row)?;
-            if pinned == *lost.pinned() && predecessor_registration == abandonment_registration {
-                Ok(())
-            } else {
-                Err(RunnerProtocolCorruption::CrossWiredReference.into())
+            if pinned != *lost.pinned() || predecessor_registration != abandonment_registration {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
             }
+            let loss = SessionRunnerPlacementState::RunnerLost(lost.as_ref().clone());
+            let (prior_row, prior_request, prior_pinned) =
+                load_authenticated_pinned_loss_predecessor(
+                    connection,
+                    &predecessor,
+                    &predecessor_request,
+                    &loss,
+                )
+                .await?;
+            authenticate_pinned_predecessor(
+                connection,
+                &prior_row,
+                catalog,
+                &prior_request,
+                &SessionRunnerPlacementState::Pinned(prior_pinned),
+            )
+            .await
         }
         AbandonedRunnerPlacement::BeforePin(_) | AbandonedRunnerPlacement::Pinned(_) => {
             Err(RunnerProtocolCorruption::CrossWiredReference.into())
