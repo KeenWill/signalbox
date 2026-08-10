@@ -3886,6 +3886,7 @@ async fn decode_placement(
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
     };
+    authenticate_loss_predecessor(connection, row, &request, &state).await?;
     authenticate_abandonment_predecessor(connection, row, &request, &state).await?;
     let history = match &state {
         SessionRunnerPlacementState::Unpinned
@@ -3912,6 +3913,97 @@ async fn decode_placement(
         profileless_tombstone,
     )
     .map_err(RunnerProtocolStoreError::Domain)
+}
+
+async fn authenticate_loss_predecessor(
+    connection: &mut PgConnection,
+    row: &PgRow,
+    request: &SessionRunnerPlacementRequest,
+    state: &SessionRunnerPlacementState,
+) -> Result<(), RunnerProtocolStoreError> {
+    match state {
+        SessionRunnerPlacementState::RunnerLostBeforePin(_)
+        | SessionRunnerPlacementState::RunnerLost(_) => {}
+        SessionRunnerPlacementState::Unpinned
+        | SessionRunnerPlacementState::Pinned(_)
+        | SessionRunnerPlacementState::RunnerAbandoned(_) => return Ok(()),
+    }
+    let session = session_id(row.decode_column("session_id")?);
+    let predecessor_ordinal = decode_u64(row.decode_column("event_ordinal")?)?
+        .checked_sub(1)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+    let predecessor = sqlx::query(
+        "SELECT *
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_ordinal = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(predecessor_ordinal))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+    let predecessor_request = decode_placement_request(connection, &predecessor).await?;
+    let predecessor_revision = decode_generation(predecessor.decode_column("placement_revision")?)?;
+    if predecessor_revision != decode_generation(row.decode_column("placement_revision")?)?
+        || &predecessor_request != request
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let predecessor_event: String = predecessor.decode_column("event_kind")?;
+    let predecessor_state: String = predecessor.decode_column("state_kind")?;
+    let predecessor_is_unpinned_origin = match predecessor_event.as_str() {
+        "created" => predecessor_ordinal == 1 && predecessor_revision == RunnerGeneration::one(),
+        "pre_pin_replaced" => {
+            predecessor_ordinal > 1 && predecessor_revision != RunnerGeneration::one()
+        }
+        _ => false,
+    };
+    let predecessor_has_loss_metadata = predecessor
+        .decode_column::<Option<Uuid>>("lost_runner_id")?
+        .is_some()
+        || predecessor
+            .decode_column::<Option<String>>("loss_source_kind")?
+            .is_some();
+    match state {
+        SessionRunnerPlacementState::RunnerLostBeforePin(_)
+            if predecessor_state == "unpinned"
+                && predecessor_is_unpinned_origin
+                && !placement_row_has_invalid_unpinned_facts(&predecessor)? =>
+        {
+            Ok(())
+        }
+        SessionRunnerPlacementState::RunnerLost(lost)
+            if predecessor_state == "pinned"
+                && matches!(
+                    predecessor_event.as_str(),
+                    "pinned" | "runner_replaced" | "profile_replaced"
+                )
+                && !predecessor_has_loss_metadata =>
+        {
+            let pinned = decode_pinned_placement(
+                connection,
+                &predecessor,
+                session,
+                predecessor_request.sandbox,
+                predecessor_request.permission_overrides,
+            )
+            .await?;
+            let predecessor_registration = decode_pinned_registration_identity(&predecessor)?;
+            let loss_registration = decode_pinned_registration_identity(row)?;
+            if pinned == *lost.pinned() && predecessor_registration == loss_registration {
+                Ok(())
+            } else {
+                Err(RunnerProtocolCorruption::CrossWiredReference.into())
+            }
+        }
+        SessionRunnerPlacementState::RunnerLostBeforePin(_)
+        | SessionRunnerPlacementState::RunnerLost(_) => {
+            Err(RunnerProtocolCorruption::CrossWiredReference.into())
+        }
+        SessionRunnerPlacementState::Unpinned
+        | SessionRunnerPlacementState::Pinned(_)
+        | SessionRunnerPlacementState::RunnerAbandoned(_) => Ok(()),
+    }
 }
 
 async fn decode_pinned_placement(
