@@ -261,15 +261,13 @@ const SYNTHETIC_CARGO_TEST_EXECUTABLE: &str = "synthetic-test-executable";
 const SYNTHETIC_CARGO_TEST_NAME: &str = "synthetic_test_name";
 const SYNTHETIC_CARGO_DIAGNOSTIC_MESSAGE: &str = "synthetic compiler diagnostic";
 const SYNTHETIC_CARGO_DIAGNOSTIC_FILE: &str = "src/lib.rs";
-const LIVE_CARGO_DIAGNOSTIC_MARKER: &str = "tool eval fixture diagnostic";
+const LIVE_CARGO_DIAGNOSTIC_MESSAGE: &str =
+    "use of deprecated function `old_fixture`: tool eval fixture diagnostic";
 const CARGO_ERROR_DIAGNOSTIC_LEVEL: &str = "error";
 const CARGO_WARNING_DIAGNOSTIC_LEVEL: &str = "warning";
-const CARGO_NOTE_DIAGNOSTIC_LEVEL: &str = "note";
-const CARGO_HELP_DIAGNOSTIC_LEVEL: &str = "help";
-const CARGO_FAILURE_NOTE_DIAGNOSTIC_LEVEL: &str = "failure-note";
-const SYNTHETIC_CARGO_DIAGNOSTIC_LINE: u64 = 7;
-const SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN: u64 = 4;
-const SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN: u64 = 8;
+const SYNTHETIC_CARGO_DIAGNOSTIC_LINE: u64 = 4;
+const SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN: u64 = 20;
+const SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN: u64 = 31;
 const SYNTHETIC_CARGO_DIAGNOSTIC_BACKWARDS_END_COLUMN: u64 = 3;
 const EXEC_NATURAL_ARGUMENTS: &str = r#"{"program":"/bin/sh","arguments":["-c","printf 'model loop observed\n' > exec-result.txt"],"working_directory":".","timeout_seconds":30}"#;
 const EXEC_NATURAL_OUTPUT: &str = "";
@@ -8103,79 +8101,35 @@ fn cargo_diagnostics_result_passed(result: &serde_json::Value) -> bool {
         && result.diagnostics.provenance == "workspace_influenced"
         && !result.diagnostics.limit_reached
         && !result.diagnostics.known_truncated
-        && result
-            .diagnostics
-            .values
-            .iter()
-            .all(cargo_diagnostic_record_is_success_evidence)
-        && result
-            .diagnostics
-            .values
-            .iter()
-            .any(cargo_diagnostic_is_live_fixture_evidence)
+        && cargo_diagnostics_are_exact_live_fixture_evidence(&result.diagnostics.values)
         && result.tests.provenance == "workspace_influenced"
         && result.tests.values.is_empty()
         && !result.tests.limit_reached
         && !result.tests.known_truncated
 }
 
-fn cargo_diagnostic_record_is_success_evidence(record: &serde_json::Value) -> bool {
+fn cargo_diagnostics_are_exact_live_fixture_evidence(records: &[serde_json::Value]) -> bool {
+    let [record] = records else {
+        return false;
+    };
     let Ok(diagnostic) = serde_json::from_value::<CargoDiagnosticsEvalDiagnostic>(record.clone())
     else {
         return false;
     };
-    cargo_diagnostic_location_is_valid(&diagnostic)
-        && diagnostic.level_completeness == "complete"
-        && matches!(
-            diagnostic.level.as_str(),
-            CARGO_WARNING_DIAGNOSTIC_LEVEL
-                | CARGO_NOTE_DIAGNOSTIC_LEVEL
-                | CARGO_HELP_DIAGNOSTIC_LEVEL
-                | CARGO_FAILURE_NOTE_DIAGNOSTIC_LEVEL
-        )
-        && !diagnostic.message.is_empty()
-        && cargo_diagnostic_completeness_is_valid(&diagnostic.message_completeness)
-}
-
-fn cargo_diagnostic_is_live_fixture_evidence(record: &serde_json::Value) -> bool {
-    let Ok(diagnostic) = serde_json::from_value::<CargoDiagnosticsEvalDiagnostic>(record.clone())
+    let Ok(span) = serde_json::from_value::<CargoDiagnosticsEvalSpan>(diagnostic.span.clone())
     else {
         return false;
     };
     diagnostic.file.as_str() == Some(SYNTHETIC_CARGO_DIAGNOSTIC_FILE)
+        && diagnostic.file_completeness == "complete"
+        && span.line_start == SYNTHETIC_CARGO_DIAGNOSTIC_LINE
+        && span.column_start == SYNTHETIC_CARGO_DIAGNOSTIC_START_COLUMN
+        && span.line_end == SYNTHETIC_CARGO_DIAGNOSTIC_LINE
+        && span.column_end == SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN
         && diagnostic.level == CARGO_WARNING_DIAGNOSTIC_LEVEL
-        && diagnostic.message.contains(LIVE_CARGO_DIAGNOSTIC_MARKER)
-        && cargo_diagnostic_record_is_success_evidence(record)
-}
-
-fn cargo_diagnostic_location_is_valid(diagnostic: &CargoDiagnosticsEvalDiagnostic) -> bool {
-    match (diagnostic.file.as_str(), diagnostic.span.is_null()) {
-        (Some(file), false) => {
-            !file.is_empty()
-                && cargo_diagnostic_completeness_is_valid(&diagnostic.file_completeness)
-                && cargo_diagnostic_span_is_valid(&diagnostic.span)
-        }
-        (None, true) if diagnostic.file.is_null() => diagnostic.file_completeness == "complete",
-        _ => false,
-    }
-}
-
-fn cargo_diagnostic_completeness_is_valid(completeness: &str) -> bool {
-    completeness == "complete"
-}
-
-fn cargo_diagnostic_span_is_valid(span: &serde_json::Value) -> bool {
-    if span.is_null() {
-        return true;
-    }
-    let Ok(span) = serde_json::from_value::<CargoDiagnosticsEvalSpan>(span.clone()) else {
-        return false;
-    };
-    span.line_start > 0
-        && span.column_start > 0
-        && span.line_end >= span.line_start
-        && span.column_end > 0
-        && (span.line_end > span.line_start || span.column_end >= span.column_start)
+        && diagnostic.level_completeness == "complete"
+        && diagnostic.message == LIVE_CARGO_DIAGNOSTIC_MESSAGE
+        && diagnostic.message_completeness == "complete"
 }
 
 fn cargo_diagnostics_stream_is_valid(stream: &CargoDiagnosticsEvalStream) -> bool {
@@ -13604,7 +13558,7 @@ fn live_cargo_diagnostic() -> CargoDiagnostic {
         }),
         level: String::from(CARGO_WARNING_DIAGNOSTIC_LEVEL),
         level_completeness: CaptureCompleteness::Complete,
-        message: String::from(LIVE_CARGO_DIAGNOSTIC_MARKER),
+        message: String::from(LIVE_CARGO_DIAGNOSTIC_MESSAGE),
         message_completeness: CaptureCompleteness::Complete,
     }
 }
@@ -13722,6 +13676,50 @@ fn forced_cargo_diagnostics_accepts_correlated_file_and_span() {
 fn forced_cargo_diagnostics_requires_the_live_fixture_warning() {
     let mut result = successful_cargo_diagnostics_result();
     result["diagnostics"]["values"] = serde_json::json!([]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_duplicated_fixture_warning() {
+    let mut result = successful_cargo_diagnostics_result();
+    let diagnostic = serde_json::to_value(live_cargo_diagnostic())
+        .expect("producer Cargo diagnostics serialize");
+    result["diagnostics"]["values"] = serde_json::json!([diagnostic, diagnostic]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_an_extra_recognized_diagnostic() {
+    let mut result = successful_cargo_diagnostics_result();
+    let fixture = serde_json::to_value(live_cargo_diagnostic())
+        .expect("producer Cargo diagnostics serialize");
+    let extra = serde_json::to_value(synthetic_cargo_diagnostic("note"))
+        .expect("producer Cargo diagnostics serialize");
+    result["diagnostics"]["values"] = serde_json::json!([fixture, extra]);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_different_valid_fixture_span() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["values"][0]["span"]["column_end"] =
+        serde_json::json!(SYNTHETIC_CARGO_DIAGNOSTIC_END_COLUMN + 1);
+    let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
+
+    assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_a_marker_bearing_wrong_message() {
+    let mut result = successful_cargo_diagnostics_result();
+    result["diagnostics"]["values"][0]["message"] =
+        serde_json::json!("synthetic prefix: tool eval fixture diagnostic");
     let outcome = forced_exec_outcome(CARGO_DIAGNOSTICS_NAME, result);
 
     assert_eq!(outcome.forced_disposition(), EvalDisposition::Miss);
