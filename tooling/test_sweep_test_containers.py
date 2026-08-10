@@ -66,16 +66,24 @@ elif command == "rm":
     if os.environ.get("FAKE_DOCKER_RM_REFUSED"):
         print(os.environ["FAKE_DOCKER_RM_REFUSED"], file=sys.stderr)
         sys.exit(1)
+    if os.environ.get("FAKE_DOCKER_RM_SILENTLY_FAILS"):
+        sys.exit(1)
     gone = set(filter(None, os.environ.get("FAKE_DOCKER_RM_GONE", "").split(",")))
     removed = [name for name in sys.argv[4:] if name not in gone]
     with open(os.environ["FAKE_DOCKER_RM_LOG"], "a") as log:
         log.write("\\n".join(removed) + "\\n")
+    for name in removed:
+        print(name)
     for name in sys.argv[4:]:
         if name in gone:
             print(
                 f"Error response from daemon: No such container: {name}",
                 file=sys.stderr,
             )
+    if os.environ.get("FAKE_DOCKER_RM_NOTE"):
+        print(os.environ["FAKE_DOCKER_RM_NOTE"], file=sys.stderr)
+    if os.environ.get("FAKE_DOCKER_RM_NOTE_IS_FATAL"):
+        sys.exit(1)
     sys.exit(1 if gone & set(sys.argv[4:]) else 0)
 elif command == "volume":
     assert "dangling=true" in sys.argv, sys.argv
@@ -109,15 +117,33 @@ REFUSED_REMOVAL = "Error response from daemon: removal is denied by policy"
 
 HARMLESS_INSPECTION_NOTE = "WARNING: the legacy inspect format is deprecated"
 
+HARMLESS_REMOVAL_NOTE = "WARNING: --volumes is deprecated in favour of -v"
+
 MARKED_START = ".with_labels(disposable_test_container_labels())"
 
+# A chain longer than this is not a container start; the walk backwards stops
+# rather than reaching into whatever precedes an unrecognized statement.
+CHAIN_LINE_LIMIT = 40
 
-def unmarked_container_start_sites() -> list[str]:
-    """Name every Rust container start that the sweep could not reclaim.
+# Re-verified against the head; a scan that silently matched nothing would
+# otherwise satisfy the marking test with no evidence at all.
+CONTAINER_START_SITES = 28
+
+
+def container_start_sites() -> tuple[list[str], list[str]]:
+    """Locate every testcontainers start in the tree, and those carrying no mark.
 
     A start site that omits the disposable mark strands containers the sweep
     cannot see, which is the leak this whole tool exists to bound, so the check
     is mechanical rather than a convention anyone has to remember.
+
+    The scan arms on awaited `.start()` in any file that reaches for
+    `testcontainers`, not on any one image type: `AsyncRunner::start` is the only
+    way that library creates a container, and it is async, which is what
+    separates it from the synchronous domain accessors of the same name in these
+    suites. Keying on `Postgres::default()` would miss a suite that later builds
+    its container through `GenericImage`, a shared helper, or anything else, and
+    an unmarked start would then pass unnoticed.
     """
     tracked = subprocess.run(
         ["git", "ls-files", "-z", "--", "*.rs"],
@@ -126,19 +152,27 @@ def unmarked_container_start_sites() -> list[str]:
         text=True,
         check=True,
     ).stdout.split("\0")
+    sites = []
     unmarked = []
     for name in filter(None, tracked):
-        lines = (REPOSITORY / name).read_text().splitlines()
-        armed = 0
-        for number, line in enumerate(lines, start=1):
-            if "Postgres::default()" in line:
-                armed = number
-            if armed and line.strip() == ".start()":
-                chain = "".join(lines[armed - 1 : number])
-                if MARKED_START not in chain:
-                    unmarked.append(f"{name}:{armed}")
-                armed = 0
-    return unmarked
+        text = (REPOSITORY / name).read_text()
+        if "testcontainers" not in text:
+            continue
+        lines = text.splitlines()
+        for found in re.finditer(r"\.start\(\)\s*\.await", text):
+            number = text.count("\n", 0, found.start()) + 1
+            sites.append(f"{name}:{number}")
+            head = number
+            while (
+                head > 1
+                and number - head < CHAIN_LINE_LIMIT
+                and lines[head - 2].strip()
+                and not lines[head - 2].lstrip().startswith("let ")
+            ):
+                head -= 1
+            if MARKED_START not in "\n".join(lines[head - 2 : number]):
+                unmarked.append(f"{name}:{number}")
+    return sites, unmarked
 
 
 def write_fake_docker(bin_dir: Path) -> None:
@@ -201,6 +235,9 @@ def run_sweep(
     inspection_note_is_fatal: bool = False,
     gone_before_removal: tuple[str, ...] = (),
     removal_refused: str | None = None,
+    removal_fails_silently: bool = False,
+    removal_note: str | None = None,
+    removal_note_is_fatal: bool = False,
 ) -> SweepRun:
     """Invoke the real sweep against one fake inventory, outside test bodies.
 
@@ -233,9 +270,18 @@ def run_sweep(
         environment.pop("FAKE_DOCKER_INSPECT_NOTE", None)
         environment.pop("FAKE_DOCKER_INSPECT_NOTE_IS_FATAL", None)
         environment.pop("FAKE_DOCKER_RM_REFUSED", None)
+        environment.pop("FAKE_DOCKER_RM_SILENTLY_FAILS", None)
         environment["FAKE_DOCKER_RM_GONE"] = ",".join(gone_before_removal)
         if removal_refused is not None:
             environment["FAKE_DOCKER_RM_REFUSED"] = removal_refused
+        environment.pop("FAKE_DOCKER_RM_NOTE", None)
+        environment.pop("FAKE_DOCKER_RM_NOTE_IS_FATAL", None)
+        if removal_fails_silently:
+            environment["FAKE_DOCKER_RM_SILENTLY_FAILS"] = "1"
+        if removal_note is not None:
+            environment["FAKE_DOCKER_RM_NOTE"] = removal_note
+        if removal_note_is_fatal:
+            environment["FAKE_DOCKER_RM_NOTE_IS_FATAL"] = "1"
         if inspection_note is not None:
             environment["FAKE_DOCKER_INSPECT_NOTE"] = inspection_note
         if inspection_note_is_fatal:
@@ -284,9 +330,14 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertIn(f"'{DISPOSABLE_LABEL_KEY}={DISPOSABLE_LABEL_VALUE}'", script)
 
     def test_every_test_container_start_marks_the_container_disposable(self) -> None:
-        unmarked = unmarked_container_start_sites()
+        _, unmarked = container_start_sites()
 
         self.assertEqual(unmarked, [], f"unswept-able container starts: {unmarked}")
+
+    def test_the_start_site_scan_finds_the_starts_this_repository_has(self) -> None:
+        sites, _ = container_start_sites()
+
+        self.assertEqual(len(sites), CONTAINER_START_SITES, sites)
 
     def test_dry_run_reports_aged_containers_and_removes_nothing(self) -> None:
         run = run_sweep(
@@ -504,6 +555,48 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertEqual(run.removed, [])
         self.assertIn("other than a container disappearing", run.stderr)
         self.assertIn(REFUSED_REMOVAL, run.stderr)
+
+    def test_a_removal_failure_carrying_an_unrelated_stderr_line_is_not_read_as_a_race(
+        self,
+    ) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            removal_note=REFUSED_REMOVAL,
+            removal_note_is_fatal=True,
+        )
+
+        self.assertEqual(run.status, 1)
+        self.assertIn("other than a container disappearing", run.stderr)
+        self.assertIn(REFUSED_REMOVAL, run.stderr)
+        self.assertNotIn("had already gone", run.stdout)
+
+    def test_a_successful_removal_that_warns_on_stderr_still_reports_a_clean_sweep(
+        self,
+    ) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            removal_note=HARMLESS_REMOVAL_NOTE,
+        )
+
+        self.assertEqual(run.status, 0, run.stderr)
+        self.assertEqual(run.removed, ["old111"])
+        self.assertIn("removed 1 container(s)", run.stdout)
+
+    def test_a_silent_removal_failure_fails_instead_of_reporting_a_clean_sweep(
+        self,
+    ) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            removal_fails_silently=True,
+        )
+
+        self.assertEqual(run.status, 1)
+        self.assertEqual(run.removed, [])
+        self.assertIn("other than a container disappearing", run.stderr)
+        self.assertNotIn("had already gone", run.stdout)
 
     def test_an_empty_inventory_exits_clean(self) -> None:
         run = run_sweep([], arguments=["--apply"])

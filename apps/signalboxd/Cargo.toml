@@ -99,7 +99,6 @@ signalbox-test-bin = { path = "../../crates/test-bin" }
 testcontainers-modules = { version = "0.15.0", default-features = false, features = [
     "postgres",
     "ring",
-    "watchdog",
 ] }
 tokio = { version = "1.53.0", default-features = false, features = ["test-util"] }
 

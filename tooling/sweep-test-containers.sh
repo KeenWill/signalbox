@@ -5,11 +5,12 @@
 # implementations, `testcontainers` 0.27 removes a container only from
 # `ContainerAsync`'s `Drop`, and creates it with `AutoRemove: false` so the
 # daemon never reclaims it either. A test process that dies without unwinding —
-# SIGKILL, an OOM kill, `std::process::exit`, a hard power loss — therefore
-# strands every container it had started, permanently. The `watchdog` feature
-# this repository enables closes the SIGTERM/SIGINT/SIGQUIT paths, which covers
-# Ctrl-C and `timeout`, but no in-process handler can survive SIGKILL. This
-# script is the backstop for what nothing in-process can catch.
+# SIGKILL, an OOM kill, Ctrl-C, `timeout`, a cancelled CI job, a hard power loss
+# — therefore strands every container it had started, permanently. The client's
+# optional `watchdog` feature is deliberately not enabled: it `expect`s every
+# stop and removal, so the first error panics its background thread, abandoning
+# the containers it had not reached and skipping the re-raise that would end the
+# process. This script is the only thing that reclaims any of it.
 #
 # Selection is positive and repository-scoped: a container is swept only when it
 # carries the label that this repository's own harness attaches immediately
@@ -291,26 +292,37 @@ removal_errors="$(mktemp)"
 trap 'rm -f "$inspection_errors" "$removal_errors"' EXIT
 
 removal_status=0
-printf '%s\n' "$selected" |
-	awk '{ print $1 }' |
-	xargs docker rm --force --volumes >/dev/null 2>"$removal_errors" ||
-	removal_status=$?
+removed_ids="$(
+	printf '%s\n' "$selected" |
+		awk '{ print $1 }' |
+		xargs docker rm --force --volumes 2>"$removal_errors"
+)" || removal_status=$?
+
+# `docker rm` echoes each container it removed, so the removals are counted from
+# the daemon's own report rather than assumed from the selection.
+removed_count="$(printf '%s\n' "$removed_ids" | grep -c . || true)"
 
 if [ "$removal_status" -eq 0 ]; then
-	echo "sweep-test-containers: removed $count container(s)"
+	echo "sweep-test-containers: removed $removed_count container(s)"
 	finish_clean
 fi
 
+# Reconciled exactly as inspection is, and for the same reason: a nonzero status
+# is benign only when the containers it could not remove are the ones something
+# else already had. A failure that wrote no diagnostic explains nothing, so an
+# empty stderr never buys a clean exit.
+already_gone="$(grep -c -E "$MISSING_OBJECT_PATTERN" "$removal_errors" || true)"
 unremoved="$(grep -v -E "$MISSING_OBJECT_PATTERN" "$removal_errors" || true)"
 
-if [ -n "$unremoved" ]; then
+if [ -n "$unremoved" ] ||
+	[ "$((removed_count + already_gone))" -ne "$count" ]; then
 	echo "sweep-test-containers: docker rm failed for a reason other than a" \
-		"container disappearing (exit status $removal_status)" >&2
+		"container disappearing (exit status $removal_status); removed" \
+		"$removed_count of $count container(s)" >&2
 	cat "$removal_errors" >&2
 	exit 1
 fi
 
-already_gone="$(grep -c -E "$MISSING_OBJECT_PATTERN" "$removal_errors" || true)"
-echo "sweep-test-containers: removed $((count - already_gone)) container(s);" \
+echo "sweep-test-containers: removed $removed_count container(s);" \
 	"$already_gone had already gone"
 finish_clean

@@ -248,17 +248,18 @@ These suites start one PostgreSQL container per test through testcontainers,
 whose Rust client ships no Ryuk reaper: a container is removed by
 `ContainerAsync`'s `Drop` and by nothing else, and it is created with
 `AutoRemove: false`, so a test process that dies without unwinding strands every
-container it started along with that container's anonymous volume. The
-`watchdog` feature enabled on `testcontainers-modules` removes registered
-containers on SIGTERM, SIGINT, and SIGQUIT, which covers Ctrl-C, `timeout`, and
-a cancelled CI job; no in-process handler can cover SIGKILL or an OOM kill.
-Reclaim what those leave behind with
+container it started along with that container's anonymous volume. Nothing
+in-process reclaims those — the client's optional `watchdog` feature is left off
+deliberately, because it `expect`s every stop and removal and so panics its
+background thread on the first error, which both abandons the containers it had
+not reached and skips re-raising the signal, leaving a process that no longer
+dies on SIGTERM. Reclaim what an interrupted run leaves behind with
 [`tooling/sweep-test-containers.sh`](tooling/sweep-test-containers.sh), which
 removes containers past an age bound — two hours by default, far above any
 suite's runtime — together with their volumes. It reports what it would remove
 and changes nothing until passed `--apply`. On a shared machine, run it on a
-timer: SIGKILL is the case no in-process handler converts, so a periodic sweep
-is what bounds the leak there rather than any code change.
+timer: an interrupted run is the case nothing in-process converts, so a periodic
+sweep is what bounds the leak there rather than any code change.
 
 The sweep selects positively, on the label
 `signalbox_persistence::disposable_test_container_labels` attaches to every
