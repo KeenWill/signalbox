@@ -1874,6 +1874,7 @@ impl FamilySuite {
                         &self.workspace_seed_modified_times,
                         &self.workspace_seed_entry_identities,
                         &self.workspace_seed_extended_attributes,
+                        self.executor.filesystem_execution_window(case.name),
                     )
                 } else {
                     exec_workspace_matches_seed(
@@ -2078,6 +2079,7 @@ fn cargo_diagnostics_workspace_matches_seed(
     seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
     seed_entry_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
     seed_extended_attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
 ) -> EvalResult<bool> {
     let actual_entries = workspace_entries(root)?;
     let actual_modified_times = workspace_modified_times(root)?;
@@ -2113,15 +2115,74 @@ fn cargo_diagnostics_workspace_matches_seed(
     let seed_extended_attributes_preserved = seed_extended_attributes
         .iter()
         .all(|(path, attributes)| actual_extended_attributes.get(path) == Some(attributes));
+    let target_ownership_matches = cargo_target_ownership_matches(
+        &actual_entries,
+        &actual_entry_identities,
+        seed_entry_identities.get(Path::new("")),
+    );
+    let target_times_match = cargo_target_times_match(
+        &actual_entries,
+        &actual_modified_times,
+        &actual_entry_identities,
+        execution_window,
+    );
+    let target_attributes_are_empty =
+        cargo_target_attributes_are_empty(&actual_entries, &actual_extended_attributes);
     Ok(seed_entries_preserved
         && additions_are_target_only
         && seed_times_preserved
         && seed_entry_identities_preserved
         && seed_extended_attributes_preserved
+        && target_ownership_matches
+        && target_times_match
+        && target_attributes_are_empty
+        && workspace_mutation_entry_times_match(root, Path::new(""), execution_window)?
         && matches!(
             actual_entries.get(target),
             Some(WorkspaceEntrySnapshot::Directory { .. })
         ))
+}
+
+fn cargo_target_ownership_matches(
+    entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    identities: &BTreeMap<PathBuf, FilesystemIdentity>,
+    expected_owner: Option<&FilesystemIdentity>,
+) -> bool {
+    entries
+        .keys()
+        .filter(|path| path.starts_with("target"))
+        .all(|path| filesystem_ownership_matches(identities.get(path), expected_owner))
+}
+
+fn cargo_target_times_match(
+    entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    modified_times: &BTreeMap<PathBuf, SystemTime>,
+    identities: &BTreeMap<PathBuf, FilesystemIdentity>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
+) -> bool {
+    execution_window.is_some_and(|window| {
+        entries
+            .keys()
+            .filter(|path| path.starts_with("target"))
+            .all(|path| {
+                modified_times
+                    .get(path)
+                    .is_some_and(|modified| window.contains_modified(*modified))
+                    && identities
+                        .get(path)
+                        .is_some_and(|identity| window.contains_change_time(*identity))
+            })
+    })
+}
+
+fn cargo_target_attributes_are_empty(
+    entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+) -> bool {
+    entries
+        .keys()
+        .filter(|path| path.starts_with("target"))
+        .all(|path| attributes.get(path).is_some_and(BTreeMap::is_empty))
 }
 
 fn workspace_entries(root: &Path) -> EvalResult<BTreeMap<PathBuf, WorkspaceEntrySnapshot>> {
@@ -6104,6 +6165,7 @@ impl ToolExecutor for SharedFamilyExecutor {
                 | GIT_CREATE_COMMIT_NAME
                 | GIT_STAGE_NAME
                 | APPLY_PATCH_NAME
+                | CARGO_DIAGNOSTICS_NAME
                 | EDIT_FILE_NAME
                 | SANDBOXED_EXEC_NAME
                 | WRITE_FILE_NAME
@@ -17067,6 +17129,28 @@ fn prepared_exec_natural_workspace() -> EvalResult<PreparedExecNaturalWorkspace>
     ))
 }
 
+fn create_cargo_target_directory(root: &Path) -> EvalResult<FilesystemExecutionTimeWindow> {
+    let started = current_filesystem_recorded_time()?;
+    fs::create_dir(root.join("target"))?;
+    Ok(FilesystemExecutionTimeWindow {
+        started,
+        finished: current_filesystem_recorded_time()?,
+    })
+}
+
+fn create_cargo_target_artifacts(root: &Path) -> EvalResult<FilesystemExecutionTimeWindow> {
+    let started = current_filesystem_recorded_time()?;
+    fs::create_dir(root.join("target"))?;
+    fs::write(
+        root.join("target/.rustc_info.json"),
+        "synthetic target artifact\n",
+    )?;
+    Ok(FilesystemExecutionTimeWindow {
+        started,
+        finished: current_filesystem_recorded_time()?,
+    })
+}
+
 #[cfg(unix)]
 #[test]
 fn exec_natural_created_file_gate_rejects_changed_ownership() -> EvalResult {
@@ -17210,11 +17294,7 @@ fn forced_cargo_diagnostics_workspace_accepts_target_artifacts() -> EvalResult {
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
     let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
-    fs::create_dir(workspace.path().join("target"))?;
-    fs::write(
-        workspace.path().join("target/.rustc_info.json"),
-        "synthetic target artifact\n",
-    )?;
+    let execution_window = create_cargo_target_artifacts(workspace.path())?;
 
     assert!(cargo_diagnostics_workspace_matches_seed(
         workspace.path(),
@@ -17222,6 +17302,7 @@ fn forced_cargo_diagnostics_workspace_accepts_target_artifacts() -> EvalResult {
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        Some(execution_window),
     )?);
     Ok(())
 }
@@ -17232,7 +17313,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_symlinked_target_artifact() -> E
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
     let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
-    fs::create_dir(workspace.path().join("target"))?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
     symlink(
         workspace.path().join("Cargo.toml"),
         workspace.path().join("target/escape"),
@@ -17244,6 +17325,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_symlinked_target_artifact() -> E
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        Some(execution_window),
     )?);
     Ok(())
 }
@@ -17253,7 +17335,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_mutated_seed_file() -> EvalResul
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
     let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
-    fs::create_dir(workspace.path().join("target"))?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
     fs::write(workspace.path().join("src/lib.rs"), "pub fn drifted() {}\n")?;
 
     assert!(!cargo_diagnostics_workspace_matches_seed(
@@ -17262,6 +17344,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_mutated_seed_file() -> EvalResul
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        Some(execution_window),
     )?);
     Ok(())
 }
@@ -17271,7 +17354,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_deleted_seed_file() -> EvalResul
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
     let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
-    fs::create_dir(workspace.path().join("target"))?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
     fs::remove_file(workspace.path().join("Cargo.toml"))?;
 
     assert!(!cargo_diagnostics_workspace_matches_seed(
@@ -17280,6 +17363,7 @@ fn forced_cargo_diagnostics_workspace_rejects_a_deleted_seed_file() -> EvalResul
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        Some(execution_window),
     )?);
     Ok(())
 }
@@ -17290,7 +17374,7 @@ fn forced_cargo_diagnostics_rejects_byte_identical_seed_replacement() -> EvalRes
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
     let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
-    fs::create_dir(workspace.path().join("target"))?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
     replace_exec_seed_file_byte_identically(workspace.path(), &seed_modified_times)?;
 
     assert!(!cargo_diagnostics_workspace_matches_seed(
@@ -17299,6 +17383,7 @@ fn forced_cargo_diagnostics_rejects_byte_identical_seed_replacement() -> EvalRes
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        Some(execution_window),
     )?);
     Ok(())
 }
@@ -17309,7 +17394,7 @@ fn forced_cargo_diagnostics_rejects_root_extended_attribute_drift() -> EvalResul
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
     let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
-    fs::create_dir(workspace.path().join("target"))?;
+    let execution_window = create_cargo_target_directory(workspace.path())?;
     rustix::fs::setxattr(
         workspace.path(),
         SYNTHETIC_UNEXPECTED_XATTR_NAME,
@@ -17323,6 +17408,78 @@ fn forced_cargo_diagnostics_rejects_root_extended_attribute_drift() -> EvalResul
         &seed_modified_times,
         &seed_entry_identities,
         &seed_extended_attributes,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_cargo_diagnostics_rejects_target_extended_attributes() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let started = current_filesystem_recorded_time()?;
+    fs::create_dir(workspace.path().join("target"))?;
+    rustix::fs::setxattr(
+        workspace.path().join("target"),
+        SYNTHETIC_UNEXPECTED_XATTR_NAME,
+        SYNTHETIC_UNEXPECTED_XATTR_VALUE,
+        rustix::fs::XattrFlags::CREATE,
+    )?;
+    let execution_window = FilesystemExecutionTimeWindow {
+        started,
+        finished: current_filesystem_recorded_time()?,
+    };
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn cargo_target_ownership_gate_rejects_changed_ownership() -> EvalResult {
+    let (workspace, _seed_entries, _seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let _execution_window = create_cargo_target_directory(workspace.path())?;
+    let entries = workspace_entries(workspace.path())?;
+    let mut identities = workspace_entry_identities(workspace.path())?;
+    identities
+        .get_mut(Path::new("target"))
+        .expect("the Cargo target fixture has a filesystem identity")
+        .user_id = seed_entry_identities[Path::new("")].user_id.wrapping_add(1);
+
+    assert!(!cargo_target_ownership_matches(
+        &entries,
+        &identities,
+        seed_entry_identities.get(Path::new("")),
+    ));
+    Ok(())
+}
+
+#[test]
+fn forced_cargo_diagnostics_rejects_out_of_window_target_times() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    let execution_window = create_cargo_target_artifacts(workspace.path())?;
+    fs::File::open(workspace.path().join("target/.rustc_info.json"))?
+        .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
+        Some(execution_window),
     )?);
     Ok(())
 }
