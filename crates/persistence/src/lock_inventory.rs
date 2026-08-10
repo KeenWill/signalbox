@@ -339,6 +339,11 @@ pub(crate) const RUNNER_PLACEMENT_HEAD: &str = "SELECT record.*
               WHERE current_placement.session_id = $1
               FOR UPDATE OF current_placement";
 
+pub(crate) const RUNNER_RETRY_REPLACEMENT_SCHEDULER: &str = "SELECT session_id
+               FROM session_scheduler
+              WHERE session_id = $1
+              FOR UPDATE";
+
 pub(crate) const RUNNER_LEASE_HEAD: &str = "SELECT current_event.event_ordinal, event.state_kind,
                     lease_generation.attempt_id,
                     lease_generation.session_id,
