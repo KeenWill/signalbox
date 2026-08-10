@@ -846,11 +846,11 @@ Locks per transaction, in acquisition order:
   placement, current credential grant when present, and lease heads in the total
   order above. The initial dispatch transaction then stores workspace receipt
   consumption, pin, grant, `InFlight` attempt, and offered lease together. Claim
-  locks enrollment, runner, registration, and lease in that order and commits
-  before acknowledgement. Result admission takes the session scheduler first,
-  then the applicable runner and lease rows without acquiring an earlier omitted
-  lock, and commits the checked terminal attempt observation and claimed-lease
-  completion together.
+  locks the session scheduler first, followed by enrollment, runner,
+  registration, and lease in that order, and commits before acknowledgement.
+  Result admission takes the session scheduler first, then the applicable runner
+  and lease rows without acquiring an earlier omitted lock, and commits the
+  checked terminal attempt observation and claimed-lease completion together.
 
 - **Runner loss**: one short transaction locks only the current connection/loss
   head, advances a positive durable loss epoch, and thereby makes every trigger
