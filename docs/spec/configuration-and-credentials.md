@@ -612,7 +612,12 @@ because a workspace is a worktree and a repository: two roots exposing one
 the pathname against that record before dispatching, including a request served
 from a retained composition, so a removed or replaced directory fails the next
 request rather than being reached through a descriptor pinned to the directory
-it replaced.
+it replaced. The same request also remakes the comparison against the configured
+root described below, because admission is not a durable answer: the configured
+composition is never re-resolved, so what its pathname names can change after a
+session was admitted, and a retained composition returned on the strength of the
+comparison made at admission would leave both reaching one tree under separate
+serialization domains.
 
 The record holds one session identity, one discriminant, and those identities,
 so it is kept apart from the descriptor-holding composition and is never
