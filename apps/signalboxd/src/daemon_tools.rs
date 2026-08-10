@@ -1701,6 +1701,22 @@ where
                     if standing != bound {
                         return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
                     }
+                    // Admission is not a durable answer. The configured
+                    // composition is never re-resolved, so what its pathname
+                    // names can change after this session was admitted — a
+                    // `.git` bind-mounted over this session's own, say — and a
+                    // retained set returned on the strength of the comparison
+                    // made at admission would leave both reaching one tree
+                    // under separate serialization domains. The comparison is
+                    // therefore remade on every dispatch, before the retained
+                    // set is consulted and before a recomposition begins.
+                    if shares_a_directory_with_the_configured_root(
+                        bound,
+                        self.configured.workspace_identity,
+                        ComposedWorkspaceIdentity::capture(self.roots.configured()).ok(),
+                    ) {
+                        return Err(SessionWorkspaceFailure::SharedRootIdentity);
+                    }
                 }
                 if let Some(retained) = state.retained.get(session) {
                     return Ok(retained);

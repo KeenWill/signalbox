@@ -8,16 +8,19 @@ and filesystem laws, and its child slices add local operations, their typed tool
 surface, and explicitly approved repair writes. These paragraphs become verified
 only with that stack. Daemon catalog wiring is outside it.
 
-The deployment injects a workspace root into each constructed suite, and the
-daemon composes one suite per session. The Git family may operate only on a
-direct main worktree whose `.git` directory is immediately inside the root its
-own suite was constructed with. Composing several suites does not weaken the
-invariants stated below: each suite is a separate construction with its own
-injected root, so the root remains construction input rather than a per-call
-argument, and no suite can reach a root another suite was constructed with.
-Repository paths and repository data are untrusted input. The local process,
-kernel, filesystem implementation, cryptographic hash implementations, and the
-typed Git library are trusted computing-base components.
+The deployment injects a workspace root into each constructed suite. The daemon
+composes one suite for the configured root, and one further suite for each
+session provisioned with a root of its own; a session with no provisioned root
+uses the configured suite, which every such session shares. The Git family may
+operate only on a direct main worktree whose `.git` directory is immediately
+inside the root its own suite was constructed with. Composing several suites
+does not weaken the invariants stated below: each suite is a separate
+construction with its own injected root, so the root remains construction input
+rather than a per-call argument, and no suite can reach a root another suite was
+constructed with. Repository paths and repository data are untrusted input. The
+local process, kernel, filesystem implementation, cryptographic hash
+implementations, and the typed Git library are trusted computing-base
+components.
 
 ## Library and descriptor boundary
 
