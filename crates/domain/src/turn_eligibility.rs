@@ -6809,19 +6809,19 @@ fn promote_external_interrupt_chains(
         .union(&external_successors)
         .copied()
         .collect::<BTreeSet<_>>();
-    let Some(start) = total_order
+    let Some((start, insertion)) = total_order
         .iter()
-        .position(|turn| external_successors.contains(turn))
+        .enumerate()
+        .filter(|(_, turn)| external_successors.contains(turn))
+        .find_map(|(start, _)| {
+            total_order[..start]
+                .iter()
+                .position(|turn| queued_turns.contains(turn) && ordinary_roots.contains(turn))
+                .map(|insertion| (start, insertion))
+        })
     else {
         return total_order;
     };
-    let insertion = total_order[..start]
-        .iter()
-        .position(|turn| queued_turns.contains(turn) && ordinary_roots.contains(turn))
-        .unwrap_or(start);
-    if insertion == start {
-        return total_order;
-    }
     let end = total_order[start + 1..]
         .iter()
         .position(|turn| roots.contains(turn))
@@ -16869,5 +16869,28 @@ mod tests {
         );
 
         assert_eq!(promoted, vec![terminal, external_successor, older_queued]);
+    }
+
+    /// INV-009: a historical external terminal does not hide the later
+    /// external interrupt chain that actually crosses queued ordinary work.
+    #[test]
+    fn inv009_later_external_interrupt_chain_crosses_queued_work() {
+        let historical_external = turn_id(851);
+        let older_queued = turn_id(852);
+        let crossing_external = turn_id(853);
+        let ordinary_roots = BTreeSet::from([older_queued]);
+        let queued_turns = BTreeSet::from([older_queued]);
+
+        let promoted = super::promote_external_interrupt_chains(
+            vec![historical_external, older_queued, crossing_external],
+            BTreeSet::from([historical_external, crossing_external]),
+            &ordinary_roots,
+            &queued_turns,
+        );
+
+        assert_eq!(
+            promoted,
+            vec![historical_external, crossing_external, older_queued]
+        );
     }
 }
