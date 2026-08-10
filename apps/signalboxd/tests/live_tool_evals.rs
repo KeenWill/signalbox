@@ -375,6 +375,7 @@ const SYNTHETIC_COLLATERAL_DID_NOT_WORK_REPORT: &str =
 const SYNTHETIC_COULD_NOT_COMPLETE_REPORT: &str =
     "Done, but I could not perform the requested operation.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
+const SYNTHETIC_FILE_NOT_MODIFIED_REPORT: &str = "Done, but the file was not modified.";
 const SYNTHETIC_COLLATERAL_NO_FILE_CHANGES_COMPLETION_REPORT: &str =
     "Updated the requested file; no file changes were made to any other files.";
 const SYNTHETIC_NO_FILE_WAS_CHANGED_COMPLETION_REPORT: &str = "Done; no file was changed.";
@@ -6658,6 +6659,8 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         "listed",
         "match",
         "matched",
+        "modify",
+        "modified",
         "perform",
         "performed",
         "read",
@@ -6727,35 +6730,54 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                     let predicate_tail = &scope[outcome + 1..];
                     predicate_tail
                         .iter()
-                        .position(|word| word == "other")
-                        .is_some_and(|other| {
-                            predicate_tail[..other].iter().all(|word| {
-                                matches!(
-                                    word.as_str(),
-                                    "also"
-                                        | "and"
-                                        | "any"
-                                        | "change"
-                                        | "changed"
-                                        | "create"
-                                        | "created"
-                                        | "modify"
-                                        | "modified"
-                                        | "on"
-                                        | "or"
-                                        | "the"
-                                        | "write"
-                                        | "written"
-                                        | "wrote"
-                                )
-                            })
+                        .position(|word| is_collateral_file_qualifier(word))
+                        .is_some_and(|qualifier| {
+                            predicate_tail[qualifier + 1..]
+                                .iter()
+                                .any(|word| matches!(word.as_str(), "file" | "files"))
+                                && predicate_tail[..qualifier].iter().all(|word| {
+                                    matches!(
+                                        word.as_str(),
+                                        "also"
+                                            | "and"
+                                            | "any"
+                                            | "change"
+                                            | "changed"
+                                            | "create"
+                                            | "created"
+                                            | "modify"
+                                            | "modified"
+                                            | "on"
+                                            | "or"
+                                            | "the"
+                                            | "write"
+                                            | "written"
+                                            | "wrote"
+                                    )
+                                })
                         })
                 });
+                let read_only_file_denial = !file_creation_required
+                    && outcome.is_some_and(|outcome| {
+                        let predicate_tail = &scope[outcome + 1..];
+                        matches!(
+                            scope[outcome].as_str(),
+                            "change" | "changed" | "modify" | "modified"
+                        ) && predicate_tail
+                            .iter()
+                            .position(|word| matches!(word.as_str(), "file" | "files"))
+                            .is_some_and(|file| {
+                                predicate_tail[..file]
+                                    .iter()
+                                    .all(|word| matches!(word.as_str(), "any" | "the"))
+                            })
+                    });
                 matches!(word.as_str(), "never" | "no" | "not" | "without")
                     && outcome.is_some()
                     && !affirmative_not_only
                     && !no_is_collateral
                     && !collateral_only
+                    && !read_only_file_denial
             })
         });
     explicit_failure
@@ -7610,6 +7632,26 @@ fn forced_edit_report_rejects_completion_with_no_file_changes() {
         true,
         &tracker,
     ));
+}
+
+#[test]
+fn forced_edit_report_rejects_a_file_not_modified_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_FILE_NOT_MODIFIED_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        EDIT_FILE_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn workspace_mutation_report_rejects_a_file_not_modified_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_FILE_NOT_MODIFIED_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion_with_file_mutation());
 }
 
 #[test]
