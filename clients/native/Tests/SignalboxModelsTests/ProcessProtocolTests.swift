@@ -1604,6 +1604,84 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  /// INV-033 / INV-044: a daemon-only transcript snapshot carries its nullable
+  /// runner member without becoming an unknown message.
+  func testTranscriptSnapshotStartDecodesAbsentRunnerProjection() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"9",
+          "message":{
+            "type":"transcript_snapshot_start",
+            "session_id":"\(sessionID)",
+            "cursor":"12",
+            "runner":null
+          }
+        }
+        """.utf8
+      )
+    )
+    let expected = SignalboxTranscriptSnapshotBoundary(
+      sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+      cursor: SignalboxCanonicalUInt64(rawValue: 12),
+      runner: nil
+    )
+
+    XCTAssertEqual(frame.message, .transcriptSnapshotStart(expected))
+  }
+
+  /// INV-033 / INV-044: the native boundary retains every axis of one complete
+  /// runner projection rather than silently discarding the new wire member.
+  func testTranscriptSnapshotStartDecodesCompleteRunnerProjection() throws {
+    let runnerID = "44444444-4444-4444-8444-444444444444"
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"9",
+          "message":{
+            "type":"transcript_snapshot_start",
+            "session_id":"\(sessionID)",
+            "cursor":"12",
+            "runner":{
+              "selector":{"type":"capability_class","name":"linux.workspace"},
+              "runner_id":"\(runnerID)",
+              "placement_revision":"3",
+              "sandbox_profile":"workspace-restricted",
+              "credential_profile":null,
+              "repository":"primary",
+              "working_directory":"workspace/project",
+              "connection_health":null,
+              "state":"runner_lost"
+            }
+          }
+        }
+        """.utf8
+      )
+    )
+    let expectedProjection = try SignalboxRunnerProjection(
+      selector: .capabilityClass(name: "linux.workspace"),
+      runnerID: SignalboxCanonicalUUID(validating: runnerID),
+      placementRevision: SignalboxCanonicalUInt64(rawValue: 3),
+      sandboxProfile: .workspaceRestricted,
+      credentialProfile: nil,
+      repository: "primary",
+      workingDirectory: "workspace/project",
+      connectionHealth: nil,
+      state: .runnerLost
+    )
+    let expected = SignalboxTranscriptSnapshotBoundary(
+      sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+      cursor: SignalboxCanonicalUInt64(rawValue: 12),
+      runner: expectedProjection
+    )
+
+    XCTAssertEqual(frame.message, .transcriptSnapshotStart(expected))
+  }
+
   func testUnadmittedFrameMemberFailsClosed() {
     let encoded = ProcessProtocolFixture.frameWithAddedMember()
 
