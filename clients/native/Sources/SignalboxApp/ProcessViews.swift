@@ -2109,7 +2109,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         cursor: followed.cursor
       )
     case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
-      .contextCompacted:
+      .contextCompacted, .runnerStateTransition:
       break
     }
   }
