@@ -277,11 +277,30 @@ impl SessionWorkspaceRoots {
     /// a reported absence is unprovisioned. A present non-directory — including
     /// a symlink, which the pinned no-follow open would refuse anyway — is a
     /// misprovisioned session rather than an unprovisioned one.
+    ///
+    /// The parent is classified the same way and for the same reason. It is the
+    /// one intermediate component this derivation introduces, and every later
+    /// no-follow open declines to follow only the component it names, so a
+    /// symlink standing at the parent is followed by all of them.
     #[must_use]
     pub fn resolve(&self, session: SessionId) -> SessionWorkspaceRoot {
-        let Some(path) = self.derived_path(session) else {
+        let (Some(parent), Some(path)) = (self.derived_parent.as_ref(), self.derived_path(session))
+        else {
             return SessionWorkspaceRoot::ConfiguredRoot;
         };
+        // A symlink at `<name>.sessions` — pointing inside the configured root,
+        // say — would place every derived root under a tree every session still
+        // bound to the configured root can read, write, and execute, which is
+        // the containment the sibling derivation exists to establish. Resolving
+        // the pathname below would follow it, and the no-follow opens after it
+        // protect only the session's own final component.
+        match fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return SessionWorkspaceRoot::ConfiguredRoot;
+            }
+            Ok(_) | Err(_) => return SessionWorkspaceRoot::Unresolvable,
+        }
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_dir() => SessionWorkspaceRoot::Derived { path },
             Ok(_) => SessionWorkspaceRoot::Unresolvable,
@@ -3447,6 +3466,42 @@ mod tests {
         )
         .expect("the derived parent exists");
         fs::write(&derived, FIRST_SESSION_MARKER).expect("a file occupies the derived path");
+
+        let resolved = roots.resolve(first);
+
+        assert_eq!(resolved, SessionWorkspaceRoot::Unresolvable);
+    }
+
+    /// A symlink at the derived parent would nest every session's root inside
+    /// the configured root, where every session still bound to that root can
+    /// read, write, and execute it. The parent is classified without following
+    /// it, so such a session is misprovisioned rather than derived.
+    #[test]
+    fn a_symlinked_derived_parent_is_unresolvable() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+        let first = session(FIRST_SESSION_IDENTITY);
+        let roots = SessionWorkspaceRoots::new(&configured);
+        let nested = configured.join("sessions");
+        let derived = roots
+            .derived_path(first)
+            .expect("the fixture configured root has a parent and a final component");
+        fs::create_dir(&nested).expect("a directory inside the configured root exists");
+        fs::create_dir(
+            nested.join(
+                derived
+                    .file_name()
+                    .expect("the derived path names a session directory"),
+            ),
+        )
+        .expect("the nested session directory exists");
+        std::os::unix::fs::symlink(
+            &nested,
+            derived
+                .parent()
+                .expect("the derived path has a parent directory"),
+        )
+        .expect("the derived parent is a symlink into the configured root");
 
         let resolved = roots.resolve(first);
 

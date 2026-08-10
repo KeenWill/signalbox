@@ -585,6 +585,16 @@ unchanged. A present non-directory, a symlink, or a path the daemon cannot
 classify at all is a misprovisioned session rather than an unprovisioned one and
 fails closed.
 
+The derived parent is classified the same way and before the session's own
+directory, because it is the one intermediate component this derivation
+introduces and every no-follow open after it declines to follow only the
+component it names. A symlink standing at the parent would otherwise be followed
+by all of them, placing every derived root wherever it points — inside the
+configured root, say, where every session still bound to that root can read,
+write, and execute it. An accepted residual: a parent that is a real directory
+whose contents are a bind mount of a tree inside the configured root presents no
+symlink and no shared directory identity, and is admitted.
+
 Which root a session bound is recorded the first time it invokes a
 workspace-root-bound tool and does not change for the process's lifetime. A
 session that bound the configured root is not moved onto a directory provisioned
