@@ -1448,8 +1448,13 @@ pub struct AcceptedInputSchedulingReconstitutionInput {
     steering_continuation_rounds: Vec<SteeringContinuationRoundReconstitutionInput>,
     continuation_rounds: Vec<ContinuationRoundReconstitutionInput>,
     active_acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
-    preceding_non_accepted_terminals:
-        Vec<(SessionId, TurnId, ContextFrontierId, DirectModelSelection)>,
+    preceding_non_accepted_terminals: Vec<(
+        SessionId,
+        TurnId,
+        TurnId,
+        ContextFrontierId,
+        DirectModelSelection,
+    )>,
 }
 
 impl AcceptedInputSchedulingReconstitutionInput {
@@ -1482,18 +1487,24 @@ impl AcceptedInputSchedulingReconstitutionInput {
     }
 
     /// Supplies one immediate terminal predecessor that is not an
-    /// accepted-input-origin turn, together with its retained terminal
-    /// frontier and selected model identity. Repeated calls retain distinct
-    /// predecessor chains.
+    /// accepted-input-origin turn, its exact accepted-input successor, and its
+    /// retained terminal frontier and selected model identity. Repeated calls
+    /// retain distinct predecessor chains.
     pub fn with_preceding_non_accepted_terminal(
         mut self,
         session: SessionId,
-        turn: TurnId,
+        predecessor: TurnId,
+        successor: TurnId,
         terminal_frontier: ContextFrontierId,
         selected: DirectModelSelection,
     ) -> Self {
-        self.preceding_non_accepted_terminals
-            .push((session, turn, terminal_frontier, selected));
+        self.preceding_non_accepted_terminals.push((
+            session,
+            predecessor,
+            successor,
+            terminal_frontier,
+            selected,
+        ));
         self
     }
 
@@ -2313,7 +2324,7 @@ pub struct AcceptedInputSchedulingProjection {
     active_model_call_recovery: Option<ActiveModelCallRecoveryWait>,
     active_tool_recovery_attempt: Option<EndedTurnAttempt>,
     active_executing_tool_batch: Option<ActiveExecutingToolBatchCorrelation>,
-    ordinary_preceding_non_accepted_terminal: Option<TurnId>,
+    preceding_non_accepted_successors: BTreeMap<TurnId, TurnId>,
     preceding_non_accepted_terminals:
         BTreeMap<TurnId, (ResolvedContextFrontierSnapshot, DirectModelSelection)>,
 }
@@ -3936,50 +3947,46 @@ fn reconstitute_inner(
         .map(|record| (record.turn, record))
         .collect::<BTreeMap<_, _>>();
     let mut preceding_non_accepted_terminal_turns = BTreeSet::new();
-    for (stored_session, turn, _, _) in &input.preceding_non_accepted_terminals {
+    let mut preceding_non_accepted_successors = BTreeMap::new();
+    for (stored_session, predecessor, successor, _, _) in &input.preceding_non_accepted_terminals {
         if *stored_session != session
-            || records_by_turn.contains_key(turn)
-            || !preceding_non_accepted_terminal_turns.insert(*turn)
+            || records_by_turn.contains_key(predecessor)
+            || !records_by_turn.contains_key(successor)
+            || !preceding_non_accepted_terminal_turns.insert(*predecessor)
+            || preceding_non_accepted_successors
+                .insert(*successor, *predecessor)
+                .is_some()
         {
             return Err(
-                AcceptedInputSchedulingReconstitutionFailure::TurnSessionMismatch { turn: *turn },
+                AcceptedInputSchedulingReconstitutionFailure::TurnSessionMismatch {
+                    turn: *predecessor,
+                },
             );
         }
     }
-    let preceding_non_accepted_successors = preceding_non_accepted_terminal_turns
-        .iter()
-        .filter_map(|predecessor| {
-            input
-                .turns
-                .iter()
-                .filter(|record| {
-                    matches!(
-                        record.order.priority(),
-                        AcceptedInputQueuePriority::InterruptImmediatelyAfter {
-                            predecessor: candidate,
-                        } if candidate == *predecessor
-                    )
-                })
-                .min_by_key(|record| record.order.acceptance_position())
-                .map(|record| (record.turn, *predecessor))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let interrupt_predecessors = preceding_non_accepted_successors
-        .values()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    let mut ordinary_predecessors = preceding_non_accepted_terminal_turns
-        .difference(&interrupt_predecessors)
-        .copied();
-    let ordinary_preceding_non_accepted_terminal = ordinary_predecessors.next();
-    if let Some(turn) = ordinary_predecessors.next() {
-        return Err(AcceptedInputSchedulingReconstitutionFailure::TurnSessionMismatch { turn });
+    let mut external_interrupt_successors = BTreeSet::new();
+    for (successor, predecessor) in &preceding_non_accepted_successors {
+        match records_by_turn[successor].order.priority() {
+            AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: recorded,
+            } if recorded == *predecessor => {
+                external_interrupt_successors.insert(*successor);
+            }
+            AcceptedInputQueuePriority::Ordinary => {}
+            AcceptedInputQueuePriority::InterruptImmediatelyAfter { .. } => {
+                return Err(
+                    AcceptedInputSchedulingReconstitutionFailure::TurnSessionMismatch {
+                        turn: *predecessor,
+                    },
+                );
+            }
+        }
     }
-    // The generic accepted-input order owns only accepted origins. Its first
-    // runtime-relevant record can instead be the immediate successor of the
-    // separately authenticated non-accepted terminal boundary; treat that one
-    // external edge as the derivation root while retaining and validating the
-    // original interrupt priority below.
+    // The generic accepted-input order owns only accepted origins. A
+    // runtime-relevant record can instead be the immediate successor of a
+    // separately authenticated non-accepted terminal boundary; treat every
+    // such external edge as a derivation root while retaining and validating
+    // interrupt priority below.
     let ordinary_roots = input
         .turns
         .iter()
@@ -3998,7 +4005,7 @@ fn reconstitute_inner(
         derive_accepted_input_total_order(queue_work).map_err(|error| {
             AcceptedInputSchedulingReconstitutionFailure::InvalidQueueOrder { error }
         })?,
-        preceding_non_accepted_successors.keys().copied().collect(),
+        external_interrupt_successors,
         &ordinary_roots,
     );
     let mut delegated_turns = BTreeMap::new();
@@ -4349,7 +4356,7 @@ fn reconstitute_inner(
     }
 
     let mut preceding_non_accepted_terminals = BTreeMap::new();
-    for (_, turn, terminal_frontier, selected) in &input.preceding_non_accepted_terminals {
+    for (_, turn, _, terminal_frontier, selected) in &input.preceding_non_accepted_terminals {
         let snapshot = snapshots.get(terminal_frontier).cloned().ok_or(
             AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn: *turn },
         )?;
@@ -5140,12 +5147,8 @@ fn reconstitute_inner(
     }
 
     let mut turns = Vec::with_capacity(total_order.len());
-    let mut previous_terminal = ordinary_preceding_non_accepted_terminal.map(|predecessor| {
-        let (snapshot, _) = &preceding_non_accepted_terminals[&predecessor];
-        (predecessor, snapshot.clone())
-    });
-    let mut previous_selected = ordinary_preceding_non_accepted_terminal
-        .map(|predecessor| preceding_non_accepted_terminals[&predecessor].1);
+    let mut previous_terminal = None;
+    let mut previous_selected = None;
     let mut active = None;
     let mut active_model_call_recovery = None;
     let mut active_tool_recovery_attempt = None;
@@ -5163,15 +5166,7 @@ fn reconstitute_inner(
 
     for (index, turn) in total_order.into_iter().enumerate() {
         let record = records_by_turn[&turn];
-        let external_predecessor = match record.order.priority() {
-            AcceptedInputQueuePriority::InterruptImmediatelyAfter { predecessor }
-                if preceding_non_accepted_terminals.contains_key(&predecessor) =>
-            {
-                Some(predecessor)
-            }
-            AcceptedInputQueuePriority::Ordinary
-            | AcceptedInputQueuePriority::InterruptImmediatelyAfter { .. } => None,
-        };
+        let external_predecessor = preceding_non_accepted_successors.get(&turn).copied();
         if let Some(predecessor) = external_predecessor {
             let (snapshot, selected) = &preceding_non_accepted_terminals[&predecessor];
             previous_terminal = Some((predecessor, snapshot.clone()));
@@ -6789,7 +6784,7 @@ fn reconstitute_inner(
         active_model_call_recovery,
         active_tool_recovery_attempt,
         active_executing_tool_batch,
-        ordinary_preceding_non_accepted_terminal,
+        preceding_non_accepted_successors,
         preceding_non_accepted_terminals,
     })
 }
@@ -7848,21 +7843,15 @@ fn prepare_earliest_queued_activation(
     }
 
     let queued = &projection.turns[index];
-    let preceding_non_accepted_terminal = match queued.order.priority() {
-        AcceptedInputQueuePriority::InterruptImmediatelyAfter { predecessor } => projection
-            .preceding_non_accepted_terminals
-            .get(&predecessor)
-            .map(|(snapshot, selected)| (predecessor, snapshot, *selected)),
-        AcceptedInputQueuePriority::Ordinary if index == 0 => projection
-            .ordinary_preceding_non_accepted_terminal
-            .and_then(|predecessor| {
-                projection
-                    .preceding_non_accepted_terminals
-                    .get(&predecessor)
-                    .map(|(snapshot, selected)| (predecessor, snapshot, *selected))
-            }),
-        AcceptedInputQueuePriority::Ordinary => None,
-    };
+    let preceding_non_accepted_terminal = projection
+        .preceding_non_accepted_successors
+        .get(&queued.turn())
+        .and_then(|predecessor| {
+            projection
+                .preceding_non_accepted_terminals
+                .get(predecessor)
+                .map(|(snapshot, selected)| (*predecessor, snapshot, *selected))
+        });
     let origin_entry = SemanticTranscriptEntry::from_validated_parts(
         identities.origin_entry,
         source_session,
