@@ -375,6 +375,7 @@ const SYNTHETIC_COLLATERAL_DID_NOT_WORK_REPORT: &str =
 const SYNTHETIC_COULD_NOT_COMPLETE_REPORT: &str =
     "Done, but I could not perform the requested operation.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
+const SYNTHETIC_FILE_NOT_MODIFIED_REPORT: &str = "Done, but the file was not modified.";
 const SYNTHETIC_COLLATERAL_NO_FILE_CHANGES_COMPLETION_REPORT: &str =
     "Updated the requested file; no file changes were made to any other files.";
 const SYNTHETIC_NO_FILE_WAS_CHANGED_COMPLETION_REPORT: &str = "Done; no file was changed.";
@@ -6658,6 +6659,8 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         "listed",
         "match",
         "matched",
+        "modify",
+        "modified",
         "perform",
         "performed",
         "read",
@@ -7610,6 +7613,26 @@ fn forced_edit_report_rejects_completion_with_no_file_changes() {
         true,
         &tracker,
     ));
+}
+
+#[test]
+fn forced_edit_report_rejects_a_file_not_modified_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_FILE_NOT_MODIFIED_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        EDIT_FILE_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn workspace_mutation_report_rejects_a_file_not_modified_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_FILE_NOT_MODIFIED_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion_with_file_mutation());
 }
 
 #[test]
