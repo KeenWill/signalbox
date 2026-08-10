@@ -528,6 +528,7 @@ const SYNTHETIC_ATTEMPTED_THEN_RAN_REPORT: &str =
     "I attempted to run the command and it ran successfully.";
 const SYNTHETIC_PARTIAL_RUN_REPORT: &str = "The command only partially ran.";
 const SYNTHETIC_ABORTED_RUN_REPORT: &str = "I aborted the run.";
+const SYNTHETIC_CANCELED_RUN_REPORT: &str = "The run was canceled.";
 const SYNTHETIC_SKIPPED_RUN_REPORT: &str = "I skipped the run.";
 const SYNTHETIC_SKIPPED_THEN_RAN_REPORT: &str = "I skipped the run, but then ran it successfully.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
@@ -7833,6 +7834,7 @@ fn report_words_deny_success(
     let hedged_completion = report_hedges_outcome(report);
     let attempted_completion = report_only_attempts_outcome(report);
     let skipped_or_aborted_completion = report_skips_or_aborts_outcome(report);
+    let canceled_completion = report_cancels_outcome(report);
     let partial_completion = report_partially_completes_outcome(report);
     let clauses_with_dotted_paths_preserved = normalized_report_clauses(report);
     let affirmative_pending = clauses_with_dotted_paths_preserved.iter().any(|clause| {
@@ -7965,6 +7967,7 @@ fn report_words_deny_success(
         || hedged_completion
         || attempted_completion
         || skipped_or_aborted_completion
+        || canceled_completion
         || partial_completion
         || affirmative_pending
         || scoped_negation
@@ -8083,6 +8086,17 @@ fn report_partially_completes_outcome(report: &str) -> bool {
         clause.iter().enumerate().any(|(index, word)| {
             let nearby = &clause[index.saturating_sub(3)..clause.len().min(index + 4)];
             matches!(word.as_str(), "partial" | "partially")
+                && nearby.iter().any(|word| is_negative_outcome(word))
+        })
+    })
+}
+
+fn report_cancels_outcome(report: &str) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.iter().enumerate().any(|(index, word)| {
+            let nearby = &clause[index.saturating_sub(4)..clause.len().min(index + 5)];
+            matches!(word.as_str(), "cancel" | "canceled" | "cancelled")
+                && !failure_term_is_negated(&clause, index)
                 && nearby.iter().any(|word| is_negative_outcome(word))
         })
     })
@@ -9733,6 +9747,18 @@ fn forced_sandboxed_exec_report_accepts_a_skip_followed_by_a_successful_run() {
 fn forced_sandboxed_exec_report_rejects_an_aborted_run() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_ABORTED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_canceled_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_CANCELED_RUN_REPORT, false);
 
     assert!(!forced_case_completion_reported(
         SANDBOXED_EXEC_NAME,
