@@ -269,6 +269,12 @@ container that carries no such label is another party's to remove, so a sweep on
 a shared daemon leaves it alone whatever it is running. Start a test container
 through that helper, or the sweep will not reclaim it.
 
+The mark is safe only because a marked container is short-lived, so anything
+that can be configured to hold one for longer — the load benchmark's
+`--duration-seconds`, say — refuses a setting that would outlive
+`signalbox_persistence::DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS`, which is the
+same bound the sweep defaults to.
+
 CI runs these ignored suites from
 [`.github/postgres-integration-suites.toml`](.github/postgres-integration-suites.toml),
 which names each suite's package, features, shard count, and exclusions. Both

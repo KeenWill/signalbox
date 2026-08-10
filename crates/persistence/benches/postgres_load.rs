@@ -31,9 +31,11 @@ use signalbox_domain::{
     TurnId, UserContent,
 };
 use signalbox_persistence::{
+    DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS,
     create_session::{CreateSessionHandlingOutcome, CreateSessionRepository},
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
+    outlives_the_disposable_container_sweep,
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository},
     tool_loop::PostgresToolLoopRepository,
@@ -231,6 +233,14 @@ fn parse_args() -> HarnessResult<ParsedArgs> {
 
     if duration_seconds == 0 {
         return Err(error("--duration-seconds must be positive"));
+    }
+    // One point holds one disposable container for its whole duration, and the
+    // orphan sweep removes marked containers past this age. A point configured
+    // to outlive that bound would have its database force-removed mid-run.
+    if outlives_the_disposable_container_sweep(Duration::from_secs(duration_seconds)) {
+        return Err(error(format!(
+            "--duration-seconds must stay under              {DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS}h: a point holds one disposable              container for its whole duration, and tooling/sweep-test-containers.sh              removes marked containers past that age"
+        )));
     }
     let highest_concurrency = concurrencies
         .iter()

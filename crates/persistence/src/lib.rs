@@ -46,6 +46,7 @@ pub use session_credentials::{
 };
 
 use std::str::FromStr;
+use std::time::Duration;
 
 use sqlx::{
     Error, PgPool,
@@ -250,6 +251,22 @@ pub const DISPOSABLE_TEST_CONTAINER_LABEL_KEY: &str = "org.signalbox.disposable"
 /// The label value paired with [`DISPOSABLE_TEST_CONTAINER_LABEL_KEY`].
 pub const DISPOSABLE_TEST_CONTAINER_LABEL_VALUE: &str = "test-container";
 
+/// The longest a container may carry the disposable mark and still be safe.
+///
+/// `tooling/sweep-test-containers.sh` removes marked containers older than this
+/// by default, which is what makes the mark safe to apply: a container serving a
+/// test is minutes old. Anything that can be configured to hold a marked
+/// container longer would be force-removed while still in use, so it checks
+/// itself against this bound first — see
+/// [`outlives_the_disposable_container_sweep`].
+pub const DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS: u64 = 2;
+
+/// Reports whether holding a marked container for `lifetime` would outlive the
+/// sweep's default age bound, and so risk removal while it is still in use.
+pub fn outlives_the_disposable_container_sweep(lifetime: Duration) -> bool {
+    lifetime >= Duration::from_secs(DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS * 60 * 60)
+}
+
 /// The environment variable the testcontainers client reads to decide whether a
 /// container is removed when its handle drops.
 const TESTCONTAINERS_COMMAND_VARIABLE: &str = "TESTCONTAINERS_COMMAND";
@@ -301,8 +318,9 @@ mod tests {
 
     use super::{
         DISPOSABLE_TEST_CONTAINER_LABEL_KEY, DISPOSABLE_TEST_CONTAINER_LABEL_VALUE,
-        TESTCONTAINERS_KEEP_COMMAND, commit_failure_is_ambiguous,
-        disposable_test_container_labels_for_command, local_test_connection_options,
+        DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS, Duration, TESTCONTAINERS_KEEP_COMMAND,
+        commit_failure_is_ambiguous, disposable_test_container_labels_for_command,
+        local_test_connection_options, outlives_the_disposable_container_sweep,
         production_connection_options, production_connection_options_with_environment,
     };
 
@@ -557,5 +575,19 @@ mod tests {
             labels.is_empty(),
             "a kept container is nothing's to remove, so the sweep must not see a mark: {labels:?}"
         );
+    }
+
+    #[test]
+    fn a_container_held_no_longer_than_a_test_is_safe_to_mark_disposable() {
+        let held = Duration::from_secs(DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS * 60 * 60 - 1);
+
+        assert!(!outlives_the_disposable_container_sweep(held));
+    }
+
+    #[test]
+    fn a_container_held_to_the_sweep_bound_would_be_removed_while_in_use() {
+        let held = Duration::from_secs(DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS * 60 * 60);
+
+        assert!(outlives_the_disposable_container_sweep(held));
     }
 }

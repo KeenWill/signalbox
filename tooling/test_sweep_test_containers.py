@@ -30,13 +30,17 @@ import os, sys, time
 
 command = sys.argv[1]
 
+if os.environ.get("FAKE_DOCKER_HANGS_ON") == command:
+    time.sleep(3600)
+
 if command == "version":
-    if os.environ.get("FAKE_DOCKER_UNRESPONSIVE"):
-        time.sleep(3600)
     sys.exit(1) if os.environ.get("FAKE_DOCKER_DOWN") else print("27.0.0")
 elif command == "ps":
     with open(os.environ["FAKE_DOCKER_PS_ARGUMENTS"], "w") as log:
         log.write("\\n".join(sys.argv[1:]))
+    if os.environ.get("FAKE_DOCKER_PS_REFUSED"):
+        print(os.environ["FAKE_DOCKER_PS_REFUSED"], file=sys.stderr)
+        sys.exit(1)
     print(os.environ["FAKE_DOCKER_PS"], end="")
 elif command == "inspect":
     if os.environ.get("FAKE_DOCKER_INSPECT_REFUSED"):
@@ -87,10 +91,25 @@ elif command == "rm":
     sys.exit(1 if gone & set(sys.argv[4:]) else 0)
 elif command == "volume":
     assert "dangling=true" in sys.argv, sys.argv
+    if os.environ.get("FAKE_DOCKER_VOLUME_REFUSED"):
+        print(os.environ["FAKE_DOCKER_VOLUME_REFUSED"], file=sys.stderr)
+        sys.exit(1)
     print(os.environ["FAKE_DOCKER_DANGLING"], end="")
 else:
     raise SystemExit(f"fake docker: unexpected command: {command}")
 '''
+
+
+def rust_number_constant(name: str) -> int:
+    """Read one `pub const … u64` from the persistence crate, outside test bodies.
+
+    The sweep's default age bound and the bound anything holding a marked
+    container checks itself against have to be the same number.
+    """
+    pattern = rf"^pub const {name}: u64 = (\d+);$"
+    found = re.search(pattern, PERSISTENCE_LIB.read_text(), re.MULTILINE)
+    assert found is not None, f"{PERSISTENCE_LIB} declares no {name}"
+    return int(found.group(1))
 
 
 def rust_string_constant(name: str) -> str:
@@ -109,7 +128,20 @@ DISPOSABLE_LABEL_KEY = rust_string_constant("DISPOSABLE_TEST_CONTAINER_LABEL_KEY
 DISPOSABLE_LABEL_VALUE = rust_string_constant("DISPOSABLE_TEST_CONTAINER_LABEL_VALUE")
 DISPOSABLE_FILTER = f"label={DISPOSABLE_LABEL_KEY}={DISPOSABLE_LABEL_VALUE}"
 
+DISPOSABLE_LIFETIME_HOURS = rust_number_constant(
+    "DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS"
+)
+
 MANAGED_BY_FILTER = "label=org.testcontainers.managed-by=testcontainers"
+
+REFUSED_VOLUME_LISTING = "Error response from daemon: volume listing is denied"
+
+REFUSED_CONTAINER_LISTING = "Error response from daemon: listing is denied by policy"
+
+# Well above any run this suite asks for and well below the CI job's own
+# timeout: a sweep that stopped bounding its daemon calls would otherwise hang
+# the whole job for twenty minutes instead of failing here in a minute.
+SWEEP_TIMEOUT_SECONDS = 60
 
 REFUSED_INSPECTION = "Error response from daemon: authorization denied"
 
@@ -159,7 +191,13 @@ def container_start_sites() -> tuple[list[str], list[str]]:
         if "testcontainers" not in text:
             continue
         lines = text.splitlines()
-        for found in re.finditer(r"\.start\(\)\s*\.await", text):
+        awaited = r"\.start\(\)\s*\.await"
+        universal = r"\b(?:Async|Sync)Runner::start\s*\("
+        # A synchronous runner would call `.start()` without awaiting it, so
+        # in a file that reaches for one every `.start()` counts. No file does
+        # today; the alternative is a start form this scan cannot see.
+        method = r"\.start\(\)" if "SyncRunner" in text else awaited
+        for found in re.finditer(f"{method}|{universal}", text):
             number = text.count("\n", 0, found.start()) + 1
             sites.append(f"{name}:{number}")
             head = number
@@ -226,7 +264,9 @@ def run_sweep(
     *,
     arguments: list[str],
     daemon_reachable: bool = True,
-    daemon_responsive: bool = True,
+    hangs_on: str | None = None,
+    listing_refused: str | None = None,
+    volume_listing_refused: str | None = None,
     dangling_volumes: int = 0,
     vanished: tuple[str, ...] = (),
     inspection_refused: str | None = None,
@@ -264,7 +304,9 @@ def run_sweep(
             f"volume{n}\n" for n in range(dangling_volumes)
         )
         environment.pop("FAKE_DOCKER_DOWN", None)
-        environment.pop("FAKE_DOCKER_UNRESPONSIVE", None)
+        environment.pop("FAKE_DOCKER_HANGS_ON", None)
+        environment.pop("FAKE_DOCKER_VOLUME_REFUSED", None)
+        environment.pop("FAKE_DOCKER_PS_REFUSED", None)
         environment.pop("FAKE_DOCKER_INSPECT_REFUSED", None)
         environment.pop("FAKE_DOCKER_INSPECT_SILENTLY_FAILS", None)
         environment.pop("FAKE_DOCKER_INSPECT_NOTE", None)
@@ -288,18 +330,29 @@ def run_sweep(
             environment["FAKE_DOCKER_INSPECT_NOTE_IS_FATAL"] = "1"
         if not daemon_reachable:
             environment["FAKE_DOCKER_DOWN"] = "1"
-        if not daemon_responsive:
-            environment["FAKE_DOCKER_UNRESPONSIVE"] = "1"
+        if hangs_on is not None:
+            environment["FAKE_DOCKER_HANGS_ON"] = hangs_on
+        if listing_refused is not None:
+            environment["FAKE_DOCKER_PS_REFUSED"] = listing_refused
+        if volume_listing_refused is not None:
+            environment["FAKE_DOCKER_VOLUME_REFUSED"] = volume_listing_refused
         if inspection_refused is not None:
             environment["FAKE_DOCKER_INSPECT_REFUSED"] = inspection_refused
         if inspection_fails_silently:
             environment["FAKE_DOCKER_INSPECT_SILENTLY_FAILS"] = "1"
-        completed = subprocess.run(
-            [str(SWEEP), *arguments],
-            env=environment,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            completed = subprocess.run(
+                [str(SWEEP), *arguments],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=SWEEP_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as expired:
+            raise AssertionError(
+                f"the sweep did not return within {SWEEP_TIMEOUT_SECONDS}s, so its "
+                f"daemon calls are no longer bounded: {arguments}"
+            ) from expired
         removed = removal_log.read_text().split() if removal_log.exists() else []
         listing = listing_log.read_text().split("\n") if listing_log.exists() else []
         return SweepRun(completed, removed, listing)
@@ -328,6 +381,11 @@ class SweepTestContainersTest(unittest.TestCase):
         script = SWEEP.read_text()
 
         self.assertIn(f"'{DISPOSABLE_LABEL_KEY}={DISPOSABLE_LABEL_VALUE}'", script)
+
+    def test_the_script_and_the_harness_agree_on_the_age_bound(self) -> None:
+        script = SWEEP.read_text()
+
+        self.assertIn(f"\nolder_than_hours={DISPOSABLE_LIFETIME_HOURS}\n", script)
 
     def test_every_test_container_start_marks_the_container_disposable(self) -> None:
         _, unmarked = container_start_sites()
@@ -605,6 +663,19 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertEqual(run.removed, [])
         self.assertIn("no disposable test containers present", run.stdout)
 
+    def test_a_refused_listing_fails_instead_of_reading_as_a_clean_box(self) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            listing_refused=REFUSED_CONTAINER_LISTING,
+        )
+
+        self.assertEqual(run.status, 1)
+        self.assertEqual(run.removed, [])
+        self.assertIn("could not list containers", run.stderr)
+        self.assertIn(REFUSED_CONTAINER_LISTING, run.stderr)
+        self.assertNotIn("no disposable test containers present", run.stdout)
+
     def test_an_unreachable_daemon_fails_instead_of_reporting_nothing_to_do(self) -> None:
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
@@ -616,19 +687,79 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertEqual(run.removed, [])
         self.assertIn("cannot reach the Docker daemon", run.stderr)
 
-    def test_a_daemon_that_never_answers_fails_instead_of_blocking_forever(self) -> None:
+    def test_a_daemon_that_never_answers_the_probe_fails_instead_of_blocking(self) -> None:
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
-            arguments=["--apply", "--daemon-probe-seconds", "1"],
-            daemon_responsive=False,
+            arguments=["--apply", "--deadline-seconds", "1"],
+            hangs_on="version",
         )
 
         self.assertEqual(run.status, 1)
         self.assertEqual(run.removed, [])
-        self.assertIn("did not answer within 1s", run.stderr)
+        self.assertIn("did not answer the version request within 1s", run.stderr)
 
-    def test_a_probe_bound_that_is_not_a_positive_number_is_refused(self) -> None:
-        run = run_sweep([], arguments=["--daemon-probe-seconds", "0"])
+    def test_a_daemon_that_stops_answering_after_the_probe_fails_instead_of_blocking(
+        self,
+    ) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply", "--deadline-seconds", "1"],
+            hangs_on="ps",
+        )
+
+        self.assertEqual(run.status, 1)
+        self.assertEqual(run.removed, [])
+        self.assertIn("did not answer the container listing within 1s", run.stderr)
+
+    def test_a_daemon_that_hangs_on_inspection_fails_instead_of_blocking(self) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply", "--deadline-seconds", "1"],
+            hangs_on="inspect",
+        )
+
+        self.assertEqual(run.status, 1)
+        self.assertEqual(run.removed, [])
+        self.assertIn("did not answer the container inspection within 1s", run.stderr)
+
+    def test_a_daemon_that_hangs_on_removal_fails_instead_of_blocking(self) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply", "--deadline-seconds", "1"],
+            hangs_on="rm",
+        )
+
+        self.assertEqual(run.status, 1)
+        self.assertIn("did not answer the removal request within 1s", run.stderr)
+
+    def test_a_daemon_that_hangs_counting_volumes_still_reports_the_removals(
+        self,
+    ) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply", "--deadline-seconds", "1"],
+            hangs_on="volume",
+        )
+
+        self.assertEqual(run.status, 0, run.stderr)
+        self.assertEqual(run.removed, ["old111"])
+        self.assertIn("removed 1 container(s)", run.stdout)
+        self.assertIn("could not count dangling volumes", run.stderr)
+
+    def test_a_refused_volume_listing_does_not_undo_a_completed_sweep(self) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            volume_listing_refused=REFUSED_VOLUME_LISTING,
+        )
+
+        self.assertEqual(run.status, 0, run.stderr)
+        self.assertEqual(run.removed, ["old111"])
+        self.assertIn("removed 1 container(s)", run.stdout)
+        self.assertIn("could not count dangling volumes", run.stderr)
+
+    def test_a_deadline_that_is_not_a_positive_number_is_refused(self) -> None:
+        run = run_sweep([], arguments=["--deadline-seconds", "0"])
 
         self.assertEqual(run.status, 2)
         self.assertIn("must be a positive whole number of seconds", run.stderr)

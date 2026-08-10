@@ -41,7 +41,7 @@
 # `--apply` is passed.
 #
 # Usage: sweep-test-containers.sh [--older-than-hours <n>]
-#                                 [--daemon-probe-seconds <n>] [--apply]
+#                                 [--deadline-seconds <n>] [--apply]
 set -euo pipefail
 
 # Kept identical to `signalbox_persistence::DISPOSABLE_TEST_CONTAINER_LABEL_KEY`
@@ -49,20 +49,23 @@ set -euo pipefail
 # drift.
 readonly DISPOSABLE_LABEL='org.signalbox.disposable=test-container'
 
-# `docker inspect` names each identifier it could not find on stderr and still
-# prints every container it did find. A line of this shape is a container that
-# left between the listing and the inspection, which is the outcome this sweep
-# wants; any other line is a real fault that must not be read as "everything
-# vanished".
+# `docker inspect` and `docker rm` name each identifier they could not find on
+# stderr and still act on every container they did find. A line of this shape is
+# a container that left between one call and the next, which is the outcome this
+# sweep wants; any other line is a real fault that must not be read as
+# "everything vanished".
 readonly MISSING_OBJECT_PATTERN='^Error( response from daemon)?: No such (object|container): '
 
 # `wait` reports a child killed by a signal as 128 plus the signal number, which
-# is how the bounded probe below tells a daemon that never answered from one
-# that refused.
+# is how a daemon call that ran past its deadline is told from one that failed.
 readonly SIGNALLED_STATUS_FLOOR=128
 
+# Kept identical to
+# `signalbox_persistence::DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS`, which is
+# what anything holding a marked container longer than a test checks itself
+# against; `tooling/test_sweep_test_containers.py` fails when the two drift.
 older_than_hours=2
-daemon_probe_seconds=10
+deadline_seconds=900
 apply=0
 
 while [ "$#" -gt 0 ]; do
@@ -75,12 +78,12 @@ while [ "$#" -gt 0 ]; do
 		older_than_hours="$2"
 		shift 2
 		;;
-	--daemon-probe-seconds)
+	--deadline-seconds)
 		if [ "$#" -lt 2 ]; then
-			echo "sweep-test-containers: --daemon-probe-seconds needs a value" >&2
+			echo "sweep-test-containers: --deadline-seconds needs a value" >&2
 			exit 2
 		fi
-		daemon_probe_seconds="$2"
+		deadline_seconds="$2"
 		shift 2
 		;;
 	--apply)
@@ -89,13 +92,13 @@ while [ "$#" -gt 0 ]; do
 		;;
 	-h | --help)
 		echo "usage: sweep-test-containers.sh [--older-than-hours <n>]" \
-			"[--daemon-probe-seconds <n>] [--apply]"
+			"[--deadline-seconds <n>] [--apply]"
 		exit 0
 		;;
 	*)
 		echo "sweep-test-containers: unknown argument: $1" >&2
 		echo "usage: sweep-test-containers.sh [--older-than-hours <n>]" \
-			"[--daemon-probe-seconds <n>] [--apply]" >&2
+			"[--deadline-seconds <n>] [--apply]" >&2
 		exit 2
 		;;
 	esac
@@ -109,10 +112,10 @@ case "$older_than_hours" in
 	;;
 esac
 
-case "$daemon_probe_seconds" in
+case "$deadline_seconds" in
 '' | 0 | *[!0-9]*)
-	echo "sweep-test-containers: --daemon-probe-seconds must be a positive whole" \
-		"number of seconds, got: $daemon_probe_seconds" >&2
+	echo "sweep-test-containers: --deadline-seconds must be a positive whole" \
+		"number of seconds, got: $deadline_seconds" >&2
 	exit 2
 	;;
 esac
@@ -122,18 +125,99 @@ if ! command -v docker >/dev/null 2>&1; then
 	exit 1
 fi
 
+scratch=""
+bounded_children=""
+
+# Installed before anything is launched, so no exit path can leave a deadline
+# process behind to signal a process identifier the kernel has since handed to
+# somebody else.
+cleanup() {
+	if [ -n "$bounded_children" ]; then
+		# Word splitting is the point: this holds the two identifiers the call in
+		# flight owns.
+		# shellcheck disable=SC2086
+		kill -s TERM $bounded_children >/dev/null 2>&1 || true
+		# shellcheck disable=SC2086
+		wait $bounded_children >/dev/null 2>&1 || true
+		bounded_children=""
+	fi
+	if [ -n "$scratch" ]; then
+		rm -rf "$scratch"
+		scratch=""
+	fi
+	return 0
+}
+
+trap cleanup EXIT
+trap 'cleanup; exit 143' INT TERM
+
+scratch="$(mktemp -d)"
+readonly OUTPUT="$scratch/output"
+readonly ERRORS="$scratch/errors"
+
+# No docker subcommand carries a timeout of its own, and reaching the daemon
+# once proves only that it answered once. A daemon that accepts the socket and
+# then stops answering — on `ps`, `inspect`, `rm`, or `volume ls` just as
+# readily as on `version` — would otherwise block here forever, and on a timer a
+# stuck invocation is precisely what stops the next sweep from bounding the
+# leak. Every daemon call therefore runs under its own deadline.
+#
+# The call runs in the background and is waited on rather than run in the
+# foreground, because a shell defers its traps until the foreground command it
+# is stuck on returns, which for a hung daemon is never; a shell sitting in
+# `wait` can be interrupted.
+run_bounded() {
+	"$@" >"$OUTPUT" 2>"$ERRORS" &
+	local worker=$!
+	(
+		sleep "$deadline_seconds"
+		kill -s TERM "$worker"
+	) >/dev/null 2>&1 &
+	local deadline=$!
+	bounded_children="$worker $deadline"
+	local status=0
+	wait "$worker" || status=$?
+	kill -s TERM "$deadline" >/dev/null 2>&1 || true
+	wait "$deadline" >/dev/null 2>&1 || true
+	bounded_children=""
+	return "$status"
+}
+
+# Names the daemon as the problem when a call ran past its deadline, and says
+# nothing when it did not, so callers can keep their own failure messages.
+refuse_a_deadline_overrun() {
+	if [ "$1" -ge "$SIGNALLED_STATUS_FLOOR" ]; then
+		echo "sweep-test-containers: the Docker daemon did not answer $2 within" \
+			"${deadline_seconds}s" >&2
+		exit 1
+	fi
+}
+
 # Dangling volumes are the part of the leak no container-scoped selector can
 # reach, so every successful run reports them — including the runs that find
 # nothing to remove. A box whose containers were already reclaimed without their
 # volumes reports an empty container inventory, and stopping there would leave
 # the remaining disk leak invisible.
+#
+# The count is advisory, so a daemon that stops answering after the removals
+# have already happened downgrades to a warning: turning a completed sweep into
+# a bare nonzero exit would tell the operator nothing except that something went
+# wrong after the part that mattered.
 report_dangling_volumes() {
+	local status=0
+	run_bounded docker volume ls --quiet --filter dangling=true || status=$?
+	if [ "$status" -ne 0 ]; then
+		echo "sweep-test-containers: could not count dangling volumes; whatever" \
+			"this run removed was still removed" >&2
+		return 0
+	fi
 	local dangling
-	dangling="$(docker volume ls --quiet --filter dangling=true | wc -l | tr -d ' ')"
+	dangling="$(grep -c . <"$OUTPUT" || true)"
 	if [ "$dangling" -gt 0 ]; then
 		echo "sweep-test-containers: $dangling dangling volume(s) remain, belonging" \
 			"to no container; reclaim with 'docker volume prune'"
 	fi
+	return 0
 }
 
 finish_clean() {
@@ -145,42 +229,27 @@ finish_clean() {
 # empty container listing, which reads exactly like a clean box and would leave
 # an operator believing the sweep found nothing to do. Ask once, and name the
 # real problem.
-#
-# `docker version` carries no timeout of its own, so a daemon whose socket
-# accepts but never answers would block here forever: on a timer that is a job
-# that never reports and never returns, which is worse than the empty listing
-# this probe exists to prevent. Bound the probe with a deadline process instead
-# and report a daemon that did not answer separately from one that refused.
-probe_daemon() {
-	docker version --format '{{.Server.Version}}' >/dev/null 2>&1 &
-	local probe=$!
-	(
-		sleep "$daemon_probe_seconds"
-		kill -s TERM "$probe"
-	) >/dev/null 2>&1 &
-	local deadline=$!
-	local status=0
-	wait "$probe" || status=$?
-	kill -s TERM "$deadline" >/dev/null 2>&1 || true
-	wait "$deadline" >/dev/null 2>&1 || true
-	return "$status"
-}
-
 probe_status=0
-probe_daemon || probe_status=$?
-
-if [ "$probe_status" -ge "$SIGNALLED_STATUS_FLOOR" ]; then
-	echo "sweep-test-containers: the Docker daemon did not answer within" \
-		"${daemon_probe_seconds}s" >&2
-	exit 1
-fi
+run_bounded docker version --format '{{.Server.Version}}' || probe_status=$?
+refuse_a_deadline_overrun "$probe_status" "the version request"
 
 if [ "$probe_status" -ne 0 ]; then
 	echo "sweep-test-containers: cannot reach the Docker daemon" >&2
 	exit 1
 fi
 
-candidates="$(docker ps --all --quiet --filter "label=$DISPOSABLE_LABEL")"
+listing_status=0
+run_bounded docker ps --all --quiet --filter "label=$DISPOSABLE_LABEL" ||
+	listing_status=$?
+refuse_a_deadline_overrun "$listing_status" "the container listing"
+
+if [ "$listing_status" -ne 0 ]; then
+	echo "sweep-test-containers: could not list containers" >&2
+	cat "$ERRORS" >&2
+	exit 1
+fi
+
+candidates="$(cat "$OUTPUT")"
 
 if [ -z "$candidates" ]; then
 	echo "sweep-test-containers: no disposable test containers present"
@@ -188,18 +257,20 @@ if [ -z "$candidates" ]; then
 fi
 
 # Identifiers arrive on stdin so a sweep of several thousand containers cannot
-# overflow the argument list. Inspection's stderr is captured rather than passed
-# through because the classification below reads it.
-inspection_errors="$(mktemp)"
-trap 'rm -f "$inspection_errors"' EXIT
-
-inspection_status=0
-inspected="$(
+# overflow the argument list.
+inspect_candidates() {
 	printf '%s\n' "$candidates" |
 		xargs docker inspect \
-			--format '{{.Id}} {{.Created}} {{.State.Status}} {{.Config.Image}}' \
-			2>"$inspection_errors"
-)" || inspection_status=$?
+			--format '{{.Id}} {{.Created}} {{.State.Status}} {{.Config.Image}}'
+}
+
+inspection_status=0
+run_bounded inspect_candidates || inspection_status=$?
+refuse_a_deadline_overrun "$inspection_status" "the container inspection"
+
+inspected="$(cat "$OUTPUT")"
+inspection_errors="$scratch/inspection-errors"
+cp "$ERRORS" "$inspection_errors"
 
 # A container listed a moment ago can be gone by the time it is inspected: a
 # concurrent test run finishing, or a second operator sweeping. That is benign,
@@ -288,19 +359,19 @@ echo "sweep-test-containers: removing $count container(s) older than" \
 # Aborting there would strand the containers `xargs` had not got to yet, so a
 # container that left on its own is counted rather than treated as a failure,
 # and every other removal error still fails the run.
-removal_errors="$(mktemp)"
-trap 'rm -f "$inspection_errors" "$removal_errors"' EXIT
-
-removal_status=0
-removed_ids="$(
+remove_selected() {
 	printf '%s\n' "$selected" |
 		awk '{ print $1 }' |
-		xargs docker rm --force --volumes 2>"$removal_errors"
-)" || removal_status=$?
+		xargs docker rm --force --volumes
+}
+
+removal_status=0
+run_bounded remove_selected || removal_status=$?
+refuse_a_deadline_overrun "$removal_status" "the removal request"
 
 # `docker rm` echoes each container it removed, so the removals are counted from
 # the daemon's own report rather than assumed from the selection.
-removed_count="$(printf '%s\n' "$removed_ids" | grep -c . || true)"
+removed_count="$(grep -c . <"$OUTPUT" || true)"
 
 if [ "$removal_status" -eq 0 ]; then
 	echo "sweep-test-containers: removed $removed_count container(s)"
@@ -311,15 +382,15 @@ fi
 # is benign only when the containers it could not remove are the ones something
 # else already had. A failure that wrote no diagnostic explains nothing, so an
 # empty stderr never buys a clean exit.
-already_gone="$(grep -c -E "$MISSING_OBJECT_PATTERN" "$removal_errors" || true)"
-unremoved="$(grep -v -E "$MISSING_OBJECT_PATTERN" "$removal_errors" || true)"
+already_gone="$(grep -c -E "$MISSING_OBJECT_PATTERN" "$ERRORS" || true)"
+unremoved="$(grep -v -E "$MISSING_OBJECT_PATTERN" "$ERRORS" || true)"
 
 if [ -n "$unremoved" ] ||
 	[ "$((removed_count + already_gone))" -ne "$count" ]; then
 	echo "sweep-test-containers: docker rm failed for a reason other than a" \
 		"container disappearing (exit status $removal_status); removed" \
 		"$removed_count of $count container(s)" >&2
-	cat "$removal_errors" >&2
+	cat "$ERRORS" >&2
 	exit 1
 fi
 
