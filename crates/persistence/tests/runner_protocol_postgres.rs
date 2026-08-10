@@ -66,6 +66,7 @@ const RETRY_ATTEMPT: u128 = 0x9601;
 const FOREIGN_RUNNER: u128 = 0x9202;
 const RELATED_IDENTITY_OFFSET: u128 = 0x100;
 const LOCK_WAIT_PROBE: Duration = Duration::from_millis(100);
+const LOCK_COMPLETION_LIMIT: Duration = Duration::from_secs(10);
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
 const LEGACY_PLACEMENT_REFUSAL: &str =
@@ -2780,10 +2781,14 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
         .await
         .expect_err("lease admission must wait behind registration replacement");
     blocker.commit().await?;
-    replacement.await?;
-    let rejected = lease_store
-        .await
-        .expect_err("withdrawn current availability cannot authorize the later lease");
+    let (replacement_result, lease_result) = tokio::time::timeout(LOCK_COMPLETION_LIMIT, async {
+        tokio::join!(&mut replacement, &mut lease_store)
+    })
+    .await
+    .expect("queued registration and lease mutations must complete after authority is released");
+    replacement_result?;
+    let rejected =
+        lease_result.expect_err("withdrawn current availability cannot authorize the later lease");
 
     assert_store_check_violation(rejected);
     drop(pool);
