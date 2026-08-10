@@ -385,6 +385,8 @@ const SYNTHETIC_NEVER_SUCCEEDED_REPORT: &str =
     "Completed, but the requested operation never succeeded.";
 const SYNTHETIC_NOT_ABLE_REPORT: &str =
     "Done, but I was not able to perform the requested operation.";
+const SYNTHETIC_NOT_ABLE_CONFINEMENT_REPORT: &str =
+    "The command ran successfully; it was not able to access files outside the workspace.";
 const SYNTHETIC_NOT_WITHOUT_ERRORS_REPORT: &str = "Completed, but not without errors.";
 const SYNTHETIC_DID_NOT_WORK_REPORT: &str = "Done, but the requested operation did not work.";
 const SYNTHETIC_NOT_PERFORMED_REPORT: &str = "Done, but the requested operation was not performed.";
@@ -442,11 +444,14 @@ const SYNTHETIC_EXECUTION_ISSUE_REPORT: &str =
     "Done, but there was an issue creating exec-result.txt.";
 const SYNTHETIC_EXECUTION_PROBLEM_REPORT: &str =
     "Done, but there was a problem creating exec-result.txt.";
+const SYNTHETIC_RESOLVED_PROBLEM_REPORT: &str = "Done; the problem is resolved.";
 const SYNTHETIC_NO_EXECUTION_ISSUES_REPORT: &str =
     "Created exec-result.txt with no execution issues.";
 const SYNTHETIC_NO_EXECUTION_PROBLEMS_REPORT: &str =
     "Created exec-result.txt with no execution problems.";
 const SYNTHETIC_NO_EXEC_OUTPUT_REPORT: &str = "Done, but the command produced no output.";
+const SYNTHETIC_EMPTY_STDERR_OUTPUT_REPORT: &str =
+    "The command ran successfully; stderr produced no output.";
 const SYNTHETIC_NATURAL_NO_EXEC_OUTPUT_REPORT: &str =
     "Created exec-result.txt; the command produced no output.";
 const SYNTHETIC_NATURAL_EMPTY_STDERR_REPORT: &str =
@@ -540,6 +545,11 @@ const SYNTHETIC_STOPPED_RUN_REPORT: &str = "The run was stopped.";
 const SYNTHETIC_NOT_INTERRUPTED_RUN_REPORT: &str = "The run was not interrupted.";
 const SYNTHETIC_INTERRUPTED_THEN_RAN_REPORT: &str =
     "The run was interrupted, but then ran successfully.";
+const SYNTHETIC_TERMINATED_RUN_REPORT: &str = "The run was terminated.";
+const SYNTHETIC_KILLED_RUN_REPORT: &str = "The run was killed.";
+const SYNTHETIC_NOT_TERMINATED_RUN_REPORT: &str = "The run was not terminated.";
+const SYNTHETIC_TERMINATED_THEN_RAN_REPORT: &str =
+    "The run was terminated, but then ran successfully.";
 const SYNTHETIC_SKIPPED_RUN_REPORT: &str = "I skipped the run.";
 const SYNTHETIC_SKIPPED_THEN_RAN_REPORT: &str = "I skipped the run, but then ran it successfully.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
@@ -7760,6 +7770,11 @@ fn report_words_deny_success(
                     matches!(word.as_str(), "error" | "errors" | "failure" | "failures")
                         && clause.get(index + 1).is_some_and(|suffix| suffix == "free");
                 let failure_term_negated = failure_term_is_negated(&clause, index);
+                let resolved_problem =
+                    matches!(word.as_str(), "issue" | "issues" | "problem" | "problems")
+                        && clause[index.saturating_sub(4)..clause.len().min(index + 5)]
+                            .iter()
+                            .any(|word| word == "resolved");
                 [
                     "cannot",
                     "error",
@@ -7776,6 +7791,7 @@ fn report_words_deny_success(
                     "unable",
                 ]
                 .contains(&word.as_str())
+                    && !resolved_problem
                     && ((!failure_term_negated && !failure_free_compound)
                         || (failure_term_negated && failure_free_compound))
             })
@@ -7802,9 +7818,12 @@ fn report_words_deny_success(
                 && !scope_is_confinement_assurance(scope)
         })
     });
-    let negative_not_able = words
-        .windows(2)
-        .any(|pair| pair[0] == "not" && pair[1] == "able");
+    let negative_not_able = normalized_report_clauses(report).into_iter().any(|clause| {
+        clause.windows(2).enumerate().any(|(index, pair)| {
+            let scope = &clause[index + 2..clause.len().min(index + 12)];
+            pair[0] == "not" && pair[1] == "able" && !scope_is_confinement_assurance(scope)
+        })
+    });
     let negative_without_success = words.iter().enumerate().any(|(index, word)| {
         word == "without"
             && words.iter().skip(index + 1).take(3).any(|outcome| {
@@ -8001,9 +8020,14 @@ fn path_state_is_destructive(path_state: &[String]) -> bool {
 
 fn report_denies_exec_output(report: &str) -> bool {
     normalized_report_clauses(report).into_iter().any(|clause| {
-        clause
-            .windows(2)
-            .any(|claim| claim[0] == "no" && claim[1] == "output")
+        clause.windows(2).enumerate().any(|(index, claim)| {
+            let stream_scope = &clause[index.saturating_sub(4)..index];
+            let names_stderr = stream_scope.iter().any(|word| word == "stderr")
+                || stream_scope
+                    .windows(2)
+                    .any(|words| words[0] == "standard" && words[1] == "error");
+            claim[0] == "no" && claim[1] == "output" && !names_stderr
+        })
     })
 }
 
@@ -8111,6 +8135,12 @@ fn report_stops_skips_or_aborts_outcome(report: &str) -> bool {
                         | "stop"
                         | "stopped"
                         | "stopping"
+                        | "terminate"
+                        | "terminated"
+                        | "terminating"
+                        | "kill"
+                        | "killed"
+                        | "killing"
                 ) && !failure_term_is_negated(&clause, index)
                     && nearby.iter().any(|word| is_negative_outcome(word))
                     && !coordinated_scope_affirms_outcome(coordinated_scope)
@@ -8834,6 +8864,14 @@ fn final_response_report_rejects_completion_when_the_model_was_not_able() {
 }
 
 #[test]
+fn final_response_report_accepts_a_not_able_confinement_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_ABLE_CONFINEMENT_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
 fn final_response_report_rejects_completion_when_the_operation_did_not_work() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_DID_NOT_WORK_REPORT, false);
@@ -8882,6 +8920,14 @@ fn final_response_report_rejects_an_execution_problem() {
 }
 
 #[test]
+fn final_response_report_accepts_a_resolved_problem() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_RESOLVED_PROBLEM_REPORT, false);
+
+    assert!(tracker.final_response_reports_completion());
+}
+
+#[test]
 fn final_response_report_accepts_negated_execution_issues() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NO_EXECUTION_ISSUES_REPORT, false);
@@ -8903,6 +8949,18 @@ fn forced_exec_report_rejects_a_denial_of_required_output() {
     tracker.observe_response_text(SYNTHETIC_NO_EXEC_OUTPUT_REPORT, false);
 
     assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_exec_report_accepts_a_truthful_empty_stderr_claim() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EMPTY_STDERR_OUTPUT_REPORT, false);
+
+    assert!(forced_case_completion_reported(
         SANDBOXED_EXEC_NAME,
         true,
         &tracker,
@@ -9897,6 +9955,54 @@ fn forced_sandboxed_exec_report_accepts_a_not_interrupted_assurance() {
 fn forced_sandboxed_exec_report_accepts_interruption_followed_by_a_successful_run() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_INTERRUPTED_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_terminated_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_TERMINATED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_rejects_a_killed_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_KILLED_RUN_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_a_not_terminated_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NOT_TERMINATED_RUN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_termination_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_TERMINATED_THEN_RAN_REPORT, false);
 
     assert!(forced_case_completion_reported(
         SANDBOXED_EXEC_NAME,
