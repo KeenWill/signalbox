@@ -3679,7 +3679,7 @@ fn git_forced_reference_entries_match(
                 &mut expected_modified_times,
                 &path,
                 execution_window,
-            ) || !admit_filesystem_identity_path(
+            ) || !admit_new_filesystem_identity_path_and_ancestors(
                 &actual_entry_identities,
                 &mut expected_entry_identities,
                 &path,
@@ -4138,6 +4138,182 @@ fn git_loose_object_relative_path(id: Oid) -> PathBuf {
     Path::new(&id[..2]).join(&id[2..])
 }
 
+fn publish_git_object_pack_for_test(
+    repository: &Repository,
+    ids: &[Oid],
+    baseline: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+) -> EvalResult {
+    let mut builder = repository.packbuilder()?;
+    for id in ids {
+        builder.insert_object(*id, None)?;
+    }
+    let mut buffer = git2::Buf::new();
+    builder.write_buf(&mut buffer)?;
+    let object_database = repository.odb()?;
+    let pack_directory = repository.path().join(GIT_OBJECTS_DIRECTORY).join("pack");
+    let pack_mode = git_pack_file_mode(baseline)
+        .ok_or_else(|| io::Error::other("the Git fixture has no pack directory mode"))?
+        .unwrap_or_default();
+    let mut indexer = git2::Indexer::new_ext(
+        Some(&object_database),
+        &pack_directory,
+        pack_mode,
+        true,
+        git2::ObjectFormat::Sha1,
+    )?;
+    std::io::Write::write_all(&mut indexer, &buffer)?;
+    indexer.commit()?;
+    let mut removable_parents = BTreeSet::new();
+    for id in ids {
+        let relative = git_loose_object_relative_path(*id);
+        fs::remove_file(
+            repository
+                .path()
+                .join(GIT_OBJECTS_DIRECTORY)
+                .join(&relative),
+        )?;
+        let parent = relative
+            .parent()
+            .ok_or_else(|| io::Error::other("a loose object has no fanout directory"))?;
+        if !baseline.contains_key(parent) {
+            removable_parents.insert(parent.to_path_buf());
+        }
+    }
+    for parent in removable_parents {
+        fs::remove_dir(repository.path().join(GIT_OBJECTS_DIRECTORY).join(parent))?;
+    }
+    Ok(())
+}
+
+fn git_pack_publication_parts(path: &Path) -> Option<(&str, &str)> {
+    if path.parent() != Some(Path::new("pack")) {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    let (stem, extension) = name.rsplit_once('.')?;
+    let checksum = stem.strip_prefix("pack-")?;
+    matches!(extension, "idx" | "pack")
+        .then_some(())
+        .filter(|()| checksum.len() == 40 && checksum.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(|()| (stem, extension))
+}
+
+fn git_pack_index_object_ids(content: &[u8]) -> Option<BTreeSet<Oid>> {
+    const HEADER_BYTES: usize = 8;
+    const FANOUT_ENTRIES: usize = 256;
+    const FANOUT_ENTRY_BYTES: usize = 4;
+    const SHA1_BYTES: usize = 20;
+    const INDEX_MAGIC: [u8; 4] = [0xff, b't', b'O', b'c'];
+    const INDEX_VERSION: [u8; 4] = 2_u32.to_be_bytes();
+    let fanout_bytes = FANOUT_ENTRIES.checked_mul(FANOUT_ENTRY_BYTES)?;
+    let names_offset = HEADER_BYTES.checked_add(fanout_bytes)?;
+    if content.get(..4)? != INDEX_MAGIC || content.get(4..HEADER_BYTES)? != INDEX_VERSION {
+        return None;
+    }
+    let count_offset = names_offset.checked_sub(FANOUT_ENTRY_BYTES)?;
+    let count = u32::from_be_bytes(content.get(count_offset..names_offset)?.try_into().ok()?);
+    let count = usize::try_from(count).ok()?;
+    let names_bytes = count.checked_mul(SHA1_BYTES)?;
+    let names = content.get(names_offset..names_offset.checked_add(names_bytes)?)?;
+    names
+        .chunks_exact(SHA1_BYTES)
+        .map(|bytes| Oid::from_bytes(bytes).ok())
+        .collect()
+}
+
+fn git_pack_file_mode(baseline: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>) -> Option<Option<u32>> {
+    let WorkspaceEntrySnapshot::Directory { mode } = baseline.get(Path::new("pack"))? else {
+        return None;
+    };
+    Some(mode.map(|mode| (mode & 0o666) | 0o600))
+}
+
+struct GitObjectEntryInventory<'a> {
+    actual: &'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    actual_modified_times: &'a BTreeMap<PathBuf, SystemTime>,
+    actual_entry_identities: &'a BTreeMap<PathBuf, FilesystemIdentity>,
+    expected: &'a mut BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
+    expected_modified_times: &'a mut BTreeMap<PathBuf, SystemTime>,
+    expected_entry_identities: &'a mut BTreeMap<PathBuf, FilesystemIdentity>,
+    execution_window: Option<FilesystemExecutionTimeWindow>,
+}
+
+fn admit_git_pack_publications(
+    inventory: &mut GitObjectEntryInventory<'_>,
+    allowed_ids: &BTreeSet<Oid>,
+    published_ids: &mut BTreeSet<Oid>,
+    file_links: Option<u64>,
+) -> bool {
+    let Some(file_mode) = git_pack_file_mode(inventory.expected) else {
+        return false;
+    };
+    let new_paths = inventory
+        .actual
+        .keys()
+        .filter(|path| !inventory.expected.contains_key(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut publications = BTreeMap::<String, BTreeSet<String>>::new();
+    for path in &new_paths {
+        let Some((stem, extension)) = git_pack_publication_parts(path) else {
+            return false;
+        };
+        publications
+            .entry(stem.to_owned())
+            .or_default()
+            .insert(extension.to_owned());
+    }
+    let expected_extensions = BTreeSet::from([String::from("idx"), String::from("pack")]);
+    if publications
+        .values()
+        .any(|extensions| *extensions != expected_extensions)
+    {
+        return false;
+    }
+    for stem in publications.keys() {
+        let index_path = Path::new("pack").join(format!("{stem}.idx"));
+        let Some(WorkspaceEntrySnapshot::File { content, .. }) = inventory.actual.get(&index_path)
+        else {
+            return false;
+        };
+        let Some(index_ids) = git_pack_index_object_ids(content) else {
+            return false;
+        };
+        for id in index_ids {
+            if !allowed_ids.contains(&id) || !published_ids.insert(id) {
+                return false;
+            }
+        }
+    }
+    for path in new_paths {
+        let Some(WorkspaceEntrySnapshot::File { content, .. }) = inventory.actual.get(&path) else {
+            return false;
+        };
+        if !admit_modified_time_path_and_ancestors(
+            inventory.actual_modified_times,
+            inventory.expected_modified_times,
+            &path,
+            inventory.execution_window,
+        ) || !admit_new_filesystem_identity_path_and_ancestors(
+            inventory.actual_entry_identities,
+            inventory.expected_entry_identities,
+            &path,
+            inventory.execution_window,
+        ) {
+            return false;
+        }
+        inventory.expected.insert(
+            path,
+            WorkspaceEntrySnapshot::File {
+                content: content.clone(),
+                mode: file_mode,
+                links: file_links,
+            },
+        );
+    }
+    true
+}
+
 fn git_object_entry_inventory_matches(
     root: &Path,
     baseline: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
@@ -4171,9 +4347,15 @@ fn git_object_entry_inventory_matches(
         return Ok(false);
     };
     let mut expected = baseline.clone();
-    for id in allowed_ids {
+    let allowed_ids = allowed_ids.iter().copied().collect::<BTreeSet<_>>();
+    let mut published_ids = BTreeSet::new();
+    for id in &allowed_ids {
         let relative = git_loose_object_relative_path(*id);
         if expected.contains_key(&relative) {
+            published_ids.insert(*id);
+            continue;
+        }
+        if !actual.contains_key(&relative) {
             continue;
         }
         if !admit_modified_time_path_and_ancestors(
@@ -4211,6 +4393,21 @@ fn git_object_entry_inventory_matches(
         ) {
             return Ok(false);
         }
+        published_ids.insert(*id);
+    }
+    let mut inventory = GitObjectEntryInventory {
+        actual: &actual,
+        actual_modified_times: &actual_modified_times,
+        actual_entry_identities: &actual_entry_identities,
+        expected: &mut expected,
+        expected_modified_times: &mut expected_modified_times,
+        expected_entry_identities: &mut expected_entry_identities,
+        execution_window,
+    };
+    if !admit_git_pack_publications(&mut inventory, &allowed_ids, &mut published_ids, file_links)
+        || published_ids != allowed_ids
+    {
+        return Ok(false);
     }
     Ok(actual == expected
         && actual_modified_times == expected_modified_times
@@ -10847,6 +11044,63 @@ fn forced_git_stage_verifier_accepts_the_exact_staged_blob() -> EvalResult {
 }
 
 #[test]
+fn git_object_entry_inventory_accepts_an_exact_pack_publication() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let repository = Repository::open(suite.workspace.path())?;
+    let started = current_filesystem_recorded_time()?;
+    let object_id = repository.blob(GIT_STAGE_CONTENT.as_bytes())?;
+    publish_git_object_pack_for_test(
+        &repository,
+        &[object_id],
+        &suite.git_seed_fixture.object_entries,
+    )?;
+    let execution_window = FilesystemExecutionTimeWindow {
+        started,
+        finished: current_filesystem_recorded_time()?,
+    };
+
+    assert!(git_object_entry_inventory_matches(
+        suite.workspace.path(),
+        &suite.git_seed_fixture.object_entries,
+        &suite.git_seed_fixture.object_modified_times,
+        &suite.git_seed_fixture.object_entry_identities,
+        &[object_id],
+        &suite.git_seed_fixture,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
+fn git_object_entry_inventory_rejects_a_pack_with_a_collateral_object() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let repository = Repository::open(suite.workspace.path())?;
+    let started = current_filesystem_recorded_time()?;
+    let allowed_id = repository.blob(GIT_STAGE_CONTENT.as_bytes())?;
+    let collateral_id = repository.blob(GIT_COLLATERAL_OBJECT_CONTENT)?;
+    publish_git_object_pack_for_test(
+        &repository,
+        &[allowed_id, collateral_id],
+        &suite.git_seed_fixture.object_entries,
+    )?;
+    let execution_window = FilesystemExecutionTimeWindow {
+        started,
+        finished: current_filesystem_recorded_time()?,
+    };
+
+    assert!(!git_object_entry_inventory_matches(
+        suite.workspace.path(),
+        &suite.git_seed_fixture.object_entries,
+        &suite.git_seed_fixture.object_modified_times,
+        &suite.git_seed_fixture.object_entry_identities,
+        &[allowed_id],
+        &suite.git_seed_fixture,
+        Some(execution_window),
+    )?);
+    Ok(())
+}
+
+#[test]
 fn forced_git_stage_verifier_rejects_unrelated_stat_cache_drift() -> EvalResult {
     let suite = FamilySuite::git()?;
     suite.prepare_git_case(GIT_STAGE_NAME)?;
@@ -11368,6 +11622,45 @@ fn forced_git_commit_verifier_rejects_retained_cherry_pick_state() -> EvalResult
     .to_string();
 
     assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[test]
+fn forced_git_branch_create_verifier_accepts_the_exact_new_reference() -> EvalResult {
+    let suite = FamilySuite::git()?;
+    let case = GIT_CASES
+        .iter()
+        .find(|case| case.name == GIT_BRANCH_CREATE_NAME)
+        .expect("the Git branch-create fixture exists");
+    let arguments: serde_json::Value = serde_json::from_str(case.expected_arguments)?;
+    let branch_name = arguments["name"]
+        .as_str()
+        .expect("the Git branch-create fixture has a name");
+    let start = arguments["start"]
+        .as_str()
+        .expect("the Git branch-create fixture has a start reference");
+    let started = current_filesystem_recorded_time()?;
+    let repository = Repository::open(suite.workspace.path())?;
+    let target = repository.find_reference(start)?.peel_to_commit()?;
+    fs::write(
+        repository.path().join("refs/heads").join(branch_name),
+        format!("{}\n", target.id()),
+    )?;
+    suite.executor.record_filesystem_execution_window(
+        GIT_BRANCH_CREATE_NAME,
+        FilesystemExecutionTimeWindow {
+            started,
+            finished: current_filesystem_recorded_time()?,
+        },
+    );
+    let result = serde_json::json!({
+        "branch": branch_name,
+        "head": target.id().to_string(),
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert!(suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
 
