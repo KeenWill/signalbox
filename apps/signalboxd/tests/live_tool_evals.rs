@@ -1882,6 +1882,7 @@ impl FamilySuite {
                         &self.workspace_seed_entries,
                         &self.workspace_seed_modified_times,
                         &self.workspace_seed_entry_identities,
+                        &self.workspace_seed_extended_attributes,
                     )
                 }
             }
@@ -2067,10 +2068,12 @@ fn exec_workspace_matches_seed(
     seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
     seed_entry_identities: &BTreeMap<PathBuf, FilesystemIdentity>,
+    seed_extended_attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
 ) -> EvalResult<bool> {
     Ok(workspace_entries(root)? == *seed_entries
         && workspace_modified_times(root)? == *seed_modified_times
-        && workspace_entry_identities(root)? == *seed_entry_identities)
+        && workspace_entry_identities(root)? == *seed_entry_identities
+        && workspace_extended_attributes(root)? == *seed_extended_attributes)
 }
 
 fn cargo_diagnostics_workspace_matches_seed(
@@ -17221,12 +17224,14 @@ fn replace_exec_seed_file_byte_identically(
 fn forced_direct_exec_workspace_accepts_the_unchanged_seed() -> EvalResult {
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
 
     assert!(exec_workspace_matches_seed(
         workspace.path(),
         &seed_entries,
         &seed_modified_times,
         &seed_entry_identities,
+        &seed_extended_attributes,
     )?);
     Ok(())
 }
@@ -17235,6 +17240,7 @@ fn forced_direct_exec_workspace_accepts_the_unchanged_seed() -> EvalResult {
 fn forced_direct_exec_workspace_rejects_a_mutated_seed_file() -> EvalResult {
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
     fs::write(workspace.path().join("src/lib.rs"), "pub fn drifted() {}\n")?;
 
     assert!(!exec_workspace_matches_seed(
@@ -17242,6 +17248,7 @@ fn forced_direct_exec_workspace_rejects_a_mutated_seed_file() -> EvalResult {
         &seed_entries,
         &seed_modified_times,
         &seed_entry_identities,
+        &seed_extended_attributes,
     )?);
     Ok(())
 }
@@ -17250,6 +17257,7 @@ fn forced_direct_exec_workspace_rejects_a_mutated_seed_file() -> EvalResult {
 fn forced_direct_exec_workspace_rejects_a_collateral_path() -> EvalResult {
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
     fs::write(
         workspace.path().join("collateral.txt"),
         "collateral fixture\n",
@@ -17260,6 +17268,7 @@ fn forced_direct_exec_workspace_rejects_a_collateral_path() -> EvalResult {
         &seed_entries,
         &seed_modified_times,
         &seed_entry_identities,
+        &seed_extended_attributes,
     )?);
     Ok(())
 }
@@ -17269,6 +17278,7 @@ fn forced_direct_exec_workspace_rejects_a_collateral_path() -> EvalResult {
 fn forced_direct_exec_workspace_rejects_byte_identical_seed_replacement() -> EvalResult {
     let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
     replace_exec_seed_file_byte_identically(workspace.path(), &seed_modified_times)?;
 
     assert_eq!(workspace_entries(workspace.path())?, seed_entries);
@@ -17285,6 +17295,30 @@ fn forced_direct_exec_workspace_rejects_byte_identical_seed_replacement() -> Eva
         &seed_entries,
         &seed_modified_times,
         &seed_entry_identities,
+        &seed_extended_attributes,
+    )?);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_direct_exec_workspace_rejects_extended_attribute_drift() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_entry_identities) =
+        prepared_exec_seed_workspace()?;
+    let seed_extended_attributes = workspace_extended_attributes(workspace.path())?;
+    rustix::fs::setxattr(
+        workspace.path().join("Cargo.toml"),
+        SYNTHETIC_UNEXPECTED_XATTR_NAME,
+        SYNTHETIC_UNEXPECTED_XATTR_VALUE,
+        rustix::fs::XattrFlags::CREATE,
+    )?;
+
+    assert!(!exec_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_entry_identities,
+        &seed_extended_attributes,
     )?);
     Ok(())
 }
