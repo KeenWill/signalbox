@@ -134,8 +134,10 @@ is below the current bound. Without that pass a raised or removed bound would
 not admit work until an unrelated old invocation happened to finish, since a
 configuration edit produces neither a release nor an availability update.
 Release atomically consumes the wait, creates a fresh `Prepared` successor
-attempt, and returns the same turn to `Running` with a fresh availability chain.
-Which exclusions survive that release is owned by
+attempt, and returns the same turn to `Running`, resuming the availability chain
+the wait was part of rather than starting a new one — the release origin carries
+that chain's predecessor call and its proof, which a new chain could not. Which
+exclusions survive that release is owned by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
 and it splits them in two. A predecessor exclusion earned by a qualifying
 failure in this turn is insert-only and turn-local, so nothing readmits that

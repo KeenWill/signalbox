@@ -1491,23 +1491,32 @@ protocol, owned by
 This paragraph makes those decisions representable and takes none of them.
 Provisioning replaces the quarantined generation with a fresh authorization in
 one transaction. That transaction also decides account-level independence, and
-its lock *order* is what makes that decision total. It first locks the row of
-the profile it is provisioning; then, under that lock and never from a read
-taken before it, it discovers every pool-policy revision that profile is pinned
-into and locks the profile row of each co-member, in profile-reference byte
-order, holding all of them until after its own commit. Discovering the
-memberships before taking its own lock is precisely the hole: a profile
-currently in no revision would lock nothing at all, while a concurrent interning
-that first makes it a co-member would lock it, observe it unprovisioned, and
-commit — after which the provisioning could still store a co-member's account
-identity, and neither transaction would ever have seen the other. The
-transaction that interns a pool-policy revision locks the profile row of every
-member it is about to freeze, in the same order. The provisioned profile's own
-row is therefore common to both, so one of the two commits first and the other
-observes its result: an interning that loses sees the stored identity and
-refuses to intern, and a provisioning that loses rediscovers the new revision
-under its own lock and fails on the collision. Which memberships are consulted,
-and what a collision does, are owned by
+its lock *order* is what makes that decision total. It reads the pool-policy
+revisions its profile is pinned into, forms the complete set of profile rows it
+will need — **its own row together with every co-member's** — and acquires that
+whole set in one acquisition ordered by profile reference, holding it until
+after its own commit. Under those locks it re-reads its memberships; if the set
+has grown it releases, repeats with the enlarged set, and proceeds only once the
+read taken under the locks agrees with the set it locked.
+
+Two properties of that shape are load-bearing, and neither survives a simpler
+one. Including the provisioned row in the *same* ordered acquisition is what
+avoids a cycle: taking one's own row first and only then the discovered
+co-members lets two concurrent provisionings of co-members A and B each hold
+their own row while waiting for the other's, which the database resolves by
+aborting one — a deadlock between two provisionings that need not even share an
+account. Re-reading the memberships under the locks is what closes the other
+direction: a profile currently in no revision would otherwise lock only itself,
+while a concurrent interning that first makes it a co-member commits, and the
+provisioning then stores a co-member's account identity having never seen it.
+
+The transaction that interns a pool-policy revision acquires the profile row of
+every member it is about to freeze in that same global order. Every transaction
+therefore takes profile rows in one order, so no cycle exists, and any two that
+share a profile serialize on it: an interning that loses sees the stored
+identity and refuses to intern, and a provisioning that loses re-reads the new
+revision under its locks and fails on the collision. Which memberships are
+consulted, and what a collision does, are owned by
 [the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery);
 this paragraph supplies only the lock span that makes two concurrent commits
 decide it the same way. Each generation stores the exact provisioning tuple it

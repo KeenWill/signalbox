@@ -775,11 +775,15 @@ Each `[[models]]` entry defines one direct selection:
 
 This build provides exactly `anthropic`, `openai`, `claude_cli`, and
 `codex_cli`. No adapter pins a profile name, and a pool may hold several
-profiles for any one adapter. Anthropic and OpenAI admit `file`; Claude CLI
-admits `ambient`; and Codex CLI admits `ambient`, `file`, `codex_home`, and
-`oauth`. OpenAI admits the reasoning levels `none` through `max` — `ultra` is
-the Codex effort value and is rejected — and the provider-tagged tiers `auto`,
-`default`, `flex`, `scale`, `priority`, and `fast`.
+profiles for any one adapter. **This sentence is the closed set of admitted
+`(adapter, delivery)` pairs, and startup rejects every pair outside it:**
+Anthropic and OpenAI admit `file`; Claude CLI admits `ambient`; and Codex CLI
+admits `ambient`, `file`, `codex_home`, and `oauth`. Each delivery's own section
+below states the *route* the secret takes for the adapters admitted here, and
+states no admission of its own — a pair is admitted here and routed there.
+OpenAI admits the reasoning levels `none` through `max` — `ultra` is the Codex
+effort value and is rejected — and the provider-tagged tiers `auto`, `default`,
+`flex`, `scale`, `priority`, and `fast`.
 
 A Codex mapping also requires `[codex_cli]` with an absolute executable path
 naming an existing regular file and an absolute, existing `working_directory`;
@@ -879,18 +883,13 @@ such as `max_concurrent_invocations` at all. The whole of this section is the
 contract its implementing children satisfy.
 
 A profile's closed `delivery` will state how its secret reaches the provider.
-Four are admitted, and which adapters each admits is stated by that delivery's
-own section below rather than by a matrix here. An `(adapter, delivery)` pair is
-admitted exactly when that delivery's section admits the adapter **and** names
-the route the secret takes to it; startup rejects every other pair. Stating the
-admission once per delivery, beside the route that justifies it, is what keeps
-the two from drifting apart — a matrix would have to be edited in two places
-whenever an adapter gained a delivery, and it is the route an implementer
-actually needs. Each `[[credential_profiles]]` entry is one flat TOML table:
-`delivery` is a required TOML string discriminant, common fields are exactly
-`name`, `adapter`, `billing_kind`, and `delivery`, and the selected variant
-admits only its fields below. A field owned by another variant is unknown and
-rejected.
+Four are admitted. Which adapters admit which of them is the closed set stated
+once with the adapter inventory above, and startup rejects every pair outside
+it; each delivery's section below states only the route its secret takes. Each
+`[[credential_profiles]]` entry is one flat TOML table: `delivery` is a required
+TOML string discriminant, common fields are exactly `name`, `adapter`,
+`billing_kind`, and `delivery`, and the selected variant admits only its fields
+below. A field owned by another variant is unknown and rejected.
 
 #### Distinct members are distinct authorizations
 
@@ -903,10 +902,19 @@ authorizations the provider meters, throttles, and rejects independently.** The
 daemon establishes that where it can and requires it of the deployment where it
 cannot; this contract says which for every delivery, and there is no third case.
 
-- `ambient` — *the question does not arise.* At most one `ambient` profile
-  exists per CLI adapter, so no pool can hold two of them, and mixing `ambient`
-  with `codex_home` for one adapter is rejected because static configuration
-  cannot prove that the ambient login store and the named directory differ.
+- `ambient` — *established by rejection.* At most one `ambient` profile exists
+  per CLI adapter, so no pool can hold two of them, and mixing `ambient` with
+  **any** other credential-bearing delivery for that adapter — `codex_home` or
+  `oauth` — is rejected. The reason is the same in both cases and is a property
+  of `ambient` rather than of what it is mixed with: the daemon never reads the
+  ambient login store, so that profile has no account identity at admission and
+  never acquires one, and static configuration cannot prove it differs from a
+  named directory or from an authorization provisioning later mints. The
+  provisioning-time serialization does not help here, because it compares
+  *stored* identities and `ambient` contributes none — so a mixed pair would
+  reach `switch_now` and retry into the one metering and rejection domain this
+  property exists to prevent. Rejecting the pair is the only check available
+  that does not require reading the store.
 - `file` — *required.* The daemon rejects only equal lexically normalized paths.
   An ordinary copy of the key file is admissible and indistinguishable from a
   second credential. This is an accepted limit rather than an oversight, and its
@@ -979,18 +987,18 @@ absolute deployment-owned path and, only for a CLI adapter, required TOML string
 `env_key`. The path is 1 through 4,096 UTF-8 bytes and NUL-free; startup rejects
 every other string before any credential preparation. The path is read per
 preparation and never cached, narrowed by the trailing-line-termination rule
-below. Every adapter admits `file`, and how the value reaches the provider is
-fixed per adapter with no third case: a direct-HTTP adapter forms an HTTP header
-from it — `anthropic` its `x-api-key` header and `openai` its
-`Authorization: Bearer` header — while a CLI adapter supplies it to the fresh
-process under `env_key`. Naming `openai` explicitly matters because `file` is
-the only delivery that replaces its conditional `OPENAI_API_KEY_FILE` channel
-when the catalog-supplied child above lands, so leaving its header path to be
-inferred would leave that adapter with no stated replacement at all. A
-direct-HTTP adapter rejects `env_key` because it does not use a child
-environment. A CLI adapter requires the one credential variable its adapter
-contract names — `OPENAI_API_KEY` for `codex_cli` — and rejects every other
-value, including forwarded and process-control names such as `HOME`,
+below. Which adapters admit `file` is the closed set stated with the adapter
+inventory above; for each of them the route is fixed with no third case: a
+direct-HTTP adapter forms an HTTP header from it — `anthropic` its `x-api-key`
+header and `openai` its `Authorization: Bearer` header — while a CLI adapter
+supplies it to the fresh process under `env_key`. Naming `openai` explicitly
+matters because `file` is the only delivery that replaces its conditional
+`OPENAI_API_KEY_FILE` channel when the catalog-supplied child above lands, so
+leaving its header path to be inferred would leave that adapter with no stated
+replacement at all. A direct-HTTP adapter rejects `env_key` because it does not
+use a child environment. A CLI adapter requires the one credential variable its
+adapter contract names — `OPENAI_API_KEY` for `codex_cli` — and rejects every
+other value, including forwarded and process-control names such as `HOME`,
 `CODEX_HOME`, and `PATH`. A CLI adapter whose contract names no such variable
 admits no `file` profile at all, and startup rejects the pair: the route is the
 admission here, so there is nothing to validate `env_key` against until that

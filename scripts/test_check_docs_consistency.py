@@ -374,6 +374,23 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertIn("machine-owner-link", failure_categories(failures))
 
+    def test_reference_style_image_is_not_a_citation(self) -> None:
+        """An image cites nothing however its destination is spelled.
+
+        The reference form is a distinct path from the inline one: skipping
+        only the image's `!` re-enters its own construct, so `[owner]` parses
+        again as a shortcut link and the image counts as navigation. Image
+        exclusion is retained contract, not the out-of-scope label question.
+        """
+        self._write_machine_owner(
+            "This page owns the evidence algebra of ![the machine][owner].\n\n"
+            "[owner]: credential-availability.md\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertIn("machine-owner-link", failure_categories(failures))
+
     def test_unused_reference_definition_is_not_a_citation(self) -> None:
         """A definition nobody uses renders no link a reader can follow.
 

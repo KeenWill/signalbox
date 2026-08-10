@@ -1955,7 +1955,21 @@ def extract_reference_links(
             index += 1
             continue
         if index and text[index - 1] == "!" and not is_escaped(text, index - 1):
-            index += 1
+            # Skip the image's complete span, reference part included.
+            # Advancing one character re-enters the image's own construct, and
+            # `![alt][owner]` then parses `[owner]` as a shortcut link — which
+            # counts the image as a citation and defeats the exclusion this
+            # branch exists to apply.
+            image_label_end = find_closing_bracket(text, index)
+            if image_label_end is None:
+                index += 1
+                continue
+            image_end = image_label_end + 1
+            if image_end < len(text) and text[image_end] == "[":
+                image_reference_end = find_closing_bracket(text, image_end)
+                if image_reference_end is not None:
+                    image_end = image_reference_end + 1
+            index = image_end
             continue
 
         label_end = find_closing_bracket(text, index)
