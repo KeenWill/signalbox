@@ -2118,7 +2118,7 @@ fn cargo_diagnostics_workspace_matches_seed(
     let seed_extended_attributes_preserved = seed_extended_attributes
         .iter()
         .all(|(path, attributes)| actual_extended_attributes.get(path) == Some(attributes));
-    let target_ownership_matches = cargo_target_ownership_matches(
+    let target_identities_match = cargo_target_identities_match(
         &actual_entries,
         &actual_entry_identities,
         seed_entry_identities.get(Path::new("")),
@@ -2136,7 +2136,7 @@ fn cargo_diagnostics_workspace_matches_seed(
         && seed_times_preserved
         && seed_entry_identities_preserved
         && seed_extended_attributes_preserved
-        && target_ownership_matches
+        && target_identities_match
         && target_times_match
         && target_attributes_are_empty
         && workspace_mutation_entry_times_match(root, Path::new(""), execution_window)?
@@ -2146,15 +2146,15 @@ fn cargo_diagnostics_workspace_matches_seed(
         ))
 }
 
-fn cargo_target_ownership_matches(
+fn cargo_target_identities_match(
     entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     identities: &BTreeMap<PathBuf, FilesystemIdentity>,
-    expected_owner: Option<&FilesystemIdentity>,
+    expected_identity: Option<&FilesystemIdentity>,
 ) -> bool {
     entries
         .keys()
         .filter(|path| path.starts_with("target"))
-        .all(|path| filesystem_ownership_matches(identities.get(path), expected_owner))
+        .all(|path| filesystem_ownership_matches(identities.get(path), expected_identity))
 }
 
 fn cargo_target_times_match(
@@ -17479,7 +17479,7 @@ fn forced_cargo_diagnostics_rejects_target_extended_attributes() -> EvalResult {
 
 #[cfg(unix)]
 #[test]
-fn cargo_target_ownership_gate_rejects_changed_ownership() -> EvalResult {
+fn cargo_target_identity_gate_rejects_changed_identity() -> EvalResult {
     let (workspace, _seed_entries, _seed_modified_times, seed_entry_identities) =
         prepared_exec_seed_workspace()?;
     let _execution_window = create_cargo_target_directory(workspace.path())?;
@@ -17490,7 +17490,7 @@ fn cargo_target_ownership_gate_rejects_changed_ownership() -> EvalResult {
         .expect("the Cargo target fixture has a filesystem identity")
         .user_id = seed_entry_identities[Path::new("")].user_id.wrapping_add(1);
 
-    assert!(!cargo_target_ownership_matches(
+    assert!(!cargo_target_identities_match(
         &entries,
         &identities,
         seed_entry_identities.get(Path::new("")),
