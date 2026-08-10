@@ -42,7 +42,7 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, ty
 use crate::lock_inventory::{
     RUNNER_ENROLLMENT, RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY,
     RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
-    RUNNER_REGISTRATION_HEAD,
+    RUNNER_REGISTRATION_HEAD, RUNNER_RETRY_REPLACEMENT_SCHEDULER,
 };
 use crate::mapping::{
     runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
@@ -2091,16 +2091,11 @@ impl RunnerProtocolStore {
             }
         };
         let mut transaction = self.pool.begin().await?;
-        let scheduler_exists = sqlx::query_scalar::<_, Uuid>(
-            "SELECT session_id
-               FROM session_scheduler
-              WHERE session_id = $1
-              FOR UPDATE",
-        )
-        .bind(retired.session().into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?
-        .is_some();
+        let scheduler_exists = sqlx::query_scalar::<_, Uuid>(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
+            .bind(retired.session().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .is_some();
         if !scheduler_exists {
             transaction.rollback().await?;
             return Err(RunnerProtocolStoreError::Corruption(
