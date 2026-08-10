@@ -1,3 +1,24 @@
 #!/bin/sh
-exec env CARGO_HOME=/tmp/signalbox-cargo-home CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 \
-  /usr/local/lib/signalbox-eval-rust/bin/cargo "$@"
+set -eu
+
+if [ "$#" -eq 1 ] && [ "$1" = "-vV" ]; then
+  printf '%s\n' \
+    'cargo 1.97.1 (tool-eval-protocol-fixture)' \
+    'host: x86_64-unknown-linux-gnu'
+  exit 0
+fi
+
+if [ "$#" -eq 5 ] \
+  && [ "$1" = "check" ] \
+  && [ "$2" = "--workspace" ] \
+  && [ "$3" = "--all-targets" ] \
+  && [ "$4" = "--all-features" ] \
+  && [ "$5" = "--message-format=json" ]; then
+  printf '%s\n' \
+    '{"reason":"compiler-message","message":{"level":"warning","message":"use of deprecated function: tool eval fixture diagnostic","spans":[{"file_name":"src/lib.rs","line_start":4,"line_end":4,"column_start":20,"column_end":31,"is_primary":true}]}}' \
+    '{"reason":"build-finished","success":true}'
+  exit 0
+fi
+
+printf '%s\n' 'unsupported Cargo protocol fixture invocation' >&2
+exit 64

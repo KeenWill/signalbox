@@ -196,16 +196,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
-      - name: Copy the selected Rust toolchain into the sandbox-visible system tree
+      - name: Install the deterministic Cargo protocol fixture
         if: ${{ matrix.family == 'exec' }}
         run: |
           set -euo pipefail
-          eval_rust_sysroot="$(rustc --print sysroot)"
-          sudo mkdir -p /usr/local/lib/signalbox-eval-rust
-          sudo cp -a "${eval_rust_sysroot}/." /usr/local/lib/signalbox-eval-rust/
           sudo install --directory /usr/local/lib/signalbox-eval-bin
           sudo install --mode=0755 apps/signalboxd/tests/tool-eval-cargo \
             /usr/local/lib/signalbox-eval-bin/cargo
+          /usr/local/lib/signalbox-eval-bin/cargo -vV \
+            | grep --fixed-strings 'host: x86_64-unknown-linux-gnu'
       - name: Enable unprivileged user namespaces for the exec family
         if: ${{ matrix.family == 'exec' }}
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
