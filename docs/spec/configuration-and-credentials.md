@@ -953,13 +953,13 @@ because rotation happens inside the store rather than at an external source of
 truth.
 
 Why this is stated as one property with a per-delivery disposition rather than
-as a list of rejected spellings: it was tried the other way first. Five
-successive rounds each rejected one more spelling — a raw duplicate path, a
-lexical alias, a symlink, a hard link, an ambient alias — and each fix admitted
-the next, because a list of rejections can only ever be as long as the shapes
-someone has already thought of. The property is what a pool actually needs, so a
-newly proposed alias shape is now either closed by construction, as it is for
-`oauth`, or already covered by the stated accepted limit, as it is for `file`.
+as a list of rejected spellings: a list of rejections can only ever be as long
+as the shapes someone has already thought of, and each new spelling admitted — a
+raw duplicate path, a lexical alias, a symlink, a hard link, an ambient alias —
+is one the previous list did not name. The property is what a pool actually
+needs, so a newly proposed alias shape is now either closed by construction, as
+it is for `oauth`, or already covered by the stated accepted limit, as it is for
+`file`.
 
 #### The `ambient` delivery
 
@@ -1002,18 +1002,19 @@ of this delivery, which would supply the value to the fresh process under
 owns its contract.
 
 Claude file delivery receives the complete adapter-scoped catalog of declared
-`claude_cli` file-profile references described by the
-[credential-access boundary](runtime-substrate.md#credential-access-boundary),
-and resolves the operation's selected reference during cancellable request
-preparation. It writes that value into a mode-0600 credential file in a private
-request-scoped Claude settings store and configures that store's `apiKeyHelper`
-to read it through a mode-0600 request-scoped script interpreted by the fixed
-`/bin/sh` path; the script uses only shell builtins and resolves no executable
-through `PATH`. The adapter replaces only the already allowlisted
-`CLAUDE_CONFIG_DIR` child value with the store's directory; the key itself never
-enters the child environment assembled by the adapter. The prepared capability
-retains the exact value for observation and terminal-evidence redaction and
-deletes the store when the capability is dropped.
+`claude_cli` file-profile references and resolves the operation's selected
+reference during cancellable request preparation, so a historical session keeps
+the profile it was created with. The value reaches the CLI through a private
+request-scoped settings store rather than the child environment: the key itself
+is never added to the environment the adapter assembles, and the store is
+removed when the prepared capability is dropped. How that store is constructed
+and applied — its file modes, the `apiKeyHelper` script and its fixed
+interpreter, and the one allowlisted child value the adapter replaces — is owned
+by the
+[credential-access boundary](runtime-substrate.md#credential-access-boundary)
+and is not restated here. What this page fixes is which value seeds redaction:
+the exact resolved credential, retained in the one-shot capability, is what
+provider-controlled observations and terminal evidence are scrubbed against.
 
 This is the delivery for every credential that has an external source of truth —
 provider API keys, and any long-lived bearer token a provider's own tooling
@@ -1059,8 +1060,14 @@ it.
 `codex_home` naming an absolute directory holding a login store the provider's
 CLI owns, reads, and writes. That path is likewise 1 through 4,096 UTF-8 bytes
 and NUL-free, and malformed static input fails startup. Its only optional field
-is `max_concurrent_invocations`, a TOML integer from 1 through 4,294,967,295;
-zero, a negative or larger integer, and every non-integer value are rejected.
+is `max_concurrent_invocations`, a TOML integer from 1 through 1,024; zero, a
+negative or larger integer, and every non-integer value are rejected. The bound
+is capped rather than left at the integer domain because a contended wait
+durably names the identity of every live reservation holding the bound and
+rewrites that snapshot on release, so the admitted maximum is also the maximum
+evidence one wait carries and the multiplier on every wake's rewrite. A bound
+larger than a pool can usefully run would buy nothing and would let one wake
+rewrite thousands of identities while holding capacity rows.
 
 The child that admits this delivery owes one separation rule the present refusal
 makes unnecessary: a document declaring an `ambient` `codex_cli` profile may not
@@ -1343,28 +1350,32 @@ identities. A contended wait also carries the earliest unelapsed reset among
 those durable exclusions as its deadline, exactly as an exhausted wait does, and
 the scheduler makes it eligible when that deadline passes. Without it a turn
 contending on a bounded member would stay parked past the moment an excluded
-member became admissible again — visibly so for a chain-local reset, whose
-passage produces no separate durable availability update. A contended wait whose
-exclusions report no reset has no deadline, and its bounded members' completions
-remain its wake. A member's admission first locks the shared capacity rows for
-every bounded profile the preparation may select, in profile-reference byte
-order. The rows are profile-scoped rather than session- or pool-scoped, so
-concurrent sessions and distinct pools serialize against the same bound without
-a lock-order cycle. Under those locks the transaction counts live reservations,
-chooses the member, and acquires its `pending_spawn` reservation together with
-the call's `Prepared` record; a database constraint rejects a live count above
-the configured bound. That bound is read from the profile's current registration
-and is never frozen into a pool policy, because `max_concurrent_invocations`
-guards a live refresh race the operator is adjusting now: a session pinned to an
-older policy must not keep running against a limit the operator has since
-tightened. A raised bound therefore admits more work at the next preparation,
-and a lowered one restricts the next admission without revoking a reservation
-already committed — a live count above a freshly lowered bound drains as those
-invocations complete rather than terminating them. A turn already parked in a
-contended wait is not left behind by a raise: a configuration edit produces
-neither a reservation release nor an availability update, so startup
-re-evaluates the retained contended waits themselves against the current
-registrations
+member became admissible again — visibly so for a reset whose passage produces
+no separate durable availability update. Only exclusions a wake can clear
+contribute to that deadline: a predecessor chain exclusion earned in this turn
+is turn-local, so no reset readmits its member before the turn ends, and
+counting its reported reset would wake the wait only to re-park it and leave a
+now-past deadline that makes it immediately eligible again. A contended wait
+none of whose remaining exclusions can be cleared by time has no deadline, and
+its bounded members' completions remain its wake. A member's admission first
+locks the shared capacity rows for every bounded profile the preparation may
+select, in profile-reference byte order. The rows are profile-scoped rather than
+session- or pool-scoped, so concurrent sessions and distinct pools serialize
+against the same bound without a lock-order cycle. Under those locks the
+transaction counts live reservations, chooses the member, and acquires its
+`pending_spawn` reservation together with the call's `Prepared` record; a
+database constraint rejects a live count above the configured bound. That bound
+is read from the profile's current registration and is never frozen into a pool
+policy, because `max_concurrent_invocations` guards a live refresh race the
+operator is adjusting now: a session pinned to an older policy must not keep
+running against a limit the operator has since tightened. A raised bound
+therefore admits more work at the next preparation, and a lowered one restricts
+the next admission without revoking a reservation already committed — a live
+count above a freshly lowered bound drains as those invocations complete rather
+than terminating them. A turn already parked in a contended wait is not left
+behind by a raise: a configuration edit produces neither a reservation release
+nor an availability update, so startup re-evaluates the retained contended waits
+themselves against the current registrations
 ([turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot)).
 A wait whose profile is now unbounded becomes eligible outright; one whose
 profile is still bounded becomes eligible when that profile's surviving
@@ -1523,44 +1534,64 @@ wins that transition owns one process-shared single-flight keyed by profile and
 generation. The durable marker excludes another refresher after the lock is
 released for the network exchange. A concurrent preparation observing that
 marker joins the same single-flight; it never starts another exchange or treats
-the marker as a credential failure. A refresh client sends exactly one POST for
-that generation to the configured `token_url`'s exact scheme, host, effective
-port, path, and query. Redirect following and automatic HTTP, transport, and
-protocol retries are disabled at every layer. Once any request bytes may have
-been written, a connection loss, redirect response, or indeterminate response is
-ambiguous: the daemon does not send again and follows the quarantine path below.
-A second transaction re-locks and matches that generation, compares the account
-identity the response carries against the one stored with that generation,
-persists the returned token, and clears the marker before the new access token
-is used anywhere. An identity that differs is not persisted: the generation
-quarantines and re-provisioning is the only recovery. Why quarantine rather than
-adopt the new identity — dispatch pairs each minted access token with the stored
-account identity to form the CLI's per-account header, so silently keeping the
-old identity would send a valid token under the wrong account, and silently
-adopting the new one would re-scope a profile the operator declared for a
-specific account without the operator saying so. Neither is a decision a refresh
-is entitled to make. A definitely committed replacement overwrites the previous
-refresh token rather than retaining it: a superseded token is unusable, and
-keeping one would only preserve material whose sole remaining effect is to
-invalidate the live authorization if it were ever replayed. If the exchange
-fails after possible provider rotation, its persistence commit is ambiguous, or
-the daemon restarts with the marker still present, it never replays the stored
-token. It first rereads the durable generation: a committed replacement is
-adopted; an uncleared marker quarantines the profile and requires
-re-provisioning. After a successful replacement commit, the refresh task
-publishes the one in-memory access token to every joined preparation. A
-definitely non-rotating failure first clears the marker, then publishes its one
-typed result. An ambiguous exchange, ambiguous commit, or refresh-task loss
-first commits quarantine from the retained marker, then publishes that typed
-result and wakes every joiner. Cancellation follows the same evidence boundary:
-before possible request bytes it is definitely non-rotating, and afterward it is
-ambiguous. Process exit needs no durable waiter: startup resolves the retained
-marker to replacement or quarantine before admitting work, and a later
-preparation observes that durable result. No joiner can wait past its own
-cancellation or the single-flight's one published terminal result. Access tokens
-are held in memory. A clean restart discards them without contacting any
-provider; the first later call preparation that needs a profile lazily refreshes
-it. This keeps access tokens out of the database and preserves
+the marker as a credential failure.
+
+The limit is one POST per **attempt**, not one per generation, and at most one
+attempt in flight per generation at a time. A refresh client sends exactly one
+POST for that attempt to the configured `token_url`'s exact scheme, host,
+effective port, path, and query, and redirect following and automatic HTTP,
+transport, and protocol retries are disabled at every layer, so an attempt is
+one request and never a family of them. The single-flight is what keeps two
+preparations from attempting the same generation concurrently; it is not a count
+of how many attempts that generation may ever have.
+
+A failure that **definitively did not rotate** the stored token — one whose
+response or transport outcome establishes that the exchange never reached the
+point of issuing a new token — clears the marker and leaves the generation
+available to a later attempt. Counting attempts per generation instead would
+permanently strand a profile after one transient token-endpoint outage, which is
+a worse outcome than the one the limit exists to prevent, and the daemon has the
+evidence to tell that case apart.
+
+**Replay after an ambiguous exchange is forbidden.** This is a separate rule and
+not a qualification of the counting above, because it is the property the whole
+protocol exists to protect: once any request bytes may have been written, a
+connection loss, a redirect response, or an indeterminate response leaves the
+rotation outcome unknown, and a token that may already have been rotated must
+never be presented again. The daemon does not send again, whatever the attempt
+count says, and follows the quarantine path below. No relaxation of the
+attempt-counting rule reaches this one. A second transaction re-locks and
+matches that generation, compares the account identity the response carries
+against the one stored with that generation, persists the returned token, and
+clears the marker before the new access token is used anywhere. An identity that
+differs is not persisted: the generation quarantines and re-provisioning is the
+only recovery. Why quarantine rather than adopt the new identity — dispatch
+pairs each minted access token with the stored account identity to form the
+CLI's per-account header, so silently keeping the old identity would send a
+valid token under the wrong account, and silently adopting the new one would
+re-scope a profile the operator declared for a specific account without the
+operator saying so. Neither is a decision a refresh is entitled to make. A
+definitely committed replacement overwrites the previous refresh token rather
+than retaining it: a superseded token is unusable, and keeping one would only
+preserve material whose sole remaining effect is to invalidate the live
+authorization if it were ever replayed. If the exchange fails after possible
+provider rotation, its persistence commit is ambiguous, or the daemon restarts
+with the marker still present, it never replays the stored token. It first
+rereads the durable generation: a committed replacement is adopted; an uncleared
+marker quarantines the profile and requires re-provisioning. After a successful
+replacement commit, the refresh task publishes the one in-memory access token to
+every joined preparation. A definitely non-rotating failure first clears the
+marker, then publishes its one typed result. An ambiguous exchange, ambiguous
+commit, or refresh-task loss first commits quarantine from the retained marker,
+then publishes that typed result and wakes every joiner. Cancellation follows
+the same evidence boundary: before possible request bytes it is definitely
+non-rotating, and afterward it is ambiguous. Process exit needs no durable
+waiter: startup resolves the retained marker to replacement or quarantine before
+admitting work, and a later preparation observes that durable result. No joiner
+can wait past its own cancellation or the single-flight's one published terminal
+result. Access tokens are held in memory. A clean restart discards them without
+contacting any provider; the first later call preparation that needs a profile
+lazily refreshes it. This keeps access tokens out of the database and preserves
 configuration-independent recovery even when a token endpoint is unavailable.
 
 Dispatch supplies each invocation a scratch credential home carrying the

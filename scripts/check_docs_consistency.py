@@ -3852,6 +3852,31 @@ def check_suite_manifest(root: Path) -> list[Violation]:
     return failures
 
 
+def is_image_link(text: str, link: MarkdownLink) -> bool:
+    """Report whether a parsed destination came from image syntax.
+
+    `extract_inline_links` returns image destinations deliberately, because its
+    other caller checks that every destination resolves. An image renders a
+    fetch rather than a navigation, so it is not a citation. This is the test
+    that function already applies to keep images out of its own link pass.
+    """
+    return bool(
+        link.offset
+        and text[link.offset - 1] == "!"
+        and not is_escaped(text, link.offset - 1)
+    )
+
+
+def renders_visible_label(link: MarkdownLink) -> bool:
+    """Report whether an anchor renders text a reader can see and click.
+
+    An anchor whose label is empty, or is only emphasis punctuation, renders no
+    clickable surface, so it cites nothing however well its destination
+    resolves.
+    """
+    return bool(unescape_markdown_punctuation(link.label).strip(" \t*_~`").strip())
+
+
 def check_machine_owner_links(root: Path) -> list[Violation]:
     """Each projection owner links the machine it projects.
 
@@ -3887,30 +3912,24 @@ def check_machine_owner_links(root: Path) -> list[Violation]:
         parsed = mask_inline_code(
             mask_block_content(source.read_text(encoding="utf-8"))
         )
-        # A citation is a link a reader can follow. Two shapes this module
-        # returns are not that, and each is exactly the missing-citation state
-        # this guard exists to reject, so both are excluded rather than
-        # tolerated. A bare reference definition renders nothing at all:
-        # `extract_markdown_links` returns definitions because its own caller
-        # checks that every destination resolves. An image renders a fetch
-        # rather than a navigation: `extract_inline_links` returns image
-        # destinations for that same reason, and the test used here to drop
-        # them is the one that function already applies to keep images out of
-        # its own link pass.
+        # The property, stated positively: a citation is an anchor a reader
+        # can see and click through to the owner. Three shapes were previously
+        # excluded one at a time — an image, a bare reference definition, an
+        # empty label — and enumerating what does not count is unbounded,
+        # because it is the complement of a small positive property. Requiring
+        # the anchor and its rendered label instead makes all three fall out,
+        # and leaves nothing for the next shape to slip through.
         citations = [
             link
             for link in extract_inline_links(parsed)
-            if not (
-                link.offset
-                and parsed[link.offset - 1] == "!"
-                and not is_escaped(parsed, link.offset - 1)
-            )
+            if not is_image_link(parsed, link)
         ]
         citations.extend(
             extract_reference_links(parsed, reference_definitions(parsed))
         )
         linked = any(
-            (resolved := resolve_relative_target(root, source, link.destination))
+            renders_visible_label(link)
+            and (resolved := resolve_relative_target(root, source, link.destination))
             is not None
             and resolved[0] == owner
             for link in citations

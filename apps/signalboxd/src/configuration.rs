@@ -3448,7 +3448,8 @@ mod tests {
     use crate::credential_pools::{
         CredentialDelivery, CredentialPoolAction, CredentialPoolExhaustion, CredentialPoolTieBreak,
         CredentialPoolTrigger, MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES,
-        MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES, MAX_CREDENTIAL_POOL_MEMBERS,
+        MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES, MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS,
+        MAX_CREDENTIAL_POOL_MEMBERS,
     };
 
     use super::{
@@ -5777,6 +5778,42 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
         let credential_home = CONFIGURATION.replace(
             "delivery = \"ambient\"",
             "delivery = \"codex_home\"\ncodex_home = \"relative/account-a\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_admits_the_largest_credential_home_concurrency_bound() {
+        // The bound is capped because a contended wait durably names every live
+        // reservation holding it. At the cap the grammar admits the field, so
+        // the profile reaches its undelivered refusal rather than a range one.
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = \"/srv/account-a\"\nmax_concurrent_invocations = {MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS}"
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
+                delivery: Arc::from("codex_home"),
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_credential_home_concurrency_bound_past_its_cap() {
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = \"/srv/account-a\"\nmax_concurrent_invocations = {}",
+                MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS + 1
+            ),
         );
 
         assert_eq!(

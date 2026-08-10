@@ -738,17 +738,19 @@ override does not weaken ambient mode's existing exclusion test.
 delivery gives the adapter a daemon-minted access token, the identity token
 issued with it, and the account metadata in a scratch credential home rather
 than through the child environment. Before anything is written or the child
-starts, its implementing slice must seed the same exact-value redaction boundary
-with *every* token placed in that home — not the access token alone — using each
-raw token and the JSON string representations whose escapes decode to that same
-token. The identity token is bearer material for the same account and the CLI
-reflects it, so seeding one and not the other leaks the other. Possible token
-prefixes are retained across stdout and stderr chunks, and all child-controlled
-text passes through that scrub before JSON decoding, truncation, debug
-rendering, observations, or durable evidence. Ambient-mode shape redaction
-remains defense in depth; it cannot replace exact-value redaction when
-preparation knows the token. Failure to install the scrub is a typed pre-spawn
-delivery failure.
+starts, its implementing slice must seed the exact-value redaction boundary with
+every value that
+[the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery)
+requires the redactor to be seeded with. That contract decides *which* values
+those are and why; this page owns *how* the adapter installs and applies the
+scrub. Each such value is seeded both as the raw token and as the JSON string
+representations whose escapes decode to that same token, because the adapter is
+the layer that sees both forms. Possible token prefixes are retained across
+stdout and stderr chunks, and all child-controlled text passes through that
+scrub before JSON decoding, truncation, debug rendering, observations, or
+durable evidence. Ambient-mode shape redaction remains defense in depth; it
+cannot replace exact-value redaction when preparation knows the token. Failure
+to install the scrub is a typed pre-spawn delivery failure.
 
 `SendCommenced` immediately precedes spawn. Spawn failure is
 `ProvenUnsent(ConnectFailed)`; after successful spawn no path respawns the CLI.

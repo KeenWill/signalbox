@@ -35,6 +35,15 @@ pub(crate) const MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES: usize = 256;
 /// Maximum number of members admitted in one credential pool.
 pub(crate) const MAX_CREDENTIAL_POOL_MEMBERS: usize = 1_024;
 
+/// Maximum concurrent invocations admitted for one bounded credential home.
+///
+/// Capped rather than left at the integer domain because a contended wait
+/// durably names the identity of every live reservation holding the bound and
+/// rewrites that snapshot on release, so the admitted maximum is also the
+/// maximum evidence one wait carries and the multiplier on every wake's
+/// rewrite.
+pub(crate) const MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS: u32 = 1_024;
+
 /// Every delivery spelling the grammar recognizes, whether or not this build
 /// supplies a surface for it.
 const DELIVERY_KEYS: [&str; 4] = ["ambient", "file", "codex_home", "oauth"];
@@ -282,6 +291,7 @@ fn parse_max_concurrent_invocations(
             value
                 .as_integer()
                 .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value <= MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS)
                 .and_then(NonZeroU32::new)
                 .ok_or(HubModelConfigurationError::InvalidCredentialDelivery)
         })

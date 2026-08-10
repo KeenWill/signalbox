@@ -318,8 +318,9 @@ and rejects it. The implementing stack must add an authorized
 `clear_credential_exclusion` mutation carrying a user-global `command_id` and
 one closed `target` object:
 
-- `profile_quarantine { profile, record_generation }` names one non-OAuth
-  profile-wide quarantine;
+- `profile_quarantine { profile, record_generation }` names one profile-wide
+  quarantine of **policy origin** — one a pool trigger such as `on_rate_limited`
+  or `on_overloaded` minted — for a profile of any delivery, `oauth` included;
 - `membership_exclusion { pool_policy_id, profile, record_generation }` names
   one `avoid_new_sessions` exclusion; and
 - `session_displacement { session_id, pool_policy_id, profile, record_generation }`
@@ -382,9 +383,15 @@ does not exactly match the named correlation, is `unknown_credential_exclusion`
 earlier command already marked inactive is not unknown: it follows the
 `already_cleared` path below, so the idempotent repair returns one answer rather
 than depending on which command ran first. Equal `command_id` replay still
-returns its stored receipt before this current-state precedence is evaluated.
-OAuth quarantine rejects this mutation because only re-provisioning can clear
-it.
+returns its stored receipt before this current-state precedence is evaluated. A
+quarantine of **delivery origin** rejects this mutation, because only
+re-provisioning can clear it: a rejected daemon-owned OAuth refresh, or a
+credential-home identity that failed its walk, is a broken credential rather
+than a throttled one. The rejection therefore turns on the quarantine's origin
+and never on the profile's delivery. Rejecting by delivery would conflate the
+two and leave a rate-limited `oauth` member with no clearing path at all where
+its adapter offers no zero-cost probe, which is the one case the operator
+command exists for.
 
 Success returns `credential_exclusion_cleared { target, outcome }`, where
 `outcome` is `cleared` for the winning transition or `already_cleared` when a

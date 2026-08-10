@@ -178,14 +178,20 @@ under the scheduler lock it revalidates the exact wait, accepts the configured
 immediate-successor origin, closes the wait, creates the fresh `Prepared`
 attempt, records the ordinary applied-interrupt proof on that attempt, ends it
 `AfterCancellation(Cancelled)`, appends `TurnCancelled` after the wait's latest
-frontier, and terminalizes `Cancelled`, all atomically. No live attempt remains.
-Equal replay returns that receipt; a released or otherwise changed wait returns
-the ordinary active-turn mismatch. A goal `stop_goal` or supersede command
-remains a goal-state transition and does not manufacture turn-interrupt
-authority; if the caller also wants to release this active slot it submits the
-existing `stop_turn` command. No approval or reconciliation command applies to
-the wait. This compatibility constraint does not add that phase or these
-branches to the implemented closed vocabulary above.
+frontier, reclassifies any steering still pending on the source turn as a queued
+successor, and terminalizes `Cancelled`, all atomically. No live attempt
+remains. The reclassification is not optional here: pending steering accepted
+while the turn was parked is ordinary pending steering, and the lifecycle rule
+below — with the `turn_lifecycle_pending_steering_closed` constraint that
+enforces it — requires every such row to be closed before its turn terminalizes,
+so a stop transaction that left it pending would be rejected at commit. Equal
+replay returns that receipt; a released or otherwise changed wait returns the
+ordinary active-turn mismatch. A goal `stop_goal` or supersede command remains a
+goal-state transition and does not manufacture turn-interrupt authority; if the
+caller also wants to release this active slot it submits the existing
+`stop_turn` command. No approval or reconciliation command applies to the wait.
+This compatibility constraint does not add that phase or these branches to the
+implemented closed vocabulary above.
 
 At most one turn per session is `active`. Enforcement is layered:
 
