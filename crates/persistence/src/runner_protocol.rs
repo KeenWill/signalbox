@@ -2855,10 +2855,13 @@ async fn terminalize_connection_for_revocation(
     ) {
         return Ok(());
     }
-    let event_ordinal = current
-        .event_ordinal()
-        .checked_add(1)
-        .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+    let event_ordinal = NonZeroU64::new(
+        current
+            .event_ordinal()
+            .checked_add(1)
+            .ok_or(RunnerProtocolCorruption::GenerationExhausted)?,
+    )
+    .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
     sqlx::query(
         "INSERT INTO runner_connection_event
             (enrollment_id, connection_epoch, event_ordinal,
@@ -2867,9 +2870,26 @@ async fn terminalize_connection_for_revocation(
     )
     .bind(enrollment.into_uuid())
     .bind(Decimal::from(current.epoch().get()))
-    .bind(Decimal::from(event_ordinal))
+    .bind(Decimal::from(event_ordinal.get()))
     .execute(&mut **transaction)
     .await?;
+    let snapshot = RunnerConnectionSnapshot {
+        epoch: current.epoch(),
+        event_ordinal,
+        state: RunnerConnectionState::Lost,
+        cause: RunnerConnectionCause::EnrollmentRevoked,
+    };
+    let loss =
+        append_runner_connection_loss_epoch(transaction.as_mut(), enrollment, snapshot).await?;
+    advance_runner_connection_authority_head(
+        transaction.as_mut(),
+        enrollment,
+        Some(current),
+        snapshot,
+        loss,
+    )
+    .await?;
+    append_runner_connection_health_events(transaction.as_mut(), enrollment, snapshot).await?;
     Ok(())
 }
 

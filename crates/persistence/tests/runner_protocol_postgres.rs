@@ -52,8 +52,9 @@ use signalbox_persistence::{
         ProcessReadRepository, ProcessRunnerConnectionHealth, ProcessRunnerProjectionState,
     },
     runner_protocol::{
-        RunnerConnectionEpoch, RunnerConnectionTransition, RunnerProtocolCorruption,
-        RunnerProtocolStore, RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
+        RunnerConnectionCause, RunnerConnectionEpoch, RunnerConnectionState,
+        RunnerConnectionTransition, RunnerProtocolCorruption, RunnerProtocolStore,
+        RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
     },
     session_credentials::{SessionCredentialPin, SessionModelCredential},
     start_eligible_turn::StartEligibleTurnRepository,
@@ -3330,6 +3331,46 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
         )
         .expect_err("durable revocation closes the exact caller-held enrollment fence");
     assert_eq!(revoked, RunnerDomainError::EnrollmentRevoked);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: revoking an enrollment with a live physical connection advances
+/// the exact loss epoch in the same transaction as terminalization.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_revocation_advances_live_connection_loss_epoch() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let mut expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let live_connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    assert!(store.revoke_enrollment(&mut expected_enrollment).await?);
+    let revoked_connection = store
+        .load_connection(expected_enrollment.enrollment())
+        .await?
+        .expect("revocation retains its terminal connection source");
+    let revocation_loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("revocation advances the connection loss epoch");
+
+    assert_eq!(revoked_connection.epoch(), live_connection.epoch());
+    assert_eq!(revoked_connection.state(), RunnerConnectionState::Lost);
+    assert_eq!(
+        revoked_connection.cause(),
+        RunnerConnectionCause::EnrollmentRevoked
+    );
+    assert_eq!(
+        revocation_loss.connection_epoch(),
+        revoked_connection.epoch()
+    );
+    assert_eq!(
+        revocation_loss.connection_event_ordinal(),
+        revoked_connection.event_ordinal()
+    );
     drop(pool);
     Ok(())
 }
