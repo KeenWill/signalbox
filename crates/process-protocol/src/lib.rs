@@ -4785,11 +4785,18 @@ impl<'de> Deserialize<'de> for TurnState {
                 runner_id,
                 placement_revision,
                 tool_attempt_id,
-            } => Self::ActiveAwaitingRunnerRecovery {
-                runner_id,
-                placement_revision,
-                tool_attempt_id,
-            },
+            } => {
+                if placement_revision.value() == 0 {
+                    return Err(serde::de::Error::custom(
+                        "runner recovery requires a positive placement revision",
+                    ));
+                }
+                Self::ActiveAwaitingRunnerRecovery {
+                    runner_id,
+                    placement_revision,
+                    tool_attempt_id,
+                }
+            }
             RawTurnState::Failed {
                 terminal_frontier_id,
                 terminal_attempt_id,
@@ -9128,6 +9135,21 @@ mod tests {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000002","acceptance_position":"1","model_settings":null,"state":{"type":"active_awaiting_runner_recovery","runner_id":"00000000-0000-0000-0000-000000000003","placement_revision":"0","tool_attempt_id":null}}}"#,
         );
+    }
+
+    /// INV-044: the public state type cannot be inhabited with the zero
+    /// placement revision rejected by its enclosing frame.
+    #[test]
+    fn inv044_runner_recovery_turn_state_direct_decode_rejects_zero_revision() {
+        let rejected = serde_json::from_value::<TurnState>(serde_json::json!({
+            "type": "active_awaiting_runner_recovery",
+            "runner_id": "00000000-0000-0000-0000-000000000003",
+            "placement_revision": "0",
+            "tool_attempt_id": null
+        }))
+        .expect_err("the public runner-recovery state requires a positive revision");
+
+        assert!(rejected.to_string().contains("positive placement revision"));
     }
 
     #[test]

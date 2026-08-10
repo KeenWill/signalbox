@@ -2853,36 +2853,37 @@ fn placement_revision_history_matches(
     history: &RunnerPlacementReconstitutionHistory,
 ) -> bool {
     let mut request = request;
-    let mut history = history;
-    loop {
-        match history {
-            RunnerPlacementReconstitutionHistory::Initial => {
-                return revision == RunnerGeneration::one();
-            }
-            RunnerPlacementReconstitutionHistory::PrePinReplacement {
-                predecessor_history,
-                prior_revision,
-                lost_runner,
-                prior_request,
-                replacement_request,
-            } => {
-                let successor_differs = match request.selector {
-                    RunnerSelector::Identity(successor) => successor != *lost_runner,
-                    RunnerSelector::CapabilityClass(_) => false,
-                };
-                if prior_revision.checked_next() != Some(revision)
-                    || prior_request.selector != RunnerSelector::Identity(*lost_runner)
-                    || replacement_request.as_ref() != request
-                    || !successor_differs
-                {
-                    return false;
-                }
-                revision = *prior_revision;
-                request = prior_request;
-                history = predecessor_history;
-            }
+    let replacements = match history {
+        RunnerPlacementReconstitutionHistory::Initial => {
+            return revision == RunnerGeneration::one();
         }
+        RunnerPlacementReconstitutionHistory::PrePinReplacements(replacements)
+            if !replacements.is_empty() =>
+        {
+            replacements
+        }
+        RunnerPlacementReconstitutionHistory::PrePinReplacements(_) => return false,
+    };
+    for replacement in replacements.iter().rev() {
+        let successor_differs = match request.selector {
+            RunnerSelector::Identity(successor) => successor != replacement.lost_runner,
+            RunnerSelector::CapabilityClass(_) => false,
+        };
+        let predecessor_names_loss = match replacement.prior_request.selector {
+            RunnerSelector::Identity(prior) => prior == replacement.lost_runner,
+            RunnerSelector::CapabilityClass(_) => false,
+        };
+        if replacement.prior_revision.checked_next() != Some(revision)
+            || !predecessor_names_loss
+            || &replacement.replacement_request != request
+            || !successor_differs
+        {
+            return false;
+        }
+        revision = replacement.prior_revision;
+        request = &replacement.prior_request;
     }
+    revision == RunnerGeneration::one()
 }
 
 /// Append-only history proof used when reconstituting a placement revision.
@@ -2890,19 +2891,21 @@ fn placement_revision_history_matches(
 pub enum RunnerPlacementReconstitutionHistory {
     /// Revision one was created directly from session placement intent.
     Initial,
-    /// A lost-before-pin placement installed this successor unpinned request.
-    PrePinReplacement {
-        /// Complete append-only history authenticating the predecessor revision.
-        predecessor_history: Box<RunnerPlacementReconstitutionHistory>,
-        /// Exact predecessor revision consumed by the replacement.
-        prior_revision: RunnerGeneration,
-        /// Exact runner retained by the predecessor loss.
-        lost_runner: RunnerId,
-        /// Complete predecessor request retained by append-only history.
-        prior_request: Box<SessionRunnerPlacementRequest>,
-        /// Complete successor request installed by append-only history.
-        replacement_request: Box<SessionRunnerPlacementRequest>,
-    },
+    /// Chronological nonempty lost-before-pin replacement history.
+    PrePinReplacements(Vec<RunnerPrePinReplacementHistory>),
+}
+
+/// One stack-safe element of append-only pre-pin replacement history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerPrePinReplacementHistory {
+    /// Exact predecessor revision consumed by the replacement.
+    pub prior_revision: RunnerGeneration,
+    /// Exact runner retained by the predecessor loss.
+    pub lost_runner: RunnerId,
+    /// Complete predecessor request retained by append-only history.
+    pub prior_request: SessionRunnerPlacementRequest,
+    /// Complete successor request installed by append-only history.
+    pub replacement_request: SessionRunnerPlacementRequest,
 }
 
 /// Complete placement facts loaded from one canonical durable revision.
@@ -6427,13 +6430,15 @@ mod tests {
             .expect("a distinct current runner installs a successor request");
         let initial_history = placement_reconstitution_input(replacement.placement);
         let mut replacement_history = initial_history.clone();
-        replacement_history.history = RunnerPlacementReconstitutionHistory::PrePinReplacement {
-            predecessor_history: Box::new(RunnerPlacementReconstitutionHistory::Initial),
-            prior_revision,
-            lost_runner: selected,
-            prior_request: Box::new(prior_request),
-            replacement_request: Box::new(initial_history.request.clone()),
-        };
+        replacement_history.history =
+            RunnerPlacementReconstitutionHistory::PrePinReplacements(vec![
+                RunnerPrePinReplacementHistory {
+                    prior_revision,
+                    lost_runner: selected,
+                    prior_request,
+                    replacement_request: initial_history.request.clone(),
+                },
+            ]);
 
         assert_eq!(
             SessionRunnerPlacement::reconstitute(initial_history, session_id(SESSION), None, None,),
@@ -6460,14 +6465,15 @@ mod tests {
             revision: RunnerGeneration::try_from_u64(3).expect("three is a positive generation"),
             request: third_request.clone(),
             state: SessionRunnerPlacementState::Unpinned,
-            history: RunnerPlacementReconstitutionHistory::PrePinReplacement {
-                predecessor_history: Box::new(RunnerPlacementReconstitutionHistory::Initial),
-                prior_revision: RunnerGeneration::try_from_u64(2)
-                    .expect("two is a positive generation"),
-                lost_runner: second_runner,
-                prior_request: Box::new(second_request),
-                replacement_request: Box::new(third_request),
-            },
+            history: RunnerPlacementReconstitutionHistory::PrePinReplacements(vec![
+                RunnerPrePinReplacementHistory {
+                    prior_revision: RunnerGeneration::try_from_u64(2)
+                        .expect("two is a positive generation"),
+                    lost_runner: second_runner,
+                    prior_request: second_request,
+                    replacement_request: third_request,
+                },
+            ]),
         };
 
         assert_eq!(

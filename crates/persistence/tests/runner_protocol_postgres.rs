@@ -371,6 +371,10 @@ fn external_authorized(facts: PhysicalAttemptFacts) -> RunnerToolAttemptAuthoriz
     authorized_with_effect(facts, ToolEffectClass::ExternalEffect)
 }
 
+fn idempotent_authorized(facts: PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization {
+    authorized_with_effect(facts, ToolEffectClass::ExternalEffect)
+}
+
 fn offer_request() -> RunnerLeaseOfferRequest {
     RunnerLeaseOfferRequest {
         lease: RunnerLeaseId::from_uuid(uuid(LEASE)),
@@ -2891,6 +2895,13 @@ async fn runner_wire_migration_rejects_legacy_placement_history() -> Result<(), 
     sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DROP CONSTRAINT runner_session_placement_state_shape,
+         ADD CONSTRAINT runner_session_placement_state_shape CHECK (TRUE)",
+    )
+    .execute(&pool)
+    .await?;
     sqlx::query(
         "INSERT INTO runner_session_placement_record
             (session_id, event_ordinal, placement_revision, event_kind,
@@ -5762,6 +5773,48 @@ async fn s32_inv044_load_rejects_pinned_facts_on_loss_before_pin() -> Result<(),
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s32_inv002_inv044_load_rejects_loss_with_another_event_kind() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DROP CONSTRAINT runner_session_placement_state_shape,
+         ADD CONSTRAINT runner_session_placement_state_shape CHECK (TRUE)",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET event_kind = 'abandoned'
+          WHERE session_id = $1 AND event_kind = 'runner_lost_before_pin'",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(placement.session())
+        .await
+        .expect_err("loss state cannot normalize another event vocabulary");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::InvalidEncoding);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s32_inv044_pre_pin_replacement_round_trips_append_only_history()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
@@ -7369,22 +7422,30 @@ async fn s32_inv029_inv044_runner_recovery_stop_preserves_tool_ambiguity()
     Ok(())
 }
 
-async fn prepare_unclaimed_retryable_runner_recovery(
+struct RunnerRecoveryToolRoundFacts {
+    session: SessionId,
+    turn: TurnId,
+    turn_attempt: TurnAttemptId,
+    interrupted_attempt: ToolAttemptId,
+    boundary: ContextFrontierId,
+    request: ToolRequestId,
+    lease: RunnerLease,
+    runner: RunnerId,
+    placement_revision: RunnerGeneration,
+    producing_call: ModelCallId,
+}
+
+async fn prepare_runner_recovery_tool_round(
     pool: &PgPool,
-) -> Result<
-    (
-        SessionId,
-        TurnId,
-        ToolAttemptId,
-        ContextFrontierId,
-        ToolRequestId,
-        RunnerLeaseCorrelation,
-    ),
-    Box<dyn Error>,
-> {
+    authorize: fn(PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization,
+    fixture_catalog: RunnerCatalog,
+    fixture_effect_kind: &'static str,
+) -> Result<RunnerRecoveryToolRoundFacts, Box<dyn Error>> {
     let (session, turn, turn_attempt) = insert_running_turn(pool).await?;
-    insert_external_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
-    let store = RunnerProtocolStore::new(pool.clone(), side_effecting_catalog());
+    insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    set_fixture_physical_attempt_effect(pool, INITIAL_PHYSICAL_ATTEMPT, fixture_effect_kind)
+        .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), fixture_catalog);
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
@@ -7412,13 +7473,11 @@ async fn prepare_unclaimed_retryable_runner_recovery(
             RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
                 .expect("the fixture working directory is valid"),
             None,
-            authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::ExternalEffect),
+            authorize(INITIAL_PHYSICAL_ATTEMPT),
             offer_request(),
         )
-        .expect("the external-effect fixture pins the placement");
+        .expect("the retryable fixture pins the placement");
     store.store_pin(&pin, &registration).await?;
-    let lease = pin.lease.correlation();
-    record_no_execution_lease_loss(pool, &pin.lease).await?;
     let interrupted_attempt = ToolAttemptId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt));
     let producing_call = ModelCallId::from_uuid(uuid(
         INITIAL_PHYSICAL_ATTEMPT.request + RELATED_IDENTITY_OFFSET,
@@ -7435,13 +7494,31 @@ async fn prepare_unclaimed_retryable_runner_recovery(
         boundary,
     )
     .await?;
+    Ok(RunnerRecoveryToolRoundFacts {
+        session,
+        turn,
+        turn_attempt,
+        interrupted_attempt,
+        boundary,
+        request,
+        lease: pin.lease,
+        runner: expected_enrollment.runner(),
+        placement_revision: pin.placement.revision(),
+        producing_call,
+    })
+}
+
+async fn park_runner_recovery_tool_round(
+    pool: &PgPool,
+    facts: &RunnerRecoveryToolRoundFacts,
+) -> Result<(), Box<dyn Error>> {
     let mut recovery = pool.begin().await?;
     append_runner_lost_without_advancing_head(
         &mut recovery,
-        session,
+        facts.session,
         Some("connection"),
         None,
-        Some(interrupted_attempt),
+        Some(facts.interrupted_attempt),
     )
     .await?;
     sqlx::query(
@@ -7449,7 +7526,7 @@ async fn prepare_unclaimed_retryable_runner_recovery(
             SET event_ordinal = event_ordinal + 1
           WHERE session_id = $1",
     )
-    .bind(session.into_uuid())
+    .bind(facts.session.into_uuid())
     .execute(&mut *recovery)
     .await?;
     sqlx::query(
@@ -7458,9 +7535,9 @@ async fn prepare_unclaimed_retryable_runner_recovery(
                 end_disposition = 'yielded_to_durable_wait'
           WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
     )
-    .bind(turn_attempt.into_uuid())
-    .bind(turn.into_uuid())
-    .bind(session.into_uuid())
+    .bind(facts.turn_attempt.into_uuid())
+    .bind(facts.turn.into_uuid())
+    .bind(facts.session.into_uuid())
     .execute(&mut *recovery)
     .await?;
     sqlx::query(
@@ -7472,16 +7549,62 @@ async fn prepare_unclaimed_retryable_runner_recovery(
                 runner_recovery_tool_attempt_id = $4
           WHERE turn_id = $5 AND session_id = $6",
     )
-    .bind(producing_call.into_uuid())
-    .bind(expected_enrollment.runner().into_uuid())
-    .bind(Decimal::from(pin.placement.revision().get()))
-    .bind(interrupted_attempt.into_uuid())
-    .bind(turn.into_uuid())
-    .bind(session.into_uuid())
+    .bind(facts.producing_call.into_uuid())
+    .bind(facts.runner.into_uuid())
+    .bind(Decimal::from(facts.placement_revision.get()))
+    .bind(facts.interrupted_attempt.into_uuid())
+    .bind(facts.turn.into_uuid())
+    .bind(facts.session.into_uuid())
     .execute(&mut *recovery)
     .await?;
     recovery.commit().await?;
-    Ok((session, turn, interrupted_attempt, boundary, request, lease))
+    Ok(())
+}
+
+async fn prepare_execution_possible_retryable_runner_recovery(
+    pool: &PgPool,
+    authorize: fn(PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization,
+    fixture_catalog: RunnerCatalog,
+    fixture_effect_kind: &'static str,
+) -> Result<RunnerRecoveryToolRoundFacts, Box<dyn Error>> {
+    let facts =
+        prepare_runner_recovery_tool_round(pool, authorize, fixture_catalog, fixture_effect_kind)
+            .await?;
+    record_execution_possible_lease_loss(pool, &facts.lease).await?;
+    park_runner_recovery_tool_round(pool, &facts).await?;
+    Ok(facts)
+}
+
+async fn prepare_unclaimed_retryable_runner_recovery(
+    pool: &PgPool,
+) -> Result<
+    (
+        SessionId,
+        TurnId,
+        ToolAttemptId,
+        ContextFrontierId,
+        ToolRequestId,
+        RunnerLeaseCorrelation,
+    ),
+    Box<dyn Error>,
+> {
+    let facts = prepare_runner_recovery_tool_round(
+        pool,
+        external_authorized,
+        side_effecting_catalog(),
+        "external_effect",
+    )
+    .await?;
+    record_no_execution_lease_loss(pool, &facts.lease).await?;
+    park_runner_recovery_tool_round(pool, &facts).await?;
+    Ok((
+        facts.session,
+        facts.turn,
+        facts.interrupted_attempt,
+        facts.boundary,
+        facts.request,
+        facts.lease.correlation(),
+    ))
 }
 
 /// INV-029 / INV-044: stopping a retryable no-execution runner wait retires
@@ -7598,6 +7721,177 @@ async fn s32_inv029_inv044_stop_retires_retryable_runner_attempt() -> Result<(),
         reload.is_some(),
         "the cancelled retryable runner wait must reload before its queued successor starts"
     );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-029 / INV-044: stopping a pure execution-possible runner wait reloads
+/// its named terminal attempt and emits the correlated crash-lost result.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv029_inv044_stop_reloads_pure_attempt_from_terminal_history()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let facts = prepare_execution_possible_retryable_runner_recovery(
+        &pool,
+        authorized,
+        catalog(),
+        "effect_free",
+    )
+    .await?;
+    let command = DurableCommandId::from_uuid(uuid(0xa184));
+    let result_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xa185));
+    let terminal_frontier = ContextFrontierId::from_uuid(uuid(0xa186));
+    let interrupt = SubmitInput::new(
+        command,
+        facts.session,
+        UserContent::try_text(String::from("stop pure lost runner attempt"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: facts.turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            interrupt,
+            AcceptedInputId::from_uuid(uuid(0xa187)),
+            Some(TurnId::from_uuid(uuid(0xa188))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa189)),
+                terminal_frontier,
+            ),
+            |_| TurnId::from_uuid(uuid(0xa18b)),
+            |_| (vec![result_entry], terminal_frontier),
+        )
+        .await?;
+    let lifecycle: String = sqlx::query_scalar(
+        "SELECT terminal_disposition_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(facts.session.into_uuid())
+    .bind(facts.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let attempt: (String, String, String) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, error_kind
+           FROM tool_attempt
+          WHERE attempt_id = $1",
+    )
+    .bind(facts.interrupted_attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let result: (String, Uuid, Uuid) = sqlx::query_as(
+        "SELECT entry.payload_kind, entry.tool_result_attempt_id,
+                effect.source_frontier_id
+           FROM semantic_transcript_entry AS entry
+           JOIN turn_runner_recovery_interrupt_effect AS effect
+             ON effect.session_id = entry.source_session_id
+            AND effect.command_id = $1
+          WHERE entry.source_session_id = $2
+            AND entry.semantic_entry_id = $3",
+    )
+    .bind(command.into_uuid())
+    .bind(facts.session.into_uuid())
+    .bind(result_entry.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(lifecycle, "cancelled");
+    assert_eq!(attempt.0, "terminal");
+    assert_eq!(attempt.1, "known_failed");
+    assert_eq!(attempt.2, "crash_lost");
+    assert_eq!(result.0, "tool_execution_result");
+    assert_eq!(result.1, facts.interrupted_attempt.into_uuid());
+    assert_eq!(result.2, facts.boundary.into_uuid());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-029 / INV-044: stopping an idempotent execution-possible runner wait
+/// reloads its named ambiguity and retains reconciliation authority.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv029_inv044_stop_reloads_idempotent_ambiguity_from_terminal_history()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let facts = prepare_execution_possible_retryable_runner_recovery(
+        &pool,
+        idempotent_authorized,
+        idempotent_catalog(),
+        "external_effect",
+    )
+    .await?;
+    let command = DurableCommandId::from_uuid(uuid(0xa18c));
+    let tool_closure = SemanticTranscriptEntryId::from_uuid(uuid(0xa18d));
+    let terminal_frontier = ContextFrontierId::from_uuid(uuid(0xa18e));
+    let interrupt = SubmitInput::new(
+        command,
+        facts.session,
+        UserContent::try_text(String::from("stop idempotent lost runner attempt"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: facts.turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            interrupt,
+            AcceptedInputId::from_uuid(uuid(0xa18f)),
+            Some(TurnId::from_uuid(uuid(0xa190))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xa191)),
+                ContextFrontierId::from_uuid(uuid(0xa192)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xa193)),
+            |_| (vec![tool_closure], terminal_frontier),
+        )
+        .await?;
+    let lifecycle: (String, Uuid) = sqlx::query_as(
+        "SELECT terminal_disposition_kind, terminal_tool_attempt_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(facts.session.into_uuid())
+    .bind(facts.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let attempt: (String, String) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM tool_attempt
+          WHERE attempt_id = $1",
+    )
+    .bind(facts.interrupted_attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let closure: (String, Uuid) = sqlx::query_as(
+        "SELECT payload_kind, tool_result_request_id
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1 AND semantic_entry_id = $2",
+    )
+    .bind(facts.session.into_uuid())
+    .bind(tool_closure.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(lifecycle.0, "reconciliation_required");
+    assert_eq!(lifecycle.1, facts.interrupted_attempt.into_uuid());
+    assert_eq!(attempt.0, "terminal");
+    assert_eq!(attempt.1, "ambiguous");
+    assert_eq!(closure.0, "tool_closed_by_turn_end");
+    assert_eq!(closure.1, facts.request.into_uuid());
     drop(pool);
     Ok(())
 }
