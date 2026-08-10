@@ -228,25 +228,32 @@ const SESSION_WORKSPACE_REPLACED_DETAIL: &str =
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionWorkspaceRoots {
     configured: PathBuf,
-    derived_parent: Option<PathBuf>,
+    derived_parent: PathBuf,
 }
 
 impl SessionWorkspaceRoots {
     /// Fixes the derivation against one configured workspace root.
-    pub fn new(configured: &Path) -> Self {
-        let derived_parent =
-            configured
-                .parent()
-                .zip(configured.file_name())
-                .map(|(parent, name)| {
-                    let mut directory = name.to_owned();
-                    directory.push(SESSION_WORKSPACE_DIRECTORY_SUFFIX);
-                    parent.join(directory)
-                });
-        Self {
+    ///
+    /// A configured root the formula cannot be applied to is rejected here
+    /// rather than carried as a derivation that answers "unprovisioned" for
+    /// every session. `/srv/workspace/child/..` is absolute, is accepted by the
+    /// configuration surface, and can name a valid worktree, but it has no
+    /// lexical final component to append the suffix to. Treating that as an
+    /// unprovisioned deployment would silently bind every session to the
+    /// configured composition — the shared root this derivation exists to
+    /// replace — and no directory provisioned by the documented formula would
+    /// ever be considered.
+    pub fn try_new(configured: &Path) -> Result<Self, DaemonToolsConstructionError> {
+        let (parent, name) = configured
+            .parent()
+            .zip(configured.file_name())
+            .ok_or(DaemonToolsConstructionError::WorkspaceRootUnderivable)?;
+        let mut directory = name.to_owned();
+        directory.push(SESSION_WORKSPACE_DIRECTORY_SUFFIX);
+        Ok(Self {
             configured: configured.to_owned(),
-            derived_parent,
-        }
+            derived_parent: parent.join(directory),
+        })
     }
 
     /// Returns the configured root every derivation is taken from.
@@ -257,15 +264,9 @@ impl SessionWorkspaceRoots {
 
     /// Returns the path the formula assigns one session, before asking whether
     /// a directory exists there.
-    ///
-    /// Absent only when the configured root has no parent or no final
-    /// component, which no absolute configured root outside the filesystem
-    /// root itself has.
     #[must_use]
-    pub fn derived_path(&self, session: SessionId) -> Option<PathBuf> {
-        self.derived_parent
-            .as_ref()
-            .map(|parent| parent.join(session.into_uuid().to_string()))
+    pub fn derived_path(&self, session: SessionId) -> PathBuf {
+        self.derived_parent.join(session.into_uuid().to_string())
     }
 
     /// Returns what the derivation currently finds for one session.
@@ -281,33 +282,48 @@ impl SessionWorkspaceRoots {
     /// The parent is classified the same way and for the same reason. It is the
     /// one intermediate component this derivation introduces, and every later
     /// no-follow open declines to follow only the component it names, so a
-    /// symlink standing at the parent is followed by all of them.
+    /// symlink standing at the parent is followed by all of them. Its identity
+    /// travels with the answer because classifying it once is a statement about
+    /// one instant, and the pathname is walked again by every family that
+    /// composes and by every request that revalidates.
     #[must_use]
     pub fn resolve(&self, session: SessionId) -> SessionWorkspaceRoot {
-        let (Some(parent), Some(path)) = (self.derived_parent.as_ref(), self.derived_path(session))
-        else {
-            return SessionWorkspaceRoot::ConfiguredRoot;
-        };
+        let path = self.derived_path(session);
         // A symlink at `<name>.sessions` — pointing inside the configured root,
         // say — would place every derived root under a tree every session still
         // bound to the configured root can read, write, and execute, which is
         // the containment the sibling derivation exists to establish. Resolving
         // the pathname below would follow it, and the no-follow opens after it
         // protect only the session's own final component.
-        match fs::symlink_metadata(parent) {
-            Ok(metadata) if metadata.is_dir() => {}
+        let parent = match fs::symlink_metadata(&self.derived_parent) {
+            Ok(metadata) if metadata.is_dir() => ComposedRootIdentity::from_metadata(&metadata),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return SessionWorkspaceRoot::ConfiguredRoot;
             }
             Ok(_) | Err(_) => return SessionWorkspaceRoot::Unresolvable,
-        }
+        };
         match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_dir() => SessionWorkspaceRoot::Derived { path },
+            Ok(metadata) if metadata.is_dir() => SessionWorkspaceRoot::Derived { path, parent },
             Ok(_) => SessionWorkspaceRoot::Unresolvable,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 SessionWorkspaceRoot::ConfiguredRoot
             }
             Err(_) => SessionWorkspaceRoot::Unresolvable,
+        }
+    }
+
+    /// Captures the identity the derived parent's pathname names right now,
+    /// declining to follow a symlink standing there.
+    ///
+    /// Used to revalidate the component the probe classified, since a caller
+    /// walks the pathname again after the probe and the classification says
+    /// nothing about the instants after it.
+    fn standing_parent(&self) -> Option<ComposedRootIdentity> {
+        match fs::symlink_metadata(&self.derived_parent) {
+            Ok(metadata) if metadata.is_dir() => {
+                Some(ComposedRootIdentity::from_metadata(&metadata))
+            }
+            Ok(_) | Err(_) => None,
         }
     }
 }
@@ -317,13 +333,19 @@ impl SessionWorkspaceRoots {
 pub enum SessionWorkspaceRoot {
     /// A directory exists at the session's derived path and binds it alone.
     ///
-    /// The probe classifies and carries no identity: which directories a
-    /// session bound is a property of both the worktree and the administration
-    /// directory inside it, and a caller comparing a binding captures that pair
-    /// rather than the one directory a classification needed to stat.
+    /// The bound pair itself is not carried: which directories a session bound
+    /// is a property of both the worktree and the administration directory
+    /// inside it, and a caller comparing a binding captures that pair rather
+    /// than the one directory a classification needed to stat. The parent is
+    /// carried, because it is walked through rather than bound, and nothing
+    /// downstream can recover which directory the classification accepted.
     Derived {
         /// The derived absolute path.
         path: PathBuf,
+        /// Identity of the parent directory the classification accepted, so a
+        /// caller can tell that the component it walks through is still the one
+        /// that was classified.
+        parent: ComposedRootIdentity,
     },
     /// Nothing exists at the session's derived path, so an unbound session
     /// binds the configured root that every session bound before this
@@ -354,6 +376,12 @@ enum RecordedSessionBinding {
         /// Identities of the worktree and administration directories this
         /// session bound.
         identity: ComposedWorkspaceIdentity,
+        /// Identity of the directory the derivation walked through to reach
+        /// them. Recorded apart from the bound pair because it is traversed
+        /// rather than bound: two sessions legitimately share one parent, so it
+        /// is never a collision, but a different directory standing there means
+        /// the pathname no longer leads where it led when this session bound.
+        parent: ComposedRootIdentity,
     },
 }
 
@@ -362,9 +390,41 @@ impl RecordedSessionBinding {
     const fn derived_identity(self) -> Option<ComposedWorkspaceIdentity> {
         match self {
             Self::ConfiguredRoot => None,
-            Self::DerivedRoot { identity } => Some(identity),
+            Self::DerivedRoot { identity, .. } => Some(identity),
         }
     }
+
+    /// Returns the parent this binding walked through, if it pinned a derived
+    /// root.
+    const fn derived_parent(self) -> Option<ComposedRootIdentity> {
+        match self {
+            Self::ConfiguredRoot => None,
+            Self::DerivedRoot { parent, .. } => Some(parent),
+        }
+    }
+}
+
+/// Whether a probe taken before the state lock has to be retaken under it.
+///
+/// A first request can observe an absent directory, be descheduled before it
+/// takes the lock, and resume after a concurrent request for the same session
+/// has provisioned nothing but *observed* the directory, composed it, and
+/// recorded a derived binding. Failing the resuming request on that stale
+/// observation would make two concurrent first requests diverge where the
+/// contract has them converge on the first record written. A genuinely removed
+/// directory reads the same way, so the answer is to look again rather than to
+/// guess: the retaken probe distinguishes them.
+const fn probe_is_stale(
+    recorded: Option<RecordedSessionBinding>,
+    derived: &SessionWorkspaceRoot,
+) -> bool {
+    matches!(
+        (recorded, derived),
+        (
+            Some(RecordedSessionBinding::DerivedRoot { .. }),
+            SessionWorkspaceRoot::ConfiguredRoot
+        )
+    )
 }
 
 /// What a session's next workspace-bound request binds.
@@ -806,7 +866,7 @@ impl<Clock>
                 git_identity.clone(),
                 exec_runner.clone(),
             )?,
-            roots: SessionWorkspaceRoots::new(workspace_root),
+            roots: SessionWorkspaceRoots::try_new(workspace_root)?,
             git_identity,
             exec_runner,
         };
@@ -961,7 +1021,7 @@ where
                 git_identity.clone(),
                 exec_runner.clone(),
             )?,
-            roots: SessionWorkspaceRoots::new(workspace_root),
+            roots: SessionWorkspaceRoots::try_new(workspace_root)?,
             git_identity,
             exec_runner,
         };
@@ -1130,6 +1190,9 @@ pub enum DaemonToolsConstructionError {
     /// whole composition, so the composed families could disagree about which
     /// directory they bound.
     WorkspaceRootUnstable,
+    /// The configured workspace root has no lexical parent and final component,
+    /// so the per-session derivation formula cannot be applied to it.
+    WorkspaceRootUnderivable,
     /// The conversation declarations or introspection port were invalid.
     Conversations,
     /// The plan declarations or session plan port were invalid.
@@ -1159,6 +1222,9 @@ impl fmt::Display for DaemonToolsConstructionError {
             Self::SessionWorkspaceDetail => "session workspace failure detail was invalid",
             Self::WorkspaceRootUnstable => {
                 "workspace root changed identity during tool composition"
+            }
+            Self::WorkspaceRootUnderivable => {
+                "workspace root has no final path component to derive session roots from"
             }
             Self::Conversations => "conversation tool suite construction failed",
             Self::Plan => "plan tool suite construction failed",
@@ -1659,32 +1725,42 @@ where
         // directory, and returning it without asking what the pathname names
         // now would let a session keep reading and writing a tree the
         // deployment has already removed or replaced.
-        let derived = self.roots.resolve(session);
+        let probed = self.roots.resolve(session);
         let mut state = self.state.lock().await;
         let recorded = state.bindings.get(&session).copied();
+        // The probe above was taken before the lock, so a concurrent first
+        // request for this session may have bound a derived root in between.
+        // Retaking it under the lock is what distinguishes that from the
+        // directory having been removed, which reads identically and must still
+        // fail closed.
+        let derived = if probe_is_stale(recorded, &probed) {
+            self.roots.resolve(session)
+        } else {
+            probed
+        };
         let path = match decide_session_root(recorded, &derived) {
             SessionRootDecision::ConfiguredRoot => {
-                // First writer wins. A concurrent first request for this
-                // session may have recorded a derived binding while this one
-                // was probing, and honouring that record is what makes the
-                // binding stable rather than last-write-wins.
+                // Reachable only with no record or a recorded configured
+                // binding, so the entry below can only read as configured. The
+                // derived arm returns no retained set: nothing on this path
+                // revalidated one, and a set returned unrevalidated is the
+                // defect the revalidation exists to prevent.
                 return match *state
                     .bindings
                     .entry(session)
                     .or_insert(RecordedSessionBinding::ConfiguredRoot)
                 {
                     RecordedSessionBinding::ConfiguredRoot => Ok(self.configured.clone()),
-                    RecordedSessionBinding::DerivedRoot { .. } => state
-                        .retained
-                        .get(session)
-                        .ok_or(SessionWorkspaceFailure::UnresolvableRoot),
+                    RecordedSessionBinding::DerivedRoot { .. } => {
+                        Err(SessionWorkspaceFailure::UnresolvableRoot)
+                    }
                 };
             }
             SessionRootDecision::Unresolvable => {
                 return Err(SessionWorkspaceFailure::UnresolvableRoot);
             }
             SessionRootDecision::ComposeDerived => {
-                let SessionWorkspaceRoot::Derived { path } = &derived else {
+                let SessionWorkspaceRoot::Derived { path, parent } = &derived else {
                     return Err(SessionWorkspaceFailure::UnresolvableRoot);
                 };
                 // A recorded binding names both directories, and a retained
@@ -1699,6 +1775,15 @@ where
                     let standing = ComposedWorkspaceIdentity::capture(path)
                         .map_err(|_| SessionWorkspaceFailure::ReplacedRootIdentity)?;
                     if standing != bound {
+                        return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
+                    }
+                    // The pair can stand unchanged while the directory walked
+                    // through to reach it does not: a parent renamed away and
+                    // replaced, with this session's directory moved under the
+                    // replacement, leaves both bound directories intact at the
+                    // same pathname. The component the classification accepted
+                    // is therefore revalidated beside the pair it leads to.
+                    if recorded.and_then(RecordedSessionBinding::derived_parent) != Some(*parent) {
                         return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
                     }
                     // Admission is not a durable answer. The configured
@@ -1721,9 +1806,10 @@ where
                 if let Some(retained) = state.retained.get(session) {
                     return Ok(retained);
                 }
-                path.clone()
+                (path.clone(), *parent)
             }
         };
+        let (path, parent) = path;
         drop(state);
         let filesystem = FileSystem::pin_further_root(&path).map_err(|_| {
             SessionWorkspaceFailure::Composition(DaemonToolsConstructionError::WorkspaceRead)
@@ -1735,6 +1821,15 @@ where
             self.exec_runner.clone(),
         )
         .map_err(SessionWorkspaceFailure::Composition)?;
+        // Every family above resolved the derived pathname independently, and
+        // each walked through the parent to do it. The parent's no-follow
+        // classification happened once, before any of them ran, so it is
+        // remade here: a parent renamed away and replaced by a symlink during
+        // composition is followed by every one of those resolutions, and the
+        // bound pair alone cannot show it, since ancestry is not equality.
+        if self.roots.standing_parent() != Some(parent) {
+            return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
+        }
         if families.executors.git_object_format != self.configured.git_object_format {
             return Err(SessionWorkspaceFailure::ObjectFormatDisagreement);
         }
@@ -1763,14 +1858,20 @@ where
         match *state
             .bindings
             .entry(session)
-            .or_insert(RecordedSessionBinding::DerivedRoot { identity: composed })
-        {
+            .or_insert(RecordedSessionBinding::DerivedRoot {
+                identity: composed,
+                parent,
+            }) {
             // A concurrent first request bound the configured root; its record
             // wins, and this composition is released rather than retained.
             RecordedSessionBinding::ConfiguredRoot => return Ok(self.configured.clone()),
             // The pathname now names a different directory than the one this
-            // session bound, so the session is not resuming its own workspace.
-            RecordedSessionBinding::DerivedRoot { identity } if identity != composed => {
+            // session bound, or reaches it through a different one, so the
+            // session is not resuming its own workspace.
+            RecordedSessionBinding::DerivedRoot {
+                identity,
+                parent: bound_parent,
+            } if identity != composed || bound_parent != parent => {
                 return Err(SessionWorkspaceFailure::ReplacedRootIdentity);
             }
             RecordedSessionBinding::DerivedRoot { .. } => {}
@@ -2075,7 +2176,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{fmt, fs, time::SystemTime};
+    use std::{ffi::OsStr, fmt, fs, time::SystemTime};
 
     use signalbox_application::{
         FixtureToolExecutionTransaction, FixtureTransactionFailures, InProcessToolDispatchGate,
@@ -3018,6 +3119,13 @@ mod tests {
             administration: FIXTURE_CONFIGURED_STANDING_IDENTITY.administration,
         };
 
+    /// The directory a derived root's pathname is reached through. Distinct
+    /// from every bound directory, since a parent is walked rather than bound.
+    const FIXTURE_PARENT_IDENTITY: ComposedRootIdentity = ComposedRootIdentity {
+        device: 0x10,
+        inode: 0x90,
+    };
+
     /// The two sessions the per-session workspace tests give separate roots.
     /// Each value only needs to be distinct from the other.
     const FIRST_SESSION_IDENTITY: u128 = 0x5001;
@@ -3054,12 +3162,19 @@ mod tests {
         configured
     }
 
+    /// The derivation for one fixture configured root.
+    ///
+    /// Every fixture root is an absolute path with a parent and a final
+    /// component, so the derivation is always constructible for one.
+    fn derivation(configured: &Path) -> SessionWorkspaceRoots {
+        SessionWorkspaceRoots::try_new(configured)
+            .expect("a fixture configured root has a parent and a final component")
+    }
+
     /// Creates a direct main worktree exactly where the derivation places one
     /// session's root, so the test never restates the formula.
     fn provisioned_session_workspace(configured: &Path, session: SessionId, marker: &str) {
-        let derived = SessionWorkspaceRoots::new(configured)
-            .derived_path(session)
-            .expect("the fixture configured root has a parent and a final component");
+        let derived = derivation(configured).derived_path(session);
         fs::create_dir_all(&derived).expect("derived session workspace exists");
         git2::Repository::init(&derived).expect("derived session repository initializes");
         fs::write(derived.join(SESSION_MARKER_PATH), marker)
@@ -3197,6 +3312,24 @@ mod tests {
         git2::Repository::init(root).expect("a replacement repository initializes");
     }
 
+    /// Replaces the directory a session's root is reached through, leaving that
+    /// root and its `.git` the same two directories at the same pathname.
+    ///
+    /// The session's own directory is moved rather than recreated, so it keeps
+    /// its identity and the bound pair still compares equal; only the component
+    /// walked through to reach it is a different directory afterwards.
+    fn replace_derived_parent(parent: &Path, session_directory: &OsStr) {
+        let displaced = parent.with_extension("displaced");
+        fs::rename(parent, &displaced).expect("the classified parent moves aside");
+        fs::create_dir(parent).expect("a replacement parent stands at the same pathname");
+        fs::rename(
+            displaced.join(session_directory),
+            parent.join(session_directory),
+        )
+        .expect("the session's own directory moves under the replacement");
+        fs::remove_dir(&displaced).expect("the displaced parent is empty and is removed");
+    }
+
     #[track_caller]
     fn read_content(evidence: ToolExecutorEvidence) -> String {
         let decoded: serde_json::Value =
@@ -3215,9 +3348,7 @@ mod tests {
         let configured = Path::new("/srv/signalbox/workspace");
         let first = session(FIRST_SESSION_IDENTITY);
 
-        let derived = SessionWorkspaceRoots::new(configured)
-            .derived_path(first)
-            .expect("an absolute configured root has a parent and a final component");
+        let derived = derivation(configured).derived_path(first);
 
         assert_eq!(
             derived,
@@ -3232,8 +3363,7 @@ mod tests {
         let parent = tempfile::tempdir().expect("fixture parent exists");
         let configured = configured_workspace(parent.path());
 
-        let resolved =
-            SessionWorkspaceRoots::new(&configured).resolve(session(FIRST_SESSION_IDENTITY));
+        let resolved = derivation(&configured).resolve(session(FIRST_SESSION_IDENTITY));
 
         assert_eq!(resolved, SessionWorkspaceRoot::ConfiguredRoot);
     }
@@ -3245,10 +3375,8 @@ mod tests {
         let configured = configured_workspace(parent.path());
         let first = session(FIRST_SESSION_IDENTITY);
         provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
-        let roots = SessionWorkspaceRoots::new(&configured);
-        let expected = roots
-            .derived_path(first)
-            .expect("the fixture configured root has a parent and a final component");
+        let roots = derivation(&configured);
+        let expected = roots.derived_path(first);
 
         let resolved = roots.resolve(first);
 
@@ -3301,9 +3429,7 @@ mod tests {
         let configured = configured_workspace(parent.path());
         let first = session(FIRST_SESSION_IDENTITY);
         provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
-        let derived = SessionWorkspaceRoots::new(&configured)
-            .derived_path(first)
-            .expect("the fixture configured root has a parent and a final component");
+        let derived = derivation(&configured).derived_path(first);
         let (catalog, executor) = offline_daemon_composition(&configured);
         let bound = daemon_evidence(
             catalog.clone(),
@@ -3318,6 +3444,53 @@ mod tests {
             daemon_evidence(catalog, executor, first, read_marker_proposal()).await;
 
         assert_eq!(read_content(bound), FIRST_SESSION_MARKER);
+        assert_eq!(
+            known_failure_detail(after_replacement),
+            SESSION_WORKSPACE_REPLACED_DETAIL
+        );
+    }
+
+    /// The directories a session bound can stand unchanged while the directory
+    /// walked through to reach them does not. A parent renamed away and
+    /// replaced, with this session's own directory moved under the replacement,
+    /// leaves the worktree, its `.git`, the pathname, and every file a read
+    /// returns exactly as they were — only the component in between is another
+    /// directory. The session's next request fails closed rather than reaching
+    /// its tree through a directory nothing classified.
+    #[tokio::test]
+    async fn a_replaced_derived_parent_fails_the_next_request() {
+        let parent = tempfile::tempdir().expect("fixture parent exists");
+        let configured = configured_workspace(parent.path());
+        let first = session(FIRST_SESSION_IDENTITY);
+        provisioned_session_workspace(&configured, first, FIRST_SESSION_MARKER);
+        let derived = derivation(&configured).derived_path(first);
+        let derived_parent = derived
+            .parent()
+            .expect("a derived session root has a parent")
+            .to_owned();
+        let session_directory = derived
+            .file_name()
+            .expect("the derived path names a session directory")
+            .to_owned();
+        let (catalog, executor) = offline_daemon_composition(&configured);
+        let bound = daemon_evidence(
+            catalog.clone(),
+            executor.clone(),
+            first,
+            read_marker_proposal(),
+        )
+        .await;
+        replace_derived_parent(&derived_parent, &session_directory);
+
+        let after_replacement =
+            daemon_evidence(catalog, executor, first, read_marker_proposal()).await;
+
+        assert_eq!(read_content(bound), FIRST_SESSION_MARKER);
+        assert_eq!(
+            fs::read_to_string(derived.join(SESSION_MARKER_PATH))
+                .expect("the session's own file is where it was"),
+            FIRST_SESSION_MARKER
+        );
         assert_eq!(
             known_failure_detail(after_replacement),
             SESSION_WORKSPACE_REPLACED_DETAIL
@@ -3471,10 +3644,8 @@ mod tests {
         let parent = tempfile::tempdir().expect("fixture parent exists");
         let configured = configured_workspace(parent.path());
         let first = session(FIRST_SESSION_IDENTITY);
-        let roots = SessionWorkspaceRoots::new(&configured);
-        let derived = roots
-            .derived_path(first)
-            .expect("the fixture configured root has a parent and a final component");
+        let roots = derivation(&configured);
+        let derived = roots.derived_path(first);
         fs::create_dir_all(
             derived
                 .parent()
@@ -3497,11 +3668,9 @@ mod tests {
         let parent = tempfile::tempdir().expect("fixture parent exists");
         let configured = configured_workspace(parent.path());
         let first = session(FIRST_SESSION_IDENTITY);
-        let roots = SessionWorkspaceRoots::new(&configured);
+        let roots = derivation(&configured);
         let nested = configured.join("sessions");
-        let derived = roots
-            .derived_path(first)
-            .expect("the fixture configured root has a parent and a final component");
+        let derived = roots.derived_path(first);
         fs::create_dir(&nested).expect("a directory inside the configured root exists");
         fs::create_dir(
             nested.join(
@@ -3541,6 +3710,7 @@ mod tests {
             None,
             &SessionWorkspaceRoot::Derived {
                 path: PathBuf::from("/srv/signalbox/workspace.sessions/fixture"),
+                parent: FIXTURE_PARENT_IDENTITY,
             },
         );
 
@@ -3565,6 +3735,7 @@ mod tests {
             Some(RecordedSessionBinding::ConfiguredRoot),
             &SessionWorkspaceRoot::Derived {
                 path: PathBuf::from("/srv/signalbox/workspace.sessions/fixture"),
+                parent: FIXTURE_PARENT_IDENTITY,
             },
         );
 
@@ -3579,11 +3750,103 @@ mod tests {
         let decision = decide_session_root(
             Some(RecordedSessionBinding::DerivedRoot {
                 identity: FIXTURE_BOUND_IDENTITY,
+                parent: FIXTURE_PARENT_IDENTITY,
             }),
             &SessionWorkspaceRoot::ConfiguredRoot,
         );
 
         assert_eq!(decision, SessionRootDecision::Unresolvable);
+    }
+
+    /// A probe taken before the state lock can observe an absent directory
+    /// while a concurrent first request for the same session binds a derived
+    /// root under the lock. That pairing is retaken rather than failed, since
+    /// the contract has two concurrent first requests converge on the first
+    /// record written.
+    #[test]
+    fn an_absent_probe_against_a_recorded_derived_binding_is_stale() {
+        let stale = probe_is_stale(
+            Some(RecordedSessionBinding::DerivedRoot {
+                identity: FIXTURE_BOUND_IDENTITY,
+                parent: FIXTURE_PARENT_IDENTITY,
+            }),
+            &SessionWorkspaceRoot::ConfiguredRoot,
+        );
+
+        assert!(stale);
+    }
+
+    /// A probe that classified the derived path as unresolvable is not a stale
+    /// absence: it observed something, so retaking it would answer a question
+    /// that was already answered.
+    #[test]
+    fn an_unresolvable_probe_against_a_recorded_derived_binding_is_not_stale() {
+        let stale = probe_is_stale(
+            Some(RecordedSessionBinding::DerivedRoot {
+                identity: FIXTURE_BOUND_IDENTITY,
+                parent: FIXTURE_PARENT_IDENTITY,
+            }),
+            &SessionWorkspaceRoot::Unresolvable,
+        );
+
+        assert!(!stale);
+    }
+
+    /// A session with no record has no concurrent winner to converge on, so an
+    /// absent probe is the answer rather than a stale observation.
+    #[test]
+    fn an_absent_probe_without_a_record_is_not_stale() {
+        let stale = probe_is_stale(None, &SessionWorkspaceRoot::ConfiguredRoot);
+
+        assert!(!stale);
+    }
+
+    /// A recorded derived binding names the parent it walked through as well as
+    /// the directories it bound, so a caller can tell that the component the
+    /// classification accepted is still the one the pathname leads through.
+    #[test]
+    fn a_derived_binding_names_the_parent_it_walked_through() {
+        let binding = RecordedSessionBinding::DerivedRoot {
+            identity: FIXTURE_BOUND_IDENTITY,
+            parent: FIXTURE_PARENT_IDENTITY,
+        };
+
+        assert_eq!(binding.derived_parent(), Some(FIXTURE_PARENT_IDENTITY));
+    }
+
+    /// A configured binding walks through no derived parent.
+    #[test]
+    fn a_configured_binding_names_no_derived_parent() {
+        let binding = RecordedSessionBinding::ConfiguredRoot;
+
+        assert_eq!(binding.derived_parent(), None);
+    }
+
+    /// A configured root with no lexical final component — `/srv/workspace/..`,
+    /// which is absolute and can name a valid worktree — has no directory name
+    /// to append the suffix to. The derivation rejects it rather than answering
+    /// "unprovisioned" for every session, which would silently return the
+    /// deployment to the one shared root.
+    #[test]
+    fn a_configured_root_without_a_final_component_has_no_derivation() {
+        let underivable = SessionWorkspaceRoots::try_new(Path::new("/srv/signalbox/workspace/.."));
+
+        assert_eq!(
+            underivable,
+            Err(DaemonToolsConstructionError::WorkspaceRootUnderivable)
+        );
+    }
+
+    /// The filesystem root itself has no parent, and is rejected for the same
+    /// reason.
+    #[test]
+    fn the_filesystem_root_has_no_derivation() {
+        let underivable = SessionWorkspaceRoots::try_new(Path::new("/"));
+
+        assert_eq!(
+            underivable,
+            Err(DaemonToolsConstructionError::WorkspaceRootUnderivable)
+        );
     }
 
     /// A recorded derived binding names the directory it bound, so a caller can
@@ -3592,6 +3855,7 @@ mod tests {
     fn a_derived_binding_names_the_identity_it_pinned() {
         let binding = RecordedSessionBinding::DerivedRoot {
             identity: FIXTURE_BOUND_IDENTITY,
+            parent: FIXTURE_PARENT_IDENTITY,
         };
 
         assert_eq!(binding.derived_identity(), Some(FIXTURE_BOUND_IDENTITY));
@@ -3616,6 +3880,7 @@ mod tests {
             first,
             RecordedSessionBinding::DerivedRoot {
                 identity: FIXTURE_BOUND_IDENTITY,
+                parent: FIXTURE_PARENT_IDENTITY,
             },
         )]);
 
@@ -3634,6 +3899,7 @@ mod tests {
             first,
             RecordedSessionBinding::DerivedRoot {
                 identity: FIXTURE_BOUND_IDENTITY,
+                parent: FIXTURE_PARENT_IDENTITY,
             },
         )]);
 
@@ -3654,6 +3920,7 @@ mod tests {
             first,
             RecordedSessionBinding::DerivedRoot {
                 identity: FIXTURE_BOUND_IDENTITY,
+                parent: FIXTURE_PARENT_IDENTITY,
             },
         )]);
 
@@ -3676,6 +3943,7 @@ mod tests {
             first,
             RecordedSessionBinding::DerivedRoot {
                 identity: FIXTURE_BOUND_IDENTITY,
+                parent: FIXTURE_PARENT_IDENTITY,
             },
         )]);
 
@@ -3696,6 +3964,7 @@ mod tests {
             first,
             RecordedSessionBinding::DerivedRoot {
                 identity: FIXTURE_BOUND_IDENTITY,
+                parent: FIXTURE_PARENT_IDENTITY,
             },
         )]);
 
@@ -3715,6 +3984,7 @@ mod tests {
             first,
             RecordedSessionBinding::DerivedRoot {
                 identity: FIXTURE_BOUND_IDENTITY,
+                parent: FIXTURE_PARENT_IDENTITY,
             },
         )]);
 

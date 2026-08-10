@@ -595,6 +595,26 @@ write, and execute it. An accepted residual: a parent that is a real directory
 whose contents are a bind mount of a tree inside the configured root presents no
 symlink and no shared directory identity, and is admitted.
 
+Classifying the parent is a statement about one instant, so its identity is
+captured with that classification and revalidated wherever the pathname is
+walked again: once the composition has built, and on every later request. The
+identity is recorded beside the pair the session bound and compared apart from
+it, because a parent is traversed rather than bound — two sessions legitimately
+share one, so it is never a collision, while a different directory standing
+there means the pathname no longer leads where it led when the session bound. A
+parent renamed away and replaced, with the session's own directory moved under
+the replacement, leaves both bound directories intact at the same pathname and
+is caught by this comparison alone. An accepted residual: a replacement undone
+between two adjacent comparisons is not distinguished, which would require
+holding the parent descriptor and resolving every family's root relative to it.
+
+The configured root must have a lexical parent and final component, since the
+formula appends the suffix to that component. A root without one —
+`/srv/workspace/child/..` is absolute, is accepted by the mapping registry, and
+can name a valid worktree — is rejected at composition rather than treated as a
+deployment where every session is unprovisioned, which would silently return
+every session to the one shared root this derivation exists to replace.
+
 Which root a session bound is recorded the first time it invokes a
 workspace-root-bound tool and does not change for the process's lifetime. A
 session that bound the configured root is not moved onto a directory provisioned
@@ -602,6 +622,12 @@ later, and a session that bound a derived root is never returned to the
 configured root by that directory's removal: its next request fails closed
 instead. The first record written wins, so two concurrent first requests for one
 session converge on one root rather than the later one overwriting the earlier.
+Convergence covers the request that observed nothing: a probe taken before the
+state lock can report an absence that a concurrent first request has already
+resolved by binding a derived root, and the resuming request retakes the probe
+under the lock rather than failing on the stale observation. A directory that is
+genuinely absent reads identically, so the retaken probe is what distinguishes
+them, and a removal still fails the next request closed.
 
 A derived record names the filesystem identities of the worktree and of the
 `.git` directory inside it, not only the fact that a derived root was bound, so
