@@ -33,6 +33,10 @@ import os, sys, time
 command = sys.argv[1]
 
 if os.environ.get("FAKE_DOCKER_HANGS_ON") == command:
+    if os.environ.get("FAKE_DOCKER_IGNORES_TERM"):
+        import signal as signals
+
+        signals.signal(signals.SIGTERM, signals.SIG_IGN)
     started = os.environ.get("FAKE_DOCKER_START_LOG")
     if started:
         with open(started, "a") as log:
@@ -217,7 +221,16 @@ def container_start_sites() -> tuple[list[str], list[str]]:
         # the synchronous domain accessors of the same name in these suites,
         # and those are always read straight through: `activated.start()` is
         # followed by `.lineage()` or `.frontier()`, never left standing.
-        method = r"\.start\(\)(?!\s*\.\s*(?!await\b)\w)"
+        # A synchronous runner reads its container straight through —
+        # `image.start().unwrap()` — so in a file that imports one every
+        # `.start()` counts, and the exclusion below would drop exactly those.
+        # No file imports one today; the alternative is a start form this scan
+        # cannot see.
+        method = (
+            r"\.start\(\)"
+            if "SyncRunner" in text
+            else r"\.start\(\)(?!\s*\.\s*(?!await\b)\w)"
+        )
         # Whatever the runner trait is called at this use site. An import may
         # rename it, and `<Image as AsyncRunner>::start` qualifies it, so the
         # spellings are collected from the file rather than assumed.
@@ -342,6 +355,7 @@ def run_sweep(
     daemon_reachable: bool = True,
     hangs_on: str | None = None,
     hang_seconds: float | None = None,
+    ignores_term: bool = False,
     cancel_with: int | None = None,
     listing_refused: str | None = None,
     volume_listing_refused: str | None = None,
@@ -413,6 +427,9 @@ def run_sweep(
         environment["FAKE_DOCKER_SURVIVAL_LOG"] = str(survival_log)
         environment["FAKE_DOCKER_START_LOG"] = str(start_log)
         environment.pop("FAKE_DOCKER_HANG_SECONDS", None)
+        environment.pop("FAKE_DOCKER_IGNORES_TERM", None)
+        if ignores_term:
+            environment["FAKE_DOCKER_IGNORES_TERM"] = "1"
         if hangs_on is not None:
             environment["FAKE_DOCKER_HANGS_ON"] = hangs_on
         if hang_seconds is not None:
@@ -841,6 +858,18 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertEqual(run.removed, ["old111"])
         self.assertEqual(before, 0, "a previous run leaked a deadline")
         self.assertEqual(sleeping_deadlines(LEAK_PROBE_DEADLINE_SECONDS), 0)
+
+    def test_a_daemon_call_that_refuses_to_stop_is_ended_anyway(self) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply", "--deadline-seconds", "1"],
+            hangs_on="ps",
+            ignores_term=True,
+        )
+
+        self.assertEqual(run.status, 1)
+        self.assertEqual(run.removed, [])
+        self.assertIn("did not answer the container listing within 1s", run.stderr)
 
     def test_a_daemon_call_that_overran_its_deadline_is_not_left_running(self) -> None:
         run = run_sweep(

@@ -68,6 +68,12 @@ readonly MISSING_OBJECT_PATTERN='^Error( response from daemon)?: No such (object
 # is how a daemon call that ran past its deadline is told from one that failed.
 readonly SIGNALLED_STATUS_FLOOR=128
 
+# How long a call that overran its deadline is given to end on the signal that
+# asks it to, before it is ended by the one it cannot refuse. A process that
+# ignores SIGTERM would otherwise leave this shell in `wait` for good, which is
+# the state the deadline exists to prevent.
+readonly DEADLINE_GRACE_SECONDS=5
+
 # Kept identical to
 # `signalbox_persistence::DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS`, which is
 # what anything holding a marked container checks itself against;
@@ -162,7 +168,10 @@ parent_of() {
 
 cleanup() {
 	if [ -n "$bounded_worker" ]; then
+		# Asked, then told. A cancellation is already an abrupt end, and a call
+		# that ignores the request would otherwise hold this handler open.
 		kill -s TERM -- -"$bounded_worker" >/dev/null 2>&1 || true
+		kill -s KILL -- -"$bounded_worker" >/dev/null 2>&1 || true
 		wait "$bounded_worker" >/dev/null 2>&1 || true
 		bounded_worker=""
 	fi
@@ -225,6 +234,13 @@ run_bounded() {
 		[ "$(parent_of "$self")" = "$sweep_pid" ] || exit 0
 		[ "$(parent_of "$worker")" = "$sweep_pid" ] || exit 0
 		kill -s TERM -- -"$worker"
+		sleep "$DEADLINE_GRACE_SECONDS"
+		# Still there, so it declined the request. Re-check the parentage,
+		# because the grace period is another window in which the sweep may
+		# have died and the identifier been reissued.
+		[ "$(parent_of "$self")" = "$sweep_pid" ] || exit 0
+		[ "$(parent_of "$worker")" = "$sweep_pid" ] || exit 0
+		kill -s KILL -- -"$worker"
 	) >/dev/null 2>&1 &
 	local deadline=$!
 	bounded_worker="$worker"
