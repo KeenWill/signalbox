@@ -4439,6 +4439,47 @@ async fn s32_inv044_runner_lost_before_pin_round_trips_exact_identity() -> Resul
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s32_inv044_revision_one_loss_authenticates_the_creation_request()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER runner_session_placement_record_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET selector_runner_id = $2,
+                lost_runner_id = $2
+          WHERE session_id = $1
+            AND event_kind = 'runner_lost_before_pin'",
+    )
+    .bind(placement.session().into_uuid())
+    .bind(uuid(LATER_RUNNER))
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(placement.session())
+        .await
+        .expect_err("revision-one loss cannot replace the creation request");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s32_inv044_load_rejects_pinned_facts_on_loss_before_pin() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;

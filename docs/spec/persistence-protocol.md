@@ -301,8 +301,9 @@ Representation rules, all enforced in the schema:
   `abandoned` records. Each event retains the complete facts required by its
   state shape: pre-pin records retain exact request history without pinned or
   registration facts, while pinned loss and abandonment retain the complete
-  pinned snapshot. Pre-pin reconstitution reads the exact replacement and lost
-  predecessor records instead of inferring history from a revision. The generic
+  pinned snapshot. Pre-pin reconstitution authenticates the revision-one request
+  against the exact `created` record and reads every later replacement and lost
+  predecessor instead of inferring history from a revision. The generic
   placement snapshot writer refuses loss, either replacement, and abandonment
   because those transitions require connection/loss, durable-command, scheduler,
   and outbox authority outside the placement aggregate. **Committed

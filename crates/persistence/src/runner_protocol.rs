@@ -2897,57 +2897,56 @@ fn classify_placement_event(
     };
     let prior_revision = decode_generation(prior.decode_column("placement_revision")?)?;
     let prior_state: String = prior.decode_column("state_kind")?;
-    match (prior_state.as_str(), placement.state()) {
-        ("unpinned", SessionRunnerPlacementState::RunnerLostBeforePin(_))
-            if placement.revision() == prior_revision =>
-        {
-            Ok("runner_lost_before_pin")
-        }
-        ("runner_lost_before_pin", SessionRunnerPlacementState::Unpinned)
-            if placement.revision()
-                == prior_revision
-                    .checked_next()
-                    .ok_or(RunnerProtocolCorruption::GenerationExhausted)? =>
-        {
-            Ok("pre_pin_replaced")
-        }
-        ("unpinned", SessionRunnerPlacementState::Pinned(_))
-            if placement.revision() == prior_revision =>
-        {
-            Ok("pinned")
-        }
-        ("pinned", SessionRunnerPlacementState::RunnerLost(_))
-            if placement.revision() == prior_revision =>
-        {
-            Ok("runner_lost")
-        }
-        ("runner_lost", SessionRunnerPlacementState::Pinned(_))
-            if placement.revision()
-                == prior_revision
-                    .checked_next()
-                    .ok_or(RunnerProtocolCorruption::GenerationExhausted)? =>
-        {
-            Ok("runner_replaced")
-        }
-        ("pinned", SessionRunnerPlacementState::Pinned(_))
-            if placement.revision()
-                == prior_revision
-                    .checked_next()
-                    .ok_or(RunnerProtocolCorruption::GenerationExhausted)? =>
-        {
-            Ok("profile_replaced")
-        }
-        (
-            "runner_lost_before_pin",
-            SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(_)),
-        )
-        | (
-            "runner_lost",
-            SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(_)),
-        ) if placement.revision() == prior_revision => Ok("abandoned"),
-        _ => Err(RunnerProtocolStoreError::Domain(
+    let invalid = || {
+        Err(RunnerProtocolStoreError::Domain(
             RunnerDomainError::InvalidState,
-        )),
+        ))
+    };
+    match placement.state() {
+        SessionRunnerPlacementState::Unpinned => match prior_state.as_str() {
+            "runner_lost_before_pin" => match prior_revision.checked_next() {
+                Some(revision) if placement.revision() == revision => Ok("pre_pin_replaced"),
+                Some(_) => invalid(),
+                None => Err(RunnerProtocolCorruption::GenerationExhausted.into()),
+            },
+            _ => invalid(),
+        },
+        SessionRunnerPlacementState::Pinned(_) => match prior_state.as_str() {
+            "unpinned" if placement.revision() == prior_revision => Ok("pinned"),
+            "runner_lost" => match prior_revision.checked_next() {
+                Some(revision) if placement.revision() == revision => Ok("runner_replaced"),
+                Some(_) => invalid(),
+                None => Err(RunnerProtocolCorruption::GenerationExhausted.into()),
+            },
+            "pinned" => match prior_revision.checked_next() {
+                Some(revision) if placement.revision() == revision => Ok("profile_replaced"),
+                Some(_) => invalid(),
+                None => Err(RunnerProtocolCorruption::GenerationExhausted.into()),
+            },
+            _ => invalid(),
+        },
+        SessionRunnerPlacementState::RunnerLostBeforePin(_) => match prior_state.as_str() {
+            "unpinned" if placement.revision() == prior_revision => Ok("runner_lost_before_pin"),
+            _ => invalid(),
+        },
+        SessionRunnerPlacementState::RunnerLost(_) => match prior_state.as_str() {
+            "pinned" if placement.revision() == prior_revision => Ok("runner_lost"),
+            _ => invalid(),
+        },
+        SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(_)) => {
+            match prior_state.as_str() {
+                "runner_lost_before_pin" if placement.revision() == prior_revision => {
+                    Ok("abandoned")
+                }
+                _ => invalid(),
+            }
+        }
+        SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(_)) => {
+            match prior_state.as_str() {
+                "runner_lost" if placement.revision() == prior_revision => Ok("abandoned"),
+                _ => invalid(),
+            }
+        }
     }
 }
 
@@ -3720,10 +3719,34 @@ async fn load_placement_reconstitution_history(
     row: &PgRow,
 ) -> Result<RunnerPlacementReconstitutionHistory, RunnerProtocolStoreError> {
     let revision = decode_generation(row.decode_column("placement_revision")?)?;
+    let session = row.decode_column::<Uuid>("session_id")?;
+    let initial = sqlx::query(
+        "SELECT *
+           FROM runner_session_placement_record
+          WHERE session_id = $1
+            AND event_ordinal = 1",
+    )
+    .bind(session)
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+    let initial_revision = decode_generation(initial.decode_column("placement_revision")?)?;
+    let initial_event: String = initial.decode_column("event_kind")?;
+    let initial_state: String = initial.decode_column("state_kind")?;
+    if initial_revision != RunnerGeneration::one()
+        || initial_event != "created"
+        || initial_state != "unpinned"
+        || placement_row_has_invalid_unpinned_facts(&initial)?
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let initial_request = decode_placement_request(connection, &initial).await?;
     if revision == RunnerGeneration::one() {
+        if decode_placement_request(connection, row).await? != initial_request {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
         return Ok(RunnerPlacementReconstitutionHistory::Initial);
     }
-    let session = row.decode_column::<Uuid>("session_id")?;
     let origins = sqlx::query(
         "SELECT *
            FROM runner_session_placement_record
@@ -3788,6 +3811,9 @@ async fn load_placement_reconstitution_history(
             .map(runner_id)
             .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
         let prior_request = decode_placement_request(connection, &predecessor).await?;
+        if index == 0 && prior_request != initial_request {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
         let replacement_request = decode_placement_request(connection, origin).await?;
         history = RunnerPlacementReconstitutionHistory::PrePinReplacement {
             predecessor_history: Box::new(history),
