@@ -5698,6 +5698,77 @@ async fn s32_inv044_pre_pin_replacement_round_trips_append_only_history()
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn s32_inv002_inv044_load_rejects_malformed_pre_pin_replacement_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let initial_runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(initial_runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    let lost = placement
+        .mark_runner_lost_before_pin(initial_runner)
+        .expect("the exact selected runner may be lost before pinning");
+    append_runner_lost_before_pin_projection(&pool, lost.session()).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    let registration = store.register(&successor, advertisement()).await?;
+    store.open_connection(successor.enrollment()).await?;
+    let replacement = lost
+        .replace_lost_runner_before_pin(
+            exact_runner_request(successor.runner()),
+            registration.registration(),
+        )
+        .expect("the live distinct runner installs a successor request");
+    append_pre_pin_replacement_projection(
+        &pool,
+        replacement.placement.session(),
+        successor.runner(),
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER runner_session_placement_record_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER runner_session_placement_requires_tools,
+         DISABLE TRIGGER runner_session_placement_requires_permission_overrides",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DROP CONSTRAINT runner_session_placement_state_shape,
+         ADD CONSTRAINT runner_session_placement_state_shape CHECK (TRUE)",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET loss_source_kind = 'connection'
+          WHERE session_id = $1 AND event_kind = 'runner_lost_before_pin'",
+    )
+    .bind(replacement.placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(replacement.placement.session())
+        .await
+        .expect_err("replacement history cannot normalize a malformed predecessor");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::InvalidEncoding);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn s32_inv044_pre_pin_replacement_rejects_retained_lost_selector()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
