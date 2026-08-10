@@ -92,6 +92,15 @@ impl TranscriptSnapshot {
         cursor: u64,
         messages: impl IntoIterator<Item = ServerMessage>,
     ) -> Result<Self, ClientError> {
+        Self::from_messages_with_runner(cursor, None, messages)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_messages_with_runner(
+        cursor: u64,
+        runner: Option<RunnerProjection>,
+        messages: impl IntoIterator<Item = ServerMessage>,
+    ) -> Result<Self, ClientError> {
         use signalbox_process_protocol::RequestId;
 
         let request_id = RequestId::try_new(1)
@@ -105,7 +114,7 @@ impl TranscriptSnapshot {
         spool.flush()?;
         Ok(Self {
             cursor,
-            runner: None,
+            runner,
             spool,
         })
     }

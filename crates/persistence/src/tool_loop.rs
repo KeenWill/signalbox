@@ -1557,7 +1557,8 @@ pub(crate) async fn load_runner_recovery_cancellation_batch(
     }
     let frontier =
         signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
-    let retired_attempts = load_retired_attempts(connection, producing_call).await?;
+    let mut retired_attempts = load_retired_attempts(connection, producing_call).await?;
+    retired_attempts.retain(|attempt| Some(*attempt) != interrupted_attempt);
     ToolBatchReconstitutionInput::new(
         session,
         turn,
@@ -1565,7 +1566,7 @@ pub(crate) async fn load_runner_recovery_cancellation_batch(
         load_snapshot(connection, session, frontier).await?,
         load_requests(connection, producing_call, session, turn).await?,
         load_approvals(connection, producing_call).await?,
-        load_attempts(connection, producing_call).await?,
+        load_runner_recovery_attempts(connection, producing_call, interrupted_attempt).await?,
         ToolBatchPhaseReconstitutionInput::Executing {
             turn_attempt: yielded_attempt,
         },
@@ -1616,7 +1617,8 @@ pub(crate) async fn load_recovery_batch_by_attempt(
     }
     let frontier =
         signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
-    let retired_attempts = load_retired_attempts(connection, producing_call).await?;
+    let mut retired_attempts = load_retired_attempts(connection, producing_call).await?;
+    retired_attempts.retain(|attempt| *attempt != recovery_attempt);
     ToolBatchReconstitutionInput::new(
         session,
         turn,
@@ -1624,7 +1626,7 @@ pub(crate) async fn load_recovery_batch_by_attempt(
         load_snapshot(connection, session, frontier).await?,
         load_requests(connection, producing_call, session, turn).await?,
         load_approvals(connection, producing_call).await?,
-        load_attempts(connection, producing_call).await?,
+        load_runner_recovery_attempts(connection, producing_call, Some(recovery_attempt)).await?,
         ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
             attempt: recovery_attempt,
         },
@@ -2327,6 +2329,38 @@ async fn load_attempts(
           ORDER BY request.request_ordinal",
     )
     .bind(producing_call.into_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    rows.into_iter().map(decode_attempt).collect()
+}
+
+/// Restores a runner-recovery round after its exact interrupted attempt has
+/// been terminalized. The current-attempt view intentionally hides terminal
+/// pure and idempotent attempts whose lease remains lost; this recovery-only
+/// loader adds back only the attempt authenticated by the lifecycle wait.
+async fn load_runner_recovery_attempts(
+    connection: &mut PgConnection,
+    producing_call: signalbox_domain::ModelCallId,
+    interrupted_attempt: Option<ToolAttemptId>,
+) -> Result<Vec<ReconstitutedToolAttempt>, ToolLoopRepositoryError> {
+    let rows = sqlx::query(
+        "SELECT attempt.*
+           FROM tool_attempt AS attempt
+           JOIN tool_request AS request
+             ON request.request_id = attempt.request_id
+          WHERE request.producing_model_call_id = $1
+            AND (
+                EXISTS (
+                    SELECT 1
+                      FROM runner_current_tool_attempt AS current
+                     WHERE current.attempt_id = attempt.attempt_id
+                )
+                OR attempt.attempt_id = $2
+            )
+          ORDER BY request.request_ordinal",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(interrupted_attempt.map(tool_attempt_id_to_uuid))
     .fetch_all(&mut *connection)
     .await?;
     rows.into_iter().map(decode_attempt).collect()
