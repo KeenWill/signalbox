@@ -1958,6 +1958,7 @@ mod tests {
     const SYNTHETIC_POST_SUBCOMMAND_UNSTABLE_OPTION_VALUE: &str = "profile-rustflags";
     const CARGO_RELEASE_OPTION: &str = "--release";
     const CARGO_RELEASE_SHORT_OPTION: &str = "-r";
+    const SYNTHETIC_CARGO_RELEASE_OPTION_CLUSTER: &str = "-qr";
     const CARGO_IGNORE_RUST_VERSION_OPTION: &str = "--ignore-rust-version";
     const MCP_JSON_RPC_VERSION: &str = "2.0";
     const MCP_INVALID_PARAMS_ERROR_CODE: i64 = -32602;
@@ -2036,7 +2037,7 @@ with open(sys.argv[3], encoding="utf-8") as source:
 hook = settings["hooks"]["SessionStart"][0]["hooks"][0]
 assert hook["type"] == "command"
 hook_timeout = hook["timeout"]
-assert isinstance(hook_timeout, (int, float)) and hook_timeout > 0
+assert type(hook_timeout) in (int, float) and hook_timeout > 0
 expected_bridge = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
 assert server["command"] == expected_bridge
 hook_arguments = shlex.split(hook["command"])
@@ -2311,7 +2312,8 @@ finally:
             if matches!(
                 argument.to_str(),
                 Some(CARGO_RELEASE_OPTION | CARGO_RELEASE_SHORT_OPTION)
-            ) {
+            ) || cargo_short_option_cluster_contains(argument, b'r')
+            {
                 profile = Some(OsString::from(CARGO_RELEASE_PROFILE));
             }
             if argument == OsStr::new(CARGO_IGNORE_RUST_VERSION_OPTION) {
@@ -2327,6 +2329,11 @@ finally:
             ignore_rust_version,
             invocation_directory: invocation_directory.to_path_buf(),
         })
+    }
+
+    fn cargo_short_option_cluster_contains(argument: &OsStr, option: u8) -> bool {
+        let encoded = argument.as_encoded_bytes();
+        encoded.starts_with(b"-") && !encoded.starts_with(b"--") && encoded[1..].contains(&option)
     }
 
     #[track_caller]
@@ -2895,6 +2902,20 @@ finally:
             OsStr::new(CARGO_PROGRAM_STEM),
             OsStr::new(CARGO_TEST_SUBCOMMAND),
             OsStr::new(CARGO_RELEASE_SHORT_OPTION),
+        ];
+
+        assert_eq!(
+            cargo_test_profile_from_arguments(&arguments),
+            Some(OsString::from(CARGO_RELEASE_PROFILE))
+        );
+    }
+
+    #[test]
+    fn cargo_test_invocation_recognizes_a_clustered_short_release_option() {
+        let arguments = [
+            OsStr::new(CARGO_PROGRAM_STEM),
+            OsStr::new(CARGO_TEST_SUBCOMMAND),
+            OsStr::new(SYNTHETIC_CARGO_RELEASE_OPTION_CLUSTER),
         ];
 
         assert_eq!(
@@ -5875,22 +5896,31 @@ finally:
         let mut initialized = fixture.initialize();
         fixture.finish();
 
-        let server_version = initialized["result"]["serverInfo"]
-            .as_object_mut()
-            .expect("MCP server info is an object")
-            .remove("version")
-            .expect("MCP server info declares its version");
         let tools_capability = initialized["result"]["capabilities"]["tools"]
             .as_object()
             .expect("MCP tools capability is an object");
-
-        assert_eq!(server_version, env!("CARGO_PKG_VERSION"));
         assert!(
             tools_capability
                 .get("listChanged")
                 .is_none_or(|value| value == &serde_json::json!(false))
         );
 
+        let server_info = initialized["result"]["serverInfo"]
+            .as_object_mut()
+            .expect("MCP server info is an object");
+        let server_version = server_info
+            .remove("version")
+            .expect("MCP server info declares its version");
+        let server_name = server_info
+            .remove("name")
+            .expect("MCP server info declares its informational name");
+        assert_eq!(server_version, env!("CARGO_PKG_VERSION"));
+        assert!(
+            server_name
+                .as_str()
+                .is_some_and(|server_name| !server_name.is_empty())
+        );
+        assert!(server_info.is_empty());
         initialized["result"]
             .as_object_mut()
             .expect("MCP initialization result is an object")
@@ -5900,9 +5930,7 @@ finally:
         expect![[r#"
             {
               "protocolVersion": "2025-11-25",
-              "serverInfo": {
-                "name": "signalbox-claude-cli-bridge"
-              }
+              "serverInfo": {}
             }"#]]
         .assert_eq(
             &serde_json::to_string_pretty(&initialized["result"])
