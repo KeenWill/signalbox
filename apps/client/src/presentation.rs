@@ -1648,24 +1648,26 @@ impl<'a> Output<'a> {
                 sandbox_profile,
                 working_directory,
                 state,
-            } => {
-                let working_directory_present = working_directory.is_some();
-                let working_directory = working_directory.as_ref().map_or_else(
-                    || String::from("none"),
-                    |directory| self.render_field(directory.as_str(), TextField::DelimitedOnLine),
-                );
-                writeln!(
+            } => match working_directory {
+                Some(working_directory) => writeln!(
                     self.stdout,
                     "event={cursor} session={session_id} runner_state_transition \
                      runner={runner_id} placement_revision={} sandbox={} \
-                     working_directory_present={} working_directory={} state={}",
+                     working_directory={} state={}",
                     placement_revision.value(),
                     runner_sandbox_profile(*sandbox_profile),
-                    working_directory_present,
-                    working_directory,
+                    self.render_field(working_directory.as_str(), TextField::DelimitedOnLine,),
                     runner_state_transition_state(*state),
-                )
-            }
+                ),
+                None => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} runner_state_transition \
+                     runner={runner_id} placement_revision={} sandbox={} state={}",
+                    placement_revision.value(),
+                    runner_sandbox_profile(*sandbox_profile),
+                    runner_state_transition_state(*state),
+                ),
+            },
             SessionEvent::ToolApprovalDecided {
                 turn_id,
                 tool_request_id,
@@ -4450,7 +4452,7 @@ mod tests {
         });
 
         expect![[r#"
-            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted working_directory_present=true working_directory=workspace\u{20}root\u{a}project state=working_directory_changed
+            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted working_directory=workspace\u{20}root\u{a}project state=working_directory_changed
         "#]]
         .assert_eq(&rendered);
     }
@@ -4478,8 +4480,8 @@ mod tests {
         });
 
         expect![[r#"
-            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted working_directory_present=false working_directory=none state=pinned
-            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted working_directory_present=true working_directory=none state=pinned
+            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted state=pinned
+            event=1 session=00000000-0000-0000-0000-000000000001 runner_state_transition runner=00000000-0000-0000-0000-000000000002 placement_revision=3 sandbox=workspace_restricted working_directory=none state=pinned
         "#]]
         .assert_eq(&format!("{default_directory}{literal_none}"));
     }
