@@ -3993,6 +3993,12 @@ fn reconstitute_inner(
         .filter(|record| record.order.priority() == AcceptedInputQueuePriority::Ordinary)
         .map(|record| record.turn)
         .collect::<BTreeSet<_>>();
+    let queued_turns = input
+        .turns
+        .iter()
+        .filter(|record| matches!(record.state, AcceptedInputTurnSchedulingRecordState::Queued))
+        .map(|record| record.turn)
+        .collect::<BTreeSet<_>>();
     let queue_work = input.turns.iter().map(|record| {
         let order = if preceding_non_accepted_successors.contains_key(&record.turn) {
             AcceptedInputQueueOrder::ordinary(record.order.acceptance_position())
@@ -4007,6 +4013,7 @@ fn reconstitute_inner(
         })?,
         external_interrupt_successors,
         &ordinary_roots,
+        &queued_turns,
     );
     let mut delegated_turns = BTreeMap::new();
     for fact in input.delegated_turns.iter().copied() {
@@ -6793,6 +6800,7 @@ fn promote_external_interrupt_chains(
     total_order: Vec<TurnId>,
     external_successors: BTreeSet<TurnId>,
     ordinary_roots: &BTreeSet<TurnId>,
+    queued_turns: &BTreeSet<TurnId>,
 ) -> Vec<TurnId> {
     if external_successors.is_empty() {
         return total_order;
@@ -6807,7 +6815,11 @@ fn promote_external_interrupt_chains(
     else {
         return total_order;
     };
-    if start == 0 {
+    let insertion = total_order[..start]
+        .iter()
+        .position(|turn| queued_turns.contains(turn) && ordinary_roots.contains(turn))
+        .unwrap_or(start);
+    if insertion == start {
         return total_order;
     }
     let end = total_order[start + 1..]
@@ -6816,8 +6828,9 @@ fn promote_external_interrupt_chains(
         .map(|offset| start + 1 + offset)
         .unwrap_or(total_order.len());
     let mut promoted = Vec::with_capacity(total_order.len());
+    promoted.extend_from_slice(&total_order[..insertion]);
     promoted.extend_from_slice(&total_order[start..end]);
-    promoted.extend_from_slice(&total_order[..start]);
+    promoted.extend_from_slice(&total_order[insertion..start]);
     promoted.extend_from_slice(&total_order[end..]);
     promoted
 }
@@ -16755,6 +16768,7 @@ mod tests {
         let interrupt_descendant = turn_id(813);
         let later_ordinary = turn_id(814);
         let ordinary_roots = BTreeSet::from([older_ordinary, later_ordinary]);
+        let queued_turns = BTreeSet::from([older_ordinary, later_ordinary]);
 
         let promoted = super::promote_external_interrupt_chains(
             vec![
@@ -16765,6 +16779,7 @@ mod tests {
             ],
             BTreeSet::from([external_successor]),
             &ordinary_roots,
+            &queued_turns,
         );
 
         assert_eq!(
@@ -16789,6 +16804,7 @@ mod tests {
         let second_descendant = turn_id(825);
         let later_ordinary = turn_id(826);
         let ordinary_roots = BTreeSet::from([older_ordinary, later_ordinary]);
+        let queued_turns = BTreeSet::from([older_ordinary, later_ordinary]);
 
         let promoted = super::promote_external_interrupt_chains(
             vec![
@@ -16801,6 +16817,7 @@ mod tests {
             ],
             BTreeSet::from([first_external_successor, second_external_successor]),
             &ordinary_roots,
+            &queued_turns,
         );
 
         assert_eq!(
@@ -16814,5 +16831,43 @@ mod tests {
                 later_ordinary,
             ]
         );
+    }
+
+    /// INV-009: an external interrupt chain does not cross a completed
+    /// accepted-input terminal prefix.
+    #[test]
+    fn inv009_external_interrupt_chain_retains_terminal_prefix() {
+        let terminal = turn_id(831);
+        let external_successor = turn_id(832);
+        let ordinary_roots = BTreeSet::from([terminal]);
+
+        let promoted = super::promote_external_interrupt_chains(
+            vec![terminal, external_successor],
+            BTreeSet::from([external_successor]),
+            &ordinary_roots,
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(promoted, vec![terminal, external_successor]);
+    }
+
+    /// INV-009: an external interrupt chain crosses queued ordinary work but
+    /// retains the completed accepted-input terminal prefix.
+    #[test]
+    fn inv009_external_interrupt_chain_precedes_only_queued_prefix() {
+        let terminal = turn_id(841);
+        let older_queued = turn_id(842);
+        let external_successor = turn_id(843);
+        let ordinary_roots = BTreeSet::from([terminal, older_queued]);
+        let queued_turns = BTreeSet::from([older_queued]);
+
+        let promoted = super::promote_external_interrupt_chains(
+            vec![terminal, older_queued, external_successor],
+            BTreeSet::from([external_successor]),
+            &ordinary_roots,
+            &queued_turns,
+        );
+
+        assert_eq!(promoted, vec![terminal, external_successor, older_queued]);
     }
 }
