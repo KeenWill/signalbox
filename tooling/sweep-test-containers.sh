@@ -247,6 +247,17 @@ run_bounded() {
 	bounded_deadline="$deadline"
 	local status=0
 	wait "$worker" || status=$?
+	if [ "$status" -ge "$SIGNALLED_STATUS_FLOOR" ]; then
+		# Reaping the wrapper is not reaping the call. A pipeline's wrapper
+		# shell dies on the first signal while a `docker` beneath it that
+		# declined keeps going, and `wait` returning here would otherwise stand
+		# the deadline down before it escalated — leaving that process talking
+		# to the daemon after the sweep reported a timeout. End the group
+		# outright instead. The identifier was just reaped, so this races
+		# reuse by the width of one statement; leaving a `docker rm` running
+		# unobserved is the worse of the two.
+		kill -s KILL -- -"$worker" >/dev/null 2>&1 || true
+	fi
 	bounded_worker=""
 	# The group, not the identifier: the deadline is a shell whose `sleep` is a
 	# child of it, and signalling the shell alone leaves that `sleep` reparented

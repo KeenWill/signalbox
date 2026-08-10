@@ -871,6 +871,20 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertEqual(run.removed, [])
         self.assertIn("did not answer the container listing within 1s", run.stderr)
 
+    def test_a_pipeline_child_that_refuses_to_stop_does_not_outlive_the_sweep(
+        self,
+    ) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply", "--deadline-seconds", "1"],
+            hangs_on="inspect",
+            hang_seconds=6,
+            ignores_term=True,
+        )
+
+        self.assertEqual(run.status, 1)
+        self.assertEqual(run.survived, [], "the refusing call kept talking to the daemon")
+
     def test_a_daemon_call_that_overran_its_deadline_is_not_left_running(self) -> None:
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
