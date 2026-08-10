@@ -8360,6 +8360,7 @@ pub struct SessionRunnerPlacement { /* private */ }
 pub enum RunnerPlacementReconstitutionHistory {
     Initial,
     PrePinReplacement {
+        predecessor_history: Box<RunnerPlacementReconstitutionHistory>,
         prior_revision: RunnerGeneration,
         lost_runner: RunnerId,
         prior_request: Box<SessionRunnerPlacementRequest>,

@@ -4516,12 +4516,37 @@ async fn s32_inv044_pre_pin_replacement_round_trips_append_only_history()
         successor_registration.registration().runner(),
     )
     .await?;
+    let successor_lost = replacement
+        .placement
+        .mark_runner_lost_before_pin(successor_enrollment.runner())
+        .expect("the exact successor may also be lost before pinning");
+    append_runner_lost_before_pin_projection(&pool, successor_lost.session()).await?;
+    let returning_enrollment = enrollment();
+    store.insert_enrollment(&returning_enrollment).await?;
+    let returning_registration = store
+        .register(&returning_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(returning_enrollment.enrollment())
+        .await?;
+    let second_replacement = successor_lost
+        .replace_lost_runner_before_pin(
+            exact_runner_request(returning_enrollment.runner()),
+            returning_registration.registration(),
+        )
+        .expect("the distinct live original runner installs the next successor request");
+    append_pre_pin_replacement_projection(
+        &pool,
+        second_replacement.placement.session(),
+        returning_enrollment.runner(),
+    )
+    .await?;
     let loaded = store
         .load_placement(SessionId::from_uuid(uuid(SESSION)))
         .await?
-        .expect("the successor unpinned placement is present");
+        .expect("the second successor unpinned placement is present");
 
-    assert_eq!(loaded.placement(), &replacement.placement);
+    assert_eq!(loaded.placement(), &second_replacement.placement);
     assert_eq!(loaded.registration(), None);
     assert_eq!(loaded.grant(), None);
     drop(pool);
