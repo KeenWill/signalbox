@@ -1738,7 +1738,9 @@ where
         } else {
             probed
         };
-        let path = match decide_session_root(recorded, &derived) {
+        // The pathname to compose against, and the directory the derivation
+        // walked through to reach it.
+        let (path, parent) = match decide_session_root(recorded, &derived) {
             SessionRootDecision::ConfiguredRoot => {
                 // Reachable only with no record or a recorded configured
                 // binding, so the entry below can only read as configured. The
@@ -1809,7 +1811,6 @@ where
                 (path.clone(), *parent)
             }
         };
-        let (path, parent) = path;
         drop(state);
         let filesystem = FileSystem::pin_further_root(&path).map_err(|_| {
             SessionWorkspaceFailure::Composition(DaemonToolsConstructionError::WorkspaceRead)
