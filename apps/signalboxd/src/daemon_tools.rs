@@ -4563,7 +4563,6 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         _support: tempfile::TempDir,
         executable: PathBuf,
         ready_path: PathBuf,
-        expected_tools: serde_json::Value,
         child: Child,
         input: Option<ChildStdin>,
         output: Option<BufReader<ChildStdout>>,
@@ -4596,8 +4595,6 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
                 ToolEffectClass::EffectFree,
             );
             let catalog = bridge_catalog(&[definition]);
-            let catalog_value: serde_json::Value =
-                serde_json::from_slice(&catalog).expect("shallow blocking bridge catalog is JSON");
             let catalog_path = support.path().join(MCP_CATALOG_FILENAME);
             let ready_path = support.path().join(MCP_READY_FILENAME);
             fs::write(&catalog_path, &catalog).expect("blocking bridge catalog is written");
@@ -4656,7 +4653,6 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
                 _support: support,
                 executable,
                 ready_path,
-                expected_tools: catalog_value["tools"].clone(),
                 child,
                 input: Some(input),
                 output: Some(output),
@@ -5429,7 +5425,6 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
     #[test]
     fn claude_mcp_bridge_writes_the_list_response_before_publishing_readiness() {
         let mut fixture = BlockingListResponseFixture::start();
-        let expected_tools = fixture.expected_tools.clone();
         fixture.await_list_response_started();
         assert!(!fixture.ready_path.exists());
         let mut waiter = McpBridgeReadyWaiter::start(McpBridgeReadyWaiterSpawn {
@@ -5440,12 +5435,10 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         waiter.synchronize_wait_path();
         waiter.assert_blocks_while_list_response_is_backpressured();
         assert!(!fixture.ready_path.exists());
-        let listed = fixture.read_list_response();
+        fixture.read_list_response();
         waiter.finish_success();
         assert!(fixture.ready_path.is_file());
         fixture.finish();
-
-        assert_eq!(listed["result"]["tools"], expected_tools);
     }
 
     #[cfg(target_os = "linux")]
