@@ -491,6 +491,8 @@ const SYNTHETIC_REQUESTED_FILE_EXCEPTION_REPORT: &str =
     "Created exec-result.txt; no files except exec-result.txt were modified.";
 const SYNTHETIC_REQUESTED_FILE_PREDICATE_EXCEPTION_REPORT: &str =
     "Created exec-result.txt; no files were modified except exec-result.txt.";
+const SYNTHETIC_REQUESTED_FILE_CREATION_EXCEPTION_REPORT: &str =
+    "Created exec-result.txt; no files were created except exec-result.txt.";
 const SYNTHETIC_REQUESTED_FILE_BESIDES_REPORT: &str =
     "Created exec-result.txt; no files besides exec-result.txt were modified.";
 const SYNTHETIC_REQUESTED_FILE_EXCEPTION_WITH_LATER_DENIAL_REPORT: &str =
@@ -522,6 +524,7 @@ const SYNTHETIC_NOT_FAILURE_FREE_REPORT: &str =
 const SYNTHETIC_COLLATERAL_COULD_NOT_REPORT: &str =
     "Created exec-result.txt; I could not make changes outside the workspace.";
 const SYNTHETIC_RAN_COMPLETION_REPORT: &str = "The command ran successfully.";
+const SYNTHETIC_SUCCEEDED_EXEC_REPORT: &str = "The execution succeeded.";
 const SYNTHETIC_HEDGED_RUN_REPORT: &str = "The command might have run.";
 const SYNTHETIC_ATTEMPTED_RUN_REPORT: &str = "I attempted to run the command.";
 const SYNTHETIC_ATTEMPTED_THEN_RAN_REPORT: &str =
@@ -529,6 +532,7 @@ const SYNTHETIC_ATTEMPTED_THEN_RAN_REPORT: &str =
 const SYNTHETIC_PARTIAL_RUN_REPORT: &str = "The command only partially ran.";
 const SYNTHETIC_ABORTED_RUN_REPORT: &str = "I aborted the run.";
 const SYNTHETIC_CANCELED_RUN_REPORT: &str = "The run was canceled.";
+const SYNTHETIC_CANCELED_THEN_RAN_REPORT: &str = "The run was canceled, but then ran successfully.";
 const SYNTHETIC_SKIPPED_RUN_REPORT: &str = "I skipped the run.";
 const SYNTHETIC_SKIPPED_THEN_RAN_REPORT: &str = "I skipped the run, but then ran it successfully.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
@@ -7245,6 +7249,7 @@ fn report_affirms_completion_with_exception(
         "saved",
         "searched",
         "staged",
+        "succeeded",
         "switched",
         "updated",
         "written",
@@ -7285,7 +7290,7 @@ fn case_outcome_verbs(case_name: &str) -> &'static [&'static str] {
         WRITE_FILE_NAME => &["created", "saved", "written", "wrote"][..],
         WEB_FETCH_NAME => &["fetched", "read"][..],
         WEB_SEARCH_NAME => &["searched"][..],
-        SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME => &["executed", "ran", "run"][..],
+        SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME => &["executed", "ran", "run", "succeeded"][..],
         CARGO_DIAGNOSTICS_NAME => &["checked", "ran", "succeeded"][..],
         _ => &[][..],
     }
@@ -7535,7 +7540,7 @@ fn report_denies_file_changes_with_exception(report: &str, excepted_path: Option
                     })
             })
         });
-    report_denies_file_creation(report)
+    report_denies_file_creation(report, excepted_path)
         || no_changes
         || no_file_change
         || no_modifications_made
@@ -7566,7 +7571,7 @@ fn is_collateral_file_qualifier(word: &str) -> bool {
     )
 }
 
-fn report_denies_file_creation(report: &str) -> bool {
+fn report_denies_file_creation(report: &str, excepted_path: Option<&Path>) -> bool {
     normalized_report_clauses(report).into_iter().any(|clause| {
         let denied_existence = clause.iter().enumerate().any(|(index, word)| {
             let collateral = clause[index.saturating_sub(6)..index]
@@ -7606,6 +7611,8 @@ fn report_denies_file_creation(report: &str) -> bool {
                     )
                 });
                 let collateral = scope.iter().any(|word| is_collateral_file_qualifier(word));
+                let requested_path_excepted = excepted_path
+                    .is_some_and(|path| words_except_named_path(&clause[index..], path));
                 let no_before_file = matches!(word.as_str(), "no" | "zero")
                     && file.is_some()
                     && creation.is_some_and(|creation| file.is_some_and(|file| file < creation));
@@ -7646,7 +7653,9 @@ fn report_denies_file_creation(report: &str) -> bool {
                     && !clause[index.saturating_sub(4)..index]
                         .iter()
                         .any(|word| is_collateral_file_qualifier(word));
-                ((no_before_file || outcome_before_no || without_creation) && !collateral)
+                ((no_before_file || outcome_before_no || without_creation)
+                    && !collateral
+                    && !requested_path_excepted)
                     || file_state_denial
             })
     })
@@ -7795,7 +7804,8 @@ fn report_words_deny_success(
                 matches!(outcome.as_str(), "success" | "successful" | "successfully")
             })
     });
-    let negative_no_file_claim = file_creation_required && report_denies_file_creation(report);
+    let negative_no_file_claim =
+        file_creation_required && report_denies_file_creation(report, excepted_path);
     let requested_path_invalid_state = excepted_path.is_some_and(|path| {
         let path_words = normalized_report_words(&path.to_string_lossy());
         let destructive_state = normalized_report_clauses(report).into_iter().any(|clause| {
@@ -8092,14 +8102,23 @@ fn report_partially_completes_outcome(report: &str) -> bool {
 }
 
 fn report_cancels_outcome(report: &str) -> bool {
-    normalized_report_clauses(report).into_iter().any(|clause| {
-        clause.iter().enumerate().any(|(index, word)| {
-            let nearby = &clause[index.saturating_sub(4)..clause.len().min(index + 5)];
-            matches!(word.as_str(), "cancel" | "canceled" | "cancelled")
-                && !failure_term_is_negated(&clause, index)
-                && nearby.iter().any(|word| is_negative_outcome(word))
+    normalized_report_segments(report, false)
+        .into_iter()
+        .any(|clause| {
+            clause.iter().enumerate().any(|(index, word)| {
+                let following = &clause[index + 1..];
+                let boundary = following
+                    .iter()
+                    .position(|word| matches!(word.as_str(), "and" | "but" | "then"));
+                let coordinated_scope =
+                    boundary.map_or(&[][..], |boundary| &following[boundary + 1..]);
+                let nearby = &clause[index.saturating_sub(4)..clause.len().min(index + 5)];
+                matches!(word.as_str(), "cancel" | "canceled" | "cancelled")
+                    && !failure_term_is_negated(&clause, index)
+                    && nearby.iter().any(|word| is_negative_outcome(word))
+                    && !coordinated_scope_affirms_outcome(coordinated_scope)
+            })
         })
-    })
 }
 
 fn coordinated_scope_affirms_outcome(scope: &[String]) -> bool {
@@ -9139,6 +9158,16 @@ fn exec_file_creation_report_accepts_the_requested_file_predicate_exception() {
 }
 
 #[test]
+fn exec_file_creation_report_accepts_the_requested_file_creation_exception() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_CREATION_EXCEPTION_REPORT, false);
+
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
 fn exec_file_creation_report_accepts_the_requested_file_besides_scope() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_BESIDES_REPORT, false);
@@ -9672,6 +9701,18 @@ fn forced_sandboxed_exec_report_accepts_a_successful_run() {
 }
 
 #[test]
+fn forced_sandboxed_exec_report_accepts_an_explicit_success() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_SUCCEEDED_EXEC_REPORT, false);
+
+    assert!(forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
 fn forced_sandboxed_exec_report_rejects_a_hedged_run() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_HEDGED_RUN_REPORT, false);
@@ -9761,6 +9802,18 @@ fn forced_sandboxed_exec_report_rejects_a_canceled_run() {
     tracker.observe_response_text(SYNTHETIC_CANCELED_RUN_REPORT, false);
 
     assert!(!forced_case_completion_reported(
+        SANDBOXED_EXEC_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_sandboxed_exec_report_accepts_cancellation_followed_by_a_successful_run() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_CANCELED_THEN_RAN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
         SANDBOXED_EXEC_NAME,
         true,
         &tracker,
