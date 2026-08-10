@@ -27,10 +27,10 @@ use signalbox_domain::{
     RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, SubmitInput, ToolAdmissibleLoci,
-    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    SessionRunnerPlacementRequest, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
@@ -14399,6 +14399,7 @@ async fn s31_inv043_inv044_exact_selection_loss_rejects_post_reconnect_pin()
         SessionId::from_uuid(uuid(SESSION)),
         exact_runner_request(expected_enrollment.runner()),
     );
+    let expected_unpinned_state = placement.state().clone();
     let session = placement.session();
     store.store_placement(&placement, None, None).await?;
     store
@@ -14433,10 +14434,7 @@ async fn s31_inv043_inv044_exact_selection_loss_rejects_post_reconnect_pin()
     assert_store_check_violation(rejected);
     assert_eq!(loaded.placement().request(), pin.placement.request());
     assert_eq!(loaded.placement().revision(), pin.placement.revision());
-    assert_eq!(
-        loaded.placement().state(),
-        &SessionRunnerPlacementState::Unpinned
-    );
+    assert_eq!(loaded.placement().state(), &expected_unpinned_state);
     drop(pool);
     Ok(())
 }
@@ -14584,6 +14582,7 @@ async fn s31_inv009_inv043_inv044_connection_loss_serializes_exact_selection_pin
         SessionId::from_uuid(uuid(SESSION)),
         exact_runner_request(expected_enrollment.runner()),
     );
+    let expected_unpinned_state = placement.state().clone();
     let session = placement.session();
     store.store_placement(&placement, None, None).await?;
     let pin = placement
@@ -14636,10 +14635,7 @@ async fn s31_inv009_inv043_inv044_connection_loss_serializes_exact_selection_pin
 
     assert_eq!(lost_connection.state(), RunnerConnectionState::Lost);
     assert_store_check_violation(rejected);
-    assert_eq!(
-        loaded.placement().state(),
-        &SessionRunnerPlacementState::Unpinned
-    );
+    assert_eq!(loaded.placement().state(), &expected_unpinned_state);
     drop(pool);
     Ok(())
 }
