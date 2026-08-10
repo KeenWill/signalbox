@@ -449,6 +449,8 @@ const SYNTHETIC_COLLATERAL_NOTHING_ELSE_CHANGED_REPORT: &str =
     "Created exec-result.txt; nothing else was changed.";
 const SYNTHETIC_REQUESTED_FILE_EXCEPTION_REPORT: &str =
     "Created exec-result.txt; no files except exec-result.txt were modified.";
+const SYNTHETIC_REQUESTED_FILE_PREDICATE_EXCEPTION_REPORT: &str =
+    "Created exec-result.txt; no files were modified except exec-result.txt.";
 const SYNTHETIC_REQUESTED_FILE_BESIDES_REPORT: &str =
     "Created exec-result.txt; no files besides exec-result.txt were modified.";
 const SYNTHETIC_SCOPED_NEGATION_COMPLETION_REPORT: &str =
@@ -6359,12 +6361,24 @@ impl OperationTracker {
                 report = report.replace(&receipt, "");
             }
         }
-        report_affirms_completion(&report, true)
+        report_affirms_completion_excepting_path(&report, path)
             && !report_denies_file_changes_excepting_path(&report, path)
     }
 }
 
 fn report_affirms_completion(report: &str, file_creation_required: bool) -> bool {
+    report_affirms_completion_with_exception(report, file_creation_required, None)
+}
+
+fn report_affirms_completion_excepting_path(report: &str, path: &Path) -> bool {
+    report_affirms_completion_with_exception(report, true, Some(path))
+}
+
+fn report_affirms_completion_with_exception(
+    report: &str,
+    file_creation_required: bool,
+    excepted_path: Option<&Path>,
+) -> bool {
     let words = normalized_report_words(report);
     let has_completion = [
         "applied",
@@ -6388,12 +6402,13 @@ fn report_affirms_completion(report: &str, file_creation_required: bool) -> bool
     ]
     .iter()
     .any(|word| words.iter().any(|observed| observed == *word));
-    has_completion && !report_denies_success(report, file_creation_required)
+    has_completion
+        && !report_words_deny_success(report, &words, file_creation_required, excepted_path)
 }
 
 fn report_denies_success(report: &str, file_creation_required: bool) -> bool {
     let words = normalized_report_words(report);
-    report_words_deny_success(report, &words, file_creation_required)
+    report_words_deny_success(report, &words, file_creation_required, None)
 }
 
 fn report_denies_file_changes(report: &str) -> bool {
@@ -6442,9 +6457,8 @@ fn report_denies_file_changes_with_exception(report: &str, excepted_path: Option
                     .iter()
                     .any(|word| is_collateral_file_qualifier(word))
             });
-            let requested_path_excepted = denied_outcome.is_some_and(|outcome| {
-                excepted_path.is_some_and(|path| words_except_named_path(&scope[..outcome], path))
-            });
+            let requested_path_excepted = denied_outcome.is_some()
+                && excepted_path.is_some_and(|path| words_except_named_path(scope, path));
             word == "no"
                 && clause
                     .get(index + 1)
@@ -6781,7 +6795,12 @@ fn normalized_report_words(report: &str) -> Vec<String> {
         .collect()
 }
 
-fn report_words_deny_success(report: &str, words: &[String], file_creation_required: bool) -> bool {
+fn report_words_deny_success(
+    report: &str,
+    words: &[String],
+    file_creation_required: bool,
+    excepted_path: Option<&Path>,
+) -> bool {
     let explicit_failure = report
         .split([';', '.', ',', '!', '?', '\n'])
         .map(normalized_report_words)
@@ -6905,9 +6924,9 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
             && claim[2] == "be"
             && negative_outcomes.contains(&claim[3].as_str())
     });
-    let scoped_negation = report
-        .split([';', '.', ',', '!', '?', '\n'])
-        .map(normalized_report_words)
+    let clauses_with_dotted_paths_preserved = normalized_report_clauses(report);
+    let scoped_negation = clauses_with_dotted_paths_preserved
+        .into_iter()
         .any(|clause| {
             clause.iter().enumerate().any(|(index, word)| {
                 let scope = &clause[index + 1..clause.len().min(index + 7)];
@@ -6983,12 +7002,15 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                                     .all(|word| matches!(word.as_str(), "any" | "the"))
                             })
                     });
+                let requested_path_excepted = outcome.is_some()
+                    && excepted_path.is_some_and(|path| words_except_named_path(&clause, path));
                 matches!(word.as_str(), "never" | "no" | "not" | "without")
                     && outcome.is_some()
                     && !affirmative_not_only
                     && !no_is_collateral
                     && !collateral_only
                     && !read_only_file_denial
+                    && !requested_path_excepted
             })
         });
     explicit_failure
@@ -7612,6 +7634,24 @@ fn exec_file_creation_report_accepts_the_requested_file_exception() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_EXCEPTION_REPORT, false);
 
+    assert!(
+        tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
+    );
+}
+
+#[test]
+fn exec_file_creation_report_accepts_the_requested_file_predicate_exception() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REQUESTED_FILE_PREDICATE_EXCEPTION_REPORT, false);
+
+    assert!(report_affirms_completion_excepting_path(
+        SYNTHETIC_REQUESTED_FILE_PREDICATE_EXCEPTION_REPORT,
+        Path::new(EXEC_RESULT_PATH),
+    ));
+    assert!(!report_denies_file_changes_excepting_path(
+        SYNTHETIC_REQUESTED_FILE_PREDICATE_EXCEPTION_REPORT,
+        Path::new(EXEC_RESULT_PATH),
+    ));
     assert!(
         tracker.final_response_reports_file_creation_excepting_path(Path::new(EXEC_RESULT_PATH))
     );
