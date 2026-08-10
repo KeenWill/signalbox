@@ -538,6 +538,86 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  /// INV-033 / INV-044: session summaries retain the same complete runner
+  /// projection as transcript snapshot boundaries.
+  func testSessionSummaryDecodesCompleteRunnerProjection() throws {
+    let runnerID = "44444444-4444-4444-8444-444444444444"
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"8",
+          "message":{
+            "type":"session_summary",
+            "session_id":"\(sessionID)",
+            "defaults_version":"1",
+            "model_selection":{"kind":"alias","alias_id":"\(turnID)"},
+            "placement_version":"1",
+            "placement":{"kind":"pathless"},
+            "runner":{
+              "selector":{"type":"capability_class","name":"linux.workspace"},
+              "runner_id":"\(runnerID)",
+              "placement_revision":"3",
+              "sandbox_profile":"workspace-restricted",
+              "credential_profile":"readonly",
+              "repository":"primary",
+              "working_directory":"workspace/project",
+              "connection_health":null,
+              "state":"runner_lost"
+            }
+          }
+        }
+        """.utf8
+      )
+    )
+    let projection = try SignalboxRunnerProjection(
+      selector: .capabilityClass(
+        name: SignalboxRunnerCapabilityClass(validating: "linux.workspace")
+      ),
+      runnerID: SignalboxCanonicalUUID(validating: runnerID),
+      placementRevision: SignalboxCanonicalUInt64(rawValue: 3),
+      sandboxProfile: .workspaceRestricted,
+      credentialProfile: SignalboxRunnerCredentialProfileName(validating: "readonly"),
+      repository: SignalboxRunnerRepositoryKey(validating: "primary"),
+      workingDirectory: SignalboxRunnerWorkingDirectory(validating: "workspace/project"),
+      connectionHealth: nil,
+      state: .runnerLost
+    )
+    let expected = SignalboxProcessSessionSummary(
+      sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+      defaultsVersion: SignalboxCanonicalUInt64(rawValue: 1),
+      modelSelection: .alias(aliasID: try SignalboxCanonicalUUID(validating: turnID)),
+      runner: projection
+    )
+
+    XCTAssertEqual(frame.message, .sessionSummary(expected))
+  }
+
+  /// INV-033: the session-summary runner member is required even when null.
+  func testSessionSummaryMissingRunnerDegradesWithDiagnostic() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"8",
+          "message":{
+            "type":"session_summary",
+            "session_id":"\(sessionID)",
+            "defaults_version":"1",
+            "model_selection":{"kind":"alias","alias_id":"\(turnID)"},
+            "placement_version":"1",
+            "placement":{"kind":"pathless"}
+          }
+        }
+        """.utf8
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+  }
+
   func testCanonicalDecimalRejectsLeadingZeroes() {
     let encoded = Data(#""01""#.utf8)
 
@@ -593,6 +673,52 @@ final class ProcessProtocolTests: XCTestCase {
             currentAttemptID: try SignalboxCanonicalUUID(
               validating: "33333333-3333-4333-8333-333333333333"
             )
+          )
+        )
+      )
+    )
+  }
+
+  /// INV-033 / INV-044: runner transitions remain typed native session events.
+  func testRunnerStateTransitionDecodesItsClosedPayload() throws {
+    let runnerID = "44444444-4444-4444-8444-444444444444"
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"runner_state_transition",
+            "runner_id":"\(runnerID)",
+            "placement_revision":"3",
+            "sandbox_profile":"workspace-restricted",
+            "working_directory":"workspace/project",
+            "state":"working_directory_changed"
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertEqual(
+      frame.message,
+      .sessionEvent(
+        SignalboxFollowedSessionEvent(
+          cursor: SignalboxCanonicalUInt64(rawValue: 12),
+          sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+          event: .runnerStateTransition(
+            runnerID: try SignalboxCanonicalUUID(validating: runnerID),
+            placementRevision: SignalboxCanonicalUInt64(rawValue: 3),
+            sandboxProfile: .workspaceRestricted,
+            workingDirectory: try SignalboxRunnerWorkingDirectory(
+              validating: "workspace/project"),
+            state: .workingDirectoryChanged
           )
         )
       )

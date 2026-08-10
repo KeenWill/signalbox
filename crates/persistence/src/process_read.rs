@@ -143,6 +143,7 @@ pub struct ProcessSessionSummary {
     defaults_version: u64,
     model_selection: ProcessModelSelection,
     placement: signalbox_domain::VersionedSessionPlacement,
+    runner: Option<ProcessRunnerProjection>,
 }
 
 impl ProcessSessionSummary {
@@ -164,6 +165,11 @@ impl ProcessSessionSummary {
     /// Borrows the current immutable placement epoch.
     pub const fn placement(&self) -> &signalbox_domain::VersionedSessionPlacement {
         &self.placement
+    }
+
+    /// Borrows the complete current runner projection when runner placement was requested.
+    pub const fn runner(&self) -> Option<&ProcessRunnerProjection> {
+        self.runner.as_ref()
     }
 }
 
@@ -333,7 +339,8 @@ impl ProcessSessionSummaryReader {
             let placement = load_process_session_placement(transaction, session)
                 .await?
                 .ok_or(ProcessReadCorruption::Missing("session placement"))?;
-            let summary = decode_session_summary(&row, placement)?;
+            let runner = load_process_runner_projection(transaction, session).await?;
+            let summary = decode_session_summary(&row, placement, runner)?;
             self.next_session_after = Some(session_id_to_uuid(summary.session()));
             self.summary_count =
                 self.summary_count
@@ -2352,6 +2359,7 @@ fn map_seed_validation_error(error: sqlx::Error) -> ProcessReadError {
 fn decode_session_summary(
     row: &PgRow,
     placement: VersionedSessionPlacement,
+    runner: Option<ProcessRunnerProjection>,
 ) -> Result<ProcessSessionSummary, ProcessReadError> {
     let session = session_id_from_uuid(required(row, "session_id")?);
     let defaults_version = decode_positive(
@@ -2382,6 +2390,7 @@ fn decode_session_summary(
         defaults_version,
         model_selection,
         placement,
+        runner,
     })
 }
 

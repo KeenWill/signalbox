@@ -2957,6 +2957,7 @@ async fn list(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(),
                 model_selection,
                 placement_version,
                 placement,
+                runner: _,
             } => output.session_summary(
                 *session_id,
                 defaults_version.value(),
