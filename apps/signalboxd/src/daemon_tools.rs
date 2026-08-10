@@ -1721,6 +1721,11 @@ mod tests {
         invocation_directory: PathBuf,
     }
 
+    struct BridgeBuildLocation<'a> {
+        invocation_directory: &'a Path,
+        workspace: &'a Path,
+    }
+
     struct ConfiguredCargoTargetDirInput<'a> {
         current_executable: &'a Path,
         configured: &'a Path,
@@ -1857,10 +1862,12 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         let current = std::env::current_exe().expect("test executable path is available");
         let known_targets = rustc_target_names(&invocation.invocation_directory);
         let configured_target_dir = configured_cargo_target_dir(&current, &known_targets);
-        let default_target_dir = configured_target_dir
-            .clone()
-            .unwrap_or_else(cargo_metadata_target_dir);
         let artifact_target_dir = cargo_target_dir_from_artifact(&current);
+        let default_target_dir = bridge_build_target_dir(
+            configured_target_dir.as_deref(),
+            artifact_target_dir.as_deref(),
+            cargo_metadata_target_dir,
+        );
         reject_unrecognized_default_target(DefaultTargetRecognition {
             current_executable: &current,
             configured_target_dir: configured_target_dir.as_deref(),
@@ -2231,6 +2238,17 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
             .as_str()
             .expect("Cargo target metadata names the artifact directory");
         canonicalized_target_dir(Path::new(target_dir))
+    }
+
+    fn bridge_build_target_dir(
+        configured_target_dir: Option<&Path>,
+        artifact_target_dir: Option<&Path>,
+        metadata_target_dir: impl FnOnce() -> PathBuf,
+    ) -> PathBuf {
+        configured_target_dir
+            .or(artifact_target_dir)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(metadata_target_dir)
     }
 
     fn cargo_target_dir_from_artifact(current_executable: &Path) -> Option<PathBuf> {
@@ -2746,7 +2764,13 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         let workspace = Path::new("/synthetic/workspace");
         let expected_manifest = workspace.join(CARGO_MANIFEST_FILENAME);
         let mut command = Command::new(CARGO_PROGRAM_STEM);
-        configure_bridge_build_location(&mut command, invocation_directory, workspace);
+        configure_bridge_build_location(
+            &mut command,
+            BridgeBuildLocation {
+                invocation_directory,
+                workspace,
+            },
+        );
 
         assert_eq!(command.get_current_dir(), Some(invocation_directory));
         assert_eq!(
@@ -2971,6 +2995,17 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
             expected_target: None,
             recognized_target: None,
         });
+    }
+
+    #[test]
+    fn bridge_build_prefers_the_executable_target_root_over_metadata() {
+        let cli_target_dir = Path::new("synthetic-cli-target");
+
+        let selected = bridge_build_target_dir(None, Some(cli_target_dir), || {
+            panic!("Cargo metadata must not override the executable target root")
+        });
+
+        assert_eq!(selected, cli_target_dir);
     }
 
     #[test]
@@ -3900,8 +3935,10 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
             .stdout(Stdio::piped());
         configure_bridge_build_location(
             &mut build_command,
-            &invocation.invocation_directory,
-            &workspace,
+            BridgeBuildLocation {
+                invocation_directory: &invocation.invocation_directory,
+                workspace: &workspace,
+            },
         );
         apply_cargo_config_overrides(&mut build_command, &invocation.config_overrides);
         apply_cargo_rust_version_policy(&mut build_command, invocation.ignore_rust_version);
@@ -3956,15 +3993,11 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         }
     }
 
-    fn configure_bridge_build_location(
-        command: &mut Command,
-        invocation_directory: &Path,
-        workspace: &Path,
-    ) {
+    fn configure_bridge_build_location(command: &mut Command, location: BridgeBuildLocation<'_>) {
         command
             .arg(CARGO_MANIFEST_PATH_OPTION)
-            .arg(workspace.join(CARGO_MANIFEST_FILENAME))
-            .current_dir(invocation_directory);
+            .arg(location.workspace.join(CARGO_MANIFEST_FILENAME))
+            .current_dir(location.invocation_directory);
     }
 
     #[track_caller]
