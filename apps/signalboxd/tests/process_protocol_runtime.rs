@@ -1517,11 +1517,9 @@ fn transcript_snapshot_start_cursor(
     expected_session: CanonicalUuid,
 ) -> u64 {
     match message {
-        ServerMessage::TranscriptSnapshotStart { session_id, cursor }
-            if *session_id == expected_session =>
-        {
-            cursor.value()
-        }
+        ServerMessage::TranscriptSnapshotStart {
+            session_id, cursor, ..
+        } if *session_id == expected_session => cursor.value(),
         message => panic!("fixture expected transcript-snapshot start, got {message:?}"),
     }
 }

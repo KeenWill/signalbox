@@ -1,7 +1,8 @@
 # Process protocol
 
-The typed runner-state session event and daemon outbox projection were verified
-against this PR (`agent/runner-event-outbox-persistence`).
+The typed runner-state session event, daemon outbox projection, and
+authoritative transcript-snapshot runner projection were verified against this
+PR (`agent/runner-event-outbox-persistence`).
 
 The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
@@ -1375,8 +1376,8 @@ predecessor lineage is authoritative.
 
 One logical snapshot is a bounded message sequence sharing the request identity:
 
-1. `transcript_snapshot_start { session_id, cursor }`; the runner proposal also
-   requires the same complete nullable `runner` object as the session summary;
+1. `transcript_snapshot_start { session_id, cursor, runner }`, where `runner` is
+   the same complete nullable runner object as the session summary;
 2. one `transcript_turn` per turn, with canonical decimal `acceptance_position`
    and required-nullable `model_settings`; a settings-aware turn carries the
    complete owning turn, accepted input, defaults epoch, requested and selected
@@ -1489,7 +1490,7 @@ The tool-bearing vocabulary adds
 and
 `tool_reconciliation_required { terminal_frontier_id, terminal_attempt_id, terminal_tool_attempt_id }`.
 The distinct tool variant avoids changing the older `reconciliation_required`
-object. The runner proposal additionally admits
+object. The runner-bearing vocabulary additionally admits
 `active_awaiting_runner_recovery { runner_id, placement_revision, tool_attempt_id }`,
 where `tool_attempt_id` is null when no physical tool attempt owns the loss. The
 snapshot-level runner object remains authoritative for queued and otherwise
