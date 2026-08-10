@@ -858,6 +858,37 @@ including that marker. Turn and attempt lifecycle doctrine is
 commit boundaries are this page's own material, and update-event delivery is
 [persistence-protocol](persistence-protocol.md).
 
+**Committed unimplemented functionality — pre-call pool exhaustion.** The
+credential-pool implementing child adds a third `TurnFailed` producer for the
+`pre-call fail` and `wait-transition fail (no call)` endings of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine):
+an active turn exhausts its frozen pool before any model call is prepared and
+that exhaustion selects no wait. Its single transaction ends the current attempt
+`KnownFailure`, appends the marker after the attempt's starting frontier,
+terminalizes the turn `Failed`, and emits both the ordinary `turn_failed` update
+and the typed `turn_credential_pool_exhausted` event. The sealed failure and
+complete member evidence are owned by
+[model-call execution](model-call-execution.md#availability-successor-calls). No
+present transcript writer can produce this shape.
+
+That third producer serves two endings, which share its commit shape exactly.
+This page owns the transcript-producer column of
+[the credential-availability machine](credential-availability.md#the-credential-availability-machine),
+and that column is total over all nine endings: `pre-call fail` and
+`wait-transition fail (no call)` use this new producer; `post-failure fail` and
+`terminal` use the existing model-call known-failure closure, because their turn
+did issue a call and that closure is already the writer which commits one; and
+`selected`, `contended-wait`, `exhausted-wait`, and `successor` have no producer
+and append no entry, because none of them terminalizes a turn.
+
+The remaining ending, `wait-transition fail (after call)`, needs a **fourth**
+producer, because it is a transition rather than an initial admission and the
+model-call closure cannot serve it: that closure committed earlier in the turn
+without terminalizing and is not available to a transition happening now. Its
+producer is a wait-transition failure producer, which commits the same shape as
+the pre-call producer and additionally names the predecessor model call whose
+cause it carries. This inventory is closed at four.
+
 ## User content
 
 Accepted-input content is the closed one-variant algebra `UserContent`; its only

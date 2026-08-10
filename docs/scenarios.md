@@ -63,10 +63,10 @@ INV-tagged test names and attached doc comments.
 - **User intent:** Receive a responsive answer while retaining an authoritative
   final transcript.
 - **Durable commands:** Accept input and create a turn with frozen direct or
-  alias model-selection configuration, resolved model settings, and disabled
-  retry/fallback; activate it and create a turn attempt; freeze a context
-  frontier; resolve and pin the exact model target; only then create a model
-  call; finally commit the complete ordered assistant-text and logical
+  alias model-selection configuration and resolved model settings; activate it
+  and create a turn attempt; freeze a context frontier; resolve and pin the
+  exact model target and credential profile; only then create a model call;
+  finally commit the complete ordered assistant-text and logical
   tool-use-reference sequence with its producing-call provenance and the call
   outcome. A tool-using response yields the attempt but retains the same turn;
   result projection and continuation create later rounds. Only a response with
@@ -84,14 +84,22 @@ INV-tagged test names and attached doc comments.
   owns durable provenance and final content; clients render drafts.
 - **Failure behavior:** A client disconnect does not cancel the call.
   Target-resolution failure creates no model call. Send preparation failure
-  leaves the already-created call known-failed. Version one performs no
-  automatic retry after any known or ambiguous provider failure; no partial
-  draft becomes final content. A future authorized call must retain steering
-  already committed to turn history.
+  leaves the already-created call known-failed. No durable authorization is
+  retried, and an ambiguous outcome never creates a successor. When pool policy
+  selects `switch_now`, a proven availability failure may create the S22
+  successor on a new attempt against the same target and a different credential
+  profile, under
+  [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
+  [the credential-availability machine](spec/credential-availability.md#the-credential-availability-machine),
+  and
+  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
+  No partial draft becomes final content. A later authorized call must retain
+  steering already committed to turn history.
 - **Required invariants:** INV-005, INV-008, INV-014, INV-015, INV-032, INV-035.
 - **Remaining questions:** Whether a future known-failure retry command is
   introduced, streaming checkpoints, transient provider-delta relay, browser
-  transport, rich assistant content, and provider/client rendering.
+  transport, rich assistant content, provider/client rendering, and transient
+  presentation while an availability successor is selected.
 
 ## S03 — Daemon restarts after accepting queued work
 
@@ -699,27 +707,46 @@ INV-tagged test names and attached doc comments.
 ## S22 — Apply an availability fallback
 
 - **User intent:** If explicitly configured, continue through a classified
-  capacity/availability failure using an allowed alternate model.
-- **Durable commands:** Record the primary call's requested selection, exact
-  daemon-resolved target, provider-reported identity when available, and failure
-  classification; evaluate explicit fallback policy; create a distinct model
-  call with an exact daemon-resolved fallback target and reason. Each call
-  appends provider-reported identity or mismatch when available.
-- **State transitions:** Primary call → known availability failure; turn/attempt
-  → fallback eligible; fallback call → terminal.
-- **Transient updates:** Client shows that fallback is being considered/applied.
-- **Owning component:** Daemon policy authorizes; provider adapters classify
-  evidence but do not silently select targets.
-- **Failure behavior:** If version one has no accepted fallback policy, stop
-  explicitly instead. If fallback is later authorized, the alternate target is
-  attempted only through its distinct call; a provider-reported mismatch against
-  either call's own exact target follows the accepted timing-sensitive mismatch
-  failure rule ([model-call-execution](spec/model-call-execution.md)) and is
-  never an allowed substitution. The scenario does not establish automatic
-  fallback as accepted behavior.
+  capacity/availability failure using another account without changing models.
+- **Durable commands:** Record the predecessor call's exact requested selection,
+  daemon-resolved target, credential profile, provider-reported identity when
+  available, failure classification, and typed non-acceptance evidence; evaluate
+  the session-pinned pool policy; create a distinct successor attempt and model
+  call that pin the same target, a different eligible profile from that pool,
+  the predecessor call, and the qualifying cause, as owned by
+  [availability successor calls](spec/model-call-execution.md#availability-successor-calls),
+  [the credential-availability machine](spec/credential-availability.md#the-credential-availability-machine),
+  and
+  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection).
+- **State transitions:** Predecessor call → known availability failure and
+  predecessor attempt → known failed; turn → successor eligible; successor
+  attempt/call → terminal. Each availability-successor chain is bounded to at
+  most one call per pool member; a successful call ends that chain before later
+  continuation, while releasing a parked wait resumes the chain the wait belongs
+  to
+  ([availability successor calls](spec/model-call-execution.md#availability-successor-calls)).
+- **Transient updates:** No current client update announces that a successor is
+  being considered or selected. The predecessor, cause, and successor are
+  committed future durable evidence that no present migration or repository
+  operation stores; no current process-protocol snapshot or history message
+  projects that chain to a client either.
+- **Owning component:** Daemon pool policy authorizes and selects the profile;
+  provider adapters supply the typed classification and separate evidence that
+  the request was not accepted. Adapters do not select successors.
+- **Failure behavior:** Only quota exhaustion, rate limiting, or overload with
+  distinct non-acceptance evidence may authorize the successor. Classification
+  alone is insufficient. Ambiguity, refusal, credential resolution failure, and
+  credential rejection never do. The successor cannot cross adapters or change
+  the exact target. Exhausting the pool follows its configured durable park or
+  known-failure outcome
+  ([credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection)).
+  A provider-reported mismatch against either call's own target follows the
+  accepted timing-sensitive mismatch failure rule
+  ([model-call-execution](spec/model-call-execution.md)) and is never an allowed
+  substitution.
 - **Required invariants:** INV-014, INV-018.
-- **Remaining questions:** Whether fallback ships, qualifying failures,
-  configuration, model-change identity, cost limits, and user confirmation.
+- **Remaining questions:** Transient client presentation of successor selection
+  and whether a future pool may cross adapter kinds.
 
 ## S23 — Encounter a model safety refusal
 
