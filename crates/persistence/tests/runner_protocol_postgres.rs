@@ -3821,15 +3821,9 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
             .register(&expected_enrollment, narrowed_advertisement())
             .await
     });
-    assert!(
-        blocked_backends_reached(&pool, 1).await?,
-        "registration replacement must reach registration-head authority"
-    );
+    let replacement_blocked = blocked_backends_reached(&pool, 1).await?;
     let lease_store = tokio::spawn(async move { store.store_lease(&lease).await });
-    assert!(
-        blocked_backends_reached(&pool, 2).await?,
-        "lease admission must wait behind registration replacement"
-    );
+    let lease_blocked = blocked_backends_reached(&pool, 2).await?;
     blocker.commit().await?;
     tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, replacement)
         .await
@@ -3841,6 +3835,14 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
         .expect("lease admission task must remain joinable")
         .expect_err("withdrawn current availability cannot authorize the later lease");
 
+    assert!(
+        replacement_blocked,
+        "registration replacement must reach registration-head authority"
+    );
+    assert!(
+        lease_blocked,
+        "lease admission must wait behind registration replacement"
+    );
     assert_store_check_violation(rejected);
     drop(pool);
     Ok(())
