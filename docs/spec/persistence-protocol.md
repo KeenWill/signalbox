@@ -1471,9 +1471,17 @@ ownership, polling, fan-out, and client observation semantics are owned by
 migration or repository stores daemon-owned OAuth material. Its implementing
 child must supply three durable shapes and no interpretation of them: a
 per-generation `refresh_in_progress` marker that exactly one transaction can
-win, an atomic replace-and-clear of token and marker in one commit, and a reread
-of a generation that reports whether a replacement committed and whether the
-marker is still set.
+win, an atomic replace-and-clear that in one commit rewrites the refresh token,
+rewrites or retains the identity token, and clears the marker, and a reread of a
+generation that reports whether a replacement committed and whether the marker
+is still set. A generation stores the identity token beside its refresh token
+and under the same protections, because dispatch requires one on every
+invocation while a refresh happens about once per access-token lifetime, so a
+generation that held only the refresh token would leave the first preparation
+after any restart with no source for it. The replace shape must express both an
+exchange that returned a new identity token and one that returned none, without
+a second commit for either and without a state in which a new refresh token is
+durable beside an identity token from another exchange.
 
 What those facts mean — which outcome each combination selects, which failures
 may clear the marker without changing the token, how many attempts a generation
@@ -1482,9 +1490,17 @@ protocol, owned by
 [the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery).
 This paragraph makes those decisions representable and takes none of them.
 Provisioning replaces the quarantined generation with a fresh authorization in
-one transaction. Each generation stores the exact provisioning tuple it was
-minted under — `client_id`, `token_url`, `device_authorization_url`, and ordered
-`scopes` — and every refresh and dispatch compares it with the current
+one transaction. That transaction also decides account-level independence: it
+locks the profile rows of every co-member of every pool-policy revision the
+profile is pinned into, in profile-reference byte order, before it reads their
+stored account identities and until after its own commit, so two provisionings
+of one account can never both observe that identity unclaimed. Which memberships
+are consulted, and what a collision does, are owned by
+[the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery);
+this paragraph supplies only the lock span that makes two concurrent commits
+decide it the same way. Each generation stores the exact provisioning tuple it
+was minted under — `client_id`, `token_url`, `device_authorization_url`, and
+ordered `scopes` — and every refresh and dispatch compares it with the current
 registration under the same profile lock, by the canonical components
 [configuration and credentials](configuration-and-credentials.md#distinct-members-are-distinct-authorizations)
 defines rather than by the configured bytes; a difference quarantines instead of
@@ -1578,7 +1594,8 @@ Without the split there would be one row to both retain and clear, and a clear
 mid-turn would either readmit the failed profile or make the turn unable to
 record why it stayed excluded.
 
-Pre-call exhaustion — the `pre-call fail` ending of
+Pre-call exhaustion — the `pre-call fail` and `wait-transition fail (no call)`
+endings of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
 whose durable-records column this page owns — uses one turn-correlated failure
 header with cause exactly `credential_pool_exhausted`, the current attempt, and
@@ -1587,16 +1604,18 @@ carrying the closed exclusion kind, correlated record generation or predecessor
 observation, and optional reset. Deferred constraints require the complete
 policy membership, no model call for the attempt, `KnownFailure` attempt end,
 `Failed` turn, exact `TurnFailed` marker and terminal frontier, and one typed
-preparation-failure outbox row in the same commit. Reconstitution rejects a
-missing, duplicate, reordered, or foreign evidence row and any correlation with
-no durable basis at that failure commit. A chain exclusion's basis is its
-turn-local fact, which no clear removes, so a member excluded by a predecessor
-failure supplies complete evidence even when an operator cleared its clearable
-state while the turn was parked. Every other exclusion kind uses its
-active-at-commit record, and reconstitution accepts one later marked inactive by
-an authorized clear; the immutable generation or predecessor observation and its
-active-at-failure fact remain historical evidence. This paragraph constrains the
-future schema; no present storage surface provides it.
+preparation-failure outbox row in the same commit; the wait-transition ending
+additionally consumes its wait in that same commit and leaves none stored.
+Reconstitution rejects a missing, duplicate, reordered, or foreign evidence row
+and any correlation with no durable basis at that failure commit. A chain
+exclusion's basis is its turn-local fact, which no clear removes, so a member
+excluded by a predecessor failure supplies complete evidence even when an
+operator cleared its clearable state while the turn was parked. Every other
+exclusion kind uses its active-at-commit record, and reconstitution accepts one
+later marked inactive by an authorized clear; the immutable generation or
+predecessor observation and its active-at-failure fact remain historical
+evidence. This paragraph constrains the future schema; no present storage
+surface provides it.
 
 **Committed unimplemented functionality — availability-successor storage.** No
 present migration, repository operation, or reconstitution path stores an
@@ -1643,26 +1662,33 @@ locks, and inserts the selected reservation with the `Prepared` call. Every
 `codex_home` invocation inserts a reservation regardless of whether its profile
 currently declares a bound; the bound decides only whether preparation takes
 that capacity lock and counts, so an unbounded profile records the same
-supervision evidence without serializing. A deferred constraint rejects a
-committed live count above the bound the profile's current registration
-declares; the bound is a live profile property rather than a frozen policy
-field, so it governs the next admission and never retroactively invalidates a
-committed reservation. Because every invocation is recorded, a bound newly
-lowered from unbounded is still enforced against complete startup fencing
-evidence rather than against only the invocations that were bounded when they
-started. The admission that *creates* a contended wait holds the capacity row of
-every bounded member it is about to name `FOR UPDATE`, from before it counts
-live reservations until after the wait row is inserted. Without that span a
-concurrent invocation can complete between the count and the insert, publish its
-wake while no wait yet exists to receive it, and leave the new wait parked on
-reservation identities already released — the stale evidence reconstitution must
-fail closed on, reached with no crash involved. Invocation completion releases
-its reservation and writes the wake signal atomically, holding that profile's
-capacity row `FOR UPDATE` across both so a release and its wake are never
-visible apart. One release can wake several waits while admitting one, so each
-woken transaction reruns admission under the same capacity locks. The one that
-acquires the freed reservation releases its wait. A transaction finding no
-admissible member instead re-derives its ending from
+supervision evidence without serializing. A deferred constraint rejects any
+commit that *raises* a profile's live reservation count to a value above the
+bound the profile's current registration declares; a commit that leaves that
+count unchanged or lower is admitted whatever the count is. The constraint is
+scoped to admissions rather than to states because the bound is a live profile
+property rather than a frozen policy field: it governs the next admission and
+never retroactively invalidates a committed reservation, so lowering the bound
+below the live count commits, the excess drains as those invocations complete,
+and each completion commits while the count is still over the bound. A
+state-scoped constraint would instead reject the lowering registration itself,
+or reject every draining completion, and leave the system in a state its own
+invariant forbids with no legal transition out. Because every invocation is
+recorded, a bound newly lowered from unbounded is still enforced against
+complete startup fencing evidence rather than against only the invocations that
+were bounded when they started. The admission that *creates* a contended wait
+holds the capacity row of every bounded member it is about to name `FOR UPDATE`,
+from before it counts live reservations until after the wait row is inserted.
+Without that span a concurrent invocation can complete between the count and the
+insert, publish its wake while no wait yet exists to receive it, and leave the
+new wait parked on reservation identities already released — the stale evidence
+reconstitution must fail closed on, reached with no crash involved. Invocation
+completion releases its reservation and writes the wake signal atomically,
+holding that profile's capacity row `FOR UPDATE` across both so a release and
+its wake are never visible apart. One release can wake several waits while
+admitting one, so each woken transaction reruns admission under the same
+capacity locks. The one that acquires the freed reservation releases its wait. A
+transaction finding no admissible member instead re-derives its ending from
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine)
 under those locks and stores whatever that row requires: where a bounded member
 still holds the pool it atomically rewrites its own wait's evidence to the live

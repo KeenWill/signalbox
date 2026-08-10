@@ -1168,7 +1168,11 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   a held-back trailing credential prefix so a secret split across provider
   chunks can never be emitted piecewise; when ordering forces a held prefix out,
   it is replaced with `[redacted]`. Why: fail closed — a possible secret prefix
-  is destroyed rather than delivered.
+  is destroyed rather than delivered. The guarantee is bounded to exactly these
+  representations — the exact value, its JSON-string-escaped form, and
+  chunk-split prefixes of it; a reflection the provider re-encodes in any other
+  form (base64, say) passes through unscrubbed, because no path here decodes one
+  before matching.
 - The Codex CLI adapter accepts only the configured non-secret
   `CredentialReference` and delegates resolution to the CLI's ambient
   subscription login on every fresh spawn. It never locates, reads, copies,
