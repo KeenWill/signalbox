@@ -102,10 +102,19 @@ transaction that observes the transition therefore consumes the wait, opens a
 fresh call-free attempt, ends **that** attempt `KnownFailure`, appends
 `TurnFailed` after it, and terminalizes the turn — carrying this chain's
 provider cause where the chain had issued a call and `credential_pool_exhausted`
-where it had not. Its transcript producer is the pre-call pool-exhaustion
-producer in the first case and the model-call known-failure closure in the
-second, and its wire projection is that of whichever failure row supplied the
-cause.
+where it had not.
+
+Its transcript producer follows the cause, and neither branch may reuse the
+model-call known-failure closure: that closure committed earlier in this turn
+without terminalizing, so it is not available to a transition happening now.
+Where the released chain issued no call, the cause is
+`credential_pool_exhausted` and the producer is the pre-call pool-exhaustion
+producer, whose commit shape is exactly this one. Where the chain had issued a
+call, the cause is that call's provider cause and the producer is a fourth one —
+a **wait-transition failure producer**, which differs from the pre-call producer
+only in naming the predecessor model call that supplied the cause, and which its
+implementing child owes alongside the wait itself. The wire projection is that
+of whichever failure row supplied the cause.
 
 Second, **exhaustion that no wake could relieve fails rather than parks,
 whatever `on_pool_exhausted` says.** Where every member is excluded solely by

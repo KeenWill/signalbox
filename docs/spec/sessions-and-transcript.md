@@ -879,10 +879,17 @@ producer; `post-failure fail` and `terminal` use the existing model-call
 known-failure closure, because their turn did issue a call and that closure is
 already the writer which commits one; and `selected`, `contended-wait`,
 `exhausted-wait`, and `successor` have no producer and append no entry, because
-none of them terminalizes a turn. A turn that observed a qualifying provider
-failure and only then exhausted its pool therefore already has a commit shape,
-and needs no fourth producer — which is what keeps this inventory closed at
-three.
+none of them terminalizes a turn.
+
+One ending needs a **fourth** producer, and it is a transition rather than an
+initial admission: a stored contended wait under a `fail` policy that later
+loses every bounded candidate. The model-call closure cannot serve it, because
+that closure committed earlier in the turn without terminalizing and is not
+available to a transition happening now. Its producer is therefore a
+wait-transition failure producer, which commits the same shape as the pre-call
+producer and additionally names the predecessor model call whose cause it
+carries. Where that same transition released a chain that had issued no call,
+the pre-call producer serves it unchanged. This inventory is closed at four.
 
 ## User content
 
