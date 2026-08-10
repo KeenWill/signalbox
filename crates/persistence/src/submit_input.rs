@@ -4106,6 +4106,12 @@ pub(crate) async fn load_scheduling_projection(
                      WHERE initial_task.child_session_id = terminal.session_id
                        AND initial_task.turn_id = terminal.turn_id
                 )
+                OR EXISTS (
+                    SELECT 1
+                      FROM session_delegation_wake_turn_origin AS wake
+                     WHERE wake.recipient_session_id = terminal.session_id
+                       AND wake.turn_id = terminal.turn_id
+                )
             )
             AND (
                 terminal.state_kind = 'terminal'
