@@ -4080,6 +4080,9 @@ async fn authenticate_pinned_predecessor(
                 }
                 && !placement_row_has_invalid_unpinned_facts(&predecessor)? =>
         {
+            if predecessor_event == "pre_pin_replaced" {
+                load_placement_reconstitution_history(connection, &predecessor).await?;
+            }
             Ok(())
         }
         "runner_replaced"
@@ -4110,6 +4113,7 @@ async fn authenticate_pinned_predecessor(
             if lost_runner != prior_pinned.runner
                 || (pinned.runner == lost_runner
                     && source != RunnerPlacementLossSource::Registration)
+                || !runner_replacement_grant_is_successor(&predecessor, row)?
             {
                 return Err(RunnerProtocolCorruption::CrossWiredReference.into());
             }
@@ -4163,6 +4167,37 @@ async fn authenticate_pinned_predecessor(
         }
         _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
     }
+}
+
+fn runner_replacement_grant_is_successor(
+    predecessor: &PgRow,
+    replacement: &PgRow,
+) -> Result<bool, RunnerProtocolStoreError> {
+    let predecessor_revision = predecessor
+        .decode_column::<Option<Decimal>>("credential_grant_revision")?
+        .map(decode_generation)
+        .transpose()?;
+    let replacement_revision = replacement
+        .decode_column::<Option<Decimal>>("credential_grant_revision")?
+        .map(decode_generation)
+        .transpose()?;
+    let predecessor_origin =
+        predecessor.decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?;
+    let replacement_origin =
+        replacement.decode_column::<Option<Decimal>>("credential_grant_lineage_origin_ordinal")?;
+    let replacement_event = replacement.decode_column::<Decimal>("event_ordinal")?;
+    Ok(match (predecessor_revision, replacement_revision) {
+        (None, None) => predecessor_origin.is_none() && replacement_origin.is_none(),
+        (None, Some(revision)) => {
+            predecessor_origin.is_none()
+                && revision == RunnerGeneration::one()
+                && replacement_origin == Some(replacement_event)
+        }
+        (Some(before), Some(after)) => {
+            before.checked_next() == Some(after) && predecessor_origin == replacement_origin
+        }
+        (Some(_), None) => false,
+    })
 }
 
 async fn decode_pinned_placement(
