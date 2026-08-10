@@ -12,19 +12,18 @@
 # script is the backstop for what nothing in-process can catch.
 #
 # Selection is positive and repository-scoped: a container is swept only when it
-# carries the label this repository's own harness attaches immediately before
-# starting it, which
-# `signalbox_persistence::disposable_test_container_labels` is the single
-# source of. That label states the property that makes removal safe — this
-# container exists only for the duration of one of this repository's tests, and
-# removing it is already the harness's own job. Nothing is excluded by name or
-# by image, because an exclusion list only protects what someone remembered to
-# name: a container without the label is simply not this script's to remove,
-# whether it is another project's test container, a hand-run database, or a
-# long-lived instance that happens to run the same PostgreSQL image. The
-# harness withholds the label when the operator set `TESTCONTAINERS_COMMAND=keep`,
-# since a container the client was asked to keep is by definition not
-# disposable.
+# carries the label that this repository's own harness attaches immediately
+# before starting it, spelled once in
+# `signalbox_persistence::disposable_test_container_labels`. The label states
+# the property that makes removal safe — this container exists only for the
+# duration of one of this repository's tests, and removing it is already the
+# harness's own job. Nothing is excluded by name or by image, because an
+# exclusion list only protects what someone remembered to name: a container
+# without the label is simply not this script's to remove, whether it is another
+# project's test container, a hand-run database, or a long-lived instance that
+# happens to run the same PostgreSQL image. The harness withholds the label when
+# the operator set `TESTCONTAINERS_COMMAND=keep`, since a container the client
+# was asked to keep is by definition not disposable.
 #
 # The age bound is what keeps a live test's container safe: a container serving
 # a running test is minutes old at most, and the default two-hour floor sits far

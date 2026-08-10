@@ -98,8 +98,9 @@ jobs:
         run: python3 tooling/test_resolve_cargo_bin.py
       # Drives the sweep against a fake `docker` it puts first on PATH, so it
       # neither needs nor touches the runner's daemon: what is under test is the
-      # label filter and the age bound, and a real daemon could not be asked on
-      # demand for the orphan ages or the mid-sweep removal the cases require.
+      # selection and the failure classification, and a real daemon could not be
+      # asked on demand for the orphan ages, the mid-sweep removal, the refused
+      # inspection, or the daemon that never answers that the cases require.
       - name: Test the orphaned-container sweep
         run: python3 tooling/test_sweep_test_containers.py
       # Runs here rather than in coverage.yml or swift.yml because it reads
