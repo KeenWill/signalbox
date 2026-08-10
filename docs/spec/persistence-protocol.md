@@ -1469,19 +1469,23 @@ ownership, polling, fan-out, and client observation semantics are owned by
 
 **Committed unimplemented functionality — OAuth refresh staging.** No present
 migration or repository stores daemon-owned OAuth material. Its implementing
-child must durably mark one profile generation `refresh_in_progress` before the
-network exchange, then atomically replace the token and clear that exact marker
-after a successful rotation. A definitely failed exchange may clear the marker
-without changing the token only when provider non-rotation is proven. After a
-commit ambiguity the repository rereads the generation: the committed
-replacement wins, while an uncleared marker is durable quarantine evidence.
-Startup treats that marker the same way and never submits the possibly
-superseded stored token again. Provisioning replaces the quarantined generation
-with a fresh authorization in one transaction. Each generation stores the exact
-provisioning tuple it was minted under — `client_id`, `token_url`,
-`device_authorization_url`, and ordered `scopes` — and every refresh and
-dispatch compares it with the current registration under the same profile lock,
-by the canonical components
+child must supply the durable shapes the refresh protocol needs: a
+per-generation `refresh_in_progress` marker that one transaction can win, an
+atomic replace-and-clear of token and marker, and a reread of the generation
+after a commit ambiguity in which the committed replacement wins while an
+uncleared marker stands as durable quarantine evidence. Startup reads that
+marker by the same rule.
+
+When each of those happens — which failures may clear the marker without
+changing the token, how many attempts a generation admits, and why an ambiguous
+exchange is never replayed — is the refresh protocol, and it is owned by
+[the `oauth` delivery](configuration-and-credentials.md#the-oauth-delivery).
+This paragraph supplies the storage that protocol requires and states none of
+it. Provisioning replaces the quarantined generation with a fresh authorization
+in one transaction. Each generation stores the exact provisioning tuple it was
+minted under — `client_id`, `token_url`, `device_authorization_url`, and ordered
+`scopes` — and every refresh and dispatch compares it with the current
+registration under the same profile lock, by the canonical components
 [configuration and credentials](configuration-and-credentials.md#distinct-members-are-distinct-authorizations)
 defines rather than by the configured bytes; a difference quarantines instead of
 exchanging, so an edited endpoint cannot receive a token minted for another.

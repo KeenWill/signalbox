@@ -1471,44 +1471,64 @@ wins that transition owns one process-shared single-flight keyed by profile and
 generation. The durable marker excludes another refresher after the lock is
 released for the network exchange. A concurrent preparation observing that
 marker joins the same single-flight; it never starts another exchange or treats
-the marker as a credential failure. A refresh client sends exactly one POST for
-that generation to the configured `token_url`'s exact scheme, host, effective
-port, path, and query. Redirect following and automatic HTTP, transport, and
-protocol retries are disabled at every layer. Once any request bytes may have
-been written, a connection loss, redirect response, or indeterminate response is
-ambiguous: the daemon does not send again and follows the quarantine path below.
-A second transaction re-locks and matches that generation, compares the account
-identity the response carries against the one stored with that generation,
-persists the returned token, and clears the marker before the new access token
-is used anywhere. An identity that differs is not persisted: the generation
-quarantines and re-provisioning is the only recovery. Why quarantine rather than
-adopt the new identity — dispatch pairs each minted access token with the stored
-account identity to form the CLI's per-account header, so silently keeping the
-old identity would send a valid token under the wrong account, and silently
-adopting the new one would re-scope a profile the operator declared for a
-specific account without the operator saying so. Neither is a decision a refresh
-is entitled to make. A definitely committed replacement overwrites the previous
-refresh token rather than retaining it: a superseded token is unusable, and
-keeping one would only preserve material whose sole remaining effect is to
-invalidate the live authorization if it were ever replayed. If the exchange
-fails after possible provider rotation, its persistence commit is ambiguous, or
-the daemon restarts with the marker still present, it never replays the stored
-token. It first rereads the durable generation: a committed replacement is
-adopted; an uncleared marker quarantines the profile and requires
-re-provisioning. After a successful replacement commit, the refresh task
-publishes the one in-memory access token to every joined preparation. A
-definitely non-rotating failure first clears the marker, then publishes its one
-typed result. An ambiguous exchange, ambiguous commit, or refresh-task loss
-first commits quarantine from the retained marker, then publishes that typed
-result and wakes every joiner. Cancellation follows the same evidence boundary:
-before possible request bytes it is definitely non-rotating, and afterward it is
-ambiguous. Process exit needs no durable waiter: startup resolves the retained
-marker to replacement or quarantine before admitting work, and a later
-preparation observes that durable result. No joiner can wait past its own
-cancellation or the single-flight's one published terminal result. Access tokens
-are held in memory. A clean restart discards them without contacting any
-provider; the first later call preparation that needs a profile lazily refreshes
-it. This keeps access tokens out of the database and preserves
+the marker as a credential failure.
+
+The limit is one POST per **attempt**, not one per generation, and at most one
+attempt in flight per generation at a time. A refresh client sends exactly one
+POST for that attempt to the configured `token_url`'s exact scheme, host,
+effective port, path, and query, and redirect following and automatic HTTP,
+transport, and protocol retries are disabled at every layer, so an attempt is
+one request and never a family of them. The single-flight is what keeps two
+preparations from attempting the same generation concurrently; it is not a count
+of how many attempts that generation may ever have.
+
+A failure that **definitively did not rotate** the stored token — one whose
+response or transport outcome establishes that the exchange never reached the
+point of issuing a new token — clears the marker and leaves the generation
+available to a later attempt. Counting attempts per generation instead would
+permanently strand a profile after one transient token-endpoint outage, which is
+a worse outcome than the one the limit exists to prevent, and the daemon has the
+evidence to tell that case apart.
+
+**Replay after an ambiguous exchange is forbidden.** This is a separate rule and
+not a qualification of the counting above, because it is the property the whole
+protocol exists to protect: once any request bytes may have been written, a
+connection loss, a redirect response, or an indeterminate response leaves the
+rotation outcome unknown, and a token that may already have been rotated must
+never be presented again. The daemon does not send again, whatever the attempt
+count says, and follows the quarantine path below. No relaxation of the
+attempt-counting rule reaches this one. A second transaction re-locks and
+matches that generation, compares the account identity the response carries
+against the one stored with that generation, persists the returned token, and
+clears the marker before the new access token is used anywhere. An identity that
+differs is not persisted: the generation quarantines and re-provisioning is the
+only recovery. Why quarantine rather than adopt the new identity — dispatch
+pairs each minted access token with the stored account identity to form the
+CLI's per-account header, so silently keeping the old identity would send a
+valid token under the wrong account, and silently adopting the new one would
+re-scope a profile the operator declared for a specific account without the
+operator saying so. Neither is a decision a refresh is entitled to make. A
+definitely committed replacement overwrites the previous refresh token rather
+than retaining it: a superseded token is unusable, and keeping one would only
+preserve material whose sole remaining effect is to invalidate the live
+authorization if it were ever replayed. If the exchange fails after possible
+provider rotation, its persistence commit is ambiguous, or the daemon restarts
+with the marker still present, it never replays the stored token. It first
+rereads the durable generation: a committed replacement is adopted; an uncleared
+marker quarantines the profile and requires re-provisioning. After a successful
+replacement commit, the refresh task publishes the one in-memory access token to
+every joined preparation. A definitely non-rotating failure first clears the
+marker, then publishes its one typed result. An ambiguous exchange, ambiguous
+commit, or refresh-task loss first commits quarantine from the retained marker,
+then publishes that typed result and wakes every joiner. Cancellation follows
+the same evidence boundary: before possible request bytes it is definitely
+non-rotating, and afterward it is ambiguous. Process exit needs no durable
+waiter: startup resolves the retained marker to replacement or quarantine before
+admitting work, and a later preparation observes that durable result. No joiner
+can wait past its own cancellation or the single-flight's one published terminal
+result. Access tokens are held in memory. A clean restart discards them without
+contacting any provider; the first later call preparation that needs a profile
+lazily refreshes it. This keeps access tokens out of the database and preserves
 configuration-independent recovery even when a token endpoint is unavailable.
 
 Dispatch supplies each invocation a scratch credential home carrying the
