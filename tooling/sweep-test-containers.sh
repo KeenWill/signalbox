@@ -167,7 +167,7 @@ cleanup() {
 		bounded_worker=""
 	fi
 	if [ -n "$bounded_deadline" ]; then
-		kill -s TERM "$bounded_deadline" >/dev/null 2>&1 || true
+		kill -s TERM -- -"$bounded_deadline" >/dev/null 2>&1 || true
 		wait "$bounded_deadline" >/dev/null 2>&1 || true
 		bounded_deadline=""
 	fi
@@ -232,7 +232,11 @@ run_bounded() {
 	local status=0
 	wait "$worker" || status=$?
 	bounded_worker=""
-	kill -s TERM "$deadline" >/dev/null 2>&1 || true
+	# The group, not the identifier: the deadline is a shell whose `sleep` is a
+	# child of it, and signalling the shell alone leaves that `sleep` reparented
+	# and running for the rest of the deadline. On a timer those accumulate, one
+	# per daemon call, on a machine this tool exists to keep clear.
+	kill -s TERM -- -"$deadline" >/dev/null 2>&1 || true
 	wait "$deadline" >/dev/null 2>&1 || true
 	bounded_deadline=""
 	return "$status"

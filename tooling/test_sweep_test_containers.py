@@ -160,6 +160,10 @@ DECLINED_TO_SIGNAL = "the orphaned deadline signalled a group it could not still
 # the whole job for twenty minutes instead of failing here in a minute.
 SWEEP_TIMEOUT_SECONDS = 60
 
+# Distinctive enough that no other process on the machine is sleeping for it,
+# so a leaked deadline from this sweep is the only thing the count can find.
+LEAK_PROBE_DEADLINE_SECONDS = 883
+
 REFUSED_INSPECTION = "Error response from daemon: authorization denied"
 
 REFUSED_REMOVAL = "Error response from daemon: removal is denied by policy"
@@ -235,6 +239,21 @@ def container_start_sites() -> tuple[list[str], list[str]]:
             if MARKED_START not in "\n".join(lines[head - 2 : number]):
                 unmarked.append(f"{name}:{number}")
     return sites, unmarked
+
+
+def sleeping_deadlines(seconds: int) -> int:
+    """Count deadline processes still sleeping for `seconds`, outside test bodies.
+
+    A deadline is a shell whose `sleep` is a child of it, so one signalled by
+    identifier rather than by group leaves that `sleep` running until it expires.
+    Nothing inside the sweep can observe that, which is why this looks at the
+    process table.
+    """
+    found = subprocess.run(
+        ["pgrep", "-f", f"sleep {seconds}"], capture_output=True, text=True
+    )
+    assert found.returncode in (0, 1), f"pgrep is unavailable: {found.stderr}"
+    return len([line for line in found.stdout.split() if line])
 
 
 def write_fake_docker(bin_dir: Path) -> None:
@@ -808,6 +827,19 @@ class SweepTestContainersTest(unittest.TestCase):
 
         self.assertEqual(run.status, 1)
         self.assertIn("did not answer the removal request within 1s", run.stderr)
+
+    def test_a_finished_sweep_leaves_no_deadline_process_behind(self) -> None:
+        before = sleeping_deadlines(LEAK_PROBE_DEADLINE_SECONDS)
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply", "--deadline-seconds", str(LEAK_PROBE_DEADLINE_SECONDS)],
+        )
+        time.sleep(1)
+
+        self.assertEqual(run.status, 0, run.stderr)
+        self.assertEqual(run.removed, ["old111"])
+        self.assertEqual(before, 0, "a previous run leaked a deadline")
+        self.assertEqual(sleeping_deadlines(LEAK_PROBE_DEADLINE_SECONDS), 0)
 
     def test_a_daemon_call_that_overran_its_deadline_is_not_left_running(self) -> None:
         run = run_sweep(
