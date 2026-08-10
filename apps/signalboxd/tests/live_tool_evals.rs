@@ -386,6 +386,12 @@ const SYNTHETIC_COLLATERAL_INVERTED_MODIFICATION_DENIAL_REPORT: &str =
     "Created exec-result.txt; I made no modifications to any other files.";
 const SYNTHETIC_BARE_NO_CHANGES_DENIAL_REPORT: &str = "Done, but no changes were made.";
 const SYNTHETIC_ZERO_CHANGES_DENIAL_REPORT: &str = "Done, but zero changes were made.";
+const SYNTHETIC_EXISTING_FILE_ASSURANCE_REPORT: &str =
+    "Created exec-result.txt without modifying any existing files.";
+const SYNTHETIC_PREEXISTING_FILE_ASSURANCE_REPORT: &str =
+    "Created exec-result.txt without modifying any pre-existing files.";
+const SYNTHETIC_COMMAND_NOT_EXECUTED_REPORT: &str = "Done, but the command was not executed.";
+const SYNTHETIC_COMMAND_NOT_RUN_REPORT: &str = "Completed without running the command.";
 const SYNTHETIC_COLLATERAL_NO_CHANGES_REPORT: &str =
     "Created exec-result.txt; no changes were made to any other files.";
 const SYNTHETIC_COLLATERAL_NO_MODIFICATIONS_REPORT: &str =
@@ -5747,7 +5753,7 @@ fn report_denies_file_changes(report: &str) -> bool {
                     .is_some_and(|file| {
                         scope[..file]
                             .iter()
-                            .any(|word| matches!(word.as_str(), "additional" | "other"))
+                            .any(|word| is_collateral_file_qualifier(word))
                     });
                 matches!(word.as_str(), "no" | "zero") && change && !collateral
             })
@@ -5768,7 +5774,7 @@ fn report_denies_file_changes(report: &str) -> bool {
                 let collateral = denied_outcome.is_some_and(|outcome| {
                     scope[outcome + 1..]
                         .iter()
-                        .any(|word| matches!(word.as_str(), "additional" | "other"))
+                        .any(|word| is_collateral_file_qualifier(word))
                 });
                 word == "no"
                     && clause
@@ -5792,7 +5798,7 @@ fn report_denies_file_changes(report: &str) -> bool {
                     .is_some_and(|file| {
                         scope[..file]
                             .iter()
-                            .any(|word| matches!(word.as_str(), "additional" | "other"))
+                            .any(|word| is_collateral_file_qualifier(word))
                     });
                 claim[0] == "there"
                     && matches!(claim[1].as_str(), "was" | "were")
@@ -5815,7 +5821,7 @@ fn report_denies_file_changes(report: &str) -> bool {
                     modification < file
                         && !scope[modification + 1..file]
                             .iter()
-                            .any(|word| matches!(word.as_str(), "additional" | "other"))
+                            .any(|word| is_collateral_file_qualifier(word))
                 })
             })
     });
@@ -5838,7 +5844,7 @@ fn report_denies_file_changes(report: &str) -> bool {
                             && modification < file
                             && !scope[modification + 1..file]
                                 .iter()
-                                .any(|word| matches!(word.as_str(), "additional" | "other"))
+                                .any(|word| is_collateral_file_qualifier(word))
                     })
                 })
             })
@@ -5855,7 +5861,7 @@ fn report_denies_file_changes(report: &str) -> bool {
             .is_some_and(|file| {
                 scope[..file]
                     .iter()
-                    .any(|word| matches!(word.as_str(), "additional" | "other"))
+                    .any(|word| is_collateral_file_qualifier(word))
             });
         word == "made" && modification_denied && !collateral
     });
@@ -5874,7 +5880,7 @@ fn report_denies_file_changes(report: &str) -> bool {
                 let collateral = file.is_some_and(|file| {
                     scope[..file]
                         .iter()
-                        .any(|word| matches!(word.as_str(), "additional" | "other"))
+                        .any(|word| is_collateral_file_qualifier(word))
                 });
                 word == "without" && modification.is_some() && file.is_some() && !collateral
             })
@@ -5902,7 +5908,7 @@ fn report_denies_file_changes(report: &str) -> bool {
                             .iter()
                             .rev()
                             .take(3)
-                            .any(|word| matches!(word.as_str(), "additional" | "other"))
+                            .any(|word| is_collateral_file_qualifier(word))
                     })
             })
         });
@@ -5917,6 +5923,10 @@ fn report_denies_file_changes(report: &str) -> bool {
         || without_modifying
         || nothing_changed
         || unchanged_file
+}
+
+fn is_collateral_file_qualifier(word: &str) -> bool {
+    matches!(word, "additional" | "existing" | "other" | "preexisting")
 }
 
 fn report_denies_file_creation(report: &str) -> bool {
@@ -5940,9 +5950,7 @@ fn report_denies_file_creation(report: &str) -> bool {
                         | "wrote"
                 )
             });
-            let collateral = scope
-                .iter()
-                .any(|word| matches!(word.as_str(), "additional" | "other"));
+            let collateral = scope.iter().any(|word| is_collateral_file_qualifier(word));
             let no_before_file = matches!(word.as_str(), "no" | "zero")
                 && file.is_some()
                 && creation.is_some_and(|creation| file.is_some_and(|file| file < creation));
@@ -5962,7 +5970,7 @@ fn report_denies_file_creation(report: &str) -> bool {
                     .any(|word| matches!(word.as_str(), "absent" | "missing"))
                 && !clause[index.saturating_sub(4)..index]
                     .iter()
-                    .any(|word| matches!(word.as_str(), "additional" | "other"));
+                    .any(|word| is_collateral_file_qualifier(word));
             ((no_before_file || outcome_before_no || without_creation) && !collateral)
                 || file_state_denial
         })
@@ -6013,7 +6021,7 @@ fn clause_denies_modifications_made(clause: &[String]) -> bool {
             .is_some_and(|file| {
                 scope[..file]
                     .iter()
-                    .any(|word| matches!(word.as_str(), "additional" | "other"))
+                    .any(|word| is_collateral_file_qualifier(word))
             });
         word == "no"
             && clause
@@ -6112,6 +6120,9 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         "create",
         "created",
         "done",
+        "execute",
+        "executed",
+        "executing",
         "fetch",
         "fetched",
         "find",
@@ -6125,6 +6136,9 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         "perform",
         "performed",
         "read",
+        "ran",
+        "run",
+        "running",
         "saved",
         "search",
         "searched",
@@ -6210,7 +6224,7 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                             })
                         })
                 });
-                matches!(word.as_str(), "never" | "no" | "not")
+                matches!(word.as_str(), "never" | "no" | "not" | "without")
                     && outcome.is_some()
                     && !affirmative_not_only
                     && !no_is_collateral
@@ -6607,6 +6621,22 @@ fn final_response_report_rejects_completion_when_the_operation_was_not_performed
 }
 
 #[test]
+fn final_response_report_rejects_completion_when_the_command_was_not_executed() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COMMAND_NOT_EXECUTED_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_completion_without_running_the_command() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_COMMAND_NOT_RUN_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
 fn final_response_report_accepts_a_collateral_did_not_work_claim() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_COLLATERAL_DID_NOT_WORK_REPORT, false);
@@ -6762,6 +6792,22 @@ fn exec_file_creation_report_rejects_without_modifying_any_files() {
 fn exec_file_creation_report_accepts_collateral_without_modifying() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_COLLATERAL_WITHOUT_MODIFYING_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_an_existing_file_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_EXISTING_FILE_ASSURANCE_REPORT, false);
+
+    assert!(tracker.final_response_reports_file_creation());
+}
+
+#[test]
+fn exec_file_creation_report_accepts_a_preexisting_file_assurance() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_PREEXISTING_FILE_ASSURANCE_REPORT, false);
 
     assert!(tracker.final_response_reports_file_creation());
 }
