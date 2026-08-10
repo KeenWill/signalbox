@@ -4618,6 +4618,59 @@ async fn s32_inv002_inv044_load_rejects_later_created_record() -> Result<(), Box
     Ok(())
 }
 
+/// INV-002 / INV-044: a pre-pin replacement cannot impersonate revision-one
+/// creation after relational guards are bypassed.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv044_load_rejects_revision_one_pre_pin_replacement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    append_pre_pin_replacement_projection(
+        &pool,
+        placement.session(),
+        RunnerId::from_uuid(uuid(REPLACEMENT_RUNNER)),
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER ALL",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DROP CONSTRAINT runner_session_placement_state_shape,
+         ADD CONSTRAINT runner_session_placement_state_shape CHECK (TRUE)",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET placement_revision = 1
+          WHERE session_id = $1 AND event_kind = 'pre_pin_replaced'",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(placement.session())
+        .await
+        .expect_err("a replacement event cannot carry the initial revision");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::InvalidEncoding);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_pre_pin_replacement_round_trips_append_only_history()
@@ -5216,6 +5269,55 @@ async fn s32_inv044_abandoned_pre_pin_placement_round_trips_terminal_state()
     Ok(())
 }
 
+/// INV-002 / INV-044: pre-pin abandonment reconstitution requires its exact
+/// immediately preceding loss record.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv044_load_rejects_pre_pin_abandonment_without_loss_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    append_abandoned_projection(&pool, placement.session(), None).await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER ALL",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DROP CONSTRAINT runner_session_placement_state_shape,
+         ADD CONSTRAINT runner_session_placement_state_shape CHECK (TRUE)",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET event_kind = 'created', state_kind = 'unpinned',
+                lost_runner_id = NULL
+          WHERE session_id = $1 AND event_kind = 'runner_lost_before_pin'",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(placement.session())
+        .await
+        .expect_err("pre-pin abandonment requires its exact loss predecessor");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn s32_inv044_abandoned_pinned_placement_round_trips_retained_authority()
@@ -5239,6 +5341,41 @@ async fn s32_inv044_abandoned_pinned_placement_round_trips_retained_authority()
     assert_eq!(loaded.placement(), &abandoned);
     assert_eq!(loaded.registration(), Some(&registration));
     assert_eq!(loaded.grant(), pin.grant.as_ref());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-002 / INV-044: pinned abandonment reconstitution requires its exact
+/// immediately preceding loss record.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv044_load_rejects_pinned_abandonment_without_loss_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
+    append_runner_lost_projection(&pool, pin.placement.session()).await?;
+    append_abandoned_projection(&pool, pin.placement.session(), None).await?;
+    sqlx::query(
+        "ALTER TABLE runner_session_placement_record
+         DISABLE TRIGGER ALL",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET event_kind = 'pinned', state_kind = 'pinned',
+                lost_runner_id = NULL, loss_source_kind = NULL
+          WHERE session_id = $1 AND event_kind = 'runner_lost'",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    let corrupted = store
+        .load_placement(pin.placement.session())
+        .await
+        .expect_err("pinned abandonment requires its exact loss predecessor");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
     drop(pool);
     Ok(())
 }

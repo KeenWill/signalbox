@@ -3489,7 +3489,6 @@ async fn decode_placement(
     profileless_tombstone: Option<&CredentialProfileGrant>,
 ) -> Result<SessionRunnerPlacement, RunnerProtocolStoreError> {
     let session = session_id(row.decode_column("session_id")?);
-    let event = row.decode_column::<Decimal>("event_ordinal")?;
     let event_ordinal = decode_u64(row.decode_column("event_ordinal")?)?;
     let placement_revision = decode_generation(row.decode_column("placement_revision")?)?;
     let request = decode_placement_request(connection, row).await?;
@@ -3499,7 +3498,9 @@ async fn decode_placement(
     let event_matches_state = match state_kind.as_str() {
         "unpinned" => match event_kind.as_str() {
             "created" => event_ordinal == 1 && placement_revision == RunnerGeneration::one(),
-            "pre_pin_replaced" => true,
+            "pre_pin_replaced" => {
+                event_ordinal > 1 && placement_revision != RunnerGeneration::one()
+            }
             _ => false,
         },
         "pinned" => matches!(
@@ -3548,54 +3549,15 @@ async fn decode_placement(
             RunnerLostBeforePin::from_stored(runner),
         ))
     } else {
-        let tool_rows = sqlx::query(
-            "SELECT tool_name, runner_required
-               FROM runner_session_placement_tool
-              WHERE session_id = $1 AND event_ordinal = $2
-              ORDER BY tool_name",
-        )
-        .bind(session.into_uuid())
-        .bind(event)
-        .fetch_all(&mut *connection)
-        .await?;
-        require_count(row, "pinned_tool_count", tool_rows.len())?;
-        let tools = tool_rows
-            .iter()
-            .map(|row| tool_name(row.decode_column("tool_name")?))
-            .collect::<Result<BTreeSet<_>, _>>()?;
-        let mut runner_required_tools = BTreeSet::new();
-        for row in &tool_rows {
-            match decode_stored_runner_requirement(row.decode_column::<bool>("runner_required")?) {
-                StoredRunnerRequirement::Optional => {}
-                StoredRunnerRequirement::Required => {
-                    runner_required_tools.insert(tool_name(row.decode_column("tool_name")?)?);
-                }
-            }
-        }
-        let runner = row
-            .decode_column::<Option<Uuid>>("pinned_runner_id")?
-            .map(runner_id)
-            .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-        let directory = row
-            .decode_column::<Option<String>>("pinned_working_directory")?
-            .map(working_directory)
-            .transpose()?
-            .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-        let workspace = decode_provisioned_workspace(row, session, runner)?;
-        let pinned = PinnedRunnerPlacement {
-            runner,
-            working_directory: directory,
-            credential_profile: row
-                .decode_column::<Option<String>>("pinned_credential_profile_name")?
-                .map(profile_name)
-                .transpose()?,
-            grant_lineage: decode_grant_lineage(row)?,
-            tools,
-            runner_required_tools,
-            workspace,
-            sandbox: request.sandbox,
+        let pinned = decode_pinned_placement(
+            connection,
+            row,
+            session,
+            request.sandbox,
             permission_overrides,
-        };
+        )
+        .await?;
+        let runner = pinned.runner;
         match (state_kind.as_str(), lost_runner, loss_source) {
             ("pinned", None, None) => SessionRunnerPlacementState::Pinned(pinned),
             ("runner_lost", Some(lost), Some(source)) if lost == runner => {
@@ -3611,6 +3573,7 @@ async fn decode_placement(
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
     };
+    authenticate_abandonment_predecessor(connection, row, &request, &state).await?;
     let history = match &state {
         SessionRunnerPlacementState::Unpinned
         | SessionRunnerPlacementState::RunnerLostBeforePin(_)
@@ -3636,6 +3599,143 @@ async fn decode_placement(
         profileless_tombstone,
     )
     .map_err(RunnerProtocolStoreError::Domain)
+}
+
+async fn decode_pinned_placement(
+    connection: &mut PgConnection,
+    row: &PgRow,
+    session: SessionId,
+    sandbox: RunnerSandboxProfile,
+    permission_overrides: RunnerToolPermissionOverrides,
+) -> Result<PinnedRunnerPlacement, RunnerProtocolStoreError> {
+    let event = row.decode_column::<Decimal>("event_ordinal")?;
+    let tool_rows = sqlx::query(
+        "SELECT tool_name, runner_required
+           FROM runner_session_placement_tool
+          WHERE session_id = $1 AND event_ordinal = $2
+          ORDER BY tool_name",
+    )
+    .bind(session.into_uuid())
+    .bind(event)
+    .fetch_all(&mut *connection)
+    .await?;
+    require_count(row, "pinned_tool_count", tool_rows.len())?;
+    let tools = tool_rows
+        .iter()
+        .map(|row| tool_name(row.decode_column("tool_name")?))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut runner_required_tools = BTreeSet::new();
+    for row in &tool_rows {
+        match decode_stored_runner_requirement(row.decode_column::<bool>("runner_required")?) {
+            StoredRunnerRequirement::Optional => {}
+            StoredRunnerRequirement::Required => {
+                runner_required_tools.insert(tool_name(row.decode_column("tool_name")?)?);
+            }
+        }
+    }
+    let runner = row
+        .decode_column::<Option<Uuid>>("pinned_runner_id")?
+        .map(runner_id)
+        .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+    let working_directory = row
+        .decode_column::<Option<String>>("pinned_working_directory")?
+        .map(working_directory)
+        .transpose()?
+        .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+    Ok(PinnedRunnerPlacement {
+        runner,
+        working_directory,
+        credential_profile: row
+            .decode_column::<Option<String>>("pinned_credential_profile_name")?
+            .map(profile_name)
+            .transpose()?,
+        grant_lineage: decode_grant_lineage(row)?,
+        tools,
+        runner_required_tools,
+        workspace: decode_provisioned_workspace(row, session, runner)?,
+        sandbox,
+        permission_overrides,
+    })
+}
+
+async fn authenticate_abandonment_predecessor(
+    connection: &mut PgConnection,
+    row: &PgRow,
+    request: &SessionRunnerPlacementRequest,
+    state: &SessionRunnerPlacementState,
+) -> Result<(), RunnerProtocolStoreError> {
+    let SessionRunnerPlacementState::RunnerAbandoned(abandoned) = state else {
+        return Ok(());
+    };
+    let session = session_id(row.decode_column("session_id")?);
+    let predecessor_ordinal = decode_u64(row.decode_column("event_ordinal")?)?
+        .checked_sub(1)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+    let predecessor = sqlx::query(
+        "SELECT *
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_ordinal = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(predecessor_ordinal))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+    let predecessor_request = decode_placement_request(connection, &predecessor).await?;
+    if decode_generation(predecessor.decode_column("placement_revision")?)?
+        != decode_generation(row.decode_column("placement_revision")?)?
+        || &predecessor_request != request
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let predecessor_event: String = predecessor.decode_column("event_kind")?;
+    let predecessor_state: String = predecessor.decode_column("state_kind")?;
+    match abandoned {
+        AbandonedRunnerPlacement::BeforePin(lost)
+            if predecessor_event == "runner_lost_before_pin"
+                && predecessor_state == "runner_lost_before_pin"
+                && predecessor
+                    .decode_column::<Option<Uuid>>("lost_runner_id")?
+                    .map(runner_id)
+                    == Some(lost.runner())
+                && !placement_row_has_invalid_pre_pin_loss_facts(&predecessor)? =>
+        {
+            Ok(())
+        }
+        AbandonedRunnerPlacement::Pinned(lost)
+            if predecessor_event == "runner_lost"
+                && predecessor_state == "runner_lost"
+                && predecessor
+                    .decode_column::<Option<Uuid>>("lost_runner_id")?
+                    .map(runner_id)
+                    == Some(lost.pinned().runner)
+                && predecessor
+                    .decode_column::<Option<String>>("loss_source_kind")?
+                    .map(|source| {
+                        runner_placement_loss_source_from_str(&source)
+                            .ok_or(RunnerProtocolCorruption::InvalidEncoding)
+                    })
+                    .transpose()?
+                    == Some(lost.source()) =>
+        {
+            let pinned = decode_pinned_placement(
+                connection,
+                &predecessor,
+                session,
+                predecessor_request.sandbox,
+                predecessor_request.permission_overrides,
+            )
+            .await?;
+            if pinned == *lost.pinned() {
+                Ok(())
+            } else {
+                Err(RunnerProtocolCorruption::CrossWiredReference.into())
+            }
+        }
+        AbandonedRunnerPlacement::BeforePin(_) | AbandonedRunnerPlacement::Pinned(_) => {
+            Err(RunnerProtocolCorruption::CrossWiredReference.into())
+        }
+    }
 }
 
 fn placement_row_has_pinned_facts(row: &PgRow) -> Result<bool, RunnerProtocolStoreError> {
