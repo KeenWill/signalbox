@@ -63,8 +63,20 @@ elif command == "inspect":
     sys.exit(1 if missing else 0)
 elif command == "rm":
     assert "--force" in sys.argv and "--volumes" in sys.argv, sys.argv
+    if os.environ.get("FAKE_DOCKER_RM_REFUSED"):
+        print(os.environ["FAKE_DOCKER_RM_REFUSED"], file=sys.stderr)
+        sys.exit(1)
+    gone = set(filter(None, os.environ.get("FAKE_DOCKER_RM_GONE", "").split(",")))
+    removed = [name for name in sys.argv[4:] if name not in gone]
     with open(os.environ["FAKE_DOCKER_RM_LOG"], "a") as log:
-        log.write("\\n".join(sys.argv[4:]) + "\\n")
+        log.write("\\n".join(removed) + "\\n")
+    for name in sys.argv[4:]:
+        if name in gone:
+            print(
+                f"Error response from daemon: No such container: {name}",
+                file=sys.stderr,
+            )
+    sys.exit(1 if gone & set(sys.argv[4:]) else 0)
 elif command == "volume":
     assert "dangling=true" in sys.argv, sys.argv
     print(os.environ["FAKE_DOCKER_DANGLING"], end="")
@@ -92,6 +104,8 @@ DISPOSABLE_FILTER = f"label={DISPOSABLE_LABEL_KEY}={DISPOSABLE_LABEL_VALUE}"
 MANAGED_BY_FILTER = "label=org.testcontainers.managed-by=testcontainers"
 
 REFUSED_INSPECTION = "Error response from daemon: authorization denied"
+
+REFUSED_REMOVAL = "Error response from daemon: removal is denied by policy"
 
 HARMLESS_INSPECTION_NOTE = "WARNING: the legacy inspect format is deprecated"
 
@@ -185,6 +199,8 @@ def run_sweep(
     inspection_fails_silently: bool = False,
     inspection_note: str | None = None,
     inspection_note_is_fatal: bool = False,
+    gone_before_removal: tuple[str, ...] = (),
+    removal_refused: str | None = None,
 ) -> SweepRun:
     """Invoke the real sweep against one fake inventory, outside test bodies.
 
@@ -216,6 +232,10 @@ def run_sweep(
         environment.pop("FAKE_DOCKER_INSPECT_SILENTLY_FAILS", None)
         environment.pop("FAKE_DOCKER_INSPECT_NOTE", None)
         environment.pop("FAKE_DOCKER_INSPECT_NOTE_IS_FATAL", None)
+        environment.pop("FAKE_DOCKER_RM_REFUSED", None)
+        environment["FAKE_DOCKER_RM_GONE"] = ",".join(gone_before_removal)
+        if removal_refused is not None:
+            environment["FAKE_DOCKER_RM_REFUSED"] = removal_refused
         if inspection_note is not None:
             environment["FAKE_DOCKER_INSPECT_NOTE"] = inspection_note
         if inspection_note_is_fatal:
@@ -456,6 +476,34 @@ class SweepTestContainersTest(unittest.TestCase):
 
         self.assertEqual(run.status, 0, run.stderr)
         self.assertEqual(run.removed, ["old111"])
+
+    def test_a_container_removed_before_the_sweep_reaches_it_does_not_abort_removal(
+        self,
+    ) -> None:
+        run = run_sweep(
+            [
+                aged("old111", 72, "running", "postgres:18.4-alpine3.23"),
+                aged("old222", 72, "running", "postgres:18.4-alpine3.23"),
+            ],
+            arguments=["--apply"],
+            gone_before_removal=("old111",),
+        )
+
+        self.assertEqual(run.status, 0, run.stderr)
+        self.assertEqual(run.removed, ["old222"])
+        self.assertIn("removed 1 container(s); 1 had already gone", run.stdout)
+
+    def test_a_refused_removal_fails_instead_of_reporting_a_clean_sweep(self) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            removal_refused=REFUSED_REMOVAL,
+        )
+
+        self.assertEqual(run.status, 1)
+        self.assertEqual(run.removed, [])
+        self.assertIn("other than a container disappearing", run.stderr)
+        self.assertIn(REFUSED_REMOVAL, run.stderr)
 
     def test_an_empty_inventory_exits_clean(self) -> None:
         run = run_sweep([], arguments=["--apply"])

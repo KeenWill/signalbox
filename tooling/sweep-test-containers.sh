@@ -281,8 +281,36 @@ fi
 
 echo "sweep-test-containers: removing $count container(s) older than" \
 	"${older_than_hours}h, with their anonymous volumes"
+
+# Removal races the same way inspection does, and for the same reason: a
+# container selected a moment ago can be gone before `docker rm` reaches it.
+# Aborting there would strand the containers `xargs` had not got to yet, so a
+# container that left on its own is counted rather than treated as a failure,
+# and every other removal error still fails the run.
+removal_errors="$(mktemp)"
+trap 'rm -f "$inspection_errors" "$removal_errors"' EXIT
+
+removal_status=0
 printf '%s\n' "$selected" |
 	awk '{ print $1 }' |
-	xargs docker rm --force --volumes >/dev/null
-echo "sweep-test-containers: removed $count container(s)"
+	xargs docker rm --force --volumes >/dev/null 2>"$removal_errors" ||
+	removal_status=$?
+
+if [ "$removal_status" -eq 0 ]; then
+	echo "sweep-test-containers: removed $count container(s)"
+	finish_clean
+fi
+
+unremoved="$(grep -v -E "$MISSING_OBJECT_PATTERN" "$removal_errors" || true)"
+
+if [ -n "$unremoved" ]; then
+	echo "sweep-test-containers: docker rm failed for a reason other than a" \
+		"container disappearing (exit status $removal_status)" >&2
+	cat "$removal_errors" >&2
+	exit 1
+fi
+
+already_gone="$(grep -c -E "$MISSING_OBJECT_PATTERN" "$removal_errors" || true)"
+echo "sweep-test-containers: removed $((count - already_gone)) container(s);" \
+	"$already_gone had already gone"
 finish_clean
