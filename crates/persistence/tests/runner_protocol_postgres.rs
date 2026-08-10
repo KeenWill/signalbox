@@ -67,6 +67,7 @@ const FOREIGN_RUNNER: u128 = 0x9202;
 const RELATED_IDENTITY_OFFSET: u128 = 0x100;
 const LOCK_WAIT_PROBE: Duration = Duration::from_millis(100);
 const LOCK_COMPLETION_LIMIT: Duration = Duration::from_secs(10);
+const CONCURRENCY_TEST_LIMIT: Duration = Duration::from_secs(60);
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
 const LEGACY_PLACEMENT_REFUSAL: &str =
@@ -2758,41 +2759,48 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
 #[ignore = "requires Docker"]
 async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
 -> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
-    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
-    let mut blocker = pool.begin().await?;
-    sqlx::query(
-        "SELECT enrollment_id
-           FROM runner_enrollment
-          WHERE enrollment_id = $1
-          FOR UPDATE",
-    )
-    .bind(expected_enrollment.enrollment().into_uuid())
-    .fetch_one(&mut *blocker)
-    .await?;
-    let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
-    let mut replacement =
-        Box::pin(replacement_store.register(&expected_enrollment, narrowed_advertisement()));
-    tokio::time::timeout(LOCK_WAIT_PROBE, &mut replacement)
-        .await
-        .expect_err("registration replacement must wait for enrollment authority");
-    let mut lease_store = Box::pin(store.store_lease(&lease));
-    tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
-        .await
-        .expect_err("lease admission must wait behind registration replacement");
-    blocker.commit().await?;
-    let (replacement_result, lease_result) = tokio::time::timeout(LOCK_COMPLETION_LIMIT, async {
-        tokio::join!(&mut replacement, &mut lease_store)
+    tokio::time::timeout(CONCURRENCY_TEST_LIMIT, async {
+        let (_container, pool) = migrated_postgres().await?;
+        let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+        let mut blocker = pool.begin().await?;
+        sqlx::query(
+            "SELECT enrollment_id
+               FROM runner_enrollment
+              WHERE enrollment_id = $1
+              FOR UPDATE",
+        )
+        .bind(expected_enrollment.enrollment().into_uuid())
+        .fetch_one(&mut *blocker)
+        .await?;
+        let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
+        let mut replacement =
+            Box::pin(replacement_store.register(&expected_enrollment, narrowed_advertisement()));
+        tokio::time::timeout(LOCK_WAIT_PROBE, &mut replacement)
+            .await
+            .expect_err("registration replacement must wait for enrollment authority");
+        let mut lease_store = Box::pin(store.store_lease(&lease));
+        tokio::time::timeout(LOCK_WAIT_PROBE, &mut lease_store)
+            .await
+            .expect_err("lease admission must wait behind registration replacement");
+        blocker.commit().await?;
+        let (replacement_result, lease_result) =
+            tokio::time::timeout(LOCK_COMPLETION_LIMIT, async {
+                tokio::join!(&mut replacement, &mut lease_store)
+            })
+            .await
+            .expect(
+                "queued registration and lease mutations must complete after authority is released",
+            );
+        replacement_result?;
+        let rejected = lease_result
+            .expect_err("withdrawn current availability cannot authorize the later lease");
+
+        assert_store_check_violation(rejected);
+        drop(pool);
+        Ok(())
     })
     .await
-    .expect("queued registration and lease mutations must complete after authority is released");
-    replacement_result?;
-    let rejected =
-        lease_result.expect_err("withdrawn current availability cannot authorize the later lease");
-
-    assert_store_check_violation(rejected);
-    drop(pool);
-    Ok(())
+    .expect("registration replacement serialization must finish within its test deadline")
 }
 
 #[tokio::test]
