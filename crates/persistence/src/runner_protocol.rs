@@ -3931,6 +3931,27 @@ async fn authenticate_loss_predecessor(
         | SessionRunnerPlacementState::Pinned(_)
         | SessionRunnerPlacementState::RunnerAbandoned(_) => return Ok(()),
     }
+    let (predecessor, predecessor_request, pinned) =
+        load_authenticated_pinned_loss_predecessor(connection, row, request, state).await?;
+    authenticate_pinned_predecessor(
+        connection,
+        &predecessor,
+        &predecessor_request,
+        &SessionRunnerPlacementState::Pinned(pinned),
+    )
+    .await
+}
+
+async fn load_authenticated_pinned_loss_predecessor(
+    connection: &mut PgConnection,
+    row: &PgRow,
+    request: &SessionRunnerPlacementRequest,
+    state: &SessionRunnerPlacementState,
+) -> Result<(PgRow, SessionRunnerPlacementRequest, PinnedRunnerPlacement), RunnerProtocolStoreError>
+{
+    let SessionRunnerPlacementState::RunnerLost(lost) = state else {
+        return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+    };
     let session = session_id(row.decode_column("session_id")?);
     let predecessor_ordinal = decode_u64(row.decode_column("event_ordinal")?)?
         .checked_sub(1)
@@ -3960,39 +3981,29 @@ async fn authenticate_loss_predecessor(
         || predecessor
             .decode_column::<Option<String>>("loss_source_kind")?
             .is_some();
-    match state {
-        SessionRunnerPlacementState::RunnerLost(lost)
-            if predecessor_state == "pinned"
-                && matches!(
-                    predecessor_event.as_str(),
-                    "pinned" | "runner_replaced" | "profile_replaced"
-                )
-                && !predecessor_has_loss_metadata =>
-        {
-            let pinned = decode_pinned_placement(
-                connection,
-                &predecessor,
-                session,
-                predecessor_request.sandbox,
-                predecessor_request.permission_overrides,
-            )
-            .await?;
-            let predecessor_registration = decode_pinned_registration_identity(&predecessor)?;
-            let loss_registration = decode_pinned_registration_identity(row)?;
-            if pinned == *lost.pinned() && predecessor_registration == loss_registration {
-                Ok(())
-            } else {
-                Err(RunnerProtocolCorruption::CrossWiredReference.into())
-            }
-        }
-        SessionRunnerPlacementState::RunnerLost(_) => {
-            Err(RunnerProtocolCorruption::CrossWiredReference.into())
-        }
-        SessionRunnerPlacementState::RunnerLostBeforePin(_)
-        | SessionRunnerPlacementState::Unpinned
-        | SessionRunnerPlacementState::Pinned(_)
-        | SessionRunnerPlacementState::RunnerAbandoned(_) => Ok(()),
+    if predecessor_state != "pinned"
+        || !matches!(
+            predecessor_event.as_str(),
+            "pinned" | "runner_replaced" | "profile_replaced"
+        )
+        || predecessor_has_loss_metadata
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
+    let pinned = decode_pinned_placement(
+        connection,
+        &predecessor,
+        session,
+        predecessor_request.sandbox,
+        predecessor_request.permission_overrides.clone(),
+    )
+    .await?;
+    let predecessor_registration = decode_pinned_registration_identity(&predecessor)?;
+    let loss_registration = decode_pinned_registration_identity(row)?;
+    if pinned != *lost.pinned() || predecessor_registration != loss_registration {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok((predecessor, predecessor_request, pinned))
 }
 
 async fn authenticate_pre_pin_loss_predecessor(
@@ -4037,135 +4048,157 @@ async fn authenticate_pre_pin_loss_predecessor(
 
 async fn authenticate_pinned_predecessor(
     connection: &mut PgConnection,
-    row: &PgRow,
+    initial_row: &PgRow,
     request: &SessionRunnerPlacementRequest,
     state: &SessionRunnerPlacementState,
 ) -> Result<(), RunnerProtocolStoreError> {
     let SessionRunnerPlacementState::Pinned(pinned) = state else {
         return Ok(());
     };
-    let session = session_id(row.decode_column("session_id")?);
-    let predecessor_ordinal = decode_u64(row.decode_column("event_ordinal")?)?
-        .checked_sub(1)
-        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
-    let predecessor = sqlx::query(
-        "SELECT *
-           FROM runner_session_placement_record
-          WHERE session_id = $1 AND event_ordinal = $2",
-    )
-    .bind(session.into_uuid())
-    .bind(Decimal::from(predecessor_ordinal))
-    .fetch_optional(&mut *connection)
-    .await?
-    .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
-    let event: String = row.decode_column("event_kind")?;
-    let predecessor_event: String = predecessor.decode_column("event_kind")?;
-    let predecessor_state: String = predecessor.decode_column("state_kind")?;
-    let revision = decode_generation(row.decode_column("placement_revision")?)?;
-    let predecessor_revision = decode_generation(predecessor.decode_column("placement_revision")?)?;
-    let predecessor_request = decode_placement_request(connection, &predecessor).await?;
-    match event.as_str() {
-        "pinned"
-            if predecessor_state == "unpinned"
-                && predecessor_revision == revision
-                && predecessor_request == *request
-                && match predecessor_event.as_str() {
-                    "created" => {
-                        predecessor_ordinal == 1 && predecessor_revision == RunnerGeneration::one()
+    let mut current_row = None;
+    let mut current_request = request.clone();
+    let mut current_pinned = pinned.clone();
+    loop {
+        let row = current_row.as_ref().unwrap_or(initial_row);
+        let session = session_id(row.decode_column("session_id")?);
+        let predecessor_ordinal = decode_u64(row.decode_column("event_ordinal")?)?
+            .checked_sub(1)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let predecessor = sqlx::query(
+            "SELECT *
+               FROM runner_session_placement_record
+              WHERE session_id = $1 AND event_ordinal = $2",
+        )
+        .bind(session.into_uuid())
+        .bind(Decimal::from(predecessor_ordinal))
+        .fetch_optional(&mut *connection)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+        let event: String = row.decode_column("event_kind")?;
+        let predecessor_event: String = predecessor.decode_column("event_kind")?;
+        let predecessor_state: String = predecessor.decode_column("state_kind")?;
+        let revision = decode_generation(row.decode_column("placement_revision")?)?;
+        let predecessor_revision =
+            decode_generation(predecessor.decode_column("placement_revision")?)?;
+        let predecessor_request = decode_placement_request(connection, &predecessor).await?;
+        match event.as_str() {
+            "pinned"
+                if predecessor_state == "unpinned"
+                    && predecessor_revision == revision
+                    && predecessor_request == current_request
+                    && match predecessor_event.as_str() {
+                        "created" => {
+                            predecessor_ordinal == 1
+                                && predecessor_revision == RunnerGeneration::one()
+                        }
+                        "pre_pin_replaced" => {
+                            predecessor_ordinal > 1
+                                && predecessor_revision != RunnerGeneration::one()
+                        }
+                        _ => false,
                     }
-                    "pre_pin_replaced" => {
-                        predecessor_ordinal > 1 && predecessor_revision != RunnerGeneration::one()
-                    }
-                    _ => false,
-                }
-                && !placement_row_has_invalid_unpinned_facts(&predecessor)? =>
-        {
-            if predecessor_event == "pre_pin_replaced" {
-                load_placement_reconstitution_history(connection, &predecessor).await?;
-            }
-            Ok(())
-        }
-        "runner_replaced"
-            if predecessor_event == "runner_lost"
-                && predecessor_state == "runner_lost"
-                && predecessor_revision.checked_next() == Some(revision) =>
-        {
-            let prior_pinned = decode_pinned_placement(
-                connection,
-                &predecessor,
-                session,
-                predecessor_request.sandbox,
-                predecessor_request.permission_overrides.clone(),
-            )
-            .await?;
-            let source = predecessor
-                .decode_column::<Option<String>>("loss_source_kind")?
-                .map(|source| {
-                    runner_placement_loss_source_from_str(&source)
-                        .ok_or(RunnerProtocolCorruption::InvalidEncoding)
-                })
-                .transpose()?
-                .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-            let lost_runner = predecessor
-                .decode_column::<Option<Uuid>>("lost_runner_id")?
-                .map(runner_id)
-                .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
-            if lost_runner != prior_pinned.runner
-                || (pinned.runner == lost_runner
-                    && source != RunnerPlacementLossSource::Registration)
-                || !runner_replacement_grant_is_successor(&predecessor, row)?
+                    && !placement_row_has_invalid_unpinned_facts(&predecessor)? =>
             {
+                if predecessor_event == "pre_pin_replaced" {
+                    load_placement_reconstitution_history(connection, &predecessor).await?;
+                }
+                return Ok(());
+            }
+            "runner_replaced"
+                if predecessor_event == "runner_lost"
+                    && predecessor_state == "runner_lost"
+                    && predecessor_revision.checked_next() == Some(revision) =>
+            {
+                let prior_pinned = decode_pinned_placement(
+                    connection,
+                    &predecessor,
+                    session,
+                    predecessor_request.sandbox,
+                    predecessor_request.permission_overrides.clone(),
+                )
+                .await?;
+                let source = predecessor
+                    .decode_column::<Option<String>>("loss_source_kind")?
+                    .map(|source| {
+                        runner_placement_loss_source_from_str(&source)
+                            .ok_or(RunnerProtocolCorruption::InvalidEncoding)
+                    })
+                    .transpose()?
+                    .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+                let lost_runner = predecessor
+                    .decode_column::<Option<Uuid>>("lost_runner_id")?
+                    .map(runner_id)
+                    .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+                if lost_runner != prior_pinned.runner
+                    || (current_pinned.runner == lost_runner
+                        && source != RunnerPlacementLossSource::Registration)
+                    || !runner_replacement_grant_is_successor(&predecessor, row)?
+                {
+                    return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+                }
+                let lost = SessionRunnerPlacementState::RunnerLost(
+                    LostPinnedRunnerPlacement::from_stored(prior_pinned, source),
+                );
+                let (prior_row, prior_request, prior_pinned) =
+                    load_authenticated_pinned_loss_predecessor(
+                        connection,
+                        &predecessor,
+                        &predecessor_request,
+                        &lost,
+                    )
+                    .await?;
+                current_row = Some(prior_row);
+                current_request = prior_request;
+                current_pinned = prior_pinned;
+            }
+            "profile_replaced"
+                if predecessor_state == "pinned"
+                    && predecessor_revision.checked_next() == Some(revision) =>
+            {
+                let prior_pinned = decode_pinned_placement(
+                    connection,
+                    &predecessor,
+                    session,
+                    predecessor_request.sandbox,
+                    predecessor_request.permission_overrides.clone(),
+                )
+                .await?;
+                let same_request_axes = predecessor_request.selector == current_request.selector
+                    && predecessor_request.working_directory == current_request.working_directory
+                    && predecessor_request.workspace == current_request.workspace
+                    && predecessor_request.sandbox == current_request.sandbox
+                    && predecessor_request.permission_overrides
+                        == current_request.permission_overrides;
+                let same_pinned_axes = prior_pinned.runner == current_pinned.runner
+                    && prior_pinned.working_directory == current_pinned.working_directory
+                    && prior_pinned.tools == current_pinned.tools
+                    && prior_pinned.runner_required_tools == current_pinned.runner_required_tools
+                    && prior_pinned.workspace == current_pinned.workspace
+                    && prior_pinned.sandbox == current_pinned.sandbox
+                    && prior_pinned.permission_overrides == current_pinned.permission_overrides;
+                let same_registration = decode_pinned_registration_identity(&predecessor)?
+                    == decode_pinned_registration_identity(row)?;
+                let grant_advances =
+                    match (prior_pinned.grant_lineage, current_pinned.grant_lineage) {
+                        (Some(before), Some(after)) => {
+                            before.runner == after.runner
+                                && before.revision.checked_next() == Some(after.revision)
+                        }
+                        (None, None) | (None, Some(_)) | (Some(_), None) => false,
+                    };
+                if same_request_axes && same_pinned_axes && same_registration && grant_advances {
+                    current_row = Some(predecessor);
+                    current_request = predecessor_request;
+                    current_pinned = prior_pinned;
+                } else {
+                    return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+                }
+            }
+            "pinned" | "runner_replaced" | "profile_replaced" => {
                 return Err(RunnerProtocolCorruption::CrossWiredReference.into());
             }
-            let lost = SessionRunnerPlacementState::RunnerLost(
-                LostPinnedRunnerPlacement::from_stored(prior_pinned, source),
-            );
-            authenticate_loss_predecessor(connection, &predecessor, &predecessor_request, &lost)
-                .await
+            _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
-        "profile_replaced"
-            if predecessor_state == "pinned"
-                && predecessor_revision.checked_next() == Some(revision) =>
-        {
-            let prior_pinned = decode_pinned_placement(
-                connection,
-                &predecessor,
-                session,
-                predecessor_request.sandbox,
-                predecessor_request.permission_overrides.clone(),
-            )
-            .await?;
-            let same_request_axes = predecessor_request.selector == request.selector
-                && predecessor_request.working_directory == request.working_directory
-                && predecessor_request.workspace == request.workspace
-                && predecessor_request.sandbox == request.sandbox
-                && predecessor_request.permission_overrides == request.permission_overrides;
-            let same_pinned_axes = prior_pinned.runner == pinned.runner
-                && prior_pinned.working_directory == pinned.working_directory
-                && prior_pinned.tools == pinned.tools
-                && prior_pinned.runner_required_tools == pinned.runner_required_tools
-                && prior_pinned.workspace == pinned.workspace
-                && prior_pinned.sandbox == pinned.sandbox
-                && prior_pinned.permission_overrides == pinned.permission_overrides;
-            let same_registration = decode_pinned_registration_identity(&predecessor)?
-                == decode_pinned_registration_identity(row)?;
-            let grant_advances = match (prior_pinned.grant_lineage, pinned.grant_lineage) {
-                (Some(before), Some(after)) => {
-                    before.runner == after.runner
-                        && before.revision.checked_next() == Some(after.revision)
-                }
-                (None, None) | (None, Some(_)) | (Some(_), None) => false,
-            };
-            if same_request_axes && same_pinned_axes && same_registration && grant_advances {
-                Ok(())
-            } else {
-                Err(RunnerProtocolCorruption::CrossWiredReference.into())
-            }
-        }
-        "pinned" | "runner_replaced" | "profile_replaced" => {
-            Err(RunnerProtocolCorruption::CrossWiredReference.into())
-        }
-        _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
     }
 }
 
