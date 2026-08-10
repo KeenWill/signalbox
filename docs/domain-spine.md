@@ -3000,7 +3000,8 @@ impl AcceptedInputSchedulingReconstitutionInput {
     pub fn with_preceding_non_accepted_terminal(
         self,
         session: SessionId,
-        turn: TurnId,
+        predecessor: TurnId,
+        successor: TurnId,
         terminal_frontier: ContextFrontierId,
         selected: DirectModelSelection,
     ) -> Self;

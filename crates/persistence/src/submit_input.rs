@@ -4068,11 +4068,13 @@ pub(crate) async fn load_scheduling_projection(
     #[derive(sqlx::FromRow)]
     struct PrecedingNonAcceptedTerminalRow {
         turn_id: Uuid,
+        successor_turn_id: Uuid,
         terminal_frontier_id: Uuid,
         direct_selection_id: Uuid,
     }
     let preceding_non_accepted_terminals = sqlx::query_as::<_, PrecedingNonAcceptedTerminalRow>(
         "SELECT terminal.turn_id AS turn_id,
+                queued.turn_id AS successor_turn_id,
                 turn_lifecycle_effective_terminal_frontier(
                     terminal.session_id, terminal.turn_id
                 ) AS terminal_frontier_id,
@@ -4080,9 +4082,14 @@ pub(crate) async fn load_scheduling_projection(
            FROM queued_input_origin AS queued
            JOIN turn_lifecycle AS terminal
              ON terminal.session_id = $1
-            AND terminal.turn_id = accepted_input_turn_queue_predecessor(
-                queued.session_id, queued.turn_id
-            )
+            AND terminal.turn_id = CASE queued.priority_kind
+                    WHEN 'interrupt_immediately_after'
+                        THEN queued.interrupt_predecessor_turn_id
+                    WHEN 'ordinary'
+                        THEN accepted_input_turn_queue_predecessor(
+                            queued.session_id, queued.turn_id
+                        )
+                END
            JOIN LATERAL turn_origin_effective_model_configuration(
                 terminal.turn_id, terminal.session_id
            ) AS effective ON true
@@ -4091,6 +4098,15 @@ pub(crate) async fn load_scheduling_projection(
                     queued.session_id, queued.turn_id
                 )
             AND terminal.origin_kind = 'delegation'
+            AND (
+                queued.priority_kind = 'interrupt_immediately_after'
+                OR EXISTS (
+                    SELECT 1
+                      FROM session_delegation_initial_task AS initial_task
+                     WHERE initial_task.child_session_id = terminal.session_id
+                       AND initial_task.turn_id = terminal.turn_id
+                )
+            )
             AND (
                 terminal.state_kind = 'terminal'
                 OR terminal.delegation_runtime_terminal
@@ -5118,6 +5134,7 @@ pub(crate) async fn load_scheduling_projection(
         input = input.with_preceding_non_accepted_terminal(
             session_id,
             TurnId::from_uuid(preceding.turn_id),
+            TurnId::from_uuid(preceding.successor_turn_id),
             ContextFrontierId::from_uuid(preceding.terminal_frontier_id),
             DirectModelSelection::from_uuid(preceding.direct_selection_id),
         );

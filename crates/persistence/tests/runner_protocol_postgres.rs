@@ -8464,6 +8464,25 @@ async fn s32_inv009_inv044_pinned_runner_recovery_wait_round_trips_exact_loss()
         loaded_wait.interrupted_tool_attempt(),
         Some(interrupted_attempt)
     );
+    let (_, _, _, _, consumed_interrupted_attempt) = loaded_placement.into_parts();
+    assert_eq!(consumed_interrupted_attempt, Some(interrupted_attempt));
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-044: the immutable runner-recovery interrupt effect rejects
+/// statement-level truncation as well as row-level mutation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv009_inv044_runner_recovery_interrupt_effect_rejects_truncate()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let rejected = sqlx::query("TRUNCATE turn_runner_recovery_interrupt_effect")
+        .execute(&pool)
+        .await
+        .expect_err("immutable runner recovery effects cannot be truncated");
+
+    assert_check_violation(rejected);
     drop(pool);
     Ok(())
 }

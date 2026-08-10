@@ -573,12 +573,14 @@ impl StoredSessionRunnerPlacement {
         SessionRunnerPlacement,
         Option<StoredValidatedRunnerRegistration>,
         Option<CredentialProfileGrant>,
+        Option<ToolAttemptId>,
     ) {
         (
             self.event_ordinal,
             self.placement,
             self.registration,
             self.grant,
+            self.interrupted_tool_attempt,
         )
     }
 }
@@ -2088,6 +2090,22 @@ impl RunnerProtocolStore {
             }
         };
         let mut transaction = self.pool.begin().await?;
+        let scheduler_exists = sqlx::query_scalar::<_, Uuid>(
+            "SELECT session_id
+               FROM session_scheduler
+              WHERE session_id = $1
+              FOR UPDATE",
+        )
+        .bind(retired.session().into_uuid())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some();
+        if !scheduler_exists {
+            transaction.rollback().await?;
+            return Err(RunnerProtocolStoreError::Corruption(
+                RunnerProtocolCorruption::CrossWiredReference,
+            ));
+        }
         let retired_rows = sqlx::query(
             "UPDATE tool_attempt
                 SET state_kind = 'terminal',
