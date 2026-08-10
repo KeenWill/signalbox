@@ -9989,7 +9989,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
-| **signalbox-domain total**                         | **759 (+10 free fn)** |
+| **signalbox-domain total**                         | **760 (+10 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |

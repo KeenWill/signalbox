@@ -6801,24 +6801,25 @@ fn promote_external_interrupt_chains(
         .union(&external_successors)
         .copied()
         .collect::<BTreeSet<_>>();
-    let mut external = Vec::with_capacity(total_order.len());
-    let mut ordinary = Vec::with_capacity(total_order.len());
-    let mut start = 0;
-    while start < total_order.len() {
-        let end = total_order[start + 1..]
-            .iter()
-            .position(|turn| roots.contains(turn))
-            .map(|offset| start + 1 + offset)
-            .unwrap_or(total_order.len());
-        if external_successors.contains(&total_order[start]) {
-            external.extend_from_slice(&total_order[start..end]);
-        } else {
-            ordinary.extend_from_slice(&total_order[start..end]);
-        }
-        start = end;
+    let Some(start) = total_order
+        .iter()
+        .position(|turn| external_successors.contains(turn))
+    else {
+        return total_order;
+    };
+    if start == 0 {
+        return total_order;
     }
-    external.extend(ordinary);
-    external
+    let end = total_order[start + 1..]
+        .iter()
+        .position(|turn| roots.contains(turn))
+        .map(|offset| start + 1 + offset)
+        .unwrap_or(total_order.len());
+    let mut promoted = Vec::with_capacity(total_order.len());
+    promoted.extend_from_slice(&total_order[start..end]);
+    promoted.extend_from_slice(&total_order[..start]);
+    promoted.extend_from_slice(&total_order[end..]);
+    promoted
 }
 
 fn reconstitute_active_acceptance_tail(
@@ -16777,8 +16778,8 @@ mod tests {
         );
     }
 
-    /// INV-009: every external delegated predecessor re-roots its retained
-    /// interrupt chain ahead of unrelated ordinary work.
+    /// INV-009: later external chains retain their historical placement once
+    /// the oldest crossing chain is promoted ahead of queued work.
     #[test]
     fn inv009_multiple_external_interrupt_chains_are_retained_in_order() {
         let older_ordinary = turn_id(821);
@@ -16807,9 +16808,9 @@ mod tests {
             vec![
                 first_external_successor,
                 first_descendant,
+                older_ordinary,
                 second_external_successor,
                 second_descendant,
-                older_ordinary,
                 later_ordinary,
             ]
         );
