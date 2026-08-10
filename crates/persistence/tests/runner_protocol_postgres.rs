@@ -5859,6 +5859,106 @@ async fn s32_inv002_inv044_pinned_pre_pin_successor_requires_complete_history()
     Ok(())
 }
 
+/// INV-002 / INV-044: an initial pin after pre-pin replacement authenticates
+/// a freshly provisioned workspace at that successor placement revision.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv044_pre_pin_successor_rejects_stale_workspace_generation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let initial_runner = RunnerId::from_uuid(uuid(RUNNER));
+    let initial_request = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::Identity(initial_runner),
+        working_directory: WorkingDirectorySelection::RunnerDefault,
+        credential_profile: None,
+        workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+        permission_overrides: no_permission_overrides(),
+    };
+    let placement =
+        SessionRunnerPlacement::new(SessionId::from_uuid(uuid(SESSION)), initial_request.clone());
+    store.store_placement(&placement, None, None).await?;
+    let lost = placement
+        .mark_runner_lost_before_pin(initial_runner)
+        .expect("the exact selected runner may be lost before pinning");
+    append_runner_lost_before_pin_projection(&pool, lost.session()).await?;
+    let successor = replacement_enrollment();
+    store.insert_enrollment(&successor).await?;
+    let registration = store.register(&successor, advertisement()).await?;
+    store.open_connection(successor.enrollment()).await?;
+    let successor_request = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::Identity(successor.runner()),
+        ..initial_request
+    };
+    let replacement = lost
+        .replace_lost_runner_before_pin(successor_request, registration.registration())
+        .expect("the live distinct runner installs a successor request");
+    append_pre_pin_replacement_projection(
+        &pool,
+        replacement.placement.session(),
+        successor.runner(),
+    )
+    .await?;
+    let successor_revision = RunnerGeneration::try_from_u64(2).expect("two is positive");
+    let successor_directory = RunnerWorkingDirectory::try_new("/workspace/second".to_owned())
+        .expect("the successor working directory is valid");
+    let pin = replacement
+        .placement
+        .pin_and_offer_lease(
+            &successor,
+            registration.registration(),
+            successor_directory.clone(),
+            Some(ProvisionedWorkspace {
+                session: SessionId::from_uuid(uuid(SESSION)),
+                placement_revision: successor_revision,
+                runner: successor.runner(),
+                repository: None,
+                canonical_clone_url_digest: None,
+                credential_profile: None,
+                sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+                working_directory: successor_directory,
+                relative_path: WorkspaceRelativePath::try_new(format!(
+                    "sessions/{}/2/work",
+                    uuid(SESSION)
+                ))
+                .expect("the successor private-root path is relative"),
+                manifest_id: WorkspaceManifestId::from_uuid(uuid(SESSION + 0x82)),
+                recovery: None,
+            }),
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the pre-pin successor provisions a fresh private root");
+    store.store_pin(&pin, &registration).await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET workspace_placement_revision = 1,
+                workspace_relative_path = $2
+          WHERE session_id = $1 AND event_kind = 'pinned'",
+    )
+    .bind(pin.placement.session().into_uuid())
+    .bind(format!("sessions/{}/1/work", uuid(SESSION)))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let corrupted = store
+        .load_placement(pin.placement.session())
+        .await
+        .expect_err("an initial successor pin cannot retain an older workspace generation");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-002 / INV-044: loss reconstitution authenticates the complete history
 /// of the pin consumed at the loss boundary.
 #[tokio::test]

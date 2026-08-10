@@ -3839,11 +3839,16 @@ async fn authenticate_pinned_predecessor(
         let predecessor_revision =
             decode_generation(predecessor.decode_column("placement_revision")?)?;
         let predecessor_request = decode_placement_request(connection, &predecessor).await?;
+        let workspace_is_fresh = current_pinned
+            .workspace
+            .as_ref()
+            .is_none_or(|workspace| workspace.placement_revision == revision);
         match event.as_str() {
             "pinned"
                 if predecessor_state == "unpinned"
                     && predecessor_revision == revision
                     && predecessor_request == current_request
+                    && workspace_is_fresh
                     && match predecessor_event.as_str() {
                         "created" => {
                             predecessor_ordinal == 1
@@ -3892,10 +3897,6 @@ async fn authenticate_pinned_predecessor(
                         .await?;
                 let grant_succeeds = runner_replacement_grant_is_successor(&predecessor, row)?
                     && durable_grant.matches;
-                let workspace_is_fresh = current_pinned
-                    .workspace
-                    .as_ref()
-                    .is_none_or(|workspace| workspace.placement_revision == revision);
                 if lost_runner != prior_pinned.runner
                     || (current_pinned.runner == lost_runner
                         && source != RunnerPlacementLossSource::Registration)
