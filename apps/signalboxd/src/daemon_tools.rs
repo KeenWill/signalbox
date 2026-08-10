@@ -1519,9 +1519,10 @@ mod tests {
         fs::set_permissions(&executable, permissions)
             .expect("catalog capture executable is private and executable");
         let credential = CredentialReference::new(SYNTHETIC_CLAUDE_CREDENTIAL_REFERENCE);
+        let bridge = std::env::current_exe().expect("test executable path is available");
         let runtime = ClaudeCliRuntime::new(ClaudeCliConfig::new(
             &executable,
-            std::env::current_exe().expect("test executable path is available"),
+            &bridge,
             workspace.path(),
             credential.clone(),
         ))
@@ -1554,7 +1555,7 @@ mod tests {
             .await;
         let captured_config = fs::read(workspace.path().join(CLAUDE_CAPTURED_CONFIG_FILENAME))
             .expect("the fake CLI captured the prepared MCP config");
-        claude_catalog_path_from_config(&captured_config)
+        claude_catalog_path_from_config(&captured_config, &bridge)
             .expect("the captured MCP config names the bridge catalog");
         fs::read(workspace.path().join(CLAUDE_CAPTURED_CATALOG_FILENAME))
             .expect("the fake CLI captured the prepared Claude catalog")
@@ -1569,14 +1570,17 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn claude_catalog_path_from_config(config: &[u8]) -> Option<PathBuf> {
+    fn claude_catalog_path_from_config(config: &[u8], expected_bridge: &Path) -> Option<PathBuf> {
         let config: serde_json::Value = serde_json::from_slice(config).ok()?;
         let servers = config.get("mcpServers")?.as_object()?;
         let server = (servers.len() == 1)
-            .then(|| servers.values().next())
+            .then(|| servers.get(CLAUDE_MCP_SERVER_NAME))
             .flatten()?;
+        let command = Path::new(server.get("command")?.as_str()?);
         let arguments = server.get("args")?.as_array()?;
-        (arguments.len() == 3 && arguments.first()?.as_str()? == CLAUDE_MCP_BRIDGE_SERVE_OPTION)
+        (command == expected_bridge
+            && arguments.len() == 3
+            && arguments.first()?.as_str()? == CLAUDE_MCP_BRIDGE_SERVE_OPTION)
             .then(|| arguments.get(1)?.as_str().map(PathBuf::from))
             .flatten()
     }
@@ -1673,7 +1677,6 @@ mod tests {
     const SYNTHETIC_DEEP_BRIDGE_SCHEMA_DEPTH: usize = 512;
     const SYNTHETIC_UNMODELED_BRIDGE_TOOL_TITLE: &str = "Synthetic unmodeled title";
     const SYNTHETIC_MCP_NEXT_CURSOR: &str = "synthetic-next-page";
-    const SYNTHETIC_MCP_SERVER_NAME: &str = "synthetic";
     const SYNTHETIC_MCP_IGNORED_ARGUMENT: &str = "ready path";
 
     fn synthetic_deep_bridge_tool_schema() -> String {
@@ -1689,7 +1692,8 @@ mod tests {
     fn captured_catalog_path_uses_semantic_mcp_configuration() {
         let config = serde_json::to_string_pretty(&serde_json::json!({
             "mcpServers": {
-                (SYNTHETIC_MCP_SERVER_NAME): {
+                (CLAUDE_MCP_SERVER_NAME): {
+                    "command": SYNTHETIC_MCP_BRIDGE_PATH,
                     "args": [
                         CLAUDE_MCP_BRIDGE_SERVE_OPTION,
                         SYNTHETIC_CAPTURED_CATALOG_PATH,
@@ -1701,8 +1705,57 @@ mod tests {
         .expect("synthetic MCP config serializes");
 
         assert_eq!(
-            claude_catalog_path_from_config(config.as_bytes()),
+            claude_catalog_path_from_config(
+                config.as_bytes(),
+                Path::new(SYNTHETIC_MCP_BRIDGE_PATH),
+            ),
             Some(PathBuf::from(SYNTHETIC_CAPTURED_CATALOG_PATH))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captured_catalog_path_rejects_a_different_mcp_server_name() {
+        let config = serde_json::to_vec(&serde_json::json!({
+            "mcpServers": {
+                "different_server": {
+                    "command": SYNTHETIC_MCP_BRIDGE_PATH,
+                    "args": [
+                        CLAUDE_MCP_BRIDGE_SERVE_OPTION,
+                        SYNTHETIC_CAPTURED_CATALOG_PATH,
+                        SYNTHETIC_MCP_IGNORED_ARGUMENT,
+                    ]
+                }
+            }
+        }))
+        .expect("synthetic MCP config serializes");
+
+        assert_eq!(
+            claude_catalog_path_from_config(&config, Path::new(SYNTHETIC_MCP_BRIDGE_PATH)),
+            None
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captured_catalog_path_rejects_a_different_bridge_command() {
+        let config = serde_json::to_vec(&serde_json::json!({
+            "mcpServers": {
+                (CLAUDE_MCP_SERVER_NAME): {
+                    "command": "different-claude-mcp-bridge",
+                    "args": [
+                        CLAUDE_MCP_BRIDGE_SERVE_OPTION,
+                        SYNTHETIC_CAPTURED_CATALOG_PATH,
+                        SYNTHETIC_MCP_IGNORED_ARGUMENT,
+                    ]
+                }
+            }
+        }))
+        .expect("synthetic MCP config serializes");
+
+        assert_eq!(
+            claude_catalog_path_from_config(&config, Path::new(SYNTHETIC_MCP_BRIDGE_PATH)),
+            None
         );
     }
 
@@ -1769,6 +1822,7 @@ mod tests {
     }
 
     const CLAUDE_MCP_BRIDGE_BINARY: &str = "signalbox-claude-mcp-bridge";
+    const CLAUDE_MCP_SERVER_NAME: &str = "signalbox_tools";
     const CLAUDE_MCP_BRIDGE_SERVE_OPTION: &str = "--serve";
     const CLAUDE_MCP_BRIDGE_WAIT_READY_OPTION: &str = "--wait-ready";
     const CARGO_TARGET_DIRECTORY_MARKER_FILENAME: &str = "CACHEDIR.TAG";
@@ -1831,6 +1885,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     const SYNTHETIC_CAPTURED_CATALOG_PATH: &str = "catalog with a \"quote\".json";
     #[cfg(target_os = "linux")]
+    const SYNTHETIC_MCP_BRIDGE_PATH: &str = "synthetic-claude-mcp-bridge";
+    #[cfg(target_os = "linux")]
     const CLAUDE_CATALOG_CAPTURE_SCRIPT: &str = r#"#!/bin/sh
 set -eu
 mcp_config=
@@ -1864,8 +1920,10 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         let configured_target_dir = configured_cargo_target_dir(&current, &known_targets);
         let artifact_target_dir = cargo_target_dir_from_artifact(&current);
         let default_target_dir = bridge_build_target_dir(
-            configured_target_dir.as_deref(),
-            artifact_target_dir.as_deref(),
+            BridgeBuildTargetCandidates {
+                configured: configured_target_dir.as_deref(),
+                executable_artifact: artifact_target_dir.as_deref(),
+            },
             cargo_metadata_target_dir,
         );
         reject_unrecognized_default_target(DefaultTargetRecognition {
@@ -2240,13 +2298,18 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         canonicalized_target_dir(Path::new(target_dir))
     }
 
+    struct BridgeBuildTargetCandidates<'a> {
+        configured: Option<&'a Path>,
+        executable_artifact: Option<&'a Path>,
+    }
+
     fn bridge_build_target_dir(
-        configured_target_dir: Option<&Path>,
-        artifact_target_dir: Option<&Path>,
+        candidates: BridgeBuildTargetCandidates<'_>,
         metadata_target_dir: impl FnOnce() -> PathBuf,
     ) -> PathBuf {
-        configured_target_dir
-            .or(artifact_target_dir)
+        candidates
+            .configured
+            .or(candidates.executable_artifact)
             .map(Path::to_path_buf)
             .unwrap_or_else(metadata_target_dir)
     }
@@ -3001,9 +3064,13 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
     fn bridge_build_prefers_the_executable_target_root_over_metadata() {
         let cli_target_dir = Path::new("synthetic-cli-target");
 
-        let selected = bridge_build_target_dir(None, Some(cli_target_dir), || {
-            panic!("Cargo metadata must not override the executable target root")
-        });
+        let selected = bridge_build_target_dir(
+            BridgeBuildTargetCandidates {
+                configured: None,
+                executable_artifact: Some(cli_target_dir),
+            },
+            || panic!("Cargo metadata must not override the executable target root"),
+        );
 
         assert_eq!(selected, cli_target_dir);
     }
