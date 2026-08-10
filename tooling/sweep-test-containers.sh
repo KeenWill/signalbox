@@ -28,6 +28,11 @@
 # each container's anonymous volume — roughly 49 MB of stranded disk apiece —
 # goes with it.
 #
+# A volume whose container was already removed separately is dangling, belongs
+# to no container, and so is beyond anything this script can select; the run
+# reports how many exist and leaves reclaiming them to `docker volume prune`,
+# which is not run here because it is not scoped to this repository's images.
+#
 # Reports what it would remove and exits without touching anything unless
 # `--apply` is passed.
 #
@@ -145,3 +150,12 @@ printf '%s\n' "$selected" |
 	awk '{ print $1 }' |
 	xargs docker rm --force --volumes >/dev/null
 echo "sweep-test-containers: removed $count container(s)"
+
+# Volumes stranded by a container removed without `--volumes` outlive every
+# selector this script has, so report them rather than leaving the operator to
+# conclude the disk should now be clear.
+dangling="$(docker volume ls --quiet --filter dangling=true | wc -l | tr -d ' ')"
+if [ "$dangling" -gt 0 ]; then
+	echo "sweep-test-containers: $dangling dangling volume(s) remain, belonging" \
+		"to no container; reclaim with 'docker volume prune'"
+fi

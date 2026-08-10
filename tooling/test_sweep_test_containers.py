@@ -45,6 +45,9 @@ elif command == "rm":
     assert "--force" in sys.argv and "--volumes" in sys.argv, sys.argv
     with open(os.environ["FAKE_DOCKER_RM_LOG"], "a") as log:
         log.write("\\n".join(sys.argv[4:]) + "\\n")
+elif command == "volume":
+    assert "dangling=true" in sys.argv, sys.argv
+    print(os.environ["FAKE_DOCKER_DANGLING"], end="")
 else:
     raise SystemExit(f"fake docker: unexpected command: {command}")
 '''
@@ -69,6 +72,7 @@ def run_sweep(
     *,
     arguments: list[str],
     daemon_reachable: bool = True,
+    dangling_volumes: int = 0,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Invoke the real sweep against one fake inventory, outside test bodies."""
     with tempfile.TemporaryDirectory() as scratch:
@@ -83,6 +87,9 @@ def run_sweep(
             f"{i} {rest}" for i, rest in inventory
         )
         environment["FAKE_DOCKER_RM_LOG"] = str(removal_log)
+        environment["FAKE_DOCKER_DANGLING"] = "".join(
+            f"volume{n}\n" for n in range(dangling_volumes)
+        )
         environment.pop("FAKE_DOCKER_DOWN", None)
         if not daemon_reachable:
             environment["FAKE_DOCKER_DOWN"] = "1"
@@ -147,6 +154,29 @@ class SweepTestContainersTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(removed, [])
         self.assertIn("none older than 2h", completed.stdout)
+
+    def test_volumes_belonging_to_no_container_are_reported_not_removed(self) -> None:
+        completed, removed = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            dangling_volumes=700,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(removed, ["old111"])
+        self.assertIn("700 dangling volume(s) remain", completed.stdout)
+        self.assertIn("docker volume prune", completed.stdout)
+
+    def test_no_dangling_volumes_reports_no_prune_advice(self) -> None:
+        completed, removed = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply"],
+            dangling_volumes=0,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(removed, ["old111"])
+        self.assertNotIn("docker volume prune", completed.stdout)
 
     def test_an_empty_inventory_exits_clean(self) -> None:
         completed, removed = run_sweep([], arguments=["--apply"])
