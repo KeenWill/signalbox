@@ -818,6 +818,7 @@ struct FamilySuite {
         StdMutex<Option<BTreeMap<PathBuf, FilesystemIdentity>>>,
     git_pre_execution_index_entries: StdMutex<Option<Vec<GitIndexCompleteEntrySnapshot>>>,
     git_pre_execution_metadata_root_modified_time: StdMutex<Option<SystemTime>>,
+    git_pre_execution_metadata_root_identity: StdMutex<Option<FilesystemIdentity>>,
     git_pre_execution_metadata_top_level:
         StdMutex<Option<BTreeMap<PathBuf, GitMetadataEntrySnapshot>>>,
     git_pre_execution_objects: StdMutex<Option<GitObjectInventory>>,
@@ -845,6 +846,8 @@ enum WorkspaceEntrySnapshot {
 struct FilesystemIdentity {
     device: u64,
     inode: u64,
+    change_time_seconds: i64,
+    change_time_nanoseconds: i64,
 }
 
 #[cfg(unix)]
@@ -852,6 +855,8 @@ fn filesystem_identity(metadata: &fs::Metadata) -> Option<FilesystemIdentity> {
     Some(FilesystemIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
+        change_time_seconds: metadata.ctime(),
+        change_time_nanoseconds: metadata.ctime_nsec(),
     })
 }
 
@@ -1161,6 +1166,7 @@ impl FamilySuite {
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
+            git_pre_execution_metadata_root_identity: StdMutex::new(None),
             git_pre_execution_metadata_top_level: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
@@ -1230,6 +1236,7 @@ impl FamilySuite {
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
+            git_pre_execution_metadata_root_identity: StdMutex::new(None),
             git_pre_execution_metadata_top_level: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
@@ -1270,6 +1277,7 @@ impl FamilySuite {
             git_pre_execution_worktree_entry_identities: StdMutex::new(None),
             git_pre_execution_index_entries: StdMutex::new(None),
             git_pre_execution_metadata_root_modified_time: StdMutex::new(None),
+            git_pre_execution_metadata_root_identity: StdMutex::new(None),
             git_pre_execution_metadata_top_level: StdMutex::new(None),
             git_pre_execution_objects: StdMutex::new(None),
             git_pre_execution_object_entries: StdMutex::new(None),
@@ -1456,6 +1464,11 @@ impl FamilySuite {
                 .expect("Git pre-execution metadata-root-time lock is available") =
                 Some(git_metadata_root_modified_time(self.workspace.path())?);
             *self
+                .git_pre_execution_metadata_root_identity
+                .lock()
+                .expect("Git pre-execution metadata-root-identity lock is available") =
+                git_metadata_root_identity(self.workspace.path())?;
+            *self
                 .git_pre_execution_metadata_top_level
                 .lock()
                 .expect("Git pre-execution metadata lock is available") =
@@ -1573,6 +1586,10 @@ impl FamilySuite {
                     .git_pre_execution_metadata_root_modified_time
                     .lock()
                     .expect("Git pre-execution metadata-root-time lock is available");
+                let pre_execution_metadata_root_identity = self
+                    .git_pre_execution_metadata_root_identity
+                    .lock()
+                    .expect("Git pre-execution metadata-root-identity lock is available");
                 let pre_execution_metadata_top_level = self
                     .git_pre_execution_metadata_top_level
                     .lock()
@@ -1607,6 +1624,7 @@ impl FamilySuite {
                         pre_execution_index_entries: pre_execution_index_entries.as_deref(),
                         pre_execution_metadata_root_modified_time:
                             *pre_execution_metadata_root_modified_time,
+                        pre_execution_metadata_root_identity: *pre_execution_metadata_root_identity,
                         pre_execution_metadata_top_level: pre_execution_metadata_top_level.as_ref(),
                         pre_execution_objects: pre_execution_objects.as_ref(),
                         pre_execution_object_entries: pre_execution_object_entries.as_ref(),
@@ -1946,6 +1964,8 @@ fn filesystem_entry_identities(
                 FilesystemIdentity {
                     device: metadata.dev(),
                     inode: metadata.ino(),
+                    change_time_seconds: metadata.ctime(),
+                    change_time_nanoseconds: metadata.ctime_nsec(),
                 },
             ))
         })
@@ -1984,6 +2004,7 @@ struct GitForcedVerification<'a> {
     pre_execution_worktree_entry_identities: Option<&'a BTreeMap<PathBuf, FilesystemIdentity>>,
     pre_execution_index_entries: Option<&'a [GitIndexCompleteEntrySnapshot]>,
     pre_execution_metadata_root_modified_time: Option<SystemTime>,
+    pre_execution_metadata_root_identity: Option<FilesystemIdentity>,
     pre_execution_metadata_top_level: Option<&'a BTreeMap<PathBuf, GitMetadataEntrySnapshot>>,
     pre_execution_objects: Option<&'a GitObjectInventory>,
     pre_execution_object_entries: Option<&'a BTreeMap<PathBuf, WorkspaceEntrySnapshot>>,
@@ -2008,6 +2029,7 @@ fn git_forced_case_passed(
         pre_execution_worktree_entry_identities,
         pre_execution_index_entries,
         pre_execution_metadata_root_modified_time,
+        pre_execution_metadata_root_identity,
         pre_execution_metadata_top_level,
         pre_execution_objects,
         pre_execution_object_entries,
@@ -2255,6 +2277,7 @@ fn git_forced_case_passed(
             name,
             seed_fixture,
             pre_execution_metadata_root_modified_time,
+            pre_execution_metadata_root_identity,
         )?
         && git_forced_metadata_top_level_matches(
             root,
@@ -2816,6 +2839,17 @@ fn entry_identities_match_except(
 ) -> bool {
     let mut expected = expected.clone();
     for path in allowed_paths {
+        let mut ancestor = path.parent();
+        while let Some(candidate) = ancestor {
+            let Some(actual_identity) = actual.get(candidate) else {
+                return false;
+            };
+            let Some(expected_identity) = expected.get_mut(candidate) else {
+                return false;
+            };
+            admit_filesystem_change_time(expected_identity, *actual_identity);
+            ancestor = candidate.parent();
+        }
         actual.remove(*path);
         expected.remove(*path);
     }
@@ -3111,6 +3145,17 @@ fn admit_filesystem_identity_path(
         return false;
     };
     expected.insert(path.to_path_buf(), *identity);
+    let mut ancestor = path.parent();
+    while let Some(candidate) = ancestor {
+        let Some(actual_identity) = actual.get(candidate) else {
+            return false;
+        };
+        let Some(expected_identity) = expected.get_mut(candidate) else {
+            return false;
+        };
+        admit_filesystem_change_time(expected_identity, *actual_identity);
+        ancestor = candidate.parent();
+    }
     true
 }
 
@@ -3121,16 +3166,35 @@ fn admit_new_filesystem_identity_path_and_ancestors(
 ) -> bool {
     let mut current = Some(path);
     while let Some(candidate) = current {
-        if expected.contains_key(candidate) {
-            return true;
-        }
         let Some(identity) = actual.get(candidate) else {
             return false;
         };
-        expected.insert(candidate.to_path_buf(), *identity);
+        if let Some(expected_identity) = expected.get_mut(candidate) {
+            admit_filesystem_change_time(expected_identity, *identity);
+        } else {
+            expected.insert(candidate.to_path_buf(), *identity);
+        }
         current = candidate.parent();
     }
     true
+}
+
+fn admit_filesystem_change_time(expected: &mut FilesystemIdentity, actual: FilesystemIdentity) {
+    expected.change_time_seconds = actual.change_time_seconds;
+    expected.change_time_nanoseconds = actual.change_time_nanoseconds;
+}
+
+fn filesystem_identity_matches_without_change_time(
+    actual: Option<FilesystemIdentity>,
+    expected: Option<FilesystemIdentity>,
+) -> bool {
+    match (actual, expected) {
+        (Some(actual), Some(expected)) => {
+            actual.device == expected.device && actual.inode == expected.inode
+        }
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 fn direct_git_reference_entry(
@@ -4084,6 +4148,8 @@ fn git_static_metadata_entry_identities(
                     FilesystemIdentity {
                         device: metadata.dev(),
                         inode: metadata.ino(),
+                        change_time_seconds: metadata.ctime(),
+                        change_time_nanoseconds: metadata.ctime_nsec(),
                     },
                 ))
             })
@@ -4128,7 +4194,10 @@ fn git_fixture_snapshot_matches(
         && config == expected.config
         && git_metadata_root_kind(root)? == expected.metadata_root_kind
         && worktree_mode(repository.path())? == expected.metadata_root_mode
-        && git_metadata_root_identity(root)? == expected.metadata_root_identity
+        && filesystem_identity_matches_without_change_time(
+            git_metadata_root_identity(root)?,
+            expected.metadata_root_identity,
+        )
         && git_static_metadata_entries(root)? == expected.static_metadata_entries
         && git_static_metadata_modified_times(root)? == expected.static_metadata_modified_times
         && git_static_metadata_entry_identities(root)? == expected.static_metadata_entry_identities)
@@ -4139,17 +4208,23 @@ fn git_forced_metadata_root_modified_time_matches(
     case_name: &str,
     seed_fixture: &GitFixtureSnapshot,
     pre_execution: Option<SystemTime>,
+    pre_execution_identity: Option<FilesystemIdentity>,
 ) -> EvalResult<bool> {
+    let actual_identity = git_metadata_root_identity(root)?;
+    let expected_identity = pre_execution_identity.or(seed_fixture.metadata_root_identity);
     if matches!(
         case_name,
         GIT_BRANCH_SWITCH_NAME | GIT_CREATE_COMMIT_NAME | GIT_STAGE_NAME
     ) {
-        return Ok(true);
+        return Ok(filesystem_identity_matches_without_change_time(
+            actual_identity,
+            expected_identity,
+        ));
     }
     let Some(expected) = pre_execution.or(seed_fixture.metadata_root_modified_time) else {
         return Ok(false);
     };
-    Ok(git_metadata_root_modified_time(root)? == expected)
+    Ok(git_metadata_root_modified_time(root)? == expected && actual_identity == expected_identity)
 }
 
 fn git_forced_metadata_top_level_matches(
@@ -4254,6 +4329,13 @@ fn admit_git_metadata_modified_time(
         return false;
     };
     expected.modified = actual.modified;
+    match (expected.identity.as_mut(), actual.identity) {
+        (Some(expected_identity), Some(actual_identity)) => {
+            admit_filesystem_change_time(expected_identity, actual_identity);
+        }
+        (None, None) => {}
+        _ => return false,
+    }
     true
 }
 
@@ -12526,6 +12608,53 @@ fn forced_workspace_read_verifier_rejects_collateral_mtime_drift() -> EvalResult
     })
     .to_string();
 
+    assert!(!suite.forced_case_result_passed(case, &result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_workspace_read_verifier_rejects_restored_mode_ctime_drift() -> EvalResult {
+    let suite = FamilySuite::workspace()?;
+    let case = WORKSPACE_CASES
+        .iter()
+        .find(|case| case.name == READ_FILE_NAME)
+        .expect("the workspace read fixture exists");
+    let relative = Path::new(WORKSPACE_GLOB_NONMATCHING_PATH);
+    let path = suite.workspace.path().join(relative);
+    let original_permissions = fs::metadata(&path)?.permissions();
+    let mut changed_permissions = original_permissions.clone();
+    changed_permissions.set_mode(original_permissions.mode() ^ GROUP_WRITE_MODE_BIT);
+    std::thread::sleep(Duration::from_millis(1));
+    fs::set_permissions(&path, changed_permissions)?;
+    fs::set_permissions(&path, original_permissions)?;
+    let actual_identities = workspace_entry_identities(suite.workspace.path())?;
+    let expected_identity = suite.workspace_seed_entry_identities[relative];
+    let actual_identity = actual_identities[relative];
+    let prefix = WORKSPACE_SEED
+        .get(..WORKSPACE_FORCED_READ_MAX_BYTES)
+        .expect("the workspace fixture covers the forced bound");
+    let result = serde_json::json!({
+        "path": WORKSPACE_SEED_PATH,
+        "content": prefix,
+        "bytes_read": prefix.len(),
+        "total_bytes": WORKSPACE_SEED.len(),
+        "truncated": true,
+        EVAL_RECEIPT_FIELD: SYNTHETIC_EVAL_RECEIPT,
+    })
+    .to_string();
+
+    assert_eq!(
+        workspace_entries(suite.workspace.path())?,
+        suite.workspace_seed_entries
+    );
+    assert_eq!(
+        workspace_modified_times(suite.workspace.path())?,
+        suite.workspace_seed_modified_times
+    );
+    assert_eq!(actual_identity.device, expected_identity.device);
+    assert_eq!(actual_identity.inode, expected_identity.inode);
+    assert_ne!(actual_identity, expected_identity);
     assert!(!suite.forced_case_result_passed(case, &result)?);
     Ok(())
 }
