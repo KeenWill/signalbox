@@ -40,10 +40,10 @@ use signalbox_process_protocol::{
     ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
     ReviewOrchestrationState, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
     ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
-    ReviewRepairTerminalOutcome, ReviewRunSnapshot, RunnerProjection, RunnerProjectionState,
-    RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
-    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
-    decode_server_line, encode_client_line, encode_server_line,
+    ReviewRepairTerminalOutcome, ReviewRunSnapshot, RunnerConnectionHealth, RunnerProjection,
+    RunnerProjectionState, RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent,
+    SessionPlacement, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
+    TurnState, decode_server_line, encode_client_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -3908,6 +3908,9 @@ fn queued_turn_runner_recovery(runner: Option<&RunnerProjection>) -> Result<(), 
         matches!(
             runner.state(),
             RunnerProjectionState::RunnerLostBeforePin | RunnerProjectionState::RunnerLost
+        ) || matches!(
+            runner.connection_health(),
+            Some(RunnerConnectionHealth::Shutdown | RunnerConnectionHealth::Lost)
         )
     }) {
         return Err(ClientError::RunnerRecoveryRequired);
@@ -6882,6 +6885,34 @@ mod tests {
     #[test]
     fn queued_send_stops_on_current_pinned_runner_loss() {
         let projection = runner_projection(1, RunnerProjectionState::RunnerLost, None);
+        let result = queued_turn_runner_recovery(Some(&projection));
+
+        assert!(matches!(result, Err(ClientError::RunnerRecoveryRequired)));
+    }
+
+    /// INV-044: orderly terminal runner shutdown blocks queued activation
+    /// before placement reconciliation catches up.
+    #[test]
+    fn queued_send_stops_on_current_runner_shutdown() {
+        let projection = runner_projection(
+            1,
+            RunnerProjectionState::Pinned,
+            Some(RunnerConnectionHealth::Shutdown),
+        );
+        let result = queued_turn_runner_recovery(Some(&projection));
+
+        assert!(matches!(result, Err(ClientError::RunnerRecoveryRequired)));
+    }
+
+    /// INV-044: terminal runner connection loss blocks queued activation
+    /// before placement reconciliation catches up.
+    #[test]
+    fn queued_send_stops_on_current_runner_connection_loss() {
+        let projection = runner_projection(
+            1,
+            RunnerProjectionState::Pinned,
+            Some(RunnerConnectionHealth::Lost),
+        );
         let result = queued_turn_runner_recovery(Some(&projection));
 
         assert!(matches!(result, Err(ClientError::RunnerRecoveryRequired)));

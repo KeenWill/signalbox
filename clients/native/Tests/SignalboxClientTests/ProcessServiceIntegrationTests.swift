@@ -5941,7 +5941,8 @@ private enum ProcessDriverFixture {
       {
         "type":"transcript_snapshot_start",
         "session_id":"\(session)",
-        "cursor":"\(cursor)"
+        "cursor":"\(cursor)",
+        "runner":null
       }
       """
     )
@@ -6743,7 +6744,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -6835,7 +6837,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -6954,7 +6957,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"\(cursor)"
+          "cursor":"\(cursor)",
+          "runner":null
         }
         """,
         """
@@ -7027,7 +7031,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"\(cursor)"
+          "cursor":"\(cursor)",
+          "runner":null
         }
         """,
         """
@@ -7082,7 +7087,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"\(cursor)"
+          "cursor":"\(cursor)",
+          "runner":null
         }
         """,
         """
@@ -7141,7 +7147,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -7174,7 +7181,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -7218,7 +7226,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -7267,7 +7276,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -7308,7 +7318,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -7467,7 +7478,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"\(cursor)"
+          "cursor":"\(cursor)",
+          "runner":null
         }
         """,
         """
@@ -7507,7 +7519,8 @@ private enum ProcessProjectionFixture {
           {
             "type":"transcript_snapshot_start",
             "session_id":"\(ProcessDriverFixture.session)",
-            "cursor":"1"
+            "cursor":"1",
+            "runner":null
           }
           """
         )
@@ -7632,7 +7645,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -7678,7 +7692,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -7795,7 +7810,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"2"
+          "cursor":"2",
+          "runner":null
         }
         """,
         """
@@ -7872,7 +7888,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
       ] + turnEvidence + usageEvidence + [
@@ -7957,7 +7974,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -8025,7 +8043,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -8081,7 +8100,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"2"
+          "cursor":"2",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -8140,7 +8160,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -8232,7 +8253,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -8288,7 +8310,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -8527,7 +8550,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -8605,7 +8629,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -8694,7 +8719,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -8881,7 +8907,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -8940,7 +8967,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -9047,7 +9075,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -9094,7 +9123,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -9184,7 +9214,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -9246,7 +9277,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -9280,7 +9312,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"2"
+          "cursor":"2",
+          "runner":null
         }
         """,
         """
@@ -10112,7 +10145,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -10383,7 +10417,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -10492,7 +10527,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         """
@@ -10568,7 +10604,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -10650,7 +10687,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -10738,7 +10776,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -10776,7 +10815,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -10836,7 +10876,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"1",
+          "runner":null
         }
         """,
         emptyModelCallsBoundary,
@@ -10936,7 +10977,8 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"\(cursor)"
+          "cursor":"\(cursor)",
+          "runner":null
         }
         """,
         """

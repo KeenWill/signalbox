@@ -928,6 +928,7 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
           ["type", "session_id", "cursor", "runner"],
           decoder: decoder
         )
+        try tagged.requireFields(["runner"], decoder: decoder)
         self = .transcriptSnapshotStart(try SignalboxTranscriptSnapshotBoundary(from: decoder))
       case "transcript_turn":
         try tagged.rejectUnadmittedFields(
@@ -2120,9 +2121,87 @@ public enum SignalboxRunnerSandboxProfile: String, Decodable, Equatable, Sendabl
   case workspaceRestricted = "workspace-restricted"
 }
 
+public enum SignalboxRunnerProjectionValueError: Error, Equatable {
+  case portableName
+  case exactText
+}
+
+private func isRunnerASCIIAlphanumeric(_ byte: UInt8) -> Bool {
+  (byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122)
+}
+
+private func validateRunnerPortableName(_ value: String) throws {
+  guard let first = value.utf8.first,
+    value.utf8.count <= 64,
+    isRunnerASCIIAlphanumeric(first),
+    value.utf8.allSatisfy({ byte in
+      isRunnerASCIIAlphanumeric(byte) || byte == 46 || byte == 95 || byte == 45
+    })
+  else {
+    throw SignalboxRunnerProjectionValueError.portableName
+  }
+}
+
+public struct SignalboxRunnerCapabilityClass: Decodable, Equatable, Sendable {
+  public let rawValue: String
+
+  public init(validating rawValue: String) throws {
+    try validateRunnerPortableName(rawValue)
+    self.rawValue = rawValue
+  }
+
+  public init(from decoder: Decoder) throws {
+    try self.init(validating: decoder.singleValueContainer().decode(String.self))
+  }
+}
+
+public struct SignalboxRunnerCredentialProfileName: Decodable, Equatable, Sendable {
+  public let rawValue: String
+
+  public init(validating rawValue: String) throws {
+    try validateRunnerPortableName(rawValue)
+    self.rawValue = rawValue
+  }
+
+  public init(from decoder: Decoder) throws {
+    try self.init(validating: decoder.singleValueContainer().decode(String.self))
+  }
+}
+
+public struct SignalboxRunnerRepositoryKey: Decodable, Equatable, Sendable {
+  public let rawValue: String
+
+  public init(validating rawValue: String) throws {
+    try validateRunnerPortableName(rawValue)
+    self.rawValue = rawValue
+  }
+
+  public init(from decoder: Decoder) throws {
+    try self.init(validating: decoder.singleValueContainer().decode(String.self))
+  }
+}
+
+public struct SignalboxRunnerWorkingDirectory: Decodable, Equatable, Sendable {
+  public let rawValue: String
+
+  public init(validating rawValue: String) throws {
+    guard !rawValue.isEmpty,
+      rawValue.utf8.count <= 4_096,
+      !rawValue.utf8.contains(0)
+    else {
+      throw SignalboxRunnerProjectionValueError.exactText
+    }
+    self.rawValue = rawValue
+  }
+
+  public init(from decoder: Decoder) throws {
+    try self.init(validating: decoder.singleValueContainer().decode(String.self))
+  }
+}
+
 public enum SignalboxRunnerProjectionSelector: Decodable, Equatable, Sendable {
   case runner(runnerID: SignalboxCanonicalUUID)
-  case capabilityClass(name: String)
+  case capabilityClass(name: SignalboxRunnerCapabilityClass)
 
   public init(from decoder: Decoder) throws {
     let tagged = try SignalboxTaggedPayload(from: decoder)
@@ -2164,9 +2243,9 @@ public struct SignalboxRunnerProjection: Decodable, Equatable, Sendable {
   public let runnerID: SignalboxCanonicalUUID?
   public let placementRevision: SignalboxCanonicalUInt64
   public let sandboxProfile: SignalboxRunnerSandboxProfile
-  public let credentialProfile: String?
-  public let repository: String?
-  public let workingDirectory: String?
+  public let credentialProfile: SignalboxRunnerCredentialProfileName?
+  public let repository: SignalboxRunnerRepositoryKey?
+  public let workingDirectory: SignalboxRunnerWorkingDirectory?
   public let connectionHealth: SignalboxRunnerConnectionHealth?
   public let state: SignalboxRunnerProjectionState
 
@@ -2195,9 +2274,9 @@ public struct SignalboxRunnerProjection: Decodable, Equatable, Sendable {
     runnerID: SignalboxCanonicalUUID?,
     placementRevision: SignalboxCanonicalUInt64,
     sandboxProfile: SignalboxRunnerSandboxProfile,
-    credentialProfile: String?,
-    repository: String?,
-    workingDirectory: String?,
+    credentialProfile: SignalboxRunnerCredentialProfileName?,
+    repository: SignalboxRunnerRepositoryKey?,
+    workingDirectory: SignalboxRunnerWorkingDirectory?,
     connectionHealth: SignalboxRunnerConnectionHealth?,
     state: SignalboxRunnerProjectionState
   ) throws {
@@ -2264,6 +2343,7 @@ public struct SignalboxTranscriptSnapshotBoundary: Decodable, Equatable, Sendabl
     let tagged = try SignalboxTaggedPayload(from: decoder)
     let fields: Set<String> = ["type", "session_id", "cursor", "runner"]
     try tagged.rejectUnadmittedFields(fields, decoder: decoder)
+    try tagged.requireFields(["runner"], decoder: decoder)
     sessionID = try decoder.decode("session_id")
     cursor = try decoder.decode("cursor")
     runner = try decoder.decodeIfPresent("runner")
