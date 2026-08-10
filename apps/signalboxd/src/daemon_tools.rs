@@ -1632,9 +1632,11 @@ mod tests {
         let server = (servers.len() == 1)
             .then(|| servers.get(CLAUDE_MCP_SERVER_NAME))
             .flatten()?;
+        let transport = server.get("type")?.as_str()?;
         let command = Path::new(server.get("command")?.as_str()?);
         let arguments = server.get("args")?.as_array()?;
-        if command != expected_bridge
+        if transport != CLAUDE_MCP_STDIO_TRANSPORT
+            || command != expected_bridge
             || arguments.len() != 3
             || arguments.first()?.as_str()? != CLAUDE_MCP_BRIDGE_SERVE_OPTION
         {
@@ -1754,6 +1756,7 @@ mod tests {
         let config = serde_json::to_string_pretty(&serde_json::json!({
             "mcpServers": {
                 (CLAUDE_MCP_SERVER_NAME): {
+                    "type": CLAUDE_MCP_STDIO_TRANSPORT,
                     "command": SYNTHETIC_MCP_BRIDGE_PATH,
                     "args": [
                         CLAUDE_MCP_BRIDGE_SERVE_OPTION,
@@ -1783,6 +1786,7 @@ mod tests {
         let config = serde_json::to_vec(&serde_json::json!({
             "mcpServers": {
                 "different_server": {
+                    "type": CLAUDE_MCP_STDIO_TRANSPORT,
                     "command": SYNTHETIC_MCP_BRIDGE_PATH,
                     "args": [
                         CLAUDE_MCP_BRIDGE_SERVE_OPTION,
@@ -1806,7 +1810,32 @@ mod tests {
         let config = serde_json::to_vec(&serde_json::json!({
             "mcpServers": {
                 (CLAUDE_MCP_SERVER_NAME): {
+                    "type": CLAUDE_MCP_STDIO_TRANSPORT,
                     "command": "different-claude-mcp-bridge",
+                    "args": [
+                        CLAUDE_MCP_BRIDGE_SERVE_OPTION,
+                        SYNTHETIC_CAPTURED_CATALOG_PATH,
+                        SYNTHETIC_MCP_IGNORED_ARGUMENT,
+                    ]
+                }
+            }
+        }))
+        .expect("synthetic MCP config serializes");
+
+        assert_eq!(
+            claude_catalog_paths_from_config(&config, Path::new(SYNTHETIC_MCP_BRIDGE_PATH)),
+            None
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captured_catalog_path_rejects_a_non_stdio_transport() {
+        let config = serde_json::to_vec(&serde_json::json!({
+            "mcpServers": {
+                (CLAUDE_MCP_SERVER_NAME): {
+                    "type": "http",
+                    "command": SYNTHETIC_MCP_BRIDGE_PATH,
                     "args": [
                         CLAUDE_MCP_BRIDGE_SERVE_OPTION,
                         SYNTHETIC_CAPTURED_CATALOG_PATH,
@@ -1962,6 +1991,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     const SYNTHETIC_MCP_BRIDGE_PATH: &str = "synthetic-claude-mcp-bridge";
     #[cfg(target_os = "linux")]
+    const CLAUDE_MCP_STDIO_TRANSPORT: &str = "stdio";
+    #[cfg(target_os = "linux")]
     #[cfg(target_os = "linux")]
     const CLAUDE_CATALOG_CAPTURE_SCRIPT: &str = r#"#!/bin/sh
 set -eu
@@ -1986,6 +2017,7 @@ with open(sys.argv[1], encoding="utf-8") as source:
     servers = json.load(source)["mcpServers"]
 assert len(servers) == 1
 server = servers["signalbox_tools"]
+assert server["type"] == "stdio"
 arguments = server["args"]
 assert len(arguments) == 3 and arguments[0] == "--serve"
 with open(sys.argv[3], encoding="utf-8") as source:
