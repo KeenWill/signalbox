@@ -1771,7 +1771,7 @@ fn seed_exec_workspace(root: &Path) -> EvalResult {
     fs::create_dir(root.join(".cargo"))?;
     fs::write(
         root.join("Cargo.toml"),
-        "[package]\nname = \"tool-eval-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        "[package]\nname = \"tool-eval-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[lib]\ntest = false\ndoctest = false\n",
     )?;
     fs::write(
         root.join("src/lib.rs"),
