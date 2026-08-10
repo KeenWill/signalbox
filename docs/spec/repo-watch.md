@@ -17,7 +17,9 @@ from the watcher.
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence, differ, polling, and rule-dispatch behavior below is verified
-against this PR (`agent/repo-watch-dispatch`).
+against this PR (`agent/repo-watch-dispatch`). The provider members the poller
+adopts as check-suite and check-run completion generations are verified against
+PR #541 (`fix/check-run-updated-at`).
 
 ## Configuration and credential boundary
 
