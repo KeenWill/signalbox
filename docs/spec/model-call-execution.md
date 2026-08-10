@@ -665,9 +665,11 @@ the turn takes the exhaustion path below rather than calling a failed member
 again.
 
 When no member remains admissible, which ending the attempt reaches is decided
-by the pool's `on_pool_exhausted` value together with whether this turn has
-already issued a call. All four such endings, and every projection of each, are
-stated once by
+by the pool's `on_pool_exhausted` value together with whether this
+**availability chain** has already issued a call — the chain and not the turn,
+since a later tool round opens a fresh chain against a turn that has already
+issued calls. All four such endings, and every projection of each, are stated
+once by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine).
 
 This page owns one column of

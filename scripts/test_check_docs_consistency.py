@@ -327,6 +327,32 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertNotIn("machine-owner-link", failure_categories(failures))
 
+    def test_link_with_no_rendered_label_is_not_a_citation(self) -> None:
+        """An anchor with nothing to click cites nothing.
+
+        The third shape that resolved correctly and rendered no navigation,
+        after images and bare definitions — and the reason the rule is now
+        stated positively rather than as a list of exclusions.
+        """
+        self._write_machine_owner(
+            "This page owns the evidence algebra of "
+            "[](credential-availability.md).\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertIn("machine-owner-link", failure_categories(failures))
+
+    def test_formatting_only_label_is_not_a_citation(self) -> None:
+        self._write_machine_owner(
+            "This page owns the evidence algebra of "
+            "[**  **](credential-availability.md).\n"
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertIn("machine-owner-link", failure_categories(failures))
+
     def test_image_destination_is_not_a_citation(self) -> None:
         """An image renders a fetch, not a navigation.
 

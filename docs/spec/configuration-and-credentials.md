@@ -939,13 +939,13 @@ because rotation happens inside the store rather than at an external source of
 truth.
 
 Why this is stated as one property with a per-delivery disposition rather than
-as a list of rejected spellings: it was tried the other way first. Five
-successive rounds each rejected one more spelling — a raw duplicate path, a
-lexical alias, a symlink, a hard link, an ambient alias — and each fix admitted
-the next, because a list of rejections can only ever be as long as the shapes
-someone has already thought of. The property is what a pool actually needs, so a
-newly proposed alias shape is now either closed by construction, as it is for
-`oauth`, or already covered by the stated accepted limit, as it is for `file`.
+as a list of rejected spellings: a list of rejections can only ever be as long
+as the shapes someone has already thought of, and each new spelling admitted — a
+raw duplicate path, a lexical alias, a symlink, a hard link, an ambient alias —
+is one the previous list did not name. The property is what a pool actually
+needs, so a newly proposed alias shape is now either closed by construction, as
+it is for `oauth`, or already covered by the stated accepted limit, as it is for
+`file`.
 
 #### The `ambient` delivery
 
@@ -1008,17 +1008,22 @@ unchanged.
 `codex_home` naming an absolute directory holding a login store the provider's
 CLI owns, reads, and writes. That path is likewise 1 through 4,096 UTF-8 bytes
 and NUL-free, and malformed static input fails startup. Its only optional field
-is `max_concurrent_invocations`, a TOML integer from 1 through 4,294,967,295;
-zero, a negative or larger integer, and every non-integer value are rejected.
-Supplying the directory is necessary but not sufficient: the invocation must
-also force the CLI's file credential backend and disable its keyring, automatic,
-and every other external store, exactly as the OAuth delivery already does.
-Without that, a CLI configured for its process-wide keyring reads an
-authentication context this walk never verified, two custody-approved homes
-resolve the same external login, and both the containment property and the
-distinct-identity check are bypassed without either being violated on its own
-terms. Failure to enforce the backend is a typed pre-send delivery failure and
-starts no child.
+is `max_concurrent_invocations`, a TOML integer from 1 through 1,024; zero, a
+negative or larger integer, and every non-integer value are rejected. The bound
+is capped rather than left at the integer domain because a contended wait
+durably names the identity of every live reservation holding the bound and
+rewrites that snapshot on release, so the admitted maximum is also the maximum
+evidence one wait carries and the multiplier on every wake's rewrite. A bound
+larger than a pool can usefully run would buy nothing and would let one wake
+rewrite thousands of identities while holding capacity rows. Supplying the
+directory is necessary but not sufficient: the invocation must also force the
+CLI's file credential backend and disable its keyring, automatic, and every
+other external store, exactly as the OAuth delivery already does. Without that,
+a CLI configured for its process-wide keyring reads an authentication context
+this walk never verified, two custody-approved homes resolve the same external
+login, and both the containment property and the distinct-identity check are
+bypassed without either being violated on its own terms. Failure to enforce the
+backend is a typed pre-send delivery failure and starts no child.
 
 The daemon supplies the directory as that process's credential home and never
 reads or interprets its entries; it opens them for metadata alone, which is what
@@ -1284,28 +1289,32 @@ identities. A contended wait also carries the earliest unelapsed reset among
 those durable exclusions as its deadline, exactly as an exhausted wait does, and
 the scheduler makes it eligible when that deadline passes. Without it a turn
 contending on a bounded member would stay parked past the moment an excluded
-member became admissible again — visibly so for a chain-local reset, whose
-passage produces no separate durable availability update. A contended wait whose
-exclusions report no reset has no deadline, and its bounded members' completions
-remain its wake. A member's admission first locks the shared capacity rows for
-every bounded profile the preparation may select, in profile-reference byte
-order. The rows are profile-scoped rather than session- or pool-scoped, so
-concurrent sessions and distinct pools serialize against the same bound without
-a lock-order cycle. Under those locks the transaction counts live reservations,
-chooses the member, and acquires its `pending_spawn` reservation together with
-the call's `Prepared` record; a database constraint rejects a live count above
-the configured bound. That bound is read from the profile's current registration
-and is never frozen into a pool policy, because `max_concurrent_invocations`
-guards a live refresh race the operator is adjusting now: a session pinned to an
-older policy must not keep running against a limit the operator has since
-tightened. A raised bound therefore admits more work at the next preparation,
-and a lowered one restricts the next admission without revoking a reservation
-already committed — a live count above a freshly lowered bound drains as those
-invocations complete rather than terminating them. A turn already parked in a
-contended wait is not left behind by a raise: a configuration edit produces
-neither a reservation release nor an availability update, so startup
-re-evaluates the retained contended waits themselves against the current
-registrations
+member became admissible again — visibly so for a reset whose passage produces
+no separate durable availability update. Only exclusions a wake can clear
+contribute to that deadline: a predecessor chain exclusion earned in this turn
+is turn-local, so no reset readmits its member before the turn ends, and
+counting its reported reset would wake the wait only to re-park it and leave a
+now-past deadline that makes it immediately eligible again. A contended wait
+none of whose remaining exclusions can be cleared by time has no deadline, and
+its bounded members' completions remain its wake. A member's admission first
+locks the shared capacity rows for every bounded profile the preparation may
+select, in profile-reference byte order. The rows are profile-scoped rather than
+session- or pool-scoped, so concurrent sessions and distinct pools serialize
+against the same bound without a lock-order cycle. Under those locks the
+transaction counts live reservations, chooses the member, and acquires its
+`pending_spawn` reservation together with the call's `Prepared` record; a
+database constraint rejects a live count above the configured bound. That bound
+is read from the profile's current registration and is never frozen into a pool
+policy, because `max_concurrent_invocations` guards a live refresh race the
+operator is adjusting now: a session pinned to an older policy must not keep
+running against a limit the operator has since tightened. A raised bound
+therefore admits more work at the next preparation, and a lowered one restricts
+the next admission without revoking a reservation already committed — a live
+count above a freshly lowered bound drains as those invocations complete rather
+than terminating them. A turn already parked in a contended wait is not left
+behind by a raise: a configuration edit produces neither a reservation release
+nor an availability update, so startup re-evaluates the retained contended waits
+themselves against the current registrations
 ([turn lifecycle](turn-lifecycle-and-scheduling.md#turns-states-and-the-single-active-slot)).
 A wait whose profile is now unbounded becomes eligible outright; one whose
 profile is still bounded becomes eligible when that profile's surviving
