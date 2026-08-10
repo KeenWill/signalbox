@@ -552,7 +552,7 @@ pub enum ProcessTurnState {
         /// Runner whose durable loss owns this wait.
         runner: RunnerId,
         /// Positive placement revision against which loss was projected.
-        placement_revision: u64,
+        placement_revision: RunnerGeneration,
         /// Physical tool attempt interrupted by loss, when one exists.
         interrupted_tool_attempt: Option<ToolAttemptId>,
     },
@@ -3425,7 +3425,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                     model_settings,
                     state: ProcessTurnState::ActiveAwaitingRunnerRecovery {
                         runner: RunnerId::from_uuid(runner),
-                        placement_revision: decode_positive(
+                        placement_revision: decode_runner_generation(
                             revision,
                             "runner recovery placement revision",
                         )?,
@@ -5205,6 +5205,14 @@ fn decode_positive(value: Decimal, field: &'static str) -> Result<u64, ProcessRe
     } else {
         Ok(value)
     }
+}
+
+fn decode_runner_generation(
+    value: Decimal,
+    field: &'static str,
+) -> Result<RunnerGeneration, ProcessReadCorruption> {
+    RunnerGeneration::try_from_u64(decode_nonnegative(value, field)?)
+        .ok_or(ProcessReadCorruption::InvalidOrdinal(field))
 }
 
 #[cfg(test)]
