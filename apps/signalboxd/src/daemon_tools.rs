@@ -1494,19 +1494,31 @@ mod tests {
     /// comparing one helper with itself.
     #[cfg(target_os = "linux")]
     #[track_caller]
-    fn bridge_catalog(definitions: &[ToolDefinition]) -> Vec<u8> {
+    fn bridge_catalog(definitions: &[ToolDefinition]) -> CapturedBridgeCatalog {
         let projected = signalbox_model_provider_runtime::runtime_tool_definitions(definitions)
             .expect("daemon tool schemas project into runtime definitions");
+        let executable = ensure_claude_mcp_bridge_executable();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("catalog capture runtime constructs");
-        runtime.block_on(capture_prepared_claude_catalog(projected))
+        let catalog = runtime.block_on(capture_prepared_claude_catalog(projected, &executable));
+        CapturedBridgeCatalog {
+            catalog,
+            executable,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct CapturedBridgeCatalog {
+        catalog: Vec<u8>,
+        executable: PathBuf,
     }
 
     #[cfg(target_os = "linux")]
     async fn capture_prepared_claude_catalog(
         tools: Vec<signalbox_model_runtime::ToolDefinition>,
+        bridge: &Path,
     ) -> Vec<u8> {
         let workspace = tempfile::tempdir().expect("catalog capture workspace exists");
         let executable = workspace.path().join(CLAUDE_CATALOG_CAPTURE_EXECUTABLE);
@@ -1519,10 +1531,9 @@ mod tests {
         fs::set_permissions(&executable, permissions)
             .expect("catalog capture executable is private and executable");
         let credential = CredentialReference::new(SYNTHETIC_CLAUDE_CREDENTIAL_REFERENCE);
-        let bridge = std::env::current_exe().expect("test executable path is available");
         let runtime = ClaudeCliRuntime::new(ClaudeCliConfig::new(
             &executable,
-            &bridge,
+            bridge,
             workspace.path(),
             credential.clone(),
         ))
@@ -1555,8 +1566,22 @@ mod tests {
             .await;
         let captured_config = fs::read(workspace.path().join(CLAUDE_CAPTURED_CONFIG_FILENAME))
             .expect("the fake CLI captured the prepared MCP config");
-        claude_catalog_path_from_config(&captured_config, &bridge)
-            .expect("the captured MCP config names the bridge catalog");
+        let captured_paths = claude_catalog_paths_from_config(&captured_config, bridge)
+            .expect("the captured MCP config names the bridge catalog and readiness marker");
+        let exercised_ready = fs::read_to_string(
+            workspace
+                .path()
+                .join(CLAUDE_CAPTURED_READY_EXERCISE_FILENAME),
+        )
+        .expect("the fake CLI exercised the configured readiness path");
+        assert_eq!(Path::new(&exercised_ready), captured_paths.ready);
+        assert_eq!(
+            captured_paths.catalog,
+            PathBuf::from(
+                fs::read_to_string(workspace.path().join(CLAUDE_CAPTURED_CATALOG_PATH_FILENAME))
+                    .expect("the fake CLI captured the configured catalog path"),
+            )
+        );
         fs::read(workspace.path().join(CLAUDE_CAPTURED_CATALOG_FILENAME))
             .expect("the fake CLI captured the prepared Claude catalog")
     }
@@ -1570,7 +1595,17 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn claude_catalog_path_from_config(config: &[u8], expected_bridge: &Path) -> Option<PathBuf> {
+    #[derive(Debug, Eq, PartialEq)]
+    struct CapturedClaudeMcpPaths {
+        catalog: PathBuf,
+        ready: PathBuf,
+    }
+
+    #[cfg(target_os = "linux")]
+    fn claude_catalog_paths_from_config(
+        config: &[u8],
+        expected_bridge: &Path,
+    ) -> Option<CapturedClaudeMcpPaths> {
         let config: serde_json::Value = serde_json::from_slice(config).ok()?;
         let servers = config.get("mcpServers")?.as_object()?;
         let server = (servers.len() == 1)
@@ -1578,11 +1613,16 @@ mod tests {
             .flatten()?;
         let command = Path::new(server.get("command")?.as_str()?);
         let arguments = server.get("args")?.as_array()?;
-        (command == expected_bridge
-            && arguments.len() == 3
-            && arguments.first()?.as_str()? == CLAUDE_MCP_BRIDGE_SERVE_OPTION)
-            .then(|| arguments.get(1)?.as_str().map(PathBuf::from))
-            .flatten()
+        if command != expected_bridge
+            || arguments.len() != 3
+            || arguments.first()?.as_str()? != CLAUDE_MCP_BRIDGE_SERVE_OPTION
+        {
+            return None;
+        }
+        Some(CapturedClaudeMcpPaths {
+            catalog: PathBuf::from(arguments.get(1)?.as_str()?),
+            ready: PathBuf::from(arguments.get(2)?.as_str()?),
+        })
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1705,11 +1745,14 @@ mod tests {
         .expect("synthetic MCP config serializes");
 
         assert_eq!(
-            claude_catalog_path_from_config(
+            claude_catalog_paths_from_config(
                 config.as_bytes(),
                 Path::new(SYNTHETIC_MCP_BRIDGE_PATH),
             ),
-            Some(PathBuf::from(SYNTHETIC_CAPTURED_CATALOG_PATH))
+            Some(CapturedClaudeMcpPaths {
+                catalog: PathBuf::from(SYNTHETIC_CAPTURED_CATALOG_PATH),
+                ready: PathBuf::from(SYNTHETIC_MCP_IGNORED_ARGUMENT),
+            })
         );
     }
 
@@ -1731,7 +1774,7 @@ mod tests {
         .expect("synthetic MCP config serializes");
 
         assert_eq!(
-            claude_catalog_path_from_config(&config, Path::new(SYNTHETIC_MCP_BRIDGE_PATH)),
+            claude_catalog_paths_from_config(&config, Path::new(SYNTHETIC_MCP_BRIDGE_PATH)),
             None
         );
     }
@@ -1754,7 +1797,7 @@ mod tests {
         .expect("synthetic MCP config serializes");
 
         assert_eq!(
-            claude_catalog_path_from_config(&config, Path::new(SYNTHETIC_MCP_BRIDGE_PATH)),
+            claude_catalog_paths_from_config(&config, Path::new(SYNTHETIC_MCP_BRIDGE_PATH)),
             None
         );
     }
@@ -1883,6 +1926,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     const CLAUDE_CAPTURED_CATALOG_FILENAME: &str = "captured-mcp-catalog.json";
     #[cfg(target_os = "linux")]
+    const CLAUDE_CAPTURED_CATALOG_PATH_FILENAME: &str = "captured-mcp-catalog-path";
+    #[cfg(target_os = "linux")]
+    const CLAUDE_CAPTURED_READY_EXERCISE_FILENAME: &str = "captured-mcp-ready-exercised";
+    #[cfg(target_os = "linux")]
     const SYNTHETIC_CAPTURED_CATALOG_PATH: &str = "catalog with a \"quote\".json";
     #[cfg(target_os = "linux")]
     const SYNTHETIC_MCP_BRIDGE_PATH: &str = "synthetic-claude-mcp-bridge";
@@ -1890,24 +1937,75 @@ mod tests {
     const CLAUDE_CATALOG_CAPTURE_SCRIPT: &str = r#"#!/bin/sh
 set -eu
 mcp_config=
+settings=
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--mcp-config" ]; then
     shift
     mcp_config=$1
+  elif [ "$1" = "--settings" ]; then
+    shift
+    settings=$1
   fi
   shift
 done
 test -n "$mcp_config"
+test -n "$settings"
 capture_dir=${0%/*}
 cp "$mcp_config" "$capture_dir/captured-mcp-config.json"
-python3 -c 'import json, shutil, sys
+python3 -c 'import json, pathlib, shutil, subprocess, sys
 with open(sys.argv[1], encoding="utf-8") as source:
     servers = json.load(source)["mcpServers"]
 assert len(servers) == 1
-arguments = next(iter(servers.values()))["args"]
+server = servers["signalbox_tools"]
+arguments = server["args"]
 assert len(arguments) == 3 and arguments[0] == "--serve"
-shutil.copyfile(arguments[1], sys.argv[2])' \
-  "$mcp_config" "$capture_dir/captured-mcp-catalog.json"
+with open(sys.argv[3], encoding="utf-8") as source:
+    settings = json.load(source)
+hook = settings["hooks"]["SessionStart"][0]["hooks"][0]
+assert hook["type"] == "command"
+shutil.copyfile(arguments[1], sys.argv[2])
+pathlib.Path(sys.argv[4]).write_text(arguments[1], encoding="utf-8")
+bridge = subprocess.Popen(
+    [server["command"], *arguments],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    text=True,
+)
+waiter = subprocess.Popen(
+    hook["command"], shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+)
+try:
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "catalog-capture", "version": "1"},
+        },
+    }
+    bridge.stdin.write(json.dumps(initialize) + "\n")
+    bridge.stdin.flush()
+    assert json.loads(bridge.stdout.readline())["id"] == 1
+    assert waiter.poll() is None
+    bridge.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+    bridge.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}) + "\n")
+    bridge.stdin.flush()
+    assert json.loads(bridge.stdout.readline())["id"] == 2
+    assert waiter.wait(timeout=12) == 0
+    assert pathlib.Path(arguments[2]).is_file()
+    pathlib.Path(sys.argv[5]).write_text(arguments[2], encoding="utf-8")
+    bridge.stdin.close()
+    assert bridge.wait(timeout=12) == 0
+finally:
+    if waiter.poll() is None:
+        waiter.terminate()
+    if bridge.poll() is None:
+        bridge.terminate()' \
+  "$mcp_config" "$capture_dir/captured-mcp-catalog.json" "$settings" \
+  "$capture_dir/captured-mcp-catalog-path" "$capture_dir/captured-mcp-ready-exercised"
 "#;
 
     #[cfg(target_os = "linux")]
@@ -1949,29 +2047,65 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
     #[cfg(target_os = "linux")]
     #[track_caller]
     fn current_cargo_test_invocation() -> CargoTestInvocation {
-        let parent = rustix::process::getppid().expect("the test process has a parent");
+        parent_cargo_test_invocation().unwrap_or_else(cargo_test_invocation_from_running_artifact)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn parent_cargo_test_invocation() -> Option<CargoTestInvocation> {
+        let parent = rustix::process::getppid()?;
         let parent_process_directory =
             Path::new(PROC_FILESYSTEM_ROOT).join(parent.as_raw_nonzero().get().to_string());
         let command_line_path = parent_process_directory.join(PROC_COMMAND_LINE_FILENAME);
         let mut command_line = Vec::new();
         fs::File::open(command_line_path)
-            .expect("the parent process command line is readable")
+            .ok()?
             .take(MAX_CARGO_COMMAND_LINE_BYTES + 1)
             .read_to_end(&mut command_line)
-            .expect("the parent process command line can be read");
-        assert!(
-            command_line.len() as u64 <= MAX_CARGO_COMMAND_LINE_BYTES,
-            "the parent Cargo command line stays within its inspection bound"
-        );
+            .ok()?;
+        (command_line.len() as u64 <= MAX_CARGO_COMMAND_LINE_BYTES).then_some(())?;
         let arguments = command_line
             .split(|byte| *byte == 0)
             .filter(|argument| !argument.is_empty())
             .map(OsStr::from_bytes)
             .collect::<Vec<_>>();
-        let invocation_directory = cargo_invocation_directory(&parent_process_directory)
-            .expect("the parent Cargo invocation directory is readable");
+        let invocation_directory = cargo_invocation_directory(&parent_process_directory).ok()?;
         cargo_test_invocation_from_arguments(&arguments, &invocation_directory)
-            .expect("the daemon-tools suite retains its parent Cargo test invocation")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[track_caller]
+    fn cargo_test_invocation_from_running_artifact() -> CargoTestInvocation {
+        let current = std::env::current_exe().expect("test executable path is available");
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("signalboxd manifest has a workspace root");
+        cargo_test_invocation_from_artifact(&current, workspace)
+    }
+
+    fn cargo_test_invocation_from_artifact(
+        current_executable: &Path,
+        workspace: &Path,
+    ) -> CargoTestInvocation {
+        let profile_directory = current_executable
+            .parent()
+            .and_then(Path::parent)
+            .expect("test executable is under a Cargo profile directory");
+        let profile_name = profile_directory
+            .file_name()
+            .expect("Cargo profile directory has a name");
+        let profile = match profile_name.to_str() {
+            Some(CARGO_DEBUG_PROFILE_DIRECTORY) => OsString::from(CARGO_TEST_PROFILE),
+            Some(CARGO_RELEASE_PROFILE) => OsString::from(CARGO_RELEASE_PROFILE),
+            _ => profile_name.to_os_string(),
+        };
+        CargoTestInvocation {
+            profile,
+            config_overrides: Vec::new(),
+            unstable_flags: Vec::new(),
+            ignore_rust_version: false,
+            invocation_directory: workspace.to_path_buf(),
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -2750,6 +2884,19 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
             .expect("the synthetic Cargo test invocation is admitted");
 
         assert_eq!(invocation.invocation_directory, invocation_directory);
+    }
+
+    #[test]
+    fn cargo_test_invocation_falls_back_to_the_running_debug_artifact() {
+        let workspace = Path::new("/synthetic/workspace");
+        let executable = Path::new("/synthetic/target/debug/deps/daemon-tools-test");
+        let invocation = cargo_test_invocation_from_artifact(executable, workspace);
+
+        assert_eq!(invocation.profile, OsStr::new(CARGO_TEST_PROFILE));
+        assert_eq!(invocation.invocation_directory, workspace);
+        assert!(invocation.config_overrides.is_empty());
+        assert!(invocation.unstable_flags.is_empty());
+        assert!(!invocation.ignore_rust_version);
     }
 
     #[test]
@@ -3806,6 +3953,29 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
         thread::sleep(BRIDGE_WAIT_CHILD_FIXTURE_LIFETIME);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "subprocess fixture for direct libtest invocation provenance"]
+    fn bridge_build_direct_invocation_fixture() {
+        assert!(ensure_claude_mcp_bridge_executable().is_file());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bridge_build_supports_a_directly_invoked_test_binary() {
+        let current = std::env::current_exe().expect("test executable path is available");
+        let status = Command::new(current)
+            .arg("daemon_tools::tests::bridge_build_direct_invocation_fixture")
+            .args(["--exact", "--ignored"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("directly invoked bridge-build fixture exits");
+
+        assert!(status.success());
+    }
+
     #[cfg(unix)]
     #[test]
     #[ignore = "subprocess fixture that holds its parent's stderr open"]
@@ -4697,8 +4867,8 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
             let catalog = bridge_catalog(&[definition]);
             let catalog_path = support.path().join(MCP_CATALOG_FILENAME);
             let ready_path = support.path().join(MCP_READY_FILENAME);
-            fs::write(&catalog_path, &catalog).expect("blocking bridge catalog is written");
-            let executable = ensure_claude_mcp_bridge_executable();
+            fs::write(&catalog_path, &catalog.catalog).expect("blocking bridge catalog is written");
+            let executable = catalog.executable;
             let mut command = Command::new(&executable);
             command
                 .arg(CLAUDE_MCP_BRIDGE_SERVE_OPTION)
@@ -5300,8 +5470,9 @@ shutil.copyfile(arguments[1], sys.argv[2])' \
             let support = tempfile::tempdir().expect("bridge support directory exists");
             let catalog_path = support.path().join(MCP_CATALOG_FILENAME);
             let ready_path = support.path().join(MCP_READY_FILENAME);
-            fs::write(&catalog_path, &projected_catalog).expect("bridge catalog is written");
-            let executable = ensure_claude_mcp_bridge_executable();
+            fs::write(&catalog_path, &projected_catalog.catalog)
+                .expect("bridge catalog is written");
+            let executable = projected_catalog.executable;
             let bridge = McpBridgeProcess::spawn(McpBridgeSpawn {
                 executable: &executable,
                 catalog: &catalog_path,
