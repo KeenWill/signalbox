@@ -338,8 +338,11 @@ const SYNTHETIC_CONTRACTED_FAILURE_REPORT: &str = "The operation wasn't complete
 const SYNTHETIC_NEVER_COMPLETION_REPORT: &str = "Never completed the requested operation.";
 const SYNTHETIC_DEFERRED_COMPLETION_REPORT: &str =
     "The requested operation has yet to be completed.";
+const SYNTHETIC_REMAINING_COMPLETION_REPORT: &str =
+    "The requested operation remains to be completed.";
 const SYNTHETIC_STILL_NEEDS_READ_REPORT: &str = "I still need to read the result.";
 const SYNTHETIC_NEEDS_READ_REPORT: &str = "I need to read the result.";
+const SYNTHETIC_NO_NEED_TO_READ_AGAIN_REPORT: &str = "Read brief.txt; no need to read it again.";
 const SYNTHETIC_FUTURE_READ_REPORT: &str = "The result will be read.";
 const SYNTHETIC_NEGATED_DIFF_REPORT: &str = "Done, but it was not diffed.";
 const SYNTHETIC_NEGATED_EDIT_REPORT: &str = "Done; I did not edit the file.";
@@ -361,6 +364,7 @@ const SYNTHETIC_LONG_NEGATED_ERRORS_COMPLETION_REPORT: &str =
     "Completed successfully without encountering any errors.";
 const SYNTHETIC_NEGATED_ERRORS_THEN_FAILURE_REPORT: &str =
     "Completed without errors but later failed.";
+const SYNTHETIC_CAUSAL_FAILURE_REPORT: &str = "Completed with no output because execution failed.";
 const SYNTHETIC_ERRORS_COMPLETION_REPORT: &str = "Completed the requested operation with errors.";
 const SYNTHETIC_ERROR_FREE_COMPLETION_REPORT: &str = "Done error-free.";
 const SYNTHETIC_EXECUTED_COMPLETION_REPORT: &str =
@@ -390,6 +394,7 @@ const SYNTHETIC_COULD_NOT_COMPLETE_REPORT: &str =
     "Done, but I could not perform the requested operation.";
 const SYNTHETIC_NO_FILE_CHANGES_COMPLETION_REPORT: &str = "Done; no file changes were made.";
 const SYNTHETIC_FILE_NOT_MODIFIED_REPORT: &str = "Done, but the file was not modified.";
+const SYNTHETIC_NO_FILE_EDITED_REPORT: &str = "No file was edited; done.";
 const SYNTHETIC_COLLATERAL_NO_FILE_CHANGES_COMPLETION_REPORT: &str =
     "Updated the requested file; no file changes were made to any other files.";
 const SYNTHETIC_NO_FILE_WAS_CHANGED_COMPLETION_REPORT: &str = "Done; no file was changed.";
@@ -7314,7 +7319,13 @@ fn report_denies_file_changes_with_exception(report: &str, excepted_path: Option
             let denied_outcome = scope.iter().position(|word| {
                 matches!(
                     word.as_str(),
-                    "change" | "changed" | "changes" | "created" | "modified" | "written"
+                    "change"
+                        | "changed"
+                        | "changes"
+                        | "created"
+                        | "edited"
+                        | "modified"
+                        | "written"
                 )
             });
             let collateral = denied_outcome.is_some_and(|outcome| {
@@ -7799,19 +7810,7 @@ fn report_words_deny_success(
             })
             && !read_only_change_denial
     });
-    let deferred_completion = words.windows(3).any(|claim| {
-        matches!(claim[0].as_str(), "need" | "yet")
-            && claim[1] == "to"
-            && is_negative_outcome(&claim[2])
-            || claim[0] == "will" && claim[1] == "be" && is_negative_outcome(&claim[2])
-    }) || words.windows(4).any(|claim| {
-        matches!(claim[0].as_str(), "need" | "yet")
-            && claim[1] == "to"
-            && claim[2] == "be"
-            && is_negative_outcome(&claim[3])
-    }) || words
-        .windows(2)
-        .any(|claim| claim[0] == "will" && is_negative_outcome(&claim[1]));
+    let deferred_completion = report_has_deferred_outcome(report);
     let clauses_with_dotted_paths_preserved = normalized_report_clauses(report);
     let affirmative_pending = clauses_with_dotted_paths_preserved.iter().any(|clause| {
         clause.iter().enumerate().any(|(index, word)| {
@@ -7834,6 +7833,9 @@ fn report_words_deny_success(
                 let confinement_assurance = scope_is_confinement_assurance(scope);
                 let affirmative_not_only =
                     word == "not" && scope.first().is_some_and(|qualifier| qualifier == "only");
+                let negated_need = matches!(word.as_str(), "never" | "no" | "not")
+                    && scope.first().is_some_and(|predicate| predicate == "need")
+                    && scope.get(1).is_some_and(|connector| connector == "to");
                 let no_is_collateral = word == "no"
                     && outcome.is_some_and(|outcome| {
                         scope[..outcome].iter().any(|word| {
@@ -7908,7 +7910,10 @@ fn report_words_deny_success(
                 let predicate_scope = &predicate_scope[..predicate_scope
                     .iter()
                     .position(|word| {
-                        matches!(word.as_str(), "and" | "but" | "however" | "then" | "yet")
+                        matches!(
+                            word.as_str(),
+                            "and" | "because" | "but" | "however" | "since" | "so" | "then" | "yet"
+                        )
                     })
                     .unwrap_or(predicate_scope.len())];
                 let requested_path_excepted = outcome.is_some()
@@ -7917,6 +7922,7 @@ fn report_words_deny_success(
                 matches!(word.as_str(), "never" | "no" | "not" | "without")
                     && outcome.is_some()
                     && !affirmative_not_only
+                    && !negated_need
                     && !no_is_collateral
                     && !collateral_only
                     && !read_only_file_denial
@@ -7935,6 +7941,42 @@ fn report_words_deny_success(
         || deferred_completion
         || affirmative_pending
         || scoped_negation
+}
+
+fn report_has_deferred_outcome(report: &str) -> bool {
+    normalized_report_clauses(report).into_iter().any(|clause| {
+        let need_or_yet = clause.windows(3).enumerate().any(|(index, claim)| {
+            let need = claim[0] == "need"
+                && !failure_term_is_negated(&clause, index)
+                && claim[1] == "to"
+                && is_negative_outcome(&claim[2]);
+            let yet = claim[0] == "yet" && claim[1] == "to" && is_negative_outcome(&claim[2]);
+            need || yet
+        });
+        let passive = clause.windows(4).enumerate().any(|(index, claim)| {
+            let need = claim[0] == "need"
+                && !failure_term_is_negated(&clause, index)
+                && claim[1] == "to"
+                && claim[2] == "be"
+                && is_negative_outcome(&claim[3]);
+            let yet = claim[0] == "yet"
+                && claim[1] == "to"
+                && claim[2] == "be"
+                && is_negative_outcome(&claim[3]);
+            let remains = matches!(claim[0].as_str(), "remain" | "remains")
+                && claim[1] == "to"
+                && claim[2] == "be"
+                && is_negative_outcome(&claim[3]);
+            need || yet || remains
+        });
+        let future = clause
+            .windows(3)
+            .any(|claim| claim[0] == "will" && claim[1] == "be" && is_negative_outcome(&claim[2]))
+            || clause
+                .windows(2)
+                .any(|claim| claim[0] == "will" && is_negative_outcome(&claim[1]));
+        need_or_yet || passive || future
+    })
 }
 
 fn scope_is_confinement_assurance(scope: &[String]) -> bool {
@@ -8033,9 +8075,12 @@ fn failure_term_is_negated(clause: &[String], failure_index: usize) -> bool {
                     .any(|word| matches!(word.as_str(), "never" | "not"));
             failure_index - negation <= 5
                 && !without_is_reversed
-                && !qualifier_scope[negation + 1..]
-                    .iter()
-                    .any(|word| matches!(word.as_str(), "and" | "but" | "however" | "then" | "yet"))
+                && !qualifier_scope[negation + 1..].iter().any(|word| {
+                    matches!(
+                        word.as_str(),
+                        "and" | "because" | "but" | "however" | "since" | "so" | "then" | "yet"
+                    )
+                })
         })
 }
 
@@ -8271,6 +8316,14 @@ fn final_response_report_rejects_deferred_completion() {
 }
 
 #[test]
+fn final_response_report_rejects_an_outcome_remaining_to_be_completed() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_REMAINING_COMPLETION_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
 fn forced_read_completion_rejects_a_still_needed_report() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_STILL_NEEDS_READ_REPORT, false);
@@ -8288,6 +8341,18 @@ fn forced_read_completion_rejects_a_needed_report() {
     tracker.observe_response_text(SYNTHETIC_NEEDS_READ_REPORT, false);
 
     assert!(!forced_case_completion_reported(
+        READ_FILE_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_read_completion_accepts_a_negated_need_to_repeat_the_read() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_NEED_TO_READ_AGAIN_REPORT, false);
+
+    assert!(forced_case_completion_reported(
         READ_FILE_NAME,
         true,
         &tracker,
@@ -8444,6 +8509,14 @@ fn final_response_report_accepts_longer_negated_failure_phrases() {
 fn final_response_report_rejects_a_failure_after_longer_negation() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_NEGATED_ERRORS_THEN_FAILURE_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn final_response_report_rejects_a_failure_after_a_causal_boundary() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_CAUSAL_FAILURE_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
 }
@@ -9192,6 +9265,14 @@ fn forced_edit_report_rejects_a_file_not_modified_denial() {
 fn workspace_mutation_report_rejects_a_file_not_modified_denial() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_FILE_NOT_MODIFIED_REPORT, false);
+
+    assert!(!tracker.final_response_reports_completion_with_file_mutation());
+}
+
+#[test]
+fn workspace_mutation_report_rejects_a_direct_file_edit_denial() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NO_FILE_EDITED_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion_with_file_mutation());
 }
@@ -11685,7 +11766,7 @@ fn git_natural_object_entries_accept_the_stage_and_commit_windows() -> EvalResul
 }
 
 #[test]
-fn git_natural_object_entries_reject_a_commit_window_for_the_staged_blob() -> EvalResult {
+fn git_natural_object_entries_reject_a_disjoint_stage_window_for_the_staged_blob() -> EvalResult {
     let fixture = git_natural_filesystem_fixture()?;
     let repository = Repository::open(fixture.suite.workspace.path())?;
     let head = repository.head()?.peel_to_commit()?;
@@ -11709,7 +11790,10 @@ fn git_natural_object_entries_reject_a_commit_window_for_the_staged_blob() -> Ev
         fixture.suite.workspace.path(),
         &head,
         &fixture.suite.git_seed_fixture,
-        Some(fixture.commit_window),
+        Some(FilesystemExecutionTimeWindow {
+            started: UNIX_EPOCH,
+            finished: UNIX_EPOCH,
+        }),
         GitObjectEntryVerification {
             pre_execution_entries: entries.as_ref(),
             pre_execution_modified_times: modified_times.as_ref(),
