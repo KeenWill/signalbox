@@ -21393,24 +21393,19 @@ async fn s18_inv006_inv010_historical_wake_does_not_replace_accepted_baseline()
         .handle(prepared(seed + 9, seed + 1, direct(seed + 2)))
         .await?;
     let input_repository = SubmitInputRepository::new(pool.clone());
-    assert!(matches!(
-        input_repository
-            .handle(
-                start_input(
-                    seed + 10,
-                    seed + 1,
-                    "first accepted input",
-                    1,
-                    ModelSelectionOverride::UseSessionDefault,
-                ),
-                first_accepted,
-                Some(first_turn),
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(_)
-        ))
-    ));
+    input_repository
+        .handle(
+            start_input(
+                seed + 10,
+                seed + 1,
+                "first accepted input",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            first_accepted,
+            Some(first_turn),
+        )
+        .await?;
     activate_earliest_queued_turn(
         &pool,
         EarliestQueuedTurnActivation {
@@ -21435,30 +21430,26 @@ async fn s18_inv006_inv010_historical_wake_does_not_replace_accepted_baseline()
         "first accepted result",
     )
     .await?;
-    assert!(matches!(
-        input_repository
-            .handle(
-                start_input(
-                    seed + 0x40,
-                    seed + 1,
-                    "second accepted input",
-                    1,
-                    ModelSelectionOverride::UseSessionDefault,
-                ),
-                second_accepted,
-                Some(second_turn),
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(_)
-        ))
-    ));
+    input_repository
+        .handle(
+            start_input(
+                seed + 0x40,
+                seed + 1,
+                "second accepted input",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            second_accepted,
+            Some(second_turn),
+        )
+        .await?;
 
     let mut transaction = pool.begin().await?;
     sqlx::raw_sql(
         "ALTER TABLE accepted_input DISABLE TRIGGER ALL;
          ALTER TABLE queued_input_origin DISABLE TRIGGER ALL;
          ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;
          ALTER TABLE session_pending_delivery DISABLE TRIGGER ALL;
          ALTER TABLE session_delegation_wake_turn_origin DISABLE TRIGGER ALL;",
     )
@@ -21488,53 +21479,21 @@ async fn s18_inv006_inv010_historical_wake_does_not_replace_accepted_baseline()
     .bind(second_turn.into_uuid())
     .execute(&mut *transaction)
     .await?;
-    sqlx::query(
-        "INSERT INTO turn_lifecycle
-         SELECT (jsonb_populate_record(
-                    NULL::turn_lifecycle,
-                    to_jsonb(source) || jsonb_build_object(
-                        'turn_id', $3,
-                        'origin_kind', 'delegation',
-                        'origin_accepted_input_id', NULL,
-                        'acceptance_position', 2,
-                        'start_lineage_kind', 'after',
-                        'immediate_predecessor_turn_id', $2
-                    )
-                )).*
-           FROM turn_lifecycle AS source
-          WHERE source.session_id = $1 AND source.turn_id = $2",
+    insert_historical_delegation_wake(
+        &mut transaction,
+        session,
+        first_turn,
+        wake_turn,
+        selection,
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x42)),
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x43)),
     )
-    .bind(session.into_uuid())
-    .bind(first_turn.into_uuid())
-    .bind(wake_turn.into_uuid())
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO session_pending_delivery
-            (recipient_session_id, delivery_sequence, delivery_kind)
-         VALUES ($1, 1, 'background_result')",
-    )
-    .bind(session.into_uuid())
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO session_delegation_wake_turn_origin
-            (turn_id, recipient_session_id, admission_position,
-             first_delivery_sequence, through_delivery_sequence,
-             defaults_version, requested_model_kind,
-             requested_direct_model_selection_id, frozen_model_kind,
-             frozen_direct_model_selection_id)
-         VALUES ($1, $2, 2, 1, 1, 1, 'direct', $3, 'direct', $3)",
-    )
-    .bind(wake_turn.into_uuid())
-    .bind(session.into_uuid())
-    .bind(selection.into_uuid())
-    .execute(&mut *transaction)
     .await?;
     sqlx::raw_sql(
         "ALTER TABLE accepted_input ENABLE TRIGGER ALL;
          ALTER TABLE queued_input_origin ENABLE TRIGGER ALL;
          ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL;
          ALTER TABLE session_pending_delivery ENABLE TRIGGER ALL;
          ALTER TABLE session_delegation_wake_turn_origin ENABLE TRIGGER ALL;",
     )
@@ -21550,8 +21509,10 @@ async fn s18_inv006_inv010_historical_wake_does_not_replace_accepted_baseline()
     .bind(session.into_uuid())
     .fetch_one(&pool)
     .await?;
+    assert_eq!(prior_position, 3);
     let third_turn = TurnId::from_uuid(Uuid::from_u128(seed + 0x50));
-    let third = input_repository
+    let third_accepted = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x52));
+    input_repository
         .handle(
             start_input(
                 seed + 0x51,
@@ -21560,23 +21521,129 @@ async fn s18_inv006_inv010_historical_wake_does_not_replace_accepted_baseline()
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x52)),
+            third_accepted,
             Some(third_turn),
         )
         .await?;
-    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-        SubmitInputAppliedResult::TurnOrigin(applied),
-    )) = third
-    else {
-        panic!("the historical wake leaves the third accepted input schedulable")
-    };
+    let third_position: i64 = sqlx::query_scalar(
+        "SELECT acceptance_position::bigint
+           FROM accepted_input
+          WHERE session_id = $1 AND accepted_input_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(third_accepted.into_uuid())
+    .fetch_one(&pool)
+    .await?;
     assert_eq!(
-        applied.acceptance_position().as_u64(),
-        u64::try_from(prior_position)? + 1
+        third_position, 4,
+        "the historical wake leaves the third accepted input schedulable"
     );
 
     pool.close().await;
     drop(container);
+    Ok(())
+}
+
+async fn insert_historical_delegation_wake(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+    predecessor: TurnId,
+    wake: TurnId,
+    selection: DirectModelSelection,
+    terminal_entry: SemanticTranscriptEntryId,
+    terminal_frontier: ContextFrontierId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             completed_turn_id)
+         VALUES ($1, $2, 'turn_completed', $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(terminal_entry.into_uuid())
+    .bind(wake.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         SELECT $1, $2, source.terminal_frontier_id,
+                prefix.member_count + 1
+           FROM turn_lifecycle AS source
+           JOIN context_frontier AS prefix
+             ON prefix.owning_session_id = source.session_id
+            AND prefix.context_frontier_id = source.terminal_frontier_id
+          WHERE source.session_id = $1 AND source.turn_id = $3",
+    )
+    .bind(session.into_uuid())
+    .bind(terminal_frontier.into_uuid())
+    .bind(predecessor.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         SELECT $1, $2, prefix.member_count + 1, $1, $3
+           FROM turn_lifecycle AS source
+           JOIN context_frontier AS prefix
+             ON prefix.owning_session_id = source.session_id
+            AND prefix.context_frontier_id = source.terminal_frontier_id
+          WHERE source.session_id = $1 AND source.turn_id = $4",
+    )
+    .bind(session.into_uuid())
+    .bind(terminal_frontier.into_uuid())
+    .bind(terminal_entry.into_uuid())
+    .bind(predecessor.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_lifecycle
+         SELECT (jsonb_populate_record(
+                    NULL::turn_lifecycle,
+                    to_jsonb(source) || jsonb_build_object(
+                        'turn_id', $3,
+                        'origin_kind', 'delegation',
+                        'origin_accepted_input_id', NULL,
+                        'acceptance_position', 2,
+                        'start_lineage_kind', 'after',
+                        'immediate_predecessor_turn_id', $2,
+                        'starting_frontier_id', source.terminal_frontier_id,
+                        'terminal_frontier_id', $4
+                    )
+                )).*
+           FROM turn_lifecycle AS source
+          WHERE source.session_id = $1 AND source.turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(predecessor.into_uuid())
+    .bind(wake.into_uuid())
+    .bind(terminal_frontier.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_pending_delivery
+            (recipient_session_id, delivery_sequence, delivery_kind)
+         VALUES ($1, 1, 'background_result')",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wake_turn_origin
+            (turn_id, recipient_session_id, admission_position,
+             first_delivery_sequence, through_delivery_sequence,
+             defaults_version, requested_model_kind,
+             requested_direct_model_selection_id, frozen_model_kind,
+             frozen_direct_model_selection_id)
+         VALUES ($1, $2, 2, 1, 1, 1, 'direct', $3, 'direct', $3)",
+    )
+    .bind(wake.into_uuid())
+    .bind(session.into_uuid())
+    .bind(selection.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 
