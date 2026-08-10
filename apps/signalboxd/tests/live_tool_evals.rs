@@ -1270,6 +1270,7 @@ impl FamilySuite {
         seed_exec_workspace(workspace.path())?;
         let workspace_seed_entries = workspace_entries(workspace.path())?;
         let workspace_seed_modified_times = workspace_modified_times(workspace.path())?;
+        let workspace_seed_file_identities = workspace_file_identities(workspace.path())?;
         let supervisor = std::env::var_os(EXEC_SUPERVISOR_VARIABLE)
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::other("the exec supervisor path is missing"))?;
@@ -1299,7 +1300,7 @@ impl FamilySuite {
             }),
             workspace_seed_entries,
             workspace_seed_modified_times,
-            workspace_seed_file_identities: BTreeMap::new(),
+            workspace_seed_file_identities,
             git_pre_execution_worktree_entries: StdMutex::new(None),
             git_pre_execution_worktree_modified_times: StdMutex::new(None),
             git_pre_execution_worktree_file_identities: StdMutex::new(None),
@@ -1614,12 +1615,14 @@ impl FamilySuite {
                         self.workspace.path(),
                         &self.workspace_seed_entries,
                         &self.workspace_seed_modified_times,
+                        &self.workspace_seed_file_identities,
                     )
                 } else {
                     exec_workspace_matches_seed(
                         self.workspace.path(),
                         &self.workspace_seed_entries,
                         &self.workspace_seed_modified_times,
+                        &self.workspace_seed_file_identities,
                     )
                 }
             }
@@ -1705,6 +1708,7 @@ impl FamilySuite {
             self.workspace.path(),
             &self.workspace_seed_entries,
             &self.workspace_seed_modified_times,
+            &self.workspace_seed_file_identities,
         )
     }
 }
@@ -1713,6 +1717,7 @@ fn exec_natural_entries_match(
     root: &Path,
     seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
+    seed_file_identities: &BTreeMap<PathBuf, FileIdentity>,
 ) -> EvalResult<bool> {
     match fs::read(root.join(EXEC_RESULT_PATH)) {
         Ok(bytes) if bytes == EXEC_RESULT.as_bytes() => {}
@@ -1734,25 +1739,34 @@ fn exec_natural_entries_match(
     expected_modified_times.remove(Path::new(""));
     Ok(result_matches
         && actual == *seed_entries
-        && actual_modified_times == expected_modified_times)
+        && actual_modified_times == expected_modified_times
+        && workspace_file_identities_match_except(
+            root,
+            seed_file_identities,
+            &[Path::new(EXEC_RESULT_PATH)],
+        )?)
 }
 
 fn exec_workspace_matches_seed(
     root: &Path,
     seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
+    seed_file_identities: &BTreeMap<PathBuf, FileIdentity>,
 ) -> EvalResult<bool> {
     Ok(workspace_entries(root)? == *seed_entries
-        && workspace_modified_times(root)? == *seed_modified_times)
+        && workspace_modified_times(root)? == *seed_modified_times
+        && workspace_file_identities(root)? == *seed_file_identities)
 }
 
 fn cargo_diagnostics_workspace_matches_seed(
     root: &Path,
     seed_entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
+    seed_file_identities: &BTreeMap<PathBuf, FileIdentity>,
 ) -> EvalResult<bool> {
     let actual_entries = workspace_entries(root)?;
     let actual_modified_times = workspace_modified_times(root)?;
+    let actual_file_identities = workspace_file_identities(root)?;
     let target = Path::new("target");
     let seed_entries_preserved = seed_entries
         .iter()
@@ -1765,9 +1779,13 @@ fn cargo_diagnostics_workspace_matches_seed(
     let seed_times_preserved = seed_modified_times.iter().all(|(path, modified)| {
         path.as_os_str().is_empty() || actual_modified_times.get(path) == Some(modified)
     });
+    let seed_file_identities_preserved = seed_file_identities
+        .iter()
+        .all(|(path, identity)| actual_file_identities.get(path) == Some(identity));
     Ok(seed_entries_preserved
         && additions_are_target_only
         && seed_times_preserved
+        && seed_file_identities_preserved
         && matches!(
             actual_entries.get(target),
             Some(WorkspaceEntrySnapshot::Directory { .. })
@@ -14349,6 +14367,7 @@ type PreparedExecWorkspace = (
     TempDir,
     BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     BTreeMap<PathBuf, SystemTime>,
+    BTreeMap<PathBuf, FileIdentity>,
 );
 
 fn prepared_exec_seed_workspace() -> EvalResult<PreparedExecWorkspace> {
@@ -14356,43 +14375,84 @@ fn prepared_exec_seed_workspace() -> EvalResult<PreparedExecWorkspace> {
     seed_exec_workspace(workspace.path())?;
     let seed_entries = workspace_entries(workspace.path())?;
     let seed_modified_times = workspace_modified_times(workspace.path())?;
-    Ok((workspace, seed_entries, seed_modified_times))
+    let seed_file_identities = workspace_file_identities(workspace.path())?;
+    Ok((
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_file_identities,
+    ))
 }
 
 fn prepared_exec_natural_workspace() -> EvalResult<PreparedExecWorkspace> {
-    let (workspace, seed_entries, seed_modified_times) = prepared_exec_seed_workspace()?;
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_seed_workspace()?;
     fs::write(workspace.path().join(EXEC_RESULT_PATH), EXEC_RESULT)?;
-    Ok((workspace, seed_entries, seed_modified_times))
+    Ok((
+        workspace,
+        seed_entries,
+        seed_modified_times,
+        seed_file_identities,
+    ))
+}
+
+#[cfg(unix)]
+fn replace_exec_seed_file_byte_identically(
+    root: &Path,
+    seed_modified_times: &BTreeMap<PathBuf, SystemTime>,
+) -> EvalResult {
+    let relative = Path::new("Cargo.toml");
+    let target = root.join(relative);
+    let replacement = root.join("replacement-fixture");
+    let content = fs::read(&target)?;
+    let permissions = fs::metadata(&target)?.permissions();
+    let target_modified = *seed_modified_times
+        .get(relative)
+        .expect("the Exec fixture has a captured target modified time");
+    let root_modified = *seed_modified_times
+        .get(Path::new(""))
+        .expect("the Exec fixture has a captured root modified time");
+    fs::write(&replacement, content)?;
+    fs::set_permissions(&replacement, permissions)?;
+    fs::rename(&replacement, &target)?;
+    fs::File::open(&target)?.set_times(fs::FileTimes::new().set_modified(target_modified))?;
+    fs::File::open(root)?.set_times(fs::FileTimes::new().set_modified(root_modified))?;
+    Ok(())
 }
 
 #[test]
 fn forced_direct_exec_workspace_accepts_the_unchanged_seed() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times) = prepared_exec_seed_workspace()?;
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_seed_workspace()?;
 
     assert!(exec_workspace_matches_seed(
         workspace.path(),
         &seed_entries,
         &seed_modified_times,
+        &seed_file_identities,
     )?);
     Ok(())
 }
 
 #[test]
 fn forced_direct_exec_workspace_rejects_a_mutated_seed_file() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times) = prepared_exec_seed_workspace()?;
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_seed_workspace()?;
     fs::write(workspace.path().join("src/lib.rs"), "pub fn drifted() {}\n")?;
 
     assert!(!exec_workspace_matches_seed(
         workspace.path(),
         &seed_entries,
         &seed_modified_times,
+        &seed_file_identities,
     )?);
     Ok(())
 }
 
 #[test]
 fn forced_direct_exec_workspace_rejects_a_collateral_path() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times) = prepared_exec_seed_workspace()?;
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_seed_workspace()?;
     fs::write(
         workspace.path().join("collateral.txt"),
         "collateral fixture\n",
@@ -14402,13 +14462,40 @@ fn forced_direct_exec_workspace_rejects_a_collateral_path() -> EvalResult {
         workspace.path(),
         &seed_entries,
         &seed_modified_times,
+        &seed_file_identities,
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_direct_exec_workspace_rejects_byte_identical_seed_replacement() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_seed_workspace()?;
+    replace_exec_seed_file_byte_identically(workspace.path(), &seed_modified_times)?;
+
+    assert_eq!(workspace_entries(workspace.path())?, seed_entries);
+    assert_eq!(
+        workspace_modified_times(workspace.path())?,
+        seed_modified_times
+    );
+    assert_ne!(
+        workspace_file_identities(workspace.path())?,
+        seed_file_identities
+    );
+    assert!(!exec_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_file_identities,
     )?);
     Ok(())
 }
 
 #[test]
 fn forced_cargo_diagnostics_workspace_accepts_target_artifacts() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times) = prepared_exec_seed_workspace()?;
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_seed_workspace()?;
     fs::create_dir(workspace.path().join("target"))?;
     fs::write(
         workspace.path().join("target/.rustc_info.json"),
@@ -14419,13 +14506,15 @@ fn forced_cargo_diagnostics_workspace_accepts_target_artifacts() -> EvalResult {
         workspace.path(),
         &seed_entries,
         &seed_modified_times,
+        &seed_file_identities,
     )?);
     Ok(())
 }
 
 #[test]
 fn forced_cargo_diagnostics_workspace_rejects_a_mutated_seed_file() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times) = prepared_exec_seed_workspace()?;
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_seed_workspace()?;
     fs::create_dir(workspace.path().join("target"))?;
     fs::write(workspace.path().join("src/lib.rs"), "pub fn drifted() {}\n")?;
 
@@ -14433,13 +14522,15 @@ fn forced_cargo_diagnostics_workspace_rejects_a_mutated_seed_file() -> EvalResul
         workspace.path(),
         &seed_entries,
         &seed_modified_times,
+        &seed_file_identities,
     )?);
     Ok(())
 }
 
 #[test]
 fn forced_cargo_diagnostics_workspace_rejects_a_deleted_seed_file() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times) = prepared_exec_seed_workspace()?;
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_seed_workspace()?;
     fs::create_dir(workspace.path().join("target"))?;
     fs::remove_file(workspace.path().join("Cargo.toml"))?;
 
@@ -14447,25 +14538,46 @@ fn forced_cargo_diagnostics_workspace_rejects_a_deleted_seed_file() -> EvalResul
         workspace.path(),
         &seed_entries,
         &seed_modified_times,
+        &seed_file_identities,
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_cargo_diagnostics_rejects_byte_identical_seed_replacement() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_seed_workspace()?;
+    fs::create_dir(workspace.path().join("target"))?;
+    replace_exec_seed_file_byte_identically(workspace.path(), &seed_modified_times)?;
+
+    assert!(!cargo_diagnostics_workspace_matches_seed(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_file_identities,
     )?);
     Ok(())
 }
 
 #[test]
 fn exec_natural_state_accepts_only_the_requested_output_addition() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times) = prepared_exec_natural_workspace()?;
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_natural_workspace()?;
 
     assert!(exec_natural_entries_match(
         workspace.path(),
         &seed_entries,
         &seed_modified_times,
+        &seed_file_identities,
     )?);
     Ok(())
 }
 
 #[test]
 fn exec_natural_state_rejects_a_mutated_seed_file() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times) = prepared_exec_natural_workspace()?;
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_natural_workspace()?;
     fs::write(
         workspace.path().join("Cargo.toml"),
         "[package]\nname = \"collateral-mutation\"\n",
@@ -14475,13 +14587,15 @@ fn exec_natural_state_rejects_a_mutated_seed_file() -> EvalResult {
         workspace.path(),
         &seed_entries,
         &seed_modified_times,
+        &seed_file_identities,
     )?);
     Ok(())
 }
 
 #[test]
 fn exec_natural_state_rejects_a_collateral_addition() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times) = prepared_exec_natural_workspace()?;
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_natural_workspace()?;
     fs::write(
         workspace.path().join("collateral.txt"),
         "collateral fixture\n",
@@ -14491,18 +14605,42 @@ fn exec_natural_state_rejects_a_collateral_addition() -> EvalResult {
         workspace.path(),
         &seed_entries,
         &seed_modified_times,
+        &seed_file_identities,
+    )?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_natural_state_rejects_byte_identical_seed_replacement() -> EvalResult {
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_natural_workspace()?;
+    replace_exec_seed_file_byte_identically(workspace.path(), &seed_modified_times)?;
+
+    assert!(!exec_natural_entries_match(
+        workspace.path(),
+        &seed_entries,
+        &seed_modified_times,
+        &seed_file_identities,
     )?);
     Ok(())
 }
 
 #[test]
 fn exec_result_inspection_propagates_failures() -> EvalResult {
-    let (workspace, seed_entries, seed_modified_times) = prepared_exec_natural_workspace()?;
+    let (workspace, seed_entries, seed_modified_times, seed_file_identities) =
+        prepared_exec_natural_workspace()?;
     fs::remove_file(workspace.path().join(EXEC_RESULT_PATH))?;
     fs::create_dir(workspace.path().join(EXEC_RESULT_PATH))?;
 
     assert!(
-        exec_natural_entries_match(workspace.path(), &seed_entries, &seed_modified_times,).is_err()
+        exec_natural_entries_match(
+            workspace.path(),
+            &seed_entries,
+            &seed_modified_times,
+            &seed_file_identities,
+        )
+        .is_err()
     );
     Ok(())
 }
