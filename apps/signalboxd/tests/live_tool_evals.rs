@@ -293,6 +293,11 @@ const SYNTHETIC_CONTRACTED_FAILURE_REPORT: &str = "The operation wasn't complete
 const SYNTHETIC_NEVER_COMPLETION_REPORT: &str = "Never completed the requested operation.";
 const SYNTHETIC_DEFERRED_COMPLETION_REPORT: &str =
     "The requested operation has yet to be completed.";
+const SYNTHETIC_STILL_NEEDS_READ_REPORT: &str = "I still need to read the result.";
+const SYNTHETIC_NEEDS_READ_REPORT: &str = "I need to read the result.";
+const SYNTHETIC_FUTURE_READ_REPORT: &str = "The result will be read.";
+const SYNTHETIC_NEGATED_DIFF_REPORT: &str = "Done, but it was not diffed.";
+const SYNTHETIC_NEGATED_EDIT_REPORT: &str = "Done; I did not edit the file.";
 const SYNTHETIC_PENDING_COMPLETION_REPORT: &str =
     "Done, but the requested operation remains pending.";
 const SYNTHETIC_NO_PENDING_COMPLETION_REPORT: &str =
@@ -6414,7 +6419,14 @@ fn report_affirms_case_outcome(report: &str, case_name: &str) -> bool {
     let generic_completion = words
         .iter()
         .any(|word| matches!(word.as_str(), "completed" | "done" | "finished"));
-    let case_outcome = match case_name {
+    generic_completion
+        || case_outcome_verbs(case_name)
+            .iter()
+            .any(|outcome| words.iter().any(|word| word == outcome))
+}
+
+fn case_outcome_verbs(case_name: &str) -> &'static [&'static str] {
+    match case_name {
         GIT_BRANCH_CREATE_NAME => &["created"][..],
         GIT_BRANCH_SWITCH_NAME => &["switched"][..],
         GIT_CREATE_COMMIT_NAME => &["commit", "committed"][..],
@@ -6432,11 +6444,16 @@ fn report_affirms_case_outcome(report: &str, case_name: &str) -> bool {
         WEB_FETCH_NAME => &["fetched", "read"][..],
         WEB_SEARCH_NAME => &["searched"][..],
         _ => &[][..],
-    };
-    generic_completion
-        || case_outcome
-            .iter()
-            .any(|outcome| words.iter().any(|word| word == outcome))
+    }
+}
+
+fn is_case_outcome_verb(word: &str) -> bool {
+    GIT_CASES
+        .iter()
+        .chain(WORKSPACE_CASES)
+        .chain(WEB_CASES)
+        .flat_map(|case| case_outcome_verbs(case.name))
+        .any(|outcome| *outcome == word)
 }
 
 fn report_denies_success(report: &str, file_creation_required: bool) -> bool {
@@ -6526,62 +6543,19 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
                 matches!(qualifier.as_str(), "else" | "failed" | "failure" | "other")
             })
     });
-    let negative_outcomes = [
-        "applied",
-        "commit",
-        "committed",
-        "change",
-        "changed",
-        "complete",
-        "completed",
-        "create",
-        "created",
-        "done",
-        "execute",
-        "executed",
-        "executing",
-        "fetch",
-        "fetched",
-        "find",
-        "finish",
-        "finished",
-        "found",
-        "list",
-        "listed",
-        "match",
-        "matched",
-        "modify",
-        "modified",
-        "perform",
-        "performed",
-        "read",
-        "saved",
-        "search",
-        "searched",
-        "stage",
-        "staged",
-        "success",
-        "successful",
-        "successfully",
-        "succeed",
-        "succeeded",
-        "switch",
-        "switched",
-        "updated",
-        "work",
-        "worked",
-        "write",
-        "written",
-        "wrote",
-    ];
     let deferred_completion = words.windows(3).any(|claim| {
-        claim[0] == "yet" && claim[1] == "to" && negative_outcomes.contains(&claim[2].as_str())
+        matches!(claim[0].as_str(), "need" | "yet")
+            && claim[1] == "to"
+            && is_negative_outcome(&claim[2])
+            || claim[0] == "will" && claim[1] == "be" && is_negative_outcome(&claim[2])
     }) || words.windows(4).any(|claim| {
-        claim[0] == "yet"
+        matches!(claim[0].as_str(), "need" | "yet")
             && claim[1] == "to"
             && claim[2] == "be"
-            && negative_outcomes.contains(&claim[3].as_str())
-    });
+            && is_negative_outcome(&claim[3])
+    }) || words
+        .windows(2)
+        .any(|claim| claim[0] == "will" && is_negative_outcome(&claim[1]));
     let affirmative_pending = report
         .split([';', '.', ',', '!', '?', '\n'])
         .map(normalized_report_words)
@@ -6603,9 +6577,7 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         .any(|clause| {
             clause.iter().enumerate().any(|(index, word)| {
                 let scope = &clause[index + 1..clause.len().min(index + 7)];
-                let outcome = scope
-                    .iter()
-                    .position(|word| negative_outcomes.contains(&word.as_str()));
+                let outcome = scope.iter().position(|word| is_negative_outcome(word));
                 let affirmative_not_only =
                     word == "not" && scope.first().is_some_and(|qualifier| qualifier == "only");
                 let no_is_collateral = word == "no"
@@ -6672,6 +6644,46 @@ fn report_words_deny_success(report: &str, words: &[String], file_creation_requi
         || deferred_completion
         || affirmative_pending
         || scoped_negation
+}
+
+fn is_negative_outcome(word: &str) -> bool {
+    is_case_outcome_verb(word)
+        || matches!(
+            word,
+            "change"
+                | "changed"
+                | "complete"
+                | "completed"
+                | "create"
+                | "diff"
+                | "done"
+                | "edit"
+                | "execute"
+                | "executed"
+                | "executing"
+                | "fetch"
+                | "find"
+                | "finish"
+                | "finished"
+                | "found"
+                | "list"
+                | "match"
+                | "modify"
+                | "modified"
+                | "perform"
+                | "performed"
+                | "search"
+                | "stage"
+                | "success"
+                | "successful"
+                | "successfully"
+                | "succeed"
+                | "succeeded"
+                | "switch"
+                | "work"
+                | "worked"
+                | "write"
+        )
 }
 
 fn failure_term_is_negated(clause: &[String], failure_index: usize) -> bool {
@@ -6824,6 +6836,30 @@ fn forced_commit_completion_rejects_a_read_only_report() {
 }
 
 #[test]
+fn forced_diff_completion_rejects_a_negated_diff_report() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NEGATED_DIFF_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        GIT_DIFF_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_edit_completion_rejects_a_negated_edit_report() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NEGATED_EDIT_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        EDIT_FILE_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
 fn forced_read_completion_accepts_a_read_report() {
     let tracker = OperationTracker::default();
     tracker.observe_response_text(SYNTHETIC_READ_RESULT_REPORT, false);
@@ -6904,6 +6940,42 @@ fn final_response_report_rejects_deferred_completion() {
     tracker.observe_response_text(SYNTHETIC_DEFERRED_COMPLETION_REPORT, false);
 
     assert!(!tracker.final_response_reports_completion());
+}
+
+#[test]
+fn forced_read_completion_rejects_a_still_needed_report() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_STILL_NEEDS_READ_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        READ_FILE_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_read_completion_rejects_a_needed_report() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_NEEDS_READ_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        READ_FILE_NAME,
+        true,
+        &tracker,
+    ));
+}
+
+#[test]
+fn forced_read_completion_rejects_a_future_report() {
+    let tracker = OperationTracker::default();
+    tracker.observe_response_text(SYNTHETIC_FUTURE_READ_REPORT, false);
+
+    assert!(!forced_case_completion_reported(
+        READ_FILE_NAME,
+        true,
+        &tracker,
+    ));
 }
 
 #[test]
