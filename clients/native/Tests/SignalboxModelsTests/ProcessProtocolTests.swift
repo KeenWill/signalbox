@@ -1651,7 +1651,7 @@ final class ProcessProtocolTests: XCTestCase {
               "runner_id":"\(runnerID)",
               "placement_revision":"3",
               "sandbox_profile":"workspace-restricted",
-              "credential_profile":null,
+              "credential_profile":"readonly",
               "repository":"primary",
               "working_directory":"workspace/project",
               "connection_health":null,
@@ -1663,13 +1663,15 @@ final class ProcessProtocolTests: XCTestCase {
       )
     )
     let expectedProjection = try SignalboxRunnerProjection(
-      selector: .capabilityClass(name: "linux.workspace"),
+      selector: .capabilityClass(
+        name: SignalboxRunnerCapabilityClass(validating: "linux.workspace")
+      ),
       runnerID: SignalboxCanonicalUUID(validating: runnerID),
       placementRevision: SignalboxCanonicalUInt64(rawValue: 3),
       sandboxProfile: .workspaceRestricted,
-      credentialProfile: nil,
-      repository: "primary",
-      workingDirectory: "workspace/project",
+      credentialProfile: SignalboxRunnerCredentialProfileName(validating: "readonly"),
+      repository: SignalboxRunnerRepositoryKey(validating: "primary"),
+      workingDirectory: SignalboxRunnerWorkingDirectory(validating: "workspace/project"),
       connectionHealth: nil,
       state: .runnerLost
     )
@@ -1680,6 +1682,109 @@ final class ProcessProtocolTests: XCTestCase {
     )
 
     XCTAssertEqual(frame.message, .transcriptSnapshotStart(expected))
+  }
+
+  /// INV-033: the required nullable runner member cannot be omitted from a
+  /// known transcript snapshot boundary.
+  func testTranscriptSnapshotStartMissingRunnerDegradesWithDiagnostic() throws {
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_snapshot_start",
+          "session_id":"\(sessionID)",
+          "cursor":"12"
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+  }
+
+  /// INV-033: capability names retain the portable runner-name grammar at the
+  /// native protocol boundary.
+  func testTranscriptSnapshotStartRejectsInvalidRunnerCapabilityName() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.runnerSnapshotStartFrame(
+        sessionID: sessionID,
+        capabilityNameJSON: #""linux/workspace""#,
+        credentialProfileJSON: "null",
+        repositoryJSON: "null",
+        workingDirectoryJSON: "null"
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+  }
+
+  /// INV-033: credential profiles retain the portable runner-name grammar at
+  /// the native protocol boundary.
+  func testTranscriptSnapshotStartRejectsInvalidRunnerCredentialProfile() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.runnerSnapshotStartFrame(
+        sessionID: sessionID,
+        capabilityNameJSON: #""linux.workspace""#,
+        credentialProfileJSON: #""read/only""#,
+        repositoryJSON: "null",
+        workingDirectoryJSON: "null"
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+  }
+
+  /// INV-033: repository keys retain the portable runner-name grammar at the
+  /// native protocol boundary.
+  func testTranscriptSnapshotStartRejectsInvalidRunnerRepositoryKey() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.runnerSnapshotStartFrame(
+        sessionID: sessionID,
+        capabilityNameJSON: #""linux.workspace""#,
+        credentialProfileJSON: "null",
+        repositoryJSON: "\"\"",
+        workingDirectoryJSON: "null"
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+  }
+
+  /// INV-033: runner working-directory text retains its exact byte bound at
+  /// the native protocol boundary.
+  func testTranscriptSnapshotStartRejectsOversizedRunnerWorkingDirectory() throws {
+    let oversizedDirectory = String(repeating: "x", count: 4_097)
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.runnerSnapshotStartFrame(
+        sessionID: sessionID,
+        capabilityNameJSON: #""linux.workspace""#,
+        credentialProfileJSON: "null",
+        repositoryJSON: "null",
+        workingDirectoryJSON: "\"\(oversizedDirectory)\""
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+  }
+
+  /// INV-033: runner working-directory text rejects NUL at the native protocol
+  /// boundary.
+  func testTranscriptSnapshotStartRejectsNULBearingRunnerWorkingDirectory() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.runnerSnapshotStartFrame(
+        sessionID: sessionID,
+        capabilityNameJSON: #""linux.workspace""#,
+        credentialProfileJSON: "null",
+        repositoryJSON: "null",
+        workingDirectoryJSON: #""workspace\u0000project""#
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
   }
 
   func testUnadmittedFrameMemberFailsClosed() {
@@ -2124,6 +2229,39 @@ private enum ProcessProtocolFixture {
       decodingDiagnostic: SignalboxDecodingDiagnostic(
         message: "Invalid field value at message."
       )
+    )
+  }
+
+  static func runnerSnapshotStartFrame(
+    sessionID: String,
+    capabilityNameJSON: String,
+    credentialProfileJSON: String,
+    repositoryJSON: String,
+    workingDirectoryJSON: String
+  ) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_snapshot_start",
+          "session_id":"\(sessionID)",
+          "cursor":"12",
+          "runner":{
+            "selector":{"type":"capability_class","name":\(capabilityNameJSON)},
+            "runner_id":"44444444-4444-4444-8444-444444444444",
+            "placement_revision":"3",
+            "sandbox_profile":"workspace-restricted",
+            "credential_profile":\(credentialProfileJSON),
+            "repository":\(repositoryJSON),
+            "working_directory":\(workingDirectoryJSON),
+            "connection_health":null,
+            "state":"runner_lost"
+          }
+        }
+      }
+      """.utf8
     )
   }
 
