@@ -44,6 +44,14 @@
 #                                 [--deadline-seconds <n>] [--apply]
 set -euo pipefail
 
+# Job control, so every daemon call below becomes its own process group and a
+# deadline can end the whole call rather than the shell wrapping it. Two of
+# these calls are pipelines, where the identifier `$!` reports is a wrapper
+# shell and `xargs` and `docker` are its children: signalling that identifier
+# alone reports a timeout while leaving a `docker rm` still mutating the
+# daemon.
+set -m
+
 # Kept identical to `signalbox_persistence::DISPOSABLE_TEST_CONTAINER_LABEL_KEY`
 # and its value; `tooling/test_sweep_test_containers.py` fails when the two
 # drift.
@@ -126,20 +134,22 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 scratch=""
-bounded_children=""
+bounded_worker=""
+bounded_deadline=""
 
 # Installed before anything is launched, so no exit path can leave a deadline
 # process behind to signal a process identifier the kernel has since handed to
 # somebody else.
 cleanup() {
-	if [ -n "$bounded_children" ]; then
-		# Word splitting is the point: this holds the two identifiers the call in
-		# flight owns.
-		# shellcheck disable=SC2086
-		kill -s TERM $bounded_children >/dev/null 2>&1 || true
-		# shellcheck disable=SC2086
-		wait $bounded_children >/dev/null 2>&1 || true
-		bounded_children=""
+	if [ -n "$bounded_worker" ]; then
+		kill -s TERM -- -"$bounded_worker" >/dev/null 2>&1 || true
+		wait "$bounded_worker" >/dev/null 2>&1 || true
+		bounded_worker=""
+	fi
+	if [ -n "$bounded_deadline" ]; then
+		kill -s TERM "$bounded_deadline" >/dev/null 2>&1 || true
+		wait "$bounded_deadline" >/dev/null 2>&1 || true
+		bounded_deadline=""
 	fi
 	if [ -n "$scratch" ]; then
 		rm -rf "$scratch"
@@ -171,15 +181,17 @@ run_bounded() {
 	local worker=$!
 	(
 		sleep "$deadline_seconds"
-		kill -s TERM "$worker"
+		kill -s TERM -- -"$worker"
 	) >/dev/null 2>&1 &
 	local deadline=$!
-	bounded_children="$worker $deadline"
+	bounded_worker="$worker"
+	bounded_deadline="$deadline"
 	local status=0
 	wait "$worker" || status=$?
+	bounded_worker=""
 	kill -s TERM "$deadline" >/dev/null 2>&1 || true
 	wait "$deadline" >/dev/null 2>&1 || true
-	bounded_children=""
+	bounded_deadline=""
 	return "$status"
 }
 

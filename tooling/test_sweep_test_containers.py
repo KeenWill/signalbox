@@ -18,6 +18,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -31,7 +32,11 @@ import os, sys, time
 command = sys.argv[1]
 
 if os.environ.get("FAKE_DOCKER_HANGS_ON") == command:
-    time.sleep(3600)
+    time.sleep(float(os.environ.get("FAKE_DOCKER_HANG_SECONDS", "3600")))
+    survival = os.environ.get("FAKE_DOCKER_SURVIVAL_LOG")
+    if survival:
+        with open(survival, "a") as log:
+            print(command, file=log)
 
 if command == "version":
     sys.exit(1) if os.environ.get("FAKE_DOCKER_DOWN") else print("27.0.0")
@@ -235,10 +240,12 @@ class SweepRun:
         completed: subprocess.CompletedProcess[str],
         removed: list[str],
         listing_arguments: list[str],
+        survived: list[str],
     ) -> None:
         self.completed = completed
         self.removed = removed
         self.listing_arguments = listing_arguments
+        self.survived = survived
 
     @property
     def status(self) -> int:
@@ -265,6 +272,7 @@ def run_sweep(
     arguments: list[str],
     daemon_reachable: bool = True,
     hangs_on: str | None = None,
+    hang_seconds: float | None = None,
     listing_refused: str | None = None,
     volume_listing_refused: str | None = None,
     dangling_volumes: int = 0,
@@ -330,8 +338,13 @@ def run_sweep(
             environment["FAKE_DOCKER_INSPECT_NOTE_IS_FATAL"] = "1"
         if not daemon_reachable:
             environment["FAKE_DOCKER_DOWN"] = "1"
+        survival_log = scratch_path / "survived.txt"
+        environment["FAKE_DOCKER_SURVIVAL_LOG"] = str(survival_log)
+        environment.pop("FAKE_DOCKER_HANG_SECONDS", None)
         if hangs_on is not None:
             environment["FAKE_DOCKER_HANGS_ON"] = hangs_on
+        if hang_seconds is not None:
+            environment["FAKE_DOCKER_HANG_SECONDS"] = str(hang_seconds)
         if listing_refused is not None:
             environment["FAKE_DOCKER_PS_REFUSED"] = listing_refused
         if volume_listing_refused is not None:
@@ -353,9 +366,14 @@ def run_sweep(
                 f"the sweep did not return within {SWEEP_TIMEOUT_SECONDS}s, so its "
                 f"daemon calls are no longer bounded: {arguments}"
             ) from expired
+        if hang_seconds is not None:
+            # Outlast the hang the fake was given, so a daemon call the sweep
+            # abandoned rather than killed has time to record that it survived.
+            time.sleep(hang_seconds + 1)
         removed = removal_log.read_text().split() if removal_log.exists() else []
         listing = listing_log.read_text().split("\n") if listing_log.exists() else []
-        return SweepRun(completed, removed, listing)
+        survived = survival_log.read_text().split() if survival_log.exists() else []
+        return SweepRun(completed, removed, listing, survived)
 
 
 class SweepTestContainersTest(unittest.TestCase):
@@ -731,6 +749,17 @@ class SweepTestContainersTest(unittest.TestCase):
 
         self.assertEqual(run.status, 1)
         self.assertIn("did not answer the removal request within 1s", run.stderr)
+
+    def test_a_daemon_call_that_overran_its_deadline_is_not_left_running(self) -> None:
+        run = run_sweep(
+            [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
+            arguments=["--apply", "--deadline-seconds", "1"],
+            hangs_on="inspect",
+            hang_seconds=4,
+        )
+
+        self.assertEqual(run.status, 1)
+        self.assertEqual(run.survived, [], "the abandoned call kept talking to the daemon")
 
     def test_a_daemon_that_hangs_counting_volumes_still_reports_the_removals(
         self,

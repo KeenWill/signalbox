@@ -71,6 +71,12 @@ const MAX_POOL_SIZE: u32 = u32::MAX - SERVER_CONNECTION_HEADROOM;
 const MAX_CONCURRENCY: u32 = MAX_POOL_SIZE - 1;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const WARMUP_DURATION: Duration = Duration::from_secs(5);
+// Covers what a point spends before its warmup begins — starting the container,
+// creating the database, running the migrations — when checking the point
+// against the sweep's age bound. Deliberately generous: the bound it protects is
+// two hours, so margin costs nothing, while being wrong the other way costs a
+// benchmark its database mid-run.
+const POINT_SETUP_ALLOWANCE: Duration = Duration::from_secs(300);
 const IDENTITY_PREFIX: u128 = 0x5b00_0000_u128 << 96;
 // These synthetic fixtures provide stable, valid payloads; their wording has no
 // domain meaning.
@@ -234,12 +240,23 @@ fn parse_args() -> HarnessResult<ParsedArgs> {
     if duration_seconds == 0 {
         return Err(error("--duration-seconds must be positive"));
     }
-    // One point holds one disposable container for its whole duration, and the
-    // orphan sweep removes marked containers past this age. A point configured
-    // to outlive that bound would have its database force-removed mid-run.
-    if outlives_the_disposable_container_sweep(Duration::from_secs(duration_seconds)) {
+    // One point holds one disposable container from before the warmup until
+    // after the offered load, and the orphan sweep removes marked containers
+    // past this age. The whole point lifetime is what has to clear the bound:
+    // measuring the offered load alone would accept a duration just under it
+    // and still let the container age past it mid-run.
+    let point_lifetime = Duration::from_secs(duration_seconds)
+        .saturating_add(WARMUP_DURATION)
+        .saturating_add(POINT_SETUP_ALLOWANCE);
+    if outlives_the_disposable_container_sweep(point_lifetime) {
         return Err(error(format!(
-            "--duration-seconds must stay under              {DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS}h: a point holds one disposable              container for its whole duration, and tooling/sweep-test-containers.sh              removes marked containers past that age"
+            "--duration-seconds must leave the whole point under {}h, counting the {}s \
+             warmup and a {}s allowance for container start and migration: one \
+             disposable container serves the point, and tooling/sweep-test-containers.sh \
+             removes marked containers past that age",
+            DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS,
+            WARMUP_DURATION.as_secs(),
+            POINT_SETUP_ALLOWANCE.as_secs()
         )));
     }
     let highest_concurrency = concurrencies
